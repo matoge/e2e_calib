@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UV Correction Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0d1117;
+    --bg2:       #161b22;
+    --bg3:       #1c2128;
+    --border:    #30363d;
+    --border2:   #21262d;
+    --text:      #e6edf3;
+    --muted:     #7d8590;
+    --green:     #3fb950;
+    --green-dim: #1a3a20;
+    --red:       #f85149;
+    --red-dim:   #3a1a1a;
+    --blue:      #58a6ff;
+    --blue-dim:  #1a2a3a;
+    --amber:     #d29922;
+    --amber-dim: #3a2a10;
+    --accent:    #00d9ff;
+    --accent2:   #0a2530;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    overflow-x: hidden;
+  }
+
+  /* subtle grid background */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(0,217,255,.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,217,255,.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .shell {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 900px;
+    padding: 2rem 1.5rem 4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    flex-direction: column;
+    gap: .3rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .header-top {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+  }
+  .pip {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    flex-shrink: 0;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; box-shadow: 0 0 8px var(--accent); }
+    50%      { opacity: .5; box-shadow: 0 0 3px var(--accent); }
+  }
+  h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: .02em;
+    color: var(--text);
+  }
+  h1 span { color: var(--accent); }
+  .subtitle {
+    font-size: .72rem;
+    color: var(--muted);
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+
+  /* ── Main layout ── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 1.25rem;
+    align-items: start;
+  }
+  @media (max-width: 720px) {
+    .main { grid-template-columns: 1fr; }
+  }
+
+  /* ── Viewer card ── */
+  .viewer-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .viewer-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .5rem .85rem;
+    border-bottom: 1px solid var(--border2);
+    background: var(--bg3);
+  }
+  .seed-nav {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+  .nav-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 28px; height: 28px;
+    border-radius: 5px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: .9rem;
+    transition: border-color .15s, background .15s;
+  }
+  .nav-btn:hover { border-color: var(--accent); background: var(--accent2); }
+  .seed-display {
+    font-size: .78rem;
+    color: var(--muted);
+    min-width: 70px;
+    text-align: center;
+  }
+  .seed-display strong { color: var(--accent); }
+  .toolbar-right {
+    display: flex; align-items: center; gap: .6rem;
+  }
+  .auto-label {
+    font-size: .7rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .toggle {
+    position: relative;
+    width: 36px; height: 20px;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-track {
+    position: absolute; inset: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background .2s, border-color .2s;
+  }
+  .toggle input:checked ~ .toggle-track {
+    background: var(--accent2);
+    border-color: var(--accent);
+  }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: var(--muted);
+    border-radius: 50%;
+    transition: transform .2s, background .2s;
+    pointer-events: none;
+  }
+  .toggle input:checked ~ .toggle-track .toggle-thumb {
+    transform: translateX(16px);
+    background: var(--accent);
+  }
+
+  /* image display */
+  .img-wrap {
+    position: relative;
+    aspect-ratio: 1;
+    background: #000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #sample-img {
+    width: 100%; height: 100%;
+    object-fit: contain;
+    display: block;
+    transition: opacity .15s;
+  }
+  #sample-img.loading { opacity: .3; }
+
+  .spinner {
+    position: absolute;
+    inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .15s;
+  }
+  .spinner.active { opacity: 1; }
+  .spinner-ring {
+    width: 36px; height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Stats panel ── */
+  .stats-panel {
+    display: flex;
+    flex-direction: column;
+    gap: .85rem;
+  }
+
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .85rem 1rem;
+  }
+  .card-title {
+    font-family: 'Syne', sans-serif;
+    font-size: .65rem;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+    margin-bottom: .65rem;
+    display: flex; align-items: center; gap: .4rem;
+  }
+  .card-title::before {
+    content: '';
+    display: block;
+    width: 10px; height: 1px;
+    background: var(--border);
+  }
+
+  /* shift stats */
+  .shift-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .4rem;
+  }
+  .stat-box {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 5px;
+    padding: .45rem .6rem;
+  }
+  .stat-label {
+    font-size: .6rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    margin-bottom: .2rem;
+  }
+  .stat-val {
+    font-size: .95rem;
+    font-weight: 500;
+  }
+  .gt-color  { color: var(--green); }
+  .pred-color { color: var(--blue); }
+  .null-color { color: var(--amber); }
+
+  /* error stats */
+  .err-rows {
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+  }
+  .err-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-size: .78rem;
+  }
+  .err-label { color: var(--muted); }
+  .err-val   { font-weight: 500; font-size: .9rem; }
+  .err-before { color: var(--red); }
+  .err-after  { color: var(--blue); }
+  .err-improvement { color: var(--green); }
+  .err-regression  { color: var(--red); }
+
+  /* improvement bar */
+  .imp-bar-wrap {
+    margin-top: .6rem;
+    height: 4px;
+    background: var(--bg3);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .imp-bar {
+    height: 100%;
+    background: var(--green);
+    border-radius: 2px;
+    transition: width .4s ease;
+  }
+
+  /* legend card */
+  .legend-list {
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .72rem;
+    color: var(--muted);
+  }
+  .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot-red   { background: var(--red); box-shadow: 0 0 4px var(--red); }
+  .dot-green { background: var(--green); box-shadow: 0 0 4px var(--green); }
+  .dot-blue  { background: var(--blue); box-shadow: 0 0 4px var(--blue); }
+
+  /* model status / reload btn */
+  .model-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+  }
+  .model-badge {
+    font-size: .68rem;
+    padding: .2rem .55rem;
+    border-radius: 20px;
+    font-weight: 500;
+    letter-spacing: .04em;
+  }
+  .model-ok  { background: var(--green-dim); color: var(--green); border: 1px solid var(--green); }
+  .model-no  { background: var(--amber-dim); color: var(--amber); border: 1px solid var(--amber); }
+  .mode-tabs { display:flex; gap:.3rem; }
+  .mode-tab {
+    background: var(--bg); border: 1px solid var(--border); color: var(--muted);
+    font-family: 'JetBrains Mono', monospace; font-size: .68rem;
+    padding: .25rem .6rem; border-radius: 4px; cursor: pointer;
+    text-transform: uppercase; letter-spacing: .05em;
+    transition: border-color .15s, color .15s;
+  }
+  .mode-tab:hover { border-color: var(--accent); color: var(--accent); }
+  .mode-tab.active { border-color: var(--accent); color: var(--accent); background: var(--accent2); }
+
+  /* sigma stats table */
+  .sigma-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .72rem;
+  }
+  .sigma-table th {
+    color: var(--muted);
+    text-align: left;
+    font-weight: 400;
+    font-size: .6rem;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    padding: .15rem .3rem;
+    border-bottom: 1px solid var(--border2);
+  }
+  .sigma-table td {
+    padding: .2rem .3rem;
+    font-size: .82rem;
+  }
+  .sigma-obj1 { color: #00ff88; }
+  .sigma-obj2 { color: #00ccff; }
+  .sigma-bg   { color: #cc88ff; }
+
+  .speak-btn {
+    margin-left: auto;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--accent);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .75rem;
+    padding: .3rem .8rem;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  .speak-btn:hover  { background: var(--accent2); border-color: var(--accent); }
+  .speak-btn.active { background: var(--accent2); color: var(--red); border-color: var(--red); }
+
+  .reload-btn {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .68rem;
+    padding: .3rem .65rem;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .reload-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* seed input */
+  .seed-jump {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    margin-top: .6rem;
+  }
+  .seed-input {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .78rem;
+    padding: .3rem .55rem;
+    border-radius: 5px;
+    width: 75px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .seed-input:focus { border-color: var(--accent); }
+  .go-btn {
+    background: var(--accent2);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .68rem;
+    padding: .3rem .65rem;
+    border-radius: 5px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    transition: background .15s;
+  }
+  .go-btn:hover { background: rgba(0,217,255,.15); }
+
+  /* footer */
+  footer {
+    border-top: 1px solid var(--border2);
+    padding-top: 1rem;
+    font-size: .65rem;
+    color: var(--muted);
+    text-align: center;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div class="header-top">
+      <div class="pip"></div>
+      <h1>UV Correction Demo &mdash; <span>LiDAR/Camera Calibration</span></h1>
+      <a href="/model-graph" target="_blank" class="speak-btn" style="text-decoration:none">🔗 モデルグラフ</a>
+      <button class="speak-btn" id="speak-btn" title="読み上げ">🔊 読み上げ</button>
+    </div>
+    <div class="subtitle">Cascaded Cross-Attention · 128×128 · N=256 pts · max offset ±15 px</div>
+  </header>
+
+  <div class="main">
+
+    <!-- ── Left: image viewer ── -->
+    <div class="viewer-card">
+      <div class="viewer-toolbar">
+        <div class="seed-nav">
+          <button class="nav-btn" id="btn-prev" title="Previous (←)">&#8592;</button>
+          <div class="seed-display">seed <strong id="seed-num">0</strong></div>
+          <button class="nav-btn" id="btn-next" title="Next (→)">&#8594;</button>
+        </div>
+        <div class="toolbar-right">
+          <div class="mode-tabs">
+            <button class="mode-tab active" id="tab-single" onclick="setMode('single')">1 Object</button>
+            <button class="mode-tab"        id="tab-multi"  onclick="setMode('multi')">2 Objects</button>
+            <button class="mode-tab"        id="tab-depth"  onclick="setMode('depth')">Depth+σ</button>
+          </div>
+          <span class="auto-label">Auto</span>
+          <label class="toggle">
+            <input type="checkbox" id="auto-toggle">
+            <div class="toggle-track"><div class="toggle-thumb"></div></div>
+          </label>
+        </div>
+      </div>
+      <div class="img-wrap">
+        <img id="sample-img" src="" alt="sample" />
+        <div class="spinner" id="spinner"><div class="spinner-ring"></div></div>
+      </div>
+    </div>
+
+    <!-- ── Right: stats ── -->
+    <div class="stats-panel">
+
+      <!-- Model status -->
+      <div class="card">
+        <div class="card-title">Model</div>
+        <div class="model-row">
+          <span class="model-badge model-no" id="model-badge">Checking…</span>
+          <button class="reload-btn" id="reload-btn">↻ Reload</button>
+        </div>
+      </div>
+
+      <!-- Shift -->
+      <div class="card">
+        <div class="card-title">Shift (tx, ty)</div>
+        <div id="shift-panel"></div>
+      </div>
+
+      <!-- Error -->
+      <div class="card">
+        <div class="card-title">Point Error</div>
+        <div class="err-rows">
+          <div class="err-row">
+            <span class="err-label">Before</span>
+            <span class="err-val err-before" id="err-before">—</span>
+          </div>
+          <div class="err-row">
+            <span class="err-label">After</span>
+            <span class="err-val err-after" id="err-after">—</span>
+          </div>
+          <div class="err-row">
+            <span class="err-label">Improvement</span>
+            <span class="err-val" id="err-imp">—</span>
+          </div>
+        </div>
+        <div class="imp-bar-wrap">
+          <div class="imp-bar" id="imp-bar" style="width:0%"></div>
+        </div>
+      </div>
+
+      <!-- Sigma stats (depth mode only) -->
+      <div class="card" id="sigma-card" style="display:none">
+        <div class="card-title">Uncertainty σ per group</div>
+        <table class="sigma-table">
+          <thead><tr><th>Group</th><th>σx</th><th>σy</th></tr></thead>
+          <tbody>
+            <tr><td class="sigma-obj1">obj1 (D=10)</td><td id="sig-obj1-sx">—</td><td id="sig-obj1-sy">—</td></tr>
+            <tr><td class="sigma-obj2">obj2 (D=20)</td><td id="sig-obj2-sx">—</td><td id="sig-obj2-sy">—</td></tr>
+            <tr><td class="sigma-bg">bg   (D=40)</td>  <td id="sig-bg-sx">—</td>  <td id="sig-bg-sy">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Jump to seed -->
+      <div class="card">
+        <div class="card-title">Jump to seed</div>
+        <div class="seed-jump">
+          <input class="seed-input" type="number" id="seed-input" min="0" max="199" value="0" />
+          <button class="go-btn" id="go-btn">Go</button>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div class="card">
+        <div class="card-title">Legend</div>
+        <div class="legend-list" id="legend-single">
+          <div class="legend-item"><div class="dot dot-red"></div> distorted — input</div>
+          <div class="legend-item"><div class="dot dot-green"></div> GT true_uv</div>
+          <div class="legend-item"><div class="dot dot-blue"></div> corrected — pred</div>
+        </div>
+        <div class="legend-list" id="legend-multi" style="display:none">
+          <div class="legend-item"><div class="dot" style="background:red"></div> dist obj1</div>
+          <div class="legend-item"><div class="dot" style="background:orange"></div> dist obj2</div>
+          <div class="legend-item"><div class="dot" style="background:lime"></div> GT obj1</div>
+          <div class="legend-item"><div class="dot" style="background:cyan"></div> GT obj2</div>
+          <div class="legend-item"><div class="dot dot-blue"></div> pred obj1</div>
+          <div class="legend-item"><div class="dot" style="background:violet"></div> pred obj2</div>
+        </div>
+        <div class="legend-list" id="legend-depth" style="display:none">
+          <div class="legend-item"><div class="dot" style="background:#00ff88"></div> GT obj1 (depth=10)</div>
+          <div class="legend-item"><div class="dot" style="background:#00ccff"></div> GT obj2 (depth=20)</div>
+          <div class="legend-item"><div class="dot" style="background:#aaa"></div> GT bg (depth=40)</div>
+          <div class="legend-item"><div class="dot" style="background:#ff4444"></div> pred obj1</div>
+          <div class="legend-item"><div class="dot" style="background:#ff9900"></div> pred obj2</div>
+          <div class="legend-item"><div class="dot" style="background:#ff00ff"></div> pred bg</div>
+        </div>
+      </div>
+
+    </div>
+  </div><!-- .main -->
+
+  <footer>128×128 synthetic · uniform shift · Cascaded Cross-Attention · RTX 5080</footer>
+</div><!-- .shell -->
+
+<script>
+  let currentSeed = 0;
+  let currentMode = 'single';
+  let autoTimer   = null;
+  const MAX_SEED  = 199;
+
+  function setMode(m) {
+    currentMode = m;
+    document.getElementById('tab-single').classList.toggle('active', m==='single');
+    document.getElementById('tab-multi').classList.toggle('active', m==='multi');
+    document.getElementById('tab-depth').classList.toggle('active', m==='depth');
+    document.getElementById('legend-single').style.display = m==='single' ? '' : 'none';
+    document.getElementById('legend-multi').style.display  = m==='multi'  ? '' : 'none';
+    document.getElementById('legend-depth').style.display  = m==='depth'  ? '' : 'none';
+    document.getElementById('sigma-card').style.display    = m==='depth'  ? '' : 'none';
+    go(currentSeed);
+  }
+
+  const imgEl      = document.getElementById('sample-img');
+  const spinner    = document.getElementById('spinner');
+  const seedNum    = document.getElementById('seed-num');
+  const modelBadge = document.getElementById('model-badge');
+  const seedInput  = document.getElementById('seed-input');
+
+  function fmt(v, unit='px') {
+    if (v == null) return '—';
+    const s = (v >= 0 ? '+' : '') + v.toFixed(2);
+    return unit ? s + ' ' + unit : s;
+  }
+
+  async function loadSample(seed) {
+    imgEl.classList.add('loading');
+    spinner.classList.add('active');
+    seedNum.textContent = seed;
+    seedInput.value     = seed;
+
+    try {
+      const r = await fetch(`/api/sample?seed=${seed}&mode=${currentMode}`);
+      const d = await r.json();
+
+      imgEl.src = 'data:image/png;base64,' + d.png;
+      imgEl.classList.remove('loading');
+      spinner.classList.remove('active');
+
+      // model badge
+      if (d.model_loaded) {
+        modelBadge.textContent = '✓ Loaded';
+        modelBadge.className   = 'model-badge model-ok';
+      } else {
+        modelBadge.textContent = '⚠ Not loaded';
+        modelBadge.className   = 'model-badge model-no';
+      }
+
+      // sigma stats (depth mode)
+      if (d.sigma_stats) {
+        const ss = d.sigma_stats;
+        ['obj1','obj2','bg'].forEach(k => {
+          document.getElementById(`sig-${k}-sx`).textContent = ss[k] ? ss[k].sx.toFixed(2) : '—';
+          document.getElementById(`sig-${k}-sy`).textContent = ss[k] ? ss[k].sy.toFixed(2) : '—';
+        });
+      }
+
+      // shift panel
+      const shiftEl = document.getElementById('shift-panel');
+      const objColors = [['gt-color','pred-color'],['#00b4b4','#9b59b6']];
+      const objLabels = d.mode==='multi' ? ['Obj 1','Obj 2'] :
+                        d.mode==='depth' ? ['obj1','obj2','bg'] : [''];
+      let html = '<div class="shift-grid">';
+      d.shifts_gt.forEach((g, i) => {
+        const p = d.shifts_pred ? d.shifts_pred[i] : null;
+        const name = g.label || objLabels[i] || '';
+        const lbl = name ? `<div style="grid-column:1/-1;font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:.3rem">${name}</div>` : '';
+        html += lbl;
+        html += `<div class="stat-box"><div class="stat-label">GT tx</div><div class="stat-val gt-color">${fmt(g.tx)}</div></div>`;
+        html += `<div class="stat-box"><div class="stat-label">GT ty</div><div class="stat-val gt-color">${fmt(g.ty)}</div></div>`;
+        html += `<div class="stat-box"><div class="stat-label">Pred tx</div><div class="stat-val pred-color">${p ? fmt(p.tx) : '<span style="color:var(--amber)">N/A</span>'}</div></div>`;
+        html += `<div class="stat-box"><div class="stat-label">Pred ty</div><div class="stat-val pred-color">${p ? fmt(p.ty) : '<span style="color:var(--amber)">N/A</span>'}</div></div>`;
+      });
+      html += '</div>';
+      shiftEl.innerHTML = html;
+
+      // errors
+      document.getElementById('err-before').textContent =
+        d.err_before != null ? d.err_before.toFixed(3) + ' px' : '—';
+
+      const impEl  = document.getElementById('err-imp');
+      const barEl  = document.getElementById('imp-bar');
+
+      if (d.err_after != null) {
+        document.getElementById('err-after').textContent = d.err_after.toFixed(3) + ' px';
+        const pct = ((d.err_before - d.err_after) / d.err_before * 100);
+        const sign = pct >= 0 ? '+' : '';
+        impEl.textContent = sign + pct.toFixed(1) + '%';
+        impEl.className   = 'err-val ' + (pct >= 0 ? 'err-improvement' : 'err-regression');
+        barEl.style.width = Math.max(0, Math.min(100, pct)) + '%';
+        barEl.style.background = pct >= 0 ? 'var(--green)' : 'var(--red)';
+      } else {
+        document.getElementById('err-after').textContent = '—';
+        impEl.textContent = '—';
+        impEl.className   = 'err-val';
+        barEl.style.width = '0%';
+      }
+
+    } catch(e) {
+      spinner.classList.remove('active');
+      imgEl.classList.remove('loading');
+      console.error(e);
+    }
+  }
+
+  function go(seed) {
+    currentSeed = ((seed % (MAX_SEED+1)) + MAX_SEED+1) % (MAX_SEED+1);
+    loadSample(currentSeed);
+  }
+
+  document.getElementById('btn-prev').addEventListener('click', () => go(currentSeed - 1));
+  document.getElementById('btn-next').addEventListener('click', () => go(currentSeed + 1));
+
+  document.getElementById('auto-toggle').addEventListener('change', e => {
+    if (e.target.checked) {
+      autoTimer = setInterval(() => go(currentSeed + 1), 1500);
+    } else {
+      clearInterval(autoTimer);
+      autoTimer = null;
+    }
+  });
+
+  document.getElementById('go-btn').addEventListener('click', () => {
+    const v = parseInt(seedInput.value, 10);
+    if (!isNaN(v)) go(v);
+  });
+  seedInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { const v = parseInt(seedInput.value,10); if(!isNaN(v)) go(v); }
+  });
+
+  document.getElementById('reload-btn').addEventListener('click', async () => {
+    modelBadge.textContent = '…';
+    modelBadge.className   = 'model-badge model-no';
+    const r = await fetch('/api/model_status');
+    const d = await r.json();
+    if (d.loaded) {
+      modelBadge.textContent = '✓ Loaded';
+      modelBadge.className   = 'model-badge model-ok';
+    } else {
+      modelBadge.textContent = d.ckpt_exists ? '⚠ File found' : '✗ No checkpoint';
+      modelBadge.className   = 'model-badge model-no';
+    }
+    loadSample(currentSeed);
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.target === seedInput) return;
+    if (e.key === 'ArrowLeft')  go(currentSeed - 1);
+    if (e.key === 'ArrowRight') go(currentSeed + 1);
+  });
+
+  // ── Speech ──────────────────────────────────────────────────────────────
+  const speakBtn = document.getElementById('speak-btn');
+  let speaking = false;
+
+  function buildReport() {
+    const seed      = currentSeed;
+    const txGt      = document.getElementById('gt-tx').textContent;
+    const tyGt      = document.getElementById('gt-ty').textContent;
+    const txPred    = document.getElementById('pred-tx').textContent;
+    const tyPred    = document.getElementById('pred-ty').textContent;
+    const errBefore = document.getElementById('err-before').textContent;
+    const errAfter  = document.getElementById('err-after').textContent;
+    const imp       = document.getElementById('err-imp').textContent;
+
+    return `サンプル${seed}番の結果です。
+グラウンドトゥルースのシフトは、X方向が${txGt}、Y方向が${tyGt}です。
+モデルの予測は、X方向が${txPred}、Y方向が${tyPred}です。
+補正前の平均誤差は${errBefore}、補正後は${errAfter}です。
+改善率は${imp}です。`;
+  }
+
+  speakBtn.addEventListener('click', () => {
+    if (!('speechSynthesis' in window)) {
+      alert('このブラウザはWeb Speech APIに対応していません');
+      return;
+    }
+    if (speaking) {
+      window.speechSynthesis.cancel();
+      speaking = false;
+      speakBtn.textContent = '🔊 読み上げ';
+      speakBtn.classList.remove('active');
+      return;
+    }
+    const utter = new SpeechSynthesisUtterance(buildReport());
+    utter.lang = 'ja-JP';
+    utter.rate = 1.1;
+    // prefer a Japanese voice if available
+    const voices = window.speechSynthesis.getVoices();
+    const jaVoice = voices.find(v => v.lang.startsWith('ja'));
+    if (jaVoice) utter.voice = jaVoice;
+
+    utter.onstart = () => {
+      speaking = true;
+      speakBtn.textContent = '⏹ 停止';
+      speakBtn.classList.add('active');
+    };
+    utter.onend = utter.onerror = () => {
+      speaking = false;
+      speakBtn.textContent = '🔊 読み上げ';
+      speakBtn.classList.remove('active');
+    };
+    window.speechSynthesis.speak(utter);
+  });
+
+  // Initial load
+  go(0);
+</script>
+</body>
+</html>
