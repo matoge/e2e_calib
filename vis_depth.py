@@ -13,10 +13,12 @@ from matplotlib.patches import Ellipse
 from dataset import make_image_and_points_depth, DEPTH_OBJ1, DEPTH_OBJ2, DEPTH_BG, DEPTH_NORM
 from model_depth import CalibNetDepth
 
-CKPT   = "best_model_depth.pt"
-OUT    = "result_depth.png"
+CKPT      = "best_model_depth.pt"
+OUT       = "result_depth.png"
 N_SAMPLES = 8
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BG_RATIO  = 1   # change to 3, 5, etc. to increase BG density
+N_POINTS  = 255
+DEVICE    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def cov_ellipse(ax, cx, cy, sx, sy, rho, n_std=1.5, **kw):
@@ -33,7 +35,8 @@ def main():
     model.load_state_dict(torch.load(CKPT, map_location=DEVICE, weights_only=True))
     model.eval()
 
-    n_per = 255 // 3
+    n_obj = N_POINTS // (2 + BG_RATIO)
+    n_bg  = N_POINTS - 2 * n_obj
 
     fig, axes = plt.subplots(2, 4, figsize=(16, 8), dpi=100)
     axes = axes.flatten()
@@ -44,7 +47,8 @@ def main():
 
     for i in range(N_SAMPLES):
         ax = axes[i]
-        img, true_uvd, dist_uvd = make_image_and_points_depth(seed=400_100 + i*7)
+        img, true_uvd, dist_uvd = make_image_and_points_depth(
+            seed=400_100 + i*7, bg_ratio=BG_RATIO, n_points=N_POINTS)
 
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             params = model(img.unsqueeze(0).to(DEVICE),
@@ -64,9 +68,9 @@ def main():
                   origin="upper", extent=[0,128,128,0])
 
         groups = [
-            (slice(0,       n_per),   "obj1", "#00ff88", "#ff4444"),
-            (slice(n_per,   2*n_per), "obj2", "#00ccff", "#ff9900"),
-            (slice(2*n_per, 3*n_per), "bg",   "#ffffff", "#ff00ff"),
+            (slice(0,         n_obj),       "obj1", "#00ff88", "#ff4444"),
+            (slice(n_obj,     2*n_obj),     "obj2", "#00ccff", "#ff9900"),
+            (slice(2*n_obj,   2*n_obj+n_bg),"bg",   "#ffffff", "#ff00ff"),
         ]
         for sl, name, gt_c, el_c in groups:
             # GT points
@@ -84,7 +88,7 @@ def main():
 
         ax.set_xlim(0,127); ax.set_ylim(127,0)
         ax.set_xticks([]); ax.set_yticks([])
-        s1 = sx[:n_per].mean(); s2 = sx[n_per:2*n_per].mean(); sb = sx[2*n_per:].mean()
+        s1 = sx[:n_obj].mean(); s2 = sx[n_obj:2*n_obj].mean(); sb = sx[2*n_obj:].mean()
         ax.set_title(f"s{i}  σx: obj1={s1:.1f} obj2={s2:.1f} bg={sb:.1f}", fontsize=7)
 
     handles = [

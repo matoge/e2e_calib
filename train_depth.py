@@ -12,6 +12,7 @@ except AttributeError:
     pass
 
 DEVICE, BATCH_SIZE, EPOCHS, LR = torch.device("cuda"), 64, 80, 1e-3
+BG_RATIO = 1   # BG points per obj point. set 3 or 5 for denser BG
 CKPT = "best_model_depth.pt"
 
 
@@ -45,7 +46,8 @@ def epoch_loop(model, loader, optimizer, scaler, train):
 def main():
     print("Depth-aware covariance training (obj1/obj2/background)")
     train_loader, val_loader = build_loaders_depth(
-        train_size=8000, val_size=800, batch_size=BATCH_SIZE, num_workers=4)
+        train_size=8000, val_size=800, batch_size=BATCH_SIZE, num_workers=4,
+        bg_ratio=BG_RATIO)
 
     model     = torch.compile(CalibNetDepth().to(DEVICE), mode="max-autotune")
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-3)

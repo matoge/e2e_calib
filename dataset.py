@@ -293,10 +293,11 @@ DEPTH_NORM = 50.0   # normalisation factor → [0,1] range
 
 
 def make_image_and_points_depth(
-    n_points: int = 255,   # divisible by 3
+    n_points: int = 255,   # total points (obj1 + obj2 + bg)
     img_size: int = 128,
     max_offset: float = 15.0,
     seed: int | None = None,
+    bg_ratio: int = 1,     # bg points = n_obj_per * bg_ratio
 ):
     """
     Returns:
@@ -309,14 +310,15 @@ def make_image_and_points_depth(
         [n//3: 2*n//3]     obj2  depth=DEPTH_OBJ2
         [2*n//3 : n]       bg    depth=DEPTH_BG
     """
-    n_points = (n_points // 3) * 3   # ensure divisible by 3
     rng = torch.Generator()
     if seed is not None:
         rng.manual_seed(seed)
 
     H = W = img_size
     image = torch.zeros(1, H, W, dtype=torch.float32)
-    n_per = n_points // 3
+    n_obj = n_points // (2 + bg_ratio)   # points per object
+    n_bg  = n_points - 2 * n_obj         # background points
+    n_per = n_obj                         # alias for legacy code below
 
     # --- 2 non-overlapping shapes (smaller) ---
     shapes = []
@@ -356,18 +358,17 @@ def make_image_and_points_depth(
 
     # background points: uniform over pixels NOT on any shape
     bg_xs, bg_ys = [], []
-    while len(bg_xs) == 0 or torch.cat(bg_xs).shape[0] < n_per:
-        bx = torch.randint(0, img_size, (n_per * 4,), generator=rng).float()
-        by = torch.randint(0, img_size, (n_per * 4,), generator=rng).float()
-        # keep only background pixels (image value == 0)
+    while len(bg_xs) == 0 or torch.cat(bg_xs).shape[0] < n_bg:
+        bx = torch.randint(0, img_size, (n_bg * 4,), generator=rng).float()
+        by = torch.randint(0, img_size, (n_bg * 4,), generator=rng).float()
         ix = bx.long().clamp(0, img_size-1)
         iy = by.long().clamp(0, img_size-1)
         on_bg = image[0, iy, ix] < 0.5
         bx, by = bx[on_bg], by[on_bg]
         if bx.numel() > 0:
             bg_xs.append(bx); bg_ys.append(by)
-    bg_x = torch.cat(bg_xs)[:n_per]
-    bg_y = torch.cat(bg_ys)[:n_per]
+    bg_x = torch.cat(bg_xs)[:n_bg]
+    bg_y = torch.cat(bg_ys)[:n_bg]
 
     # stack all U,V coords
     all_u = torch.cat([obj_xs[0], obj_xs[1], bg_x])   # (N,)
@@ -375,22 +376,24 @@ def make_image_and_points_depth(
 
     # depth labels (normalised)
     depths = torch.cat([
-        torch.full((n_per,), DEPTH_OBJ1 / DEPTH_NORM),
-        torch.full((n_per,), DEPTH_OBJ2 / DEPTH_NORM),
-        torch.full((n_per,), DEPTH_BG   / DEPTH_NORM),
+        torch.full((n_obj,), DEPTH_OBJ1 / DEPTH_NORM),
+        torch.full((n_obj,), DEPTH_OBJ2 / DEPTH_NORM),
+        torch.full((n_bg,),  DEPTH_BG   / DEPTH_NORM),
     ])
 
     true_uvd = torch.stack([all_u, all_v, depths], dim=1)   # (N,3)
 
     # independent shifts per group
+    group_sizes = [n_obj, n_obj, n_bg]
     dist_parts = []
-    for i in range(3):
+    offset = 0
+    for sz in group_sizes:
         tx = (torch.rand(1, generator=rng)*2 - 1) * max_offset
         ty = (torch.rand(1, generator=rng)*2 - 1) * max_offset
-        uv_i = true_uvd[i*n_per:(i+1)*n_per, :2]
-        uv_d  = (uv_i + torch.stack([tx.expand(n_per),
-                                      ty.expand(n_per)], dim=1)).clamp(0, img_size-1)
-        dist_parts.append(torch.cat([uv_d, true_uvd[i*n_per:(i+1)*n_per, 2:3]], dim=1))
+        uv_i = true_uvd[offset:offset+sz, :2]
+        uv_d  = (uv_i + torch.stack([tx.expand(sz), ty.expand(sz)], dim=1)).clamp(0, img_size-1)
+        dist_parts.append(torch.cat([uv_d, true_uvd[offset:offset+sz, 2:3]], dim=1))
+        offset += sz
 
     distorted_uvd = torch.cat(dist_parts, dim=0)   # (N,3)
     return image, true_uvd, distorted_uvd
@@ -398,10 +401,11 @@ def make_image_and_points_depth(
 
 class DepthDataset(Dataset):
     def __init__(self, length=4000, n_points=255, img_size=128,
-                 max_offset=15.0, base_seed=0, random_each_epoch=False):
+                 max_offset=15.0, base_seed=0, random_each_epoch=False, bg_ratio=1):
         self.length = length; self.n_points = n_points
         self.img_size = img_size; self.max_offset = max_offset
         self.base_seed = base_seed; self.random_each_epoch = random_each_epoch
+        self.bg_ratio = bg_ratio
 
     def __len__(self): return self.length
 
@@ -409,12 +413,13 @@ class DepthDataset(Dataset):
         seed = (int(torch.randint(0, 2**30, (1,)).item())
                 if self.random_each_epoch else self.base_seed + idx)
         return make_image_and_points_depth(self.n_points, self.img_size,
-                                            self.max_offset, seed)
+                                            self.max_offset, seed, self.bg_ratio)
 
 
-def build_loaders_depth(train_size=8000, val_size=800, batch_size=32, num_workers=4):
-    train_ds = DepthDataset(length=train_size, random_each_epoch=True)
-    val_ds   = DepthDataset(length=val_size,   base_seed=400_000)
+def build_loaders_depth(train_size=8000, val_size=800, batch_size=32, num_workers=4,
+                        bg_ratio=1):
+    train_ds = DepthDataset(length=train_size, random_each_epoch=True, bg_ratio=bg_ratio)
+    val_ds   = DepthDataset(length=val_size,   base_seed=400_000,      bg_ratio=bg_ratio)
     return (
         DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                    num_workers=num_workers, pin_memory=True, persistent_workers=True),

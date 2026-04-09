@@ -81,14 +81,16 @@ def index():
 
 @app.route("/api/sample")
 def api_sample():
-    seed  = int(request.args.get("seed", 0))
-    mode  = request.args.get("mode", "single")   # "single" | "multi" | "depth"
-    multi = (mode == "multi")
-    depth = (mode == "depth")
+    seed     = int(request.args.get("seed", 0))
+    mode     = request.args.get("mode", "single")   # "single" | "multi" | "depth"
+    bg_ratio = int(request.args.get("bg_ratio", 1))
+    multi    = (mode == "multi")
+    depth    = (mode == "depth")
 
     if depth:
         ckpt = "best_model_depth.pt"
-        img, true_uvd, dist_uvd = make_image_and_points_depth(seed=seed + 400_100)
+        img, true_uvd, dist_uvd = make_image_and_points_depth(
+            seed=seed + 400_100, bg_ratio=bg_ratio)
         true_uv = true_uvd[:, :2]
         dist_uv = dist_uvd[:, :2]
     elif multi:
@@ -107,8 +109,11 @@ def api_sample():
     sigma_stats = None
 
     if depth:
-        n = len(true_uv) // 3
-        for name, sl in [("obj1", slice(0, n)), ("obj2", slice(n, 2*n)), ("bg", slice(2*n, 3*n))]:
+        n_total = len(true_uv)
+        n_obj = n_total // (2 + bg_ratio)
+        n_bg  = n_total - 2 * n_obj
+        for name, sl in [("obj1", slice(0, n_obj)), ("obj2", slice(n_obj, 2*n_obj)),
+                          ("bg",  slice(2*n_obj, 2*n_obj+n_bg))]:
             off = (true_uv[sl] - dist_uv[sl]).mean(0)
             shifts_gt.append({"label": name, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
     elif multi:
@@ -131,11 +136,10 @@ def api_sample():
                 offset_pred = torch.stack([tx_pred, ty_pred], dim=1)
                 sx = params[:, 2].exp().numpy()
                 sy = params[:, 3].exp().numpy()
-                n  = len(true_uv) // 3
                 sigma_stats = {
-                    "obj1": {"sx": round(float(sx[:n].mean()),   3), "sy": round(float(sy[:n].mean()),   3)},
-                    "obj2": {"sx": round(float(sx[n:2*n].mean()),3), "sy": round(float(sy[n:2*n].mean()),3)},
-                    "bg":   {"sx": round(float(sx[2*n:].mean()), 3), "sy": round(float(sy[2*n:].mean()), 3)},
+                    "obj1": {"sx": round(float(sx[:n_obj].mean()),        3), "sy": round(float(sy[:n_obj].mean()),        3)},
+                    "obj2": {"sx": round(float(sx[n_obj:2*n_obj].mean()), 3), "sy": round(float(sy[n_obj:2*n_obj].mean()), 3)},
+                    "bg":   {"sx": round(float(sx[2*n_obj:].mean()),      3), "sy": round(float(sy[2*n_obj:].mean()),      3)},
                 }
             else:
                 offset_pred = model(img.unsqueeze(0).to(DEVICE),
@@ -146,9 +150,9 @@ def api_sample():
         pred_uv   = pred_uv_t.numpy()
 
         if depth:
-            n = len(true_uv) // 3
-            for j, name in enumerate(["obj1", "obj2", "bg"]):
-                sl = slice(j*n, (j+1)*n)
+            for j, (name, sz) in enumerate(zip(["obj1","obj2","bg"], [n_obj, n_obj, n_bg])):
+                start = sum([n_obj, n_obj, n_bg][:j])
+                sl = slice(start, start + sz)
                 off = offset_pred[sl].mean(0)
                 shifts_pred.append({"label": name, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
         elif multi:
