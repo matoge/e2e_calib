@@ -131,7 +131,7 @@ def api_sample():
     depth    = (mode == "depth") or (dataset == "sim3d")
 
     if dataset == "sim3d":
-        ckpt = "best_model_depth.pt"
+        ckpt = "best_model_sim3d.pt"
         img, true_uvd, dist_uvd = make_sample_sim3d(
             seed=seed + 500_100, bg_ratio=bg_ratio)
         true_uv = true_uvd[:, :2]
@@ -246,6 +246,7 @@ def api_model_status():
         "single": os.path.exists("best_model.pt"),
         "multi":  os.path.exists("best_model_multi.pt"),
         "depth":  os.path.exists("best_model_depth.pt"),
+        "sim3d":  os.path.exists("best_model_sim3d.pt"),
     })
 
 

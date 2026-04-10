@@ -356,28 +356,57 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class Sim3DDataset(Dataset):
-    def __init__(self, length=4000, n_points=255, max_offset=15.0,
-                 bg_ratio=1, base_seed=0, random_each_epoch=False):
+    def __init__(self, length=4000, n_points=255, max_offset=8.0,
+                 bg_ratio=1, base_seed=0, random_each_epoch=False, grayscale=True):
         self.length = length
         self.n_points = n_points
         self.max_offset = max_offset
         self.bg_ratio = bg_ratio
         self.base_seed = base_seed
         self.random_each_epoch = random_each_epoch
+        self.grayscale = grayscale
 
     def __len__(self): return self.length
 
     def __getitem__(self, idx):
         seed = (int(torch.randint(0, 2**30, (1,)).item())
                 if self.random_each_epoch else self.base_seed + idx)
-        return make_sample(seed, self.n_points, self.max_offset, self.bg_ratio)
+        img, true_uvd, dist_uvd = make_sample(seed, self.n_points, self.max_offset, self.bg_ratio)
+        if self.grayscale:
+            img = img.mean(dim=0, keepdim=True)   # (3,H,W) → (1,H,W)
+        return img, true_uvd, dist_uvd
 
 
 def build_loaders_sim3d(train_size=8000, val_size=800, batch_size=32,
-                        num_workers=4, bg_ratio=1):
-    train_ds = Sim3DDataset(length=train_size, random_each_epoch=True,  bg_ratio=bg_ratio)
-    val_ds   = Sim3DDataset(length=val_size,   base_seed=500_000,       bg_ratio=bg_ratio)
+                        num_workers=4, bg_ratio=1, max_offset=8.0):
+    train_ds = Sim3DDataset(length=train_size, random_each_epoch=True,
+                            bg_ratio=bg_ratio, max_offset=max_offset)
+    val_ds   = Sim3DDataset(length=val_size,   base_seed=500_000,
+                            bg_ratio=bg_ratio, max_offset=max_offset)
     kw = dict(num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    return (DataLoader(train_ds, batch_size=batch_size, shuffle=True,  **kw),
+            DataLoader(val_ds,   batch_size=batch_size, shuffle=False, **kw))
+
+
+class Sim3DCachedDataset(Dataset):
+    """Fast dataset that loads from pre-generated cache file."""
+    def __init__(self, cache_file: str):
+        imgs, true_uvds, dist_uvds = torch.load(cache_file, weights_only=True)
+        self.imgs      = imgs
+        self.true_uvds = true_uvds
+        self.dist_uvds = dist_uvds
+
+    def __len__(self): return len(self.imgs)
+
+    def __getitem__(self, idx):
+        return self.imgs[idx], self.true_uvds[idx], self.dist_uvds[idx]
+
+
+def build_loaders_sim3d_cached(train_file="sim3d_train.pt", val_file="sim3d_val.pt",
+                                batch_size=64, num_workers=4):
+    train_ds = Sim3DCachedDataset(train_file)
+    val_ds   = Sim3DCachedDataset(val_file)
+    kw = dict(num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0)
     return (DataLoader(train_ds, batch_size=batch_size, shuffle=True,  **kw),
             DataLoader(val_ds,   batch_size=batch_size, shuffle=False, **kw))
 
