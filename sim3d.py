@@ -137,10 +137,19 @@ def make_scene(rng: np.random.Generator) -> Scene:
         scene.add(Box([x, y, hh], [hw, hd, hh], "building"))
 
     # Poles along road edges
-    for _ in range(rng.integers(4, 12)):
+    for _ in range(rng.integers(2, 5)):
         x = rng.uniform(2, 28)
         y = rng.choice([-1, 1]) * rng.uniform(1.5, 4)
         scene.add(Cylinder([x, y], 0.08, 0.0, rng.uniform(2, 5), "pole"))
+
+    # Cars on road (boxes ~4m×2m×1.5m)
+    for _ in range(rng.integers(1, 4)):
+        x  = rng.uniform(5, 25)
+        y  = rng.uniform(-1.5, 1.5)   # near road center
+        hx = rng.uniform(1.8, 2.5)    # half-length
+        hy = rng.uniform(0.8, 1.0)    # half-width
+        hz = 0.75                      # half-height (1.5m tall)
+        scene.add(Box([x, y, hz], [hx, hy, hz], "car"))
 
     return scene
 
@@ -180,6 +189,8 @@ def render_camera(scene: Scene, img_size: int = IMG_SIZE) -> np.ndarray:
             img[mask] = 0.45 + 0.55 * (1 - t[mask] / LIDAR_MAX_RANGE)
         elif obj.label == "pole":
             img[mask] = 1.0
+        elif obj.label == "car":
+            img[mask] = 0.72 + 0.28 * (1 - t[mask] / LIDAR_MAX_RANGE)
 
     return img.reshape(H, W)
 
@@ -235,7 +246,7 @@ def project(pts_world: np.ndarray, img_size: int = IMG_SIZE):
 
 # ── Full sample ────────────────────────────────────────────────────────────────
 
-def make_sample(seed=None, n_points=255, max_offset=15.0, bg_ratio=1,
+def make_sample(seed=None, n_points=255, max_offset=8.0, bg_ratio=1,
                 img_size=IMG_SIZE):
     """
     Same interface as make_image_and_points_depth().
