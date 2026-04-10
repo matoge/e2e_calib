@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt, matplotlib.patches as mpatches
 from flask import Flask, jsonify, request, send_from_directory, redirect
 
 from dataset import make_image_and_points, make_image_and_points_multi, make_image_and_points_depth
+from sim3d import make_sample as make_sample_sim3d
 from model import CalibNet
 from model_depth import CalibNetDepth
 
@@ -83,11 +84,18 @@ def index():
 def api_sample():
     seed     = int(request.args.get("seed", 0))
     mode     = request.args.get("mode", "single")   # "single" | "multi" | "depth"
+    dataset  = request.args.get("dataset", "synthetic")   # "synthetic" | "sim3d"
     bg_ratio = int(request.args.get("bg_ratio", 1))
     multi    = (mode == "multi")
-    depth    = (mode == "depth")
+    depth    = (mode == "depth") or (dataset == "sim3d")
 
-    if depth:
+    if dataset == "sim3d":
+        ckpt = "best_model_depth.pt"
+        img, true_uvd, dist_uvd = make_sample_sim3d(
+            seed=seed + 500_100, bg_ratio=bg_ratio)
+        true_uv = true_uvd[:, :2]
+        dist_uv = dist_uvd[:, :2]
+    elif depth:
         ckpt = "best_model_depth.pt"
         img, true_uvd, dist_uvd = make_image_and_points_depth(
             seed=seed + 400_100, bg_ratio=bg_ratio)
@@ -108,7 +116,7 @@ def api_sample():
     shifts_pred = []
     sigma_stats = None
 
-    if depth:
+    if depth:  # covers both mode=depth and dataset=sim3d
         n_total = len(true_uv)
         n_obj = n_total // (2 + bg_ratio)
         n_bg  = n_total - 2 * n_obj
@@ -178,6 +186,7 @@ def api_sample():
         "err_after":    round(err_after, 3) if err_after is not None else None,
         "model_loaded": model is not None,
         "sigma_stats":  sigma_stats,
+        "dataset":      dataset,
     })
 
 

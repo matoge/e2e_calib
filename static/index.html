@@ -499,6 +499,10 @@
             <button class="mode-tab"        id="tab-multi"  onclick="setMode('multi')">2 Objects</button>
             <button class="mode-tab"        id="tab-depth"  onclick="setMode('depth')">Depth+σ</button>
           </div>
+          <div class="mode-tabs" style="margin-left:.5rem">
+            <button class="mode-tab active" id="ds-synthetic" onclick="setDataset('synthetic')" title="Synthetic shapes">Synth</button>
+            <button class="mode-tab"        id="ds-sim3d"     onclick="setDataset('sim3d')"     title="3D ray-cast scene">Sim3D</button>
+          </div>
           <span class="auto-label">Auto</span>
           <label class="toggle">
             <input type="checkbox" id="auto-toggle">
@@ -607,21 +611,41 @@
 </div><!-- .shell -->
 
 <script>
-  let currentSeed = 0;
-  let currentMode = 'single';
-  let autoTimer   = null;
-  const MAX_SEED  = 199;
+  let currentSeed    = 0;
+  let currentMode    = 'single';
+  let currentDataset = 'synthetic';
+  let autoTimer      = null;
+  const MAX_SEED     = 199;
 
   function setMode(m) {
     currentMode = m;
     document.getElementById('tab-single').classList.toggle('active', m==='single');
     document.getElementById('tab-multi').classList.toggle('active', m==='multi');
     document.getElementById('tab-depth').classList.toggle('active', m==='depth');
-    document.getElementById('legend-single').style.display = m==='single' ? '' : 'none';
-    document.getElementById('legend-multi').style.display  = m==='multi'  ? '' : 'none';
-    document.getElementById('legend-depth').style.display  = m==='depth'  ? '' : 'none';
-    document.getElementById('sigma-card').style.display    = m==='depth'  ? '' : 'none';
+    updateLegend();
     go(currentSeed);
+  }
+
+  function setDataset(ds) {
+    currentDataset = ds;
+    document.getElementById('ds-synthetic').classList.toggle('active', ds==='synthetic');
+    document.getElementById('ds-sim3d').classList.toggle('active',     ds==='sim3d');
+    // sim3d always uses depth-style layout
+    if (ds === 'sim3d') {
+      currentMode = 'depth';
+      ['single','multi','depth'].forEach(t =>
+        document.getElementById('tab-'+t).classList.toggle('active', t==='depth'));
+    }
+    updateLegend();
+    go(currentSeed);
+  }
+
+  function updateLegend() {
+    const isDepth = currentMode==='depth' || currentDataset==='sim3d';
+    document.getElementById('legend-single').style.display = (!isDepth && currentMode==='single') ? '' : 'none';
+    document.getElementById('legend-multi').style.display  = (!isDepth && currentMode==='multi')  ? '' : 'none';
+    document.getElementById('legend-depth').style.display  = isDepth ? '' : 'none';
+    document.getElementById('sigma-card').style.display    = isDepth ? '' : 'none';
   }
 
   const imgEl      = document.getElementById('sample-img');
@@ -643,7 +667,7 @@
     seedInput.value     = seed;
 
     try {
-      const r = await fetch(`/api/sample?seed=${seed}&mode=${currentMode}`);
+      const r = await fetch(`/api/sample?seed=${seed}&mode=${currentMode}&dataset=${currentDataset}`);
       const d = await r.json();
 
       imgEl.src = 'data:image/png;base64,' + d.png;
