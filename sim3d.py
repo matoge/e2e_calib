@@ -35,14 +35,44 @@ LIDAR_MAX_RANGE  = 50.0
 DEPTH_NORM = 50.0   # normalisation  → d_norm ∈ [0,1]
 
 
+# ── Object color palettes ──────────────────────────────────────────────────────
+
+_BUILDING_COLORS = [
+    (0.55, 0.35, 0.17),  # brown
+    (0.78, 0.71, 0.55),  # beige
+    (0.59, 0.59, 0.63),  # concrete gray
+    (0.71, 0.31, 0.24),  # brick red
+    (0.39, 0.47, 0.51),  # steel blue-gray
+    (0.82, 0.78, 0.68),  # sandstone
+    (0.46, 0.52, 0.46),  # olive/military green
+]
+_POLE_COLORS = [
+    (1.0,  0.88, 0.0),   # yellow
+    (0.95, 0.95, 0.95),  # white
+    (0.70, 0.70, 0.68),  # galvanized gray
+    (1.0,  0.50, 0.0),   # orange
+]
+_CAR_COLORS = [
+    (0.80, 0.10, 0.10),  # red
+    (0.10, 0.25, 0.80),  # blue
+    (0.72, 0.72, 0.75),  # silver
+    (0.95, 0.80, 0.0),   # yellow
+    (0.10, 0.60, 0.25),  # green
+    (0.92, 0.92, 0.92),  # white
+    (0.15, 0.15, 0.15),  # black
+    (0.70, 0.20, 0.50),  # maroon
+]
+
+
 # ── Primitives ─────────────────────────────────────────────────────────────────
 
 class Box:
     """Axis-aligned box (building)."""
-    def __init__(self, center, half_size, label="building"):
+    def __init__(self, center, half_size, label="building", color=None):
         self.c     = np.asarray(center,    float)
         self.h     = np.asarray(half_size, float)
         self.label = label
+        self.color = np.array(color if color is not None else (0.6, 0.6, 0.6), float)
 
     def intersect(self, origins, dirs):
         """Vectorised AABB slab method.  returns t (N,), inf = no hit."""
@@ -58,12 +88,13 @@ class Box:
 
 class Cylinder:
     """Vertical cylinder (pole), axis along Z."""
-    def __init__(self, xy, radius, z_base, height, label="pole"):
+    def __init__(self, xy, radius, z_base, height, label="pole", color=None):
         self.xy    = np.asarray(xy, float)
         self.r     = radius
         self.zb    = z_base
         self.zt    = z_base + height
         self.label = label
+        self.color = np.array(color if color is not None else (1.0, 1.0, 1.0), float)
 
     def intersect(self, origins, dirs):
         ox = origins[:, 0] - self.xy[0]
@@ -92,6 +123,7 @@ class Ground:
     def __init__(self, z=0.0, label="ground"):
         self.z     = z
         self.label = label
+        self.color = np.array((0.14, 0.12, 0.10), float)  # dark asphalt
 
     def intersect(self, origins, dirs):
         dz = dirs[:, 2]
@@ -129,27 +161,30 @@ def make_scene(rng: np.random.Generator) -> Scene:
 
     # Buildings on both sides
     for _ in range(rng.integers(3, 8)):
-        x  = rng.uniform(4, 25)
-        y  = rng.choice([-1, 1]) * rng.uniform(3, 9)
-        hw = rng.uniform(1, 4)
-        hd = rng.uniform(1, 4)
-        hh = rng.uniform(2, 7)
-        scene.add(Box([x, y, hh], [hw, hd, hh], "building"))
+        x   = rng.uniform(4, 25)
+        y   = rng.choice([-1, 1]) * rng.uniform(3, 9)
+        hw  = rng.uniform(1, 4)
+        hd  = rng.uniform(1, 4)
+        hh  = rng.uniform(2, 7)
+        col = _BUILDING_COLORS[rng.integers(len(_BUILDING_COLORS))]
+        scene.add(Box([x, y, hh], [hw, hd, hh], "building", color=col))
 
     # Poles along road edges
     for _ in range(rng.integers(2, 5)):
-        x = rng.uniform(2, 28)
-        y = rng.choice([-1, 1]) * rng.uniform(1.5, 4)
-        scene.add(Cylinder([x, y], 0.08, 0.0, rng.uniform(2, 5), "pole"))
+        x   = rng.uniform(2, 28)
+        y   = rng.choice([-1, 1]) * rng.uniform(1.5, 4)
+        col = _POLE_COLORS[rng.integers(len(_POLE_COLORS))]
+        scene.add(Cylinder([x, y], 0.08, 0.0, rng.uniform(2, 5), "pole", color=col))
 
     # Cars on road (boxes ~4m×2m×1.5m)
     for _ in range(rng.integers(1, 4)):
-        x  = rng.uniform(5, 25)
-        y  = rng.uniform(-1.5, 1.5)   # near road center
-        hx = rng.uniform(1.8, 2.5)    # half-length
-        hy = rng.uniform(0.8, 1.0)    # half-width
-        hz = 0.75                      # half-height (1.5m tall)
-        scene.add(Box([x, y, hz], [hx, hy, hz], "car"))
+        x   = rng.uniform(5, 25)
+        y   = rng.uniform(-1.5, 1.5)   # near road center
+        hx  = rng.uniform(1.8, 2.5)    # half-length
+        hy  = rng.uniform(0.8, 1.0)    # half-width
+        hz  = 0.75                      # half-height (1.5m tall)
+        col = _CAR_COLORS[rng.integers(len(_CAR_COLORS))]
+        scene.add(Box([x, y, hz], [hx, hy, hz], "car", color=col))
 
     return scene
 
@@ -158,7 +193,7 @@ def make_scene(rng: np.random.Generator) -> Scene:
 
 def render_camera(scene: Scene, img_size: int = IMG_SIZE) -> np.ndarray:
     """
-    Ray-trace a grayscale image (H, W) float32 ∈ [0, 1].
+    Ray-trace an RGB image (H, W, 3) float32 ∈ [0, 1].
     Camera at (0, 0, CAM_HEIGHT) looking along +X.
     """
     H = W = img_size
@@ -176,23 +211,24 @@ def render_camera(scene: Scene, img_size: int = IMG_SIZE) -> np.ndarray:
     origins = np.broadcast_to([0.0, 0.0, CAM_HEIGHT], (H * W, 3)).copy()
     t, idx  = scene.cast(origins, dirs)
 
-    img  = np.zeros(H * W, np.float32)
-    hit  = t < LIDAR_MAX_RANGE
+    img = np.zeros((H * W, 3), np.float32)
+    hit = t < LIDAR_MAX_RANGE
 
     for i, obj in enumerate(scene.objects):
         mask = (idx == i) & hit
         if not mask.any():
             continue
+        base = obj.color.astype(np.float32)
         if obj.label == "ground":
-            img[mask] = 0.12
-        elif obj.label == "building":
-            img[mask] = 0.45 + 0.55 * (1 - t[mask] / LIDAR_MAX_RANGE)
-        elif obj.label == "pole":
-            img[mask] = 1.0
-        elif obj.label == "car":
-            img[mask] = 0.72 + 0.28 * (1 - t[mask] / LIDAR_MAX_RANGE)
+            # slight distance fog on ground
+            bright = 0.7 + 0.3 * (1 - t[mask] / LIDAR_MAX_RANGE)
+        elif obj.label in ("building", "car"):
+            bright = 0.55 + 0.45 * (1 - t[mask] / LIDAR_MAX_RANGE)
+        else:  # pole — mostly uniform brightness
+            bright = np.ones(mask.sum(), np.float32)
+        img[mask] = base * bright[:, None]
 
-    return img.reshape(H, W)
+    return img.clip(0, 1).reshape(H, W, 3)
 
 
 # ── LiDAR scanner ──────────────────────────────────────────────────────────────
@@ -262,8 +298,8 @@ def make_sample(seed=None, n_points=255, max_offset=8.0, bg_ratio=1,
     rng   = np.random.default_rng(seed)
     scene = make_scene(rng)
 
-    img_np = render_camera(scene, img_size)
-    image  = torch.from_numpy(img_np).unsqueeze(0)
+    img_np = render_camera(scene, img_size)              # (H, W, 3)
+    image  = torch.from_numpy(img_np.transpose(2, 0, 1))  # (3, H, W)
 
     pts, lbls = scan_lidar(scene)
     u, v, d, src = project(pts, img_size)
@@ -272,25 +308,26 @@ def make_sample(seed=None, n_points=255, max_offset=8.0, bg_ratio=1,
     # Classify
     is_bg  = lbls_proj == "ground"
     is_fg  = ~is_bg
-    # Further split FG: left (Y>0) vs right (Y<0)
-    fy_val = pts[src, 1]
-    is_left  = is_fg & (fy_val >= 0)
-    is_right = is_fg & (fy_val <  0)
 
     n_obj   = n_points // (2 + bg_ratio)
     n_bg_pt = n_points - 2 * n_obj
 
-    def _sample(mask, n):
-        idx = np.where(mask)[0]
-        if len(idx) == 0:
-            idx = np.where(is_fg)[0]  # fallback: any FG
-        if len(idx) == 0:
-            idx = np.arange(len(u))
-        return rng.choice(idx, n, replace=len(idx) < n)
+    # Sample FG without replacement, then split by Y for obj1/obj2 labelling
+    fg_idx = np.where(is_fg)[0]
+    bg_idx = np.where(is_bg)[0]
 
-    s1 = _sample(is_left,  n_obj)
-    s2 = _sample(is_right, n_obj)
-    sb = _sample(is_bg,    n_bg_pt)
+    n_fg = 2 * n_obj
+    fg_sel = (rng.choice(fg_idx, n_fg, replace=len(fg_idx) < n_fg)
+              if len(fg_idx) > 0 else np.zeros(n_fg, int))
+    bg_sel = (rng.choice(bg_idx, n_bg_pt, replace=len(bg_idx) < n_bg_pt)
+              if len(bg_idx) > 0 else np.zeros(n_bg_pt, int))
+
+    # Split FG half/half by Y position for obj1/obj2
+    fy = pts[src[fg_sel], 1]
+    order = np.argsort(fy)[::-1]          # descending Y: left-side first
+    s1 = fg_sel[order[:n_obj]]
+    s2 = fg_sel[order[n_obj:]]
+    sb = bg_sel
     sel = np.concatenate([s1, s2, sb])
 
     d_norm = np.clip(d[sel] / DEPTH_NORM, 0.0, 1.0)
@@ -359,7 +396,7 @@ if __name__ == "__main__":
         n = img.shape[-1]
         n_obj = true_uvd.shape[0] // 3
 
-        ax.imshow(img[0].numpy(), cmap="gray", vmin=0, vmax=1,
+        ax.imshow(img.numpy().transpose(1, 2, 0),
                   origin="upper", extent=[0, n, n, 0])
         ax.scatter(true_uvd[:n_obj, 0],       true_uvd[:n_obj, 1],       c="#00ff88", s=4, alpha=0.7, linewidths=0)
         ax.scatter(true_uvd[n_obj:2*n_obj, 0],true_uvd[n_obj:2*n_obj, 1],c="#00ccff", s=4, alpha=0.7, linewidths=0)

@@ -503,6 +503,11 @@
             <button class="mode-tab active" id="ds-synthetic" onclick="setDataset('synthetic')" title="Synthetic shapes">Synth</button>
             <button class="mode-tab"        id="ds-sim3d"     onclick="setDataset('sim3d')"     title="3D ray-cast scene">Sim3D</button>
           </div>
+          <span class="auto-label">GT only</span>
+          <label class="toggle">
+            <input type="checkbox" id="gt-toggle">
+            <div class="toggle-track"><div class="toggle-thumb"></div></div>
+          </label>
           <span class="auto-label">Auto</span>
           <label class="toggle">
             <input type="checkbox" id="auto-toggle">
@@ -614,6 +619,7 @@
   let currentSeed    = 0;
   let currentMode    = 'single';
   let currentDataset = 'synthetic';
+  let gtOnly         = false;
   let autoTimer      = null;
   const MAX_SEED     = 199;
 
@@ -667,7 +673,7 @@
     seedInput.value     = seed;
 
     try {
-      const r = await fetch(`/api/sample?seed=${seed}&mode=${currentMode}&dataset=${currentDataset}`);
+      const r = await fetch(`/api/sample?seed=${seed}&mode=${currentMode}&dataset=${currentDataset}&gt_only=${gtOnly?1:0}`);
       const d = await r.json();
 
       imgEl.src = 'data:image/png;base64,' + d.png;

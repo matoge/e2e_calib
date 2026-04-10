@@ -32,38 +32,78 @@ def get_model(ckpt, model_cls=None):
     return m
 
 
-def render_png(img_np, true_uv, dist_uv, pred_uv=None, multi=False, depth=False):
+def draw_arrows(ax, src, dst, color, n_arrows=20, step=None):
+    """Draw subsampled arrows from src → dst."""
+    if step is None:
+        step = max(1, len(src) // n_arrows)
+    idx = range(0, len(src), step)
+    for i in idx:
+        dx, dy = dst[i,0]-src[i,0], dst[i,1]-src[i,1]
+        if abs(dx)+abs(dy) < 0.5:
+            continue
+        ax.annotate("", xy=(dst[i,0], dst[i,1]), xytext=(src[i,0], src[i,1]),
+                    arrowprops=dict(arrowstyle="-|>", color=color,
+                                   lw=0.8, mutation_scale=6),
+                    annotation_clip=True)
+
+
+def _draw_arrows(ax, src, dst, color, n_max=15):
+    """Subsample and draw dist→pred arrows."""
+    n = len(src)
+    step = max(1, n // n_max)
+    for i in range(0, n, step):
+        dx = dst[i, 0] - src[i, 0]
+        dy = dst[i, 1] - src[i, 1]
+        if abs(dx) + abs(dy) < 0.8:
+            continue
+        ax.annotate("", xy=(dst[i,0], dst[i,1]), xytext=(src[i,0], src[i,1]),
+                    arrowprops=dict(arrowstyle="-|>", color=color,
+                                   lw=0.9, mutation_scale=7, alpha=0.75),
+                    annotation_clip=True)
+
+
+def render_png(img_np, true_uv, dist_uv, pred_uv=None, multi=False, depth=False, gt_only=False):
     fig, ax = plt.subplots(1, 1, figsize=(4, 4), dpi=128)
-    ax.imshow(img_np, cmap="gray", vmin=0, vmax=1,
-              origin="upper", extent=[0, IMG_SIZE, IMG_SIZE, 0])
+    if img_np.ndim == 3:   # RGB (H, W, 3)
+        ax.imshow(img_np, origin="upper", extent=[0, IMG_SIZE, IMG_SIZE, 0])
+    else:                  # grayscale (H, W)
+        ax.imshow(img_np, cmap="gray", vmin=0, vmax=1,
+                  origin="upper", extent=[0, IMG_SIZE, IMG_SIZE, 0])
 
     if depth:
         n = len(true_uv) // 3
-        ax.scatter(dist_uv[:n,0],   dist_uv[:n,1],   c="red",     s=5, alpha=0.7, linewidths=0, label="dist obj1")
-        ax.scatter(dist_uv[n:2*n,0],dist_uv[n:2*n,1],c="orange",  s=5, alpha=0.7, linewidths=0, label="dist obj2")
-        ax.scatter(dist_uv[2*n:,0], dist_uv[2*n:,1], c="#ff88ff", s=3, alpha=0.5, linewidths=0, label="dist bg")
-        ax.scatter(true_uv[:n,0],   true_uv[:n,1],   c="#00ff88", s=5, alpha=0.7, linewidths=0, label="GT obj1")
-        ax.scatter(true_uv[n:2*n,0],true_uv[n:2*n,1],c="#00ccff", s=5, alpha=0.7, linewidths=0, label="GT obj2")
-        ax.scatter(true_uv[2*n:,0], true_uv[2*n:,1], c="white",   s=3, alpha=0.4, linewidths=0, label="GT bg")
-        if pred_uv is not None:
-            ax.scatter(pred_uv[:n,0],   pred_uv[:n,1],   c="#ff4444",   s=5, alpha=0.9, linewidths=0, label="pred obj1")
-            ax.scatter(pred_uv[n:2*n,0],pred_uv[n:2*n,1],c="#ff9900",   s=5, alpha=0.9, linewidths=0, label="pred obj2")
-            ax.scatter(pred_uv[2*n:,0], pred_uv[2*n:,1], c="#ff00ff",   s=3, alpha=0.6, linewidths=0, label="pred bg")
+        ax.scatter(true_uv[:n,0],   true_uv[:n,1],   c="#00ff88", s=30, alpha=0.9, marker='x', linewidths=1.2, label="GT obj1")
+        ax.scatter(true_uv[n:2*n,0],true_uv[n:2*n,1],c="#00ccff", s=30, alpha=0.9, marker='x', linewidths=1.2, label="GT obj2")
+        ax.scatter(true_uv[2*n:,0], true_uv[2*n:,1], c="white",   s=12, alpha=0.5, marker='x', linewidths=0.7, label="GT bg")
+        if not gt_only:
+            ax.scatter(dist_uv[:n,0],   dist_uv[:n,1],   c="red",     s=8,  alpha=0.7, linewidths=0, label="dist obj1")
+            ax.scatter(dist_uv[n:2*n,0],dist_uv[n:2*n,1],c="orange",  s=8,  alpha=0.7, linewidths=0, label="dist obj2")
+            ax.scatter(dist_uv[2*n:,0], dist_uv[2*n:,1], c="#ff88ff", s=4,  alpha=0.4, linewidths=0, label="dist bg")
+            if pred_uv is not None:
+                ax.scatter(pred_uv[:n,0],   pred_uv[:n,1],   c="#ff4444", s=30, alpha=0.9, marker='+', linewidths=1.5, label="pred obj1")
+                ax.scatter(pred_uv[n:2*n,0],pred_uv[n:2*n,1],c="#ff9900", s=30, alpha=0.9, marker='+', linewidths=1.5, label="pred obj2")
+                ax.scatter(pred_uv[2*n:,0], pred_uv[2*n:,1], c="#ff00ff", s=12, alpha=0.6, marker='+', linewidths=0.8, label="pred bg")
+                _draw_arrows(ax, dist_uv[:n],    pred_uv[:n],    "#ff4444", n_max=12)
+                _draw_arrows(ax, dist_uv[n:2*n], pred_uv[n:2*n],"#ff9900", n_max=12)
     elif multi:
         n = len(true_uv) // 2
-        # obj1: red/lime/blue, obj2: orange/cyan/violet
-        ax.scatter(dist_uv[:n,0], dist_uv[:n,1], c="red",    s=7, alpha=0.8, linewidths=0, label="dist obj1")
-        ax.scatter(dist_uv[n:,0], dist_uv[n:,1], c="orange", s=7, alpha=0.8, linewidths=0, label="dist obj2")
-        ax.scatter(true_uv[:n,0], true_uv[:n,1], c="lime",   s=7, alpha=0.7, linewidths=0, label="GT obj1")
-        ax.scatter(true_uv[n:,0], true_uv[n:,1], c="cyan",   s=7, alpha=0.7, linewidths=0, label="GT obj2")
-        if pred_uv is not None:
-            ax.scatter(pred_uv[:n,0], pred_uv[:n,1], c="deepskyblue", s=7, alpha=0.9, linewidths=0, label="pred obj1")
-            ax.scatter(pred_uv[n:,0], pred_uv[n:,1], c="violet",      s=7, alpha=0.9, linewidths=0, label="pred obj2")
+        ax.scatter(true_uv[:n,0], true_uv[:n,1], c="lime", s=30, alpha=0.9, marker='x', linewidths=1.2, label="GT obj1")
+        ax.scatter(true_uv[n:,0], true_uv[n:,1], c="cyan", s=30, alpha=0.9, marker='x', linewidths=1.2, label="GT obj2")
+        if not gt_only:
+            ax.scatter(dist_uv[:n,0], dist_uv[:n,1], c="red",    s=8, alpha=0.7, linewidths=0, label="dist obj1")
+            ax.scatter(dist_uv[n:,0], dist_uv[n:,1], c="orange", s=8, alpha=0.7, linewidths=0, label="dist obj2")
+            if pred_uv is not None:
+                ax.scatter(pred_uv[:n,0], pred_uv[:n,1], c="deepskyblue", s=30, alpha=0.9, marker='+', linewidths=1.5, label="pred obj1")
+                ax.scatter(pred_uv[n:,0], pred_uv[n:,1], c="violet",      s=30, alpha=0.9, marker='+', linewidths=1.5, label="pred obj2")
+                _draw_arrows(ax, dist_uv[:n], pred_uv[:n], "deepskyblue", n_max=15)
+                _draw_arrows(ax, dist_uv[n:], pred_uv[n:], "violet",      n_max=15)
     else:
-        ax.scatter(dist_uv[:,0], dist_uv[:,1], c="red",          s=8, alpha=0.8, linewidths=0, label="distorted")
-        ax.scatter(true_uv[:,0], true_uv[:,1], c="lime",          s=8, alpha=0.7, linewidths=0, label="GT")
-        if pred_uv is not None:
-            ax.scatter(pred_uv[:,0], pred_uv[:,1], c="deepskyblue", s=8, alpha=0.9, linewidths=0, label="corrected")
+        ax.scatter(true_uv[:,0], true_uv[:,1], c="lime", s=30, alpha=0.9, marker='x', linewidths=1.2, label="GT")
+        if not gt_only:
+            ax.scatter(dist_uv[:,0], dist_uv[:,1], c="red", s=8, alpha=0.7, linewidths=0, label="distorted")
+            if pred_uv is not None:
+                ax.scatter(pred_uv[:,0], pred_uv[:,1], c="deepskyblue", s=30, alpha=0.9, marker='+', linewidths=1.5, label="corrected")
+                _draw_arrows(ax, dist_uv, pred_uv, "deepskyblue", n_max=20)
 
     ax.set_xlim(0, IMG_SIZE); ax.set_ylim(IMG_SIZE, 0)
     ax.set_xticks([]); ax.set_yticks([])
@@ -83,9 +123,10 @@ def index():
 @app.route("/api/sample")
 def api_sample():
     seed     = int(request.args.get("seed", 0))
-    mode     = request.args.get("mode", "single")   # "single" | "multi" | "depth"
-    dataset  = request.args.get("dataset", "synthetic")   # "synthetic" | "sim3d"
+    mode     = request.args.get("mode", "single")
+    dataset  = request.args.get("dataset", "synthetic")
     bg_ratio = int(request.args.get("bg_ratio", 1))
+    gt_only  = request.args.get("gt_only", "0") == "1"
     multi    = (mode == "multi")
     depth    = (mode == "depth") or (dataset == "sim3d")
 
@@ -95,6 +136,7 @@ def api_sample():
             seed=seed + 500_100, bg_ratio=bg_ratio)
         true_uv = true_uvd[:, :2]
         dist_uv = dist_uvd[:, :2]
+        img_gray = img.mean(dim=0, keepdim=True)   # (1,H,W) for model
     elif depth:
         ckpt = "best_model_depth.pt"
         img, true_uvd, dist_uvd = make_image_and_points_depth(
@@ -138,7 +180,9 @@ def api_sample():
     if model is not None:
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             if depth:
-                params = model(img.unsqueeze(0).to(DEVICE),
+                # sim3d returns 3-ch RGB; use grayscale for model inference
+                img_in = img_gray if dataset == "sim3d" else img
+                params = model(img_in.unsqueeze(0).to(DEVICE),
                                dist_uvd.unsqueeze(0).to(DEVICE))[0].cpu().float()
                 tx_pred = params[:, 0]; ty_pred = params[:, 1]
                 offset_pred = torch.stack([tx_pred, ty_pred], dim=1)
@@ -172,10 +216,16 @@ def api_sample():
             off = offset_pred.mean(0)
             shifts_pred.append({"tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
 
-    if depth:
-        png = render_png(img[0].numpy(), true_uv.numpy(), dist_uv.numpy(), pred_uv, depth=True)
+    # Build display image: sim3d returns (3,H,W) RGB, others (1,H,W) grayscale
+    if dataset == "sim3d":
+        img_disp = img.numpy().transpose(1, 2, 0)  # (H, W, 3)
     else:
-        png = render_png(img[0].numpy(), true_uv.numpy(), dist_uv.numpy(), pred_uv, multi=multi)
+        img_disp = img[0].numpy()                  # (H, W)
+
+    if depth:
+        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv, depth=True,  gt_only=gt_only)
+    else:
+        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv, multi=multi, gt_only=gt_only)
 
     return jsonify({
         "png":          png,
