@@ -62,6 +62,19 @@ _CAR_COLORS = [
     (0.15, 0.15, 0.15),  # black
     (0.70, 0.20, 0.50),  # maroon
 ]
+_SPHERE_COLORS = [
+    (0.90, 0.30, 0.10),  # orange-red (traffic bollard)
+    (0.95, 0.85, 0.10),  # yellow bollard
+    (0.50, 0.50, 0.55),  # stone gray
+    (0.20, 0.60, 0.80),  # teal
+    (0.85, 0.85, 0.85),  # light gray
+]
+_CRATE_COLORS = [
+    (0.60, 0.45, 0.25),  # wood brown
+    (0.30, 0.45, 0.30),  # military green
+    (0.70, 0.20, 0.20),  # red crate
+    (0.55, 0.55, 0.60),  # metal gray
+]
 
 
 # ── Primitives ─────────────────────────────────────────────────────────────────
@@ -133,6 +146,27 @@ class Ground:
         return np.where(t > 1e-4, t, np.inf)
 
 
+class Sphere:
+    """Sphere (bollard, rock, decorative)."""
+    def __init__(self, center, radius, label="sphere", color=None):
+        self.c     = np.asarray(center, float)
+        self.r     = float(radius)
+        self.label = label
+        self.color = np.array(color if color is not None else (0.8, 0.5, 0.2), float)
+
+    def intersect(self, origins, dirs):
+        oc   = origins - self.c          # (N, 3)
+        b    = 2.0 * (oc * dirs).sum(1)  # (N,)
+        c_   = (oc * oc).sum(1) - self.r ** 2
+        disc = b * b - 4.0 * c_
+        ok   = disc >= 0
+        sq   = np.sqrt(np.where(ok, disc, 0.0))
+        t1   = np.where(ok, (-b - sq) * 0.5, np.inf)
+        t2   = np.where(ok, (-b + sq) * 0.5, np.inf)
+        t    = np.where(t1 > 1e-4, t1, np.where(t2 > 1e-4, t2, np.inf))
+        return t
+
+
 # ── Scene ──────────────────────────────────────────────────────────────────────
 
 class Scene:
@@ -155,17 +189,17 @@ class Scene:
 
 
 def make_scene(rng: np.random.Generator) -> Scene:
-    """Random scene: road + N buildings + M poles."""
+    """Random scene: ground + buildings + poles + cars + spheres + small crates."""
     scene = Scene()
     scene.add(Ground(z=0.0, label="ground"))
 
-    # Buildings on both sides
-    for _ in range(rng.integers(3, 8)):
-        x   = rng.uniform(4, 25)
-        y   = rng.choice([-1, 1]) * rng.uniform(3, 9)
-        hw  = rng.uniform(1, 4)
-        hd  = rng.uniform(1, 4)
-        hh  = rng.uniform(2, 7)
+    # Buildings on both sides — small/medium only
+    for _ in range(rng.integers(2, 5)):
+        x   = rng.uniform(6, 22)
+        y   = rng.choice([-1, 1]) * rng.uniform(3, 8)
+        hw  = rng.uniform(0.5, 2.5)
+        hd  = rng.uniform(0.5, 2.5)
+        hh  = rng.uniform(1, 3.5)
         col = _BUILDING_COLORS[rng.integers(len(_BUILDING_COLORS))]
         scene.add(Box([x, y, hh], [hw, hd, hh], "building", color=col))
 
@@ -176,15 +210,31 @@ def make_scene(rng: np.random.Generator) -> Scene:
         col = _POLE_COLORS[rng.integers(len(_POLE_COLORS))]
         scene.add(Cylinder([x, y], 0.08, 0.0, rng.uniform(2, 5), "pole", color=col))
 
-    # Cars on road (boxes ~4m×2m×1.5m)
+    # Cars on road
     for _ in range(rng.integers(1, 4)):
         x   = rng.uniform(5, 25)
-        y   = rng.uniform(-1.5, 1.5)   # near road center
-        hx  = rng.uniform(1.8, 2.5)    # half-length
-        hy  = rng.uniform(0.8, 1.0)    # half-width
-        hz  = 0.75                      # half-height (1.5m tall)
+        y   = rng.uniform(-1.5, 1.5)
+        hx  = rng.uniform(1.8, 2.5)
+        hy  = rng.uniform(0.8, 1.0)
+        hz  = 0.75
         col = _CAR_COLORS[rng.integers(len(_CAR_COLORS))]
         scene.add(Box([x, y, hz], [hx, hy, hz], "car", color=col))
+
+    # Spheres: bollards / rocks (r=0.15–0.6m)
+    for _ in range(rng.integers(2, 6)):
+        x   = rng.uniform(3, 26)
+        y   = rng.choice([-1, 1]) * rng.uniform(0.5, 5)
+        r   = rng.uniform(0.15, 0.60)
+        col = _SPHERE_COLORS[rng.integers(len(_SPHERE_COLORS))]
+        scene.add(Sphere([x, y, r], r, "sphere", color=col))
+
+    # Small crates / boxes (0.2–0.8m)
+    for _ in range(rng.integers(1, 5)):
+        x   = rng.uniform(4, 24)
+        y   = rng.choice([-1, 1]) * rng.uniform(1, 6)
+        h   = rng.uniform(0.2, 0.8)
+        col = _CRATE_COLORS[rng.integers(len(_CRATE_COLORS))]
+        scene.add(Box([x, y, h/2], [h/2, h/2, h/2], "crate", color=col))
 
     return scene
 
@@ -220,10 +270,11 @@ def render_camera(scene: Scene, img_size: int = IMG_SIZE) -> np.ndarray:
             continue
         base = obj.color.astype(np.float32)
         if obj.label == "ground":
-            # slight distance fog on ground
             bright = 0.7 + 0.3 * (1 - t[mask] / LIDAR_MAX_RANGE)
-        elif obj.label in ("building", "car"):
+        elif obj.label in ("building", "car", "crate"):
             bright = 0.55 + 0.45 * (1 - t[mask] / LIDAR_MAX_RANGE)
+        elif obj.label == "sphere":
+            bright = 0.65 + 0.35 * (1 - t[mask] / LIDAR_MAX_RANGE)
         else:  # pole — mostly uniform brightness
             bright = np.ones(mask.sum(), np.float32)
         img[mask] = base * bright[:, None]
@@ -236,7 +287,7 @@ def render_camera(scene: Scene, img_size: int = IMG_SIZE) -> np.ndarray:
 def scan_lidar(scene: Scene):
     """
     Spinning LiDAR at (0,0,CAM_HEIGHT).
-    Returns pts (M,3), label_name (M,) as strings.
+    Returns pts (M,3), label_name (M,), obj_idx (M,) — index into scene.objects.
     """
     v_angs = np.linspace(LIDAR_V_DOWN, LIDAR_V_UP, LIDAR_CHANNELS)
     h_angs = np.arange(0, 2 * math.pi, LIDAR_H_RES)
@@ -249,10 +300,11 @@ def scan_lidar(scene: Scene):
     origins = np.broadcast_to([0.0, 0.0, CAM_HEIGHT], (n, 3)).copy()
     t, idx  = scene.cast(origins, dirs)
 
-    hit  = (t < LIDAR_MAX_RANGE) & (idx >= 0)
-    pts  = origins[hit] + t[hit, None] * dirs[hit]
-    lbls = np.array([scene.objects[i].label for i in idx[hit]])
-    return pts, lbls
+    hit     = (t < LIDAR_MAX_RANGE) & (idx >= 0)
+    pts     = origins[hit] + t[hit, None] * dirs[hit]
+    lbls    = np.array([scene.objects[i].label for i in idx[hit]])
+    obj_idx = idx[hit]
+    return pts, lbls, obj_idx
 
 
 # ── UV projection ──────────────────────────────────────────────────────────────
@@ -291,9 +343,10 @@ def make_sample(seed=None, n_points=255, max_offset=8.0, bg_ratio=1,
         true_uvd     (N, 3)  [u, v, d_norm]
         distorted_uvd (N, 3)
     Groups:
-        [0 : n_obj]       obj1  — left-side objects  (Y > 0)
-        [n_obj : 2*n_obj] obj2  — right-side objects (Y < 0)
-        [2*n_obj : N]     bg    — ground points
+        [0 : n_obj]       obj1  — car
+        [n_obj : 2*n_obj] obj2  — pole + sphere
+        [2*n_obj : N]     bg    — building + crate
+        (ground points are excluded)
     """
     rng   = np.random.default_rng(seed)
     scene = make_scene(rng)
@@ -301,33 +354,45 @@ def make_sample(seed=None, n_points=255, max_offset=8.0, bg_ratio=1,
     img_np = render_camera(scene, img_size)              # (H, W, 3)
     image  = torch.from_numpy(img_np.transpose(2, 0, 1))  # (3, H, W)
 
-    pts, lbls = scan_lidar(scene)
+    pts, lbls, obj_ids = scan_lidar(scene)
     u, v, d, src = project(pts, img_size)
-    lbls_proj = lbls[src]
+    lbls_proj    = lbls[src]
+    oids_proj    = obj_ids[src]
 
-    # Classify
-    is_bg  = lbls_proj == "ground"
-    is_fg  = ~is_bg
+    # Exclude ground
+    valid = lbls_proj != "ground"
+    u, v, d      = u[valid], v[valid], d[valid]
+    lbls_proj    = lbls_proj[valid]
+    oids_proj    = oids_proj[valid]
+
+    # Semantic groups
+    mask_car  = lbls_proj == "car"
+    mask_pole = (lbls_proj == "pole") | (lbls_proj == "sphere")
+    mask_bg   = (lbls_proj == "building") | (lbls_proj == "crate")
 
     n_obj   = n_points // (2 + bg_ratio)
     n_bg_pt = n_points - 2 * n_obj
 
-    # Sample FG without replacement, then split by Y for obj1/obj2 labelling
-    fg_idx = np.where(is_fg)[0]
-    bg_idx = np.where(is_bg)[0]
+    def _sample_uniform(mask, n):
+        """Sample n points uniformly across object instances."""
+        idx = np.where(mask)[0]
+        if len(idx) == 0:
+            return np.zeros(n, int)
+        instances = np.unique(oids_proj[idx])
+        k_each = max(1, n // len(instances))
+        chosen = []
+        for inst in instances:
+            inst_pts = idx[oids_proj[idx] == inst]
+            k = min(k_each, len(inst_pts))
+            chosen.append(rng.choice(inst_pts, k, replace=False))
+        combined = np.concatenate(chosen)
+        if len(combined) >= n:
+            return rng.choice(combined, n, replace=False)
+        return rng.choice(combined, n, replace=True)
 
-    n_fg = 2 * n_obj
-    fg_sel = (rng.choice(fg_idx, n_fg, replace=len(fg_idx) < n_fg)
-              if len(fg_idx) > 0 else np.zeros(n_fg, int))
-    bg_sel = (rng.choice(bg_idx, n_bg_pt, replace=len(bg_idx) < n_bg_pt)
-              if len(bg_idx) > 0 else np.zeros(n_bg_pt, int))
-
-    # Split FG half/half by Y position for obj1/obj2
-    fy = pts[src[fg_sel], 1]
-    order = np.argsort(fy)[::-1]          # descending Y: left-side first
-    s1 = fg_sel[order[:n_obj]]
-    s2 = fg_sel[order[n_obj:]]
-    sb = bg_sel
+    s1  = _sample_uniform(mask_car,  n_obj)
+    s2  = _sample_uniform(mask_pole, n_obj)
+    sb  = _sample_uniform(mask_bg,   n_bg_pt)
     sel = np.concatenate([s1, s2, sb])
 
     d_norm = np.clip(d[sel] / DEPTH_NORM, 0.0, 1.0)

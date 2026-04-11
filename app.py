@@ -162,8 +162,10 @@ def api_sample():
         n_total = len(true_uv)
         n_obj = n_total // (2 + bg_ratio)
         n_bg  = n_total - 2 * n_obj
-        for name, sl in [("obj1", slice(0, n_obj)), ("obj2", slice(n_obj, 2*n_obj)),
-                          ("bg",  slice(2*n_obj, 2*n_obj+n_bg))]:
+        group_names = (["car", "pole", "bg"] if dataset == "sim3d"
+                       else ["obj1", "obj2", "bg"])
+        for name, sl in zip(group_names, [slice(0, n_obj), slice(n_obj, 2*n_obj),
+                                          slice(2*n_obj, 2*n_obj+n_bg)]):
             off = (true_uv[sl] - dist_uv[sl]).mean(0)
             shifts_gt.append({"label": name, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
     elif multi:
@@ -202,7 +204,7 @@ def api_sample():
         pred_uv   = pred_uv_t.numpy()
 
         if depth:
-            for j, (name, sz) in enumerate(zip(["obj1","obj2","bg"], [n_obj, n_obj, n_bg])):
+            for j, (name, sz) in enumerate(zip(group_names, [n_obj, n_obj, n_bg])):
                 start = sum([n_obj, n_obj, n_bg][:j])
                 sl = slice(start, start + sz)
                 off = offset_pred[sl].mean(0)
