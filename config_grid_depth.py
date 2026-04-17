@@ -4,7 +4,7 @@
 
 CFG = dict(
     # ── Experiment ─────────────────────────────────────────────────────────
-    name        = "v8_3layer_rgb_pole",   # → experiments/v8_3layer_rgb_pole/
+    name        = "v9_3layer_rgb_randdepth",   # → experiments/v9_3layer_rgb_randdepth/
 
     # ── Model ──────────────────────────────────────────────────────────────
     n_layers    = 3,        # 2 or 3  (coarse→fine  or  coarse→coarse→fine)
@@ -19,5 +19,6 @@ CFG = dict(
     lr_min      = 1e-6,
     train_size  = 8000,
     val_size    = 800,
-    max_offset  = 16.0,
+    max_offset     = 16.0,
+    random_depths  = True,    # True → all 3 depths random (v9+)
 )

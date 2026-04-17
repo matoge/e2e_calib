@@ -55,10 +55,11 @@ def epoch_loop(model, loader, optimizer, scaler, train):
 
         with torch.no_grad():
             mse = (params[valid][..., :2] - gt[valid]).norm(dim=-1).mean().item()
-            # per-group NLL
-            depth  = dist_uvd[..., 2]          # (B, N)
-            is_bg  = valid & (depth >= 0.95)
-            is_obj = valid & (depth <  0.95)
+            # per-group NLL: BG = points with max depth per sample
+            depth    = dist_uvd[..., 2]                          # (B, N)
+            max_d    = depth.max(dim=1, keepdim=True).values     # (B, 1)
+            is_bg    = valid & (depth >= max_d - 1e-3)
+            is_obj   = valid & (depth <  max_d - 1e-3)
             if is_obj.any():
                 obj_nll_sum += gaussian2d_nll(params[is_obj], gt[is_obj]).item()
                 obj_n += 1
