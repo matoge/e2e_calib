@@ -21,7 +21,10 @@ MAX_SIGMA = 30.0  # px  — ceiling prevents explosion
 
 
 class CrossAttentionBlockCov(nn.Module):
-    def __init__(self, d: int = D, n_heads: int = 4):
+    """Cross-attn block. Order: [kv_self_attn →] cross → [self_first? sa :] sa → FFN.
+    kv_self_attn=True enriches image tokens with self-attn before cross-attn.
+    """
+    def __init__(self, d: int = D, n_heads: int = 4, kv_self_attn: bool = False):
         super().__init__()
         self.cross_attn  = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
         self.norm_q      = nn.LayerNorm(d)
@@ -33,19 +36,27 @@ class CrossAttentionBlockCov(nn.Module):
             nn.Linear(d, d*2), nn.GELU(), nn.Dropout(0.1), nn.Linear(d*2, d),
         )
         self.norm_ffn    = nn.LayerNorm(d)
-        # 5 outputs: tx, ty, log_sx, log_sy, rho_raw
         self.proj        = nn.Linear(d + 2, 5)
-        # init: mean head near zero, log_sigma near log(2)=0.69
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
         with torch.no_grad():
-            # log_sx bias → log(2.0), log_sy bias → log(2.0)
             self.proj.bias[2] = 0.69
             self.proj.bias[3] = 0.69
+        # optional image encoder self-attn
+        if kv_self_attn:
+            self.kv_sa      = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+            self.norm_kv_sa = nn.LayerNorm(d)
+        self._kv_self_attn = kv_self_attn
 
     def forward(self, q, feat, uv_01, key_padding_mask=None, self_first=False):
         B, D_, H, W = feat.shape
-        kv = feat.flatten(2).permute(0, 2, 1)
+        kv = feat.flatten(2).permute(0, 2, 1)   # (B, H*W, D)
+
+        # image self-attn (optional)
+        if self._kv_self_attn:
+            img_sa, _ = self.kv_sa(self.norm_kv_sa(kv), self.norm_kv_sa(kv), self.norm_kv_sa(kv))
+            kv = kv + self.drop(img_sa)
+
         if self_first:
             sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
                                    key_padding_mask=key_padding_mask)
@@ -60,6 +71,57 @@ class CrossAttentionBlockCov(nn.Module):
             q = q + self.drop(sa)
         q = q + self.ffn(self.norm_ffn(q))
         raw = self.proj(torch.cat([q, uv_01], dim=-1))   # (B,N,5)
+        return q, raw
+
+
+class TransformerDecoderBlock(nn.Module):
+    """Standard Transformer Decoder block:
+    image self-attn → point self-attn → cross-attn → FFN
+    """
+    def __init__(self, d: int = D, n_heads: int = 4):
+        super().__init__()
+        # encoder (image) self-attn
+        self.img_self_attn = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+        self.norm_img      = nn.LayerNorm(d)
+        # decoder (point) self-attn
+        self.self_attn     = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+        self.norm_self     = nn.LayerNorm(d)
+        # cross-attn
+        self.cross_attn    = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+        self.norm_q        = nn.LayerNorm(d)
+        self.norm_kv       = nn.LayerNorm(d)
+        self.drop          = nn.Dropout(0.1)
+        self.ffn           = nn.Sequential(
+            nn.Linear(d, d*2), nn.GELU(), nn.Dropout(0.1), nn.Linear(d*2, d),
+        )
+        self.norm_ffn      = nn.LayerNorm(d)
+        self.proj          = nn.Linear(d + 2, 5)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        with torch.no_grad():
+            self.proj.bias[2] = 0.69
+            self.proj.bias[3] = 0.69
+
+    def forward(self, q, feat, uv_01, key_padding_mask=None):
+        B, D_, H, W = feat.shape
+        kv = feat.flatten(2).permute(0, 2, 1)          # (B, H*W, D)
+
+        # 1. image self-attn
+        img_sa, _ = self.img_self_attn(self.norm_img(kv), self.norm_img(kv), self.norm_img(kv))
+        kv = kv + self.drop(img_sa)
+
+        # 2. point self-attn
+        pt_sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
+                                  key_padding_mask=key_padding_mask)
+        q = q + self.drop(pt_sa)
+
+        # 3. cross-attn
+        ca, _ = self.cross_attn(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv))
+        q = q + self.drop(ca)
+
+        # 4. FFN
+        q = q + self.ffn(self.norm_ffn(q))
+        raw = self.proj(torch.cat([q, uv_01], dim=-1))  # (B,N,5)
         return q, raw
 
 

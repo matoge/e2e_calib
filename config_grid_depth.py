@@ -4,11 +4,12 @@
 
 CFG = dict(
     # ── Experiment ─────────────────────────────────────────────────────────
-    name        = "v9_3layer_rgb_randdepth",   # → experiments/v9_3layer_rgb_randdepth/
+    name        = "v12_2layer_kvsa",   # → experiments/v12_2layer_kvsa/
 
     # ── Model ──────────────────────────────────────────────────────────────
-    n_layers    = 3,        # 2 or 3  (coarse→fine  or  coarse→coarse→fine)
-    self_first  = False,    # True = self-attn before cross-attn in each block
+    n_layers      = 2,        # 2 or 3  (coarse→fine  or  coarse→coarse→fine)
+    self_first    = False,    # True = self-attn before cross-attn in each block
+    kv_self_attn  = True,     # True = image tokens self-attn before cross-attn
     img_size    = 64,
     in_channels = 3,
 

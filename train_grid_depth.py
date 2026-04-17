@@ -100,10 +100,11 @@ def main():
         batch_size=c["batch_size"], shuffle=False, **kw)
 
     model = CalibNetDepth(
-        img_size    = c["img_size"],
-        in_channels = c["in_channels"],
-        n_layers    = c["n_layers"],
-        self_first  = c["self_first"],
+        img_size     = c["img_size"],
+        in_channels  = c["in_channels"],
+        n_layers     = c["n_layers"],
+        self_first   = c["self_first"],
+        kv_self_attn = c.get("kv_self_attn", False),
     ).to(DEVICE)
 
     total_params = sum(p.numel() for p in model.parameters())
