@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>実験レポート</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body {
+    background: #0d1117; color: #e6edf3;
+    font-family: 'Noto Sans JP', sans-serif;
+    max-width: 820px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    line-height: 1.85; font-size: 1rem;
+  }
+  h1 { font-size: 1.6rem; color: #00d9ff; border-bottom: 1px solid #30363d; padding-bottom: .5rem; margin-bottom: .5rem; }
+  h2 { font-size: 1.15rem; color: #58a6ff; margin-top: 2rem; }
+  h3 { font-size: 1rem; color: #7d8590; margin-top: 1.2rem; }
+  .meta { color: #7d8590; font-size: .85rem; margin-bottom: 2rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #30363d; padding: .45rem .8rem; text-align: left; }
+  th { background: #161b22; color: #58a6ff; }
+  code { font-family: 'JetBrains Mono', monospace; background: #161b22; padding: .1em .4em; border-radius: 3px; font-size: .9em; color: #00d9ff; }
+  .good { color: #3fb950; } .bad { color: #f85149; } .note { color: #d29922; }
+  .speak-btn {
+    position: fixed; bottom: 2rem; right: 2rem;
+    background: #0a2530; border: 1px solid #00d9ff; color: #00d9ff;
+    font-family: 'JetBrains Mono', monospace; font-size: .85rem;
+    padding: .6rem 1.2rem; border-radius: 6px; cursor: pointer;
+    transition: background .15s;
+  }
+  .speak-btn:hover { background: rgba(0,217,255,.15); }
+  .speak-btn.active { color: #f85149; border-color: #f85149; }
+  blockquote { border-left: 3px solid #30363d; margin: 1rem 0; padding-left: 1rem; color: #7d8590; }
+</style>
+</head>
+<body>
+
+<h1>UV補正モデル 実験レポート</h1>
+<div class="meta">2026-04-10 ／ RTX 5080 ／ PyTorch 2.10 (cu128)</div>
+
+<h2>1. 問題設定</h2>
+<p>
+LiDAR点群とカメラ画像の間には、取り付け誤差やキャリブレーションのズレによって
+<strong>均一な平行移動オフセット</strong>が生じる。
+このオフセットを画像と点群から推定する最小のToy Problemとして本実験を設計した。
+</p>
+<ul>
+  <li>入力画像: <code>(B, 1, 128, 128)</code>、黒背景に白い矩形または円</li>
+  <li>入力点群 distorted_uv: <code>(B, 256, 2)</code>、図形内にランダムサンプリングした後、<strong>全点に同一の(tx, ty)を加算</strong>（最大±15ピクセル）</li>
+  <li>目標: 点群を元の位置に戻すオフセット <code>(tx, ty)</code> を推定する</li>
+</ul>
+
+<h2>2. モデルアーキテクチャ</h2>
+<p>特徴次元 <code>D=128</code> の Coarse-to-Fine Cascaded Cross-Attention。</p>
+
+<h3>CNN バックボーン</h3>
+<p>画像から2段階の特徴マップを抽出する。</p>
+<ul>
+  <li>Coarse feature: <code>(B, 128, 16, 16)</code>、stride=8相当</li>
+  <li>Fine feature: <code>(B, 128, 32, 32)</code>、stride=4相当</li>
+  <li>両マップに2D Sinusoidal Positional Encoding（座標系: [0,1]）を加算</li>
+</ul>
+
+<h3>Point MLP</h3>
+<p>UV座標を[0,1]に正規化してからD次元に射影する。<code>2 → 64 → 128 → 128</code>。</p>
+
+<h3>Cascaded Cross-Attention</h3>
+<ol>
+  <li>Coarseフィーチャに対してCross-Attention → <code>offset_coarse</code>を推定</li>
+  <li>点群を <code>offset_coarse</code> でワープ</li>
+  <li>Fineフィーチャに対してCross-Attention → <code>offset_fine</code>を推定</li>
+  <li>最終出力: <code>offset_coarse + offset_fine</code></li>
+</ol>
+<p>
+<strong class="note">重要な設計ポイント:</strong>
+オフセット予測ヘッドは <code>concat(attention_output, uv_position)</code> を入力とする。
+Attention出力だけでは「どこにいるか」が分からず差分を計算できないため、
+クエリ点の位置を明示的に条件付けする。
+</p>
+<p>
+また、全N点の予測を<strong>平均してブロードキャスト</strong>することで、
+「均一シフト」という問題構造をアーキテクチャレベルで強制する。
+</p>
+
+<h2>3. 学習設定</h2>
+<table>
+  <tr><th>項目</th><th>設定</th></tr>
+  <tr><td>GPU</td><td>NVIDIA RTX 5080</td></tr>
+  <tr><td>最適化</td><td>TF32有効 / bfloat16 AMP / <code>torch.compile(max-autotune)</code></td></tr>
+  <tr><td>オプティマイザ</td><td>AdamW (lr=1e-3, wd=1e-3)</td></tr>
+  <tr><td>スケジューラ</td><td>Linear Warmup 5epoch + Cosine Decay</td></tr>
+  <tr><td>Loss</td><td>Smooth L1 (beta=1.0)</td></tr>
+  <tr><td>バッチサイズ</td><td>64</td></tr>
+  <tr><td>エポック数</td><td>80</td></tr>
+  <tr><td>学習データ</td><td>8000サンプル（エポックごとにランダム生成）</td></tr>
+  <tr><td>検証データ</td><td>800サンプル（固定seed）</td></tr>
+</table>
+
+<h2>4. 失敗と原因分析</h2>
+
+<h3>失敗① 歪み方が現実と違う</h3>
+<p>
+最初の実装では、各点に<strong>低周波フーリエ基底による滑らかな局所歪み</strong>を加えていた。
+これはLiDAR-カメラキャリブのモデルとして不適切であり、問題を不必要に難化させていた。
+<br><span class="bad">→ 修正: 全点に同一(tx, ty)を加える均一シフトに変更</span>
+</p>
+
+<h3>失敗② 深刻なオーバーフィット (train=2.1 / val=7.5)</h3>
+<p>
+学習データのseedが固定（<code>base_seed + idx</code>）だったため、
+モデルが8000サンプルを丸暗記してしまい、汎化できなかった。
+<br><span class="bad">→ 修正: 学習時はエポックごとにランダムseedで新規サンプルを生成</span>
+</p>
+
+<h3>失敗③ モデルがシフトを過小評価 (pred≈25%のGT)</h3>
+<p>
+Cross-Attentionのオフセットヘッドが
+<code>Linear(D, 2)</code> だけだったため、
+「Attention出力（画像側の特徴位置）」と「クエリ点の現在位置」の<strong>差分</strong>を計算できなかった。
+モデルが見ているのは画像特徴のみで、「今どこにいるか」の情報がなかった。
+<br><span class="bad">→ 修正: ヘッドを <code>Linear(D+2, 2)</code> に変更し、UV座標を明示的に入力</span>
+</p>
+
+<h2>5. 最終結果</h2>
+<table>
+  <tr><th>指標</th><th>修正前（複雑歪み）</th><th class="good">修正後（均一シフト）</th></tr>
+  <tr><td>Train Loss</td><td class="bad">2.14</td><td class="good">0.36</td></tr>
+  <tr><td>Val Loss</td><td class="bad">7.50</td><td class="good">0.39</td></tr>
+  <tr><td>Overfit Gap</td><td class="bad">5.4倍</td><td class="good">1.1倍（ほぼなし）</td></tr>
+  <tr><td>補正前誤差</td><td>～14 px</td><td>～14 px</td></tr>
+  <tr><td>補正後誤差</td><td class="bad">～8.5 px</td><td class="good"><strong>～1.0 px</strong></td></tr>
+  <tr><td>学習時間</td><td>11分</td><td>7.4分</td></tr>
+</table>
+
+<p>
+補正前14px → 補正後1px、<span class="good"><strong>約93%の誤差削減</strong></span>を達成。
+SmoothL1 val=0.39はほぼサブピクセル（<1px/座標）に相当する。
+</p>
+
+<h2>6. 考察・まとめ</h2>
+<p>
+均一シフトという単純な問題設定においても、
+アーキテクチャに<strong>位置情報の条件付け</strong>がなければ正しく学習できないことが確認された。
+「どこから動かすか」をモデルに明示的に伝えることが本質的な鍵だった。
+</p>
+<p>
+次のステップとして、複数物体・物体ごとに異なるシフト、
+さらには回転・スケール変化への拡張が考えられる。
+</p>
+
+<button class="speak-btn" id="speak-btn">🔊 読み上げ</button>
+
+<script>
+const btn = document.getElementById('speak-btn');
+let speaking = false;
+const text = document.body.innerText.replace(/🔊.*/, '').trim();
+
+btn.addEventListener('click', () => {
+  if (!('speechSynthesis' in window)) { alert('非対応ブラウザ'); return; }
+  if (speaking) {
+    speechSynthesis.cancel(); speaking = false;
+    btn.textContent = '🔊 読み上げ'; btn.classList.remove('active'); return;
+  }
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ja-JP'; u.rate = 1.05;
+  const v = speechSynthesis.getVoices().find(v => v.lang.startsWith('ja'));
+  if (v) u.voice = v;
+  u.onstart = () => { speaking=true; btn.textContent='⏹ 停止'; btn.classList.add('active'); };
+  u.onend = u.onerror = () => { speaking=false; btn.textContent='🔊 読み上げ'; btn.classList.remove('active'); };
+  speechSynthesis.speak(u);
+});
+</script>
+</body>
+</html>
