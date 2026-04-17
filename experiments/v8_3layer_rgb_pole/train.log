@@ -1,0 +1,2 @@
+10:57:41  name=v8_3layer_rgb_pole  n_layers=3 self_first=False max_offset=16.0  batch=64  epochs=100  lr=0.001→1e-06
+10:57:42  params: 1.16M

@@ -1,0 +1,138 @@
+01:52:58  name=v3_3layer_gs_random  n_layers=3 self_first=False max_offset=16.0  batch=64  epochs=100  lr=0.001→1e-06
+01:52:58  params: 1.16M
+01:53:02  [  1/100]  train nll=+4.734 mse=8.284  val nll=+4.077 mse=5.143  lr=4.00e-04  tot=0.1min
+01:53:02    ↳ saved (val_nll=4.0774)
+01:53:04  [  2/100]  train nll=+3.863 mse=5.317  val nll=+3.497 mse=4.653  lr=6.00e-04  tot=0.1min
+01:53:04    ↳ saved (val_nll=3.4972)
+01:53:07  [  3/100]  train nll=+3.562 mse=4.744  val nll=+3.819 mse=4.853  lr=8.00e-04  tot=0.1min
+01:53:09  [  4/100]  train nll=+3.506 mse=4.693  val nll=+3.249 mse=4.343  lr=1.00e-03  tot=0.2min
+01:53:09    ↳ saved (val_nll=3.2487)
+01:53:12  [  5/100]  train nll=+3.473 mse=4.579  val nll=+2.830 mse=3.550  lr=1.00e-03  tot=0.2min
+01:53:12    ↳ saved (val_nll=2.8298)
+01:53:14  [  6/100]  train nll=+3.171 mse=4.025  val nll=+3.096 mse=3.710  lr=1.00e-03  tot=0.3min
+01:53:17  [  7/100]  train nll=+3.018 mse=3.807  val nll=+2.771 mse=3.407  lr=9.99e-04  tot=0.3min
+01:53:17    ↳ saved (val_nll=2.7708)
+01:53:20  [  8/100]  train nll=+2.983 mse=3.681  val nll=+3.173 mse=4.112  lr=9.98e-04  tot=0.3min
+01:53:22  [  9/100]  train nll=+2.949 mse=3.702  val nll=+3.298 mse=4.099  lr=9.96e-04  tot=0.4min
+01:53:24  [ 10/100]  train nll=+2.854 mse=3.514  val nll=+2.612 mse=3.127  lr=9.93e-04  tot=0.4min
+01:53:24    ↳ saved (val_nll=2.6117)
+01:53:27  [ 11/100]  train nll=+2.701 mse=3.293  val nll=+3.357 mse=3.819  lr=9.90e-04  tot=0.5min
+01:53:29  [ 12/100]  train nll=+2.875 mse=3.498  val nll=+3.448 mse=4.547  lr=9.87e-04  tot=0.5min
+01:53:32  [ 13/100]  train nll=+2.793 mse=3.361  val nll=+2.416 mse=2.833  lr=9.83e-04  tot=0.6min
+01:53:32    ↳ saved (val_nll=2.4156)
+01:53:34  [ 14/100]  train nll=+2.571 mse=3.070  val nll=+2.391 mse=2.906  lr=9.78e-04  tot=0.6min
+01:53:34    ↳ saved (val_nll=2.3913)
+01:53:37  [ 15/100]  train nll=+2.550 mse=3.035  val nll=+2.759 mse=3.049  lr=9.73e-04  tot=0.6min
+01:53:40  [ 16/100]  train nll=+2.592 mse=3.060  val nll=+2.745 mse=3.038  lr=9.67e-04  tot=0.7min
+01:53:42  [ 17/100]  train nll=+2.552 mse=3.007  val nll=+2.763 mse=3.400  lr=9.61e-04  tot=0.7min
+01:53:45  [ 18/100]  train nll=+2.487 mse=2.925  val nll=+2.350 mse=2.691  lr=9.55e-04  tot=0.8min
+01:53:45    ↳ saved (val_nll=2.3496)
+01:53:47  [ 19/100]  train nll=+2.419 mse=2.831  val nll=+2.493 mse=2.950  lr=9.47e-04  tot=0.8min
+01:53:50  [ 20/100]  train nll=+2.419 mse=2.829  val nll=+2.141 mse=2.509  lr=9.40e-04  tot=0.8min
+01:53:50    ↳ saved (val_nll=2.1413)
+01:53:52  [ 21/100]  train nll=+2.397 mse=2.795  val nll=+2.185 mse=2.520  lr=9.32e-04  tot=0.9min
+01:53:54  [ 22/100]  train nll=+2.412 mse=2.809  val nll=+2.226 mse=2.601  lr=9.23e-04  tot=0.9min
+01:53:57  [ 23/100]  train nll=+2.374 mse=2.767  val nll=+2.401 mse=2.775  lr=9.14e-04  tot=1.0min
+01:53:59  [ 24/100]  train nll=+2.339 mse=2.712  val nll=+2.277 mse=2.587  lr=9.05e-04  tot=1.0min
+01:54:02  [ 25/100]  train nll=+2.363 mse=2.740  val nll=+2.108 mse=2.415  lr=8.95e-04  tot=1.1min
+01:54:02    ↳ saved (val_nll=2.1084)
+01:54:05  [ 26/100]  train nll=+2.268 mse=2.639  val nll=+2.262 mse=2.597  lr=8.84e-04  tot=1.1min
+01:54:07  [ 27/100]  train nll=+2.287 mse=2.652  val nll=+2.128 mse=2.463  lr=8.74e-04  tot=1.1min
+01:54:09  [ 28/100]  train nll=+2.213 mse=2.586  val nll=+2.073 mse=2.483  lr=8.62e-04  tot=1.2min
+01:54:09    ↳ saved (val_nll=2.0725)
+01:54:12  [ 29/100]  train nll=+2.287 mse=2.637  val nll=+2.272 mse=2.596  lr=8.51e-04  tot=1.2min
+01:54:14  [ 30/100]  train nll=+2.192 mse=2.542  val nll=+2.379 mse=2.718  lr=8.39e-04  tot=1.3min
+01:54:17  [ 31/100]  train nll=+2.197 mse=2.540  val nll=+2.283 mse=2.593  lr=8.26e-04  tot=1.3min
+01:54:19  [ 32/100]  train nll=+2.203 mse=2.557  val nll=+2.533 mse=2.952  lr=8.14e-04  tot=1.3min
+01:54:21  [ 33/100]  train nll=+2.184 mse=2.539  val nll=+2.016 mse=2.316  lr=8.01e-04  tot=1.4min
+01:54:21    ↳ saved (val_nll=2.0160)
+01:54:24  [ 34/100]  train nll=+2.151 mse=2.505  val nll=+1.956 mse=2.268  lr=7.87e-04  tot=1.4min
+01:54:24    ↳ saved (val_nll=1.9557)
+01:54:26  [ 35/100]  train nll=+2.145 mse=2.487  val nll=+1.996 mse=2.306  lr=7.74e-04  tot=1.5min
+01:54:29  [ 36/100]  train nll=+2.183 mse=2.519  val nll=+2.009 mse=2.313  lr=7.60e-04  tot=1.5min
+01:54:32  [ 37/100]  train nll=+2.123 mse=2.469  val nll=+1.992 mse=2.337  lr=7.45e-04  tot=1.6min
+01:54:34  [ 38/100]  train nll=+2.129 mse=2.478  val nll=+2.202 mse=2.492  lr=7.31e-04  tot=1.6min
+01:54:37  [ 39/100]  train nll=+2.072 mse=2.425  val nll=+2.004 mse=2.348  lr=7.16e-04  tot=1.6min
+01:54:39  [ 40/100]  train nll=+2.065 mse=2.414  val nll=+1.957 mse=2.268  lr=7.01e-04  tot=1.7min
+01:54:41  [ 41/100]  train nll=+2.066 mse=2.413  val nll=+2.240 mse=2.547  lr=6.86e-04  tot=1.7min
+01:54:44  [ 42/100]  train nll=+2.071 mse=2.420  val nll=+1.972 mse=2.257  lr=6.70e-04  tot=1.8min
+01:54:46  [ 43/100]  train nll=+2.060 mse=2.402  val nll=+1.914 mse=2.240  lr=6.55e-04  tot=1.8min
+01:54:46    ↳ saved (val_nll=1.9137)
+01:54:49  [ 44/100]  train nll=+2.042 mse=2.383  val nll=+1.840 mse=2.155  lr=6.39e-04  tot=1.8min
+01:54:49    ↳ saved (val_nll=1.8395)
+01:54:52  [ 45/100]  train nll=+2.028 mse=2.372  val nll=+1.998 mse=2.297  lr=6.23e-04  tot=1.9min
+01:54:54  [ 46/100]  train nll=+2.014 mse=2.360  val nll=+1.873 mse=2.199  lr=6.07e-04  tot=1.9min
+01:54:57  [ 47/100]  train nll=+2.006 mse=2.343  val nll=+1.790 mse=2.100  lr=5.91e-04  tot=2.0min
+01:54:57    ↳ saved (val_nll=1.7902)
+01:54:59  [ 48/100]  train nll=+2.040 mse=2.385  val nll=+1.867 mse=2.163  lr=5.75e-04  tot=2.0min
+01:55:02  [ 49/100]  train nll=+1.967 mse=2.313  val nll=+2.000 mse=2.347  lr=5.58e-04  tot=2.1min
+01:55:04  [ 50/100]  train nll=+1.987 mse=2.337  val nll=+1.915 mse=2.276  lr=5.42e-04  tot=2.1min
+01:55:07  [ 51/100]  train nll=+1.976 mse=2.315  val nll=+1.885 mse=2.185  lr=5.25e-04  tot=2.1min
+01:55:09  [ 52/100]  train nll=+1.936 mse=2.281  val nll=+1.771 mse=2.118  lr=5.09e-04  tot=2.2min
+01:55:09    ↳ saved (val_nll=1.7707)
+01:55:12  [ 53/100]  train nll=+1.951 mse=2.290  val nll=+1.779 mse=2.119  lr=4.92e-04  tot=2.2min
+01:55:14  [ 54/100]  train nll=+1.906 mse=2.264  val nll=+1.814 mse=2.124  lr=4.76e-04  tot=2.3min
+01:55:16  [ 55/100]  train nll=+1.895 mse=2.250  val nll=+1.829 mse=2.157  lr=4.59e-04  tot=2.3min
+01:55:19  [ 56/100]  train nll=+1.934 mse=2.279  val nll=+1.786 mse=2.107  lr=4.43e-04  tot=2.3min
+01:55:22  [ 57/100]  train nll=+1.925 mse=2.260  val nll=+1.911 mse=2.223  lr=4.26e-04  tot=2.4min
+01:55:24  [ 58/100]  train nll=+1.916 mse=2.263  val nll=+1.868 mse=2.195  lr=4.10e-04  tot=2.4min
+01:55:27  [ 59/100]  train nll=+1.883 mse=2.238  val nll=+1.702 mse=2.084  lr=3.94e-04  tot=2.5min
+01:55:27    ↳ saved (val_nll=1.7021)
+01:55:29  [ 60/100]  train nll=+1.883 mse=2.244  val nll=+1.677 mse=2.054  lr=3.78e-04  tot=2.5min
+01:55:29    ↳ saved (val_nll=1.6772)
+01:55:32  [ 61/100]  train nll=+1.862 mse=2.219  val nll=+1.799 mse=2.124  lr=3.62e-04  tot=2.6min
+01:55:34  [ 62/100]  train nll=+1.855 mse=2.208  val nll=+1.760 mse=2.090  lr=3.46e-04  tot=2.6min
+01:55:37  [ 63/100]  train nll=+1.827 mse=2.186  val nll=+1.652 mse=2.019  lr=3.31e-04  tot=2.6min
+01:55:37    ↳ saved (val_nll=1.6516)
+01:55:39  [ 64/100]  train nll=+1.838 mse=2.196  val nll=+1.661 mse=2.038  lr=3.15e-04  tot=2.7min
+01:55:42  [ 65/100]  train nll=+1.839 mse=2.198  val nll=+1.857 mse=2.164  lr=3.00e-04  tot=2.7min
+01:55:44  [ 66/100]  train nll=+1.817 mse=2.186  val nll=+1.686 mse=2.065  lr=2.85e-04  tot=2.8min
+01:55:47  [ 67/100]  train nll=+1.791 mse=2.162  val nll=+1.732 mse=2.093  lr=2.70e-04  tot=2.8min
+01:55:49  [ 68/100]  train nll=+1.784 mse=2.151  val nll=+1.681 mse=2.075  lr=2.56e-04  tot=2.8min
+01:55:52  [ 69/100]  train nll=+1.771 mse=2.155  val nll=+1.658 mse=2.051  lr=2.41e-04  tot=2.9min
+01:55:54  [ 70/100]  train nll=+1.765 mse=2.139  val nll=+1.681 mse=2.020  lr=2.27e-04  tot=2.9min
+01:55:57  [ 71/100]  train nll=+1.745 mse=2.133  val nll=+1.705 mse=2.061  lr=2.14e-04  tot=3.0min
+01:55:59  [ 72/100]  train nll=+1.754 mse=2.134  val nll=+1.612 mse=2.025  lr=2.00e-04  tot=3.0min
+01:55:59    ↳ saved (val_nll=1.6124)
+01:56:02  [ 73/100]  train nll=+1.738 mse=2.129  val nll=+1.570 mse=1.976  lr=1.87e-04  tot=3.0min
+01:56:02    ↳ saved (val_nll=1.5700)
+01:56:04  [ 74/100]  train nll=+1.708 mse=2.108  val nll=+1.646 mse=2.020  lr=1.75e-04  tot=3.1min
+01:56:06  [ 75/100]  train nll=+1.734 mse=2.128  val nll=+1.569 mse=1.988  lr=1.62e-04  tot=3.1min
+01:56:06    ↳ saved (val_nll=1.5690)
+01:56:09  [ 76/100]  train nll=+1.713 mse=2.105  val nll=+1.554 mse=1.989  lr=1.50e-04  tot=3.2min
+01:56:09    ↳ saved (val_nll=1.5542)
+01:56:11  [ 77/100]  train nll=+1.699 mse=2.095  val nll=+1.555 mse=1.968  lr=1.39e-04  tot=3.2min
+01:56:14  [ 78/100]  train nll=+1.698 mse=2.095  val nll=+1.720 mse=2.061  lr=1.27e-04  tot=3.3min
+01:56:16  [ 79/100]  train nll=+1.664 mse=2.070  val nll=+1.529 mse=1.965  lr=1.17e-04  tot=3.3min
+01:56:16    ↳ saved (val_nll=1.5291)
+01:56:19  [ 80/100]  train nll=+1.684 mse=2.080  val nll=+1.502 mse=1.946  lr=1.06e-04  tot=3.3min
+01:56:19    ↳ saved (val_nll=1.5023)
+01:56:21  [ 81/100]  train nll=+1.660 mse=2.072  val nll=+1.570 mse=1.970  lr=9.64e-05  tot=3.4min
+01:56:24  [ 82/100]  train nll=+1.670 mse=2.077  val nll=+1.532 mse=1.977  lr=8.69e-05  tot=3.4min
+01:56:26  [ 83/100]  train nll=+1.650 mse=2.066  val nll=+1.492 mse=1.938  lr=7.79e-05  tot=3.5min
+01:56:26    ↳ saved (val_nll=1.4923)
+01:56:29  [ 84/100]  train nll=+1.624 mse=2.051  val nll=+1.513 mse=1.947  lr=6.93e-05  tot=3.5min
+01:56:31  [ 85/100]  train nll=+1.638 mse=2.061  val nll=+1.459 mse=1.925  lr=6.12e-05  tot=3.5min
+01:56:31    ↳ saved (val_nll=1.4592)
+01:56:34  [ 86/100]  train nll=+1.609 mse=2.040  val nll=+1.470 mse=1.927  lr=5.36e-05  tot=3.6min
+01:56:36  [ 87/100]  train nll=+1.605 mse=2.042  val nll=+1.488 mse=1.933  lr=4.65e-05  tot=3.6min
+01:56:39  [ 88/100]  train nll=+1.599 mse=2.037  val nll=+1.446 mse=1.913  lr=3.98e-05  tot=3.7min
+01:56:39    ↳ saved (val_nll=1.4459)
+01:56:41  [ 89/100]  train nll=+1.604 mse=2.037  val nll=+1.428 mse=1.913  lr=3.37e-05  tot=3.7min
+01:56:41    ↳ saved (val_nll=1.4276)
+01:56:44  [ 90/100]  train nll=+1.588 mse=2.029  val nll=+1.416 mse=1.897  lr=2.81e-05  tot=3.8min
+01:56:44    ↳ saved (val_nll=1.4159)
+01:56:46  [ 91/100]  train nll=+1.560 mse=2.007  val nll=+1.436 mse=1.926  lr=2.30e-05  tot=3.8min
+01:56:49  [ 92/100]  train nll=+1.576 mse=2.028  val nll=+1.417 mse=1.911  lr=1.84e-05  tot=3.8min
+01:56:51  [ 93/100]  train nll=+1.562 mse=2.013  val nll=+1.442 mse=1.913  lr=1.43e-05  tot=3.9min
+01:56:54  [ 94/100]  train nll=+1.550 mse=2.005  val nll=+1.392 mse=1.890  lr=1.08e-05  tot=3.9min
+01:56:54    ↳ saved (val_nll=1.3921)
+01:56:56  [ 95/100]  train nll=+1.559 mse=2.017  val nll=+1.409 mse=1.893  lr=7.81e-06  tot=4.0min
+01:56:59  [ 96/100]  train nll=+1.539 mse=1.998  val nll=+1.400 mse=1.891  lr=5.36e-06  tot=4.0min
+01:57:01  [ 97/100]  train nll=+1.527 mse=1.988  val nll=+1.392 mse=1.887  lr=3.46e-06  tot=4.0min
+01:57:03  [ 98/100]  train nll=+1.532 mse=2.002  val nll=+1.393 mse=1.885  lr=2.09e-06  tot=4.1min
+01:57:06  [ 99/100]  train nll=+1.553 mse=2.009  val nll=+1.385 mse=1.885  lr=1.27e-06  tot=4.1min
+01:57:06    ↳ saved (val_nll=1.3854)
+01:57:09  [100/100]  train nll=+1.544 mse=2.000  val nll=+1.385 mse=1.883  lr=1.00e-06  tot=4.2min
+01:57:09    ↳ saved (val_nll=1.3851)
+01:57:09  Best val NLL: 1.3851  |  time: 4.2min
