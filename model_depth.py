@@ -39,10 +39,12 @@ class CalibNetDepth(nn.Module):
 
         kw = dict(kv_self_attn=kv_self_attn) if not self_first else {}
         Block = TransformerDecoderBlock if self_first else CrossAttentionBlockCov
-        self.cross_coarse = Block(d, **kw)
-        self.cross_fine   = Block(d, **kw)
+        self.cross_coarse  = Block(d, **kw)
+        self.cross_fine    = Block(d, **kw)
         if n_layers >= 3:
-            self.cross_refine = Block(d, **kw)
+            self.cross_refine  = Block(d, **kw)
+        if n_layers >= 4:
+            self.cross_fine2   = Block(d, **kw)
         self._self_first = self_first
 
     def _block(self, block, q, feat, uv_01, mask):
@@ -74,7 +76,7 @@ class CalibNetDepth(nn.Module):
             _, raw_f = self._block(self.cross_fine, q_w, fine_feat, uv_w, key_padding_mask)
             raw = raw_c + raw_f
 
-        else:  # n_layers == 3: coarse → coarse → fine
+        elif self.n_layers == 3:  # coarse → coarse → fine
             uv_w = (uv_01 + raw_c[..., :2]).clamp(0, 1)
             q_w  = self.point_mlp(torch.cat([uv_w, d3], dim=-1)) + q
             q_w, raw_c2 = self._block(self.cross_refine, q_w, coarse_feat, uv_w, key_padding_mask)
@@ -83,5 +85,19 @@ class CalibNetDepth(nn.Module):
             q_w2  = self.point_mlp(torch.cat([uv_w2, d3], dim=-1)) + q_w
             _, raw_f = self._block(self.cross_fine, q_w2, fine_feat, uv_w2, key_padding_mask)
             raw = raw_c + raw_c2 + raw_f
+
+        else:  # n_layers == 4: coarse → coarse → fine → fine
+            uv_w = (uv_01 + raw_c[..., :2]).clamp(0, 1)
+            q_w  = self.point_mlp(torch.cat([uv_w, d3], dim=-1)) + q
+            q_w, raw_c2 = self._block(self.cross_refine, q_w, coarse_feat, uv_w, key_padding_mask)
+
+            uv_w2 = (uv_01 + (raw_c + raw_c2)[..., :2]).clamp(0, 1)
+            q_w2  = self.point_mlp(torch.cat([uv_w2, d3], dim=-1)) + q_w
+            q_w2, raw_f = self._block(self.cross_fine, q_w2, fine_feat, uv_w2, key_padding_mask)
+
+            uv_w3 = (uv_01 + (raw_c + raw_c2 + raw_f)[..., :2]).clamp(0, 1)
+            q_w3  = self.point_mlp(torch.cat([uv_w3, d3], dim=-1)) + q_w2
+            _, raw_f2 = self._block(self.cross_fine2, q_w3, fine_feat, uv_w3, key_padding_mask)
+            raw = raw_c + raw_c2 + raw_f + raw_f2
 
         return clamp_params(raw, self.img_size)   # (B,N,5)

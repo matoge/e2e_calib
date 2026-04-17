@@ -4,12 +4,12 @@
 
 CFG = dict(
     # ── Experiment ─────────────────────────────────────────────────────────
-    name        = "v12_2layer_kvsa",   # → experiments/v12_2layer_kvsa/
+    name        = "v14_3layer_kvsa",   # → experiments/v13_2layer_vanilla/
 
     # ── Model ──────────────────────────────────────────────────────────────
-    n_layers      = 2,        # 2 or 3  (coarse→fine  or  coarse→coarse→fine)
+    n_layers      = 3,        # 2 or 3  (coarse→fine  or  coarse→coarse→fine)
     self_first    = False,    # True = self-attn before cross-attn in each block
-    kv_self_attn  = True,     # True = image tokens self-attn before cross-attn
+    kv_self_attn  = True,    # True = image tokens self-attn before cross-attn
     img_size    = 64,
     in_channels = 3,
 
