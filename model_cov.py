@@ -43,13 +43,21 @@ class CrossAttentionBlockCov(nn.Module):
             self.proj.bias[2] = 0.69
             self.proj.bias[3] = 0.69
 
-    def forward(self, q, feat, uv_01):
+    def forward(self, q, feat, uv_01, key_padding_mask=None, self_first=False):
         B, D_, H, W = feat.shape
         kv = feat.flatten(2).permute(0, 2, 1)
-        ca, _ = self.cross_attn(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv))
-        q = q + self.drop(ca)
-        sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q))
-        q = q + self.drop(sa)
+        if self_first:
+            sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
+                                   key_padding_mask=key_padding_mask)
+            q = q + self.drop(sa)
+            ca, _ = self.cross_attn(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv))
+            q = q + self.drop(ca)
+        else:
+            ca, _ = self.cross_attn(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv))
+            q = q + self.drop(ca)
+            sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
+                                   key_padding_mask=key_padding_mask)
+            q = q + self.drop(sa)
         q = q + self.ffn(self.norm_ffn(q))
         raw = self.proj(torch.cat([q, uv_01], dim=-1))   # (B,N,5)
         return q, raw

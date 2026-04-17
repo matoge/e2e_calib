@@ -18,9 +18,26 @@ def _randint(lo: int, hi: int, rng: torch.Generator) -> int:
     return lo + int(torch.randint(hi - lo, (1,), generator=rng).item())
 
 
+def _rand_pole(rng: torch.Generator, img_size: int = 128):
+    """Returns (cx, cy, hw, hh) for a thin pole (extreme aspect-ratio rectangle)."""
+    s = img_size / 128
+    vertical = int(torch.randint(0, 2, (1,), generator=rng).item())
+    if vertical:
+        hw = max(1, _randint(1, 3, rng))
+        hh = max(hw + 4, _randint(max(5, int(12 * s)), max(6, int(30 * s)) + 1, rng))
+    else:
+        hh = max(1, _randint(1, 3, rng))
+        hw = max(hh + 4, _randint(max(5, int(12 * s)), max(6, int(30 * s)) + 1, rng))
+    cx = _randint(hw + 1, img_size - hw - 1, rng)
+    cy = _randint(hh + 1, img_size - hh - 1, rng)
+    return cx, cy, hw, hh
+
+
 def _rand_rect(rng: torch.Generator, img_size: int = 128, small: bool = False):
     """Returns (cx, cy, hw, hh) for a random rectangle."""
-    lo, hi = (8, 22) if small else (14, 40)
+    s = img_size / 128
+    lo = max(4, int((8  if small else 14) * s))
+    hi = max(lo + 2, int((22 if small else 40) * s))
     hw = _randint(lo, hi, rng)
     hh = _randint(lo, hi, rng)
     cx = _randint(hw + 2, img_size - hw - 2, rng)
@@ -30,11 +47,280 @@ def _rand_rect(rng: torch.Generator, img_size: int = 128, small: bool = False):
 
 def _rand_circle(rng: torch.Generator, img_size: int = 128, small: bool = False):
     """Returns (cx, cy, r) for a random circle."""
-    lo, hi = (7, 20) if small else (12, 38)
+    s = img_size / 128
+    lo = max(3, int((7  if small else 12) * s))
+    hi = max(lo + 2, int((20 if small else 38) * s))
     r  = _randint(lo, hi, rng)
     cx = _randint(r + 2, img_size - r - 2, rng)
     cy = _randint(r + 2, img_size - r - 2, rng)
     return cx, cy, r
+
+
+def _rand_ellipse(rng: torch.Generator, img_size: int = 128, small: bool = False):
+    """Returns (cx, cy, rx, ry) for a random ellipse."""
+    s = img_size / 128
+    lo = max(3, int((6  if small else 10) * s))
+    hi = max(lo + 2, int((20 if small else 36) * s))
+    rx = _randint(lo, hi, rng)
+    ry = _randint(lo, hi, rng)
+    # ensure aspect ratio is at least 1.3 (otherwise it's just a circle)
+    if rx < ry:
+        rx, ry = ry, rx
+    ry = min(ry, max(3, int(rx * 0.65)))
+    cx = _randint(rx + 2, img_size - rx - 2, rng)
+    cy = _randint(ry + 2, img_size - ry - 2, rng)
+    return cx, cy, rx, ry
+
+
+def make_image_and_points_grid(
+    img_size: int = 128,
+    max_offset: float = 15.0,
+    grid_size: float | None = None,  # None = random [4.0, 8.0]
+    jitter: float | None = None,     # None = random [0.5, 2.0]
+    seed: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Grid-sampled points (LiDAR-like): one point every grid_size pixels with jitter.
+    Points are sampled over the whole image regardless of shape content.
+    grid_size is a float, so the grid is truly irregular.
+    """
+    rng = torch.Generator()
+    if seed is not None:
+        rng.manual_seed(seed)
+
+    # Randomise grid_size (float) and jitter if not specified
+    if grid_size is None:
+        grid_size = float(torch.rand(1, generator=rng).item() * 4 + 4)  # [4.0, 8.0]
+    if jitter is None:
+        jitter = float(torch.rand(1, generator=rng).item() * 1.5 + 0.5)  # [0.5, 2.0]
+
+    H = W = img_size
+    image = torch.zeros(1, H, W, dtype=torch.float32)
+
+    # Draw shape (same as make_image_and_points)
+    shape_type = int(torch.randint(0, 2, (1,), generator=rng).item())
+    if shape_type == 0:
+        cx, cy, hw, hh = _rand_rect(rng, img_size)
+        image[0, cy - hh : cy + hh, cx - hw : cx + hw] = 1.0
+    else:
+        cx, cy, r = _rand_circle(rng, img_size)
+        yy, xx = torch.meshgrid(
+            torch.arange(H, dtype=torch.float32),
+            torch.arange(W, dtype=torch.float32),
+            indexing="ij",
+        )
+        image[0][(((xx - cx) ** 2 + (yy - cy) ** 2) <= r ** 2)] = 1.0
+
+    # Grid sampling with random origin — prevents memorising grid positions
+    ox = float(torch.rand(1, generator=rng).item() * grid_size)
+    oy = float(torch.rand(1, generator=rng).item() * grid_size)
+    gx = torch.arange(ox, W, grid_size, dtype=torch.float32)
+    gy = torch.arange(oy, H, grid_size, dtype=torch.float32)
+    grid_y, grid_x = torch.meshgrid(gy, gx, indexing="ij")
+    xs = grid_x.reshape(-1)
+    ys = grid_y.reshape(-1)
+
+    # Jitter
+    n = len(xs)
+    xs = (xs + (torch.rand(n, generator=rng) * 2 - 1) * jitter).clamp(0, W - 1)
+    ys = (ys + (torch.rand(n, generator=rng) * 2 - 1) * jitter).clamp(0, H - 1)
+
+    true_uv = torch.stack([xs, ys], dim=1)
+
+    tx = (torch.rand(1, generator=rng) * 2 - 1) * max_offset
+    ty = (torch.rand(1, generator=rng) * 2 - 1) * max_offset
+    distorted_uv = (true_uv + torch.tensor([tx, ty])).clamp(0, img_size - 1)
+
+    return image, true_uv, distorted_uv
+
+
+def make_image_and_points_grid_depth(
+    img_size: int = 64,
+    max_offset: float = 16.0,
+    grid_size: float | None = None,  # None → random [4.0, 8.0]
+    jitter: float | None = None,     # None → random [0.5, 2.0]
+    seed: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Grayscale image, 2 white shapes on black background.
+    Grid-sampled points (float spacing, random origin).
+    Each point gets depth: d1 (obj1), d2 (obj2), or 1.0 (bg).
+    Output sorted by depth so groups are contiguous.
+
+    Returns:
+        image    (1, H, W)
+        true_uvd (N, 3)  [u, v, d_norm]  sorted: obj1 | obj2 | bg
+        dist_uvd (N, 3)  u,v shifted per group; d unchanged
+    """
+    rng = torch.Generator()
+    if seed is not None:
+        rng.manual_seed(seed)
+
+    if grid_size is None:
+        grid_size = float(torch.rand(1, generator=rng).item() * 4 + 4)
+    if jitter is None:
+        jitter = float(torch.rand(1, generator=rng).item() * 1.5 + 0.5)
+
+    H = W = img_size
+
+    # random RGB colors: bg and each object get distinct random colors
+    def rand_color():
+        return torch.rand(3, generator=rng)
+
+    bg_color = rand_color()
+    obj_colors = []
+    for _ in range(2):
+        c = rand_color()
+        # ensure contrast with bg (L2 distance >= 0.35)
+        while (c - bg_color).norm().item() < 0.35:
+            c = rand_color()
+        obj_colors.append(c)
+
+    image = bg_color[:, None, None].expand(3, H, W).clone()
+
+    yy, xx = torch.meshgrid(torch.arange(H, dtype=torch.float32),
+                             torch.arange(W, dtype=torch.float32), indexing="ij")
+
+    # Generate 2 non-overlapping shapes
+    shapes = []
+    for _attempt in range(300):
+        if len(shapes) >= 2:
+            break
+        st    = _randint(0, 4, rng)   # 0=rect 1=circle 2=ellipse 3=pole
+        small = bool(_randint(0, 2, rng))
+        if st == 0:
+            cx, cy, hw, hh = _rand_rect(rng, img_size, small=small)
+            s = (st, cx, cy, hw, hh)
+        elif st == 1:
+            cx, cy, r = _rand_circle(rng, img_size, small=small)
+            s = (st, cx, cy, r, r)
+        elif st == 2:
+            cx, cy, rx, ry = _rand_ellipse(rng, img_size, small=small)
+            s = (st, cx, cy, rx, ry)
+        else:
+            cx, cy, hw, hh = _rand_pole(rng, img_size)
+            s = (st, cx, cy, hw, hh)
+        if all(not _shapes_overlap(s, prev, margin=4) for prev in shapes):
+            shapes.append(s)
+    while len(shapes) < 2:  # fallback
+        st    = _randint(0, 4, rng)
+        small = bool(_randint(0, 2, rng))
+        if st == 0:
+            cx, cy, hw, hh = _rand_rect(rng, img_size, small=small)
+            shapes.append((st, cx, cy, hw, hh))
+        elif st == 1:
+            cx, cy, r = _rand_circle(rng, img_size, small=small)
+            shapes.append((st, cx, cy, r, r))
+        elif st == 2:
+            cx, cy, rx, ry = _rand_ellipse(rng, img_size, small=small)
+            shapes.append((st, cx, cy, rx, ry))
+        else:
+            cx, cy, hw, hh = _rand_pole(rng, img_size)
+            shapes.append((st, cx, cy, hw, hh))
+
+    masks = []
+    for i, (st, cx, cy, a, b) in enumerate(shapes):
+        if st in (0, 3):  # rect or pole
+            mask = torch.zeros(H, W, dtype=torch.bool)
+            mask[cy - b : cy + b, cx - a : cx + a] = True
+        elif st == 1:     # circle
+            mask = ((xx - cx) ** 2 + (yy - cy) ** 2) <= a ** 2
+        else:             # ellipse
+            mask = ((xx - cx).pow(2) / a ** 2 + (yy - cy).pow(2) / b ** 2) <= 1.0
+        image[:, mask] = obj_colors[i][:, None]
+        masks.append(mask)
+
+    d1  = float(torch.rand(1, generator=rng).item() * 0.35 + 0.10)  # [0.10, 0.45]
+    d2  = float(torch.rand(1, generator=rng).item() * 0.35 + 0.50)  # [0.50, 0.85]
+
+    # grid over extended area (image + max_offset margin on all sides)
+    # After shifting, only keep points whose DISTORTED position falls inside [0, img_size).
+    # BG points that originate outside the frame create genuine uncertainty.
+    margin = max_offset
+    ox = float(torch.rand(1, generator=rng).item() * grid_size)
+    oy = float(torch.rand(1, generator=rng).item() * grid_size)
+    gx = torch.arange(-margin + ox, W + margin, grid_size, dtype=torch.float32)
+    gy = torch.arange(-margin + oy, H + margin, grid_size, dtype=torch.float32)
+    grid_y, grid_x = torch.meshgrid(gy, gx, indexing="ij")
+    xs = grid_x.reshape(-1)
+    ys = grid_y.reshape(-1)
+    n  = len(xs)
+    xs = xs + (torch.rand(n, generator=rng) * 2 - 1) * jitter
+    ys = ys + (torch.rand(n, generator=rng) * 2 - 1) * jitter
+
+    # assign depth using image mask (clamp to valid pixel coords for lookup)
+    xi = xs.long().clamp(0, W - 1)
+    yi = ys.long().clamp(0, H - 1)
+    in_frame = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
+    depths = torch.full((n,), 1.0)
+    depths[in_frame & masks[0][yi, xi]] = d1
+    depths[in_frame & masks[1][yi, xi]] = d2
+
+    # independent shift per depth group; keep only points visible AFTER shift
+    # BG uses ALL grid points (including those on objects) so there is no
+    # object-shaped hole in the BG dist cloud that would reveal the BG shift.
+    true_parts, dist_parts = [], []
+    for d_val in [d1, d2, 1.0]:
+        if d_val >= 0.95:          # BG: include every grid point
+            sel = torch.ones(n, dtype=torch.bool)
+        else:
+            sel = (torch.abs(depths - d_val) < 1e-5)
+        if not sel.any():
+            continue
+        tx = (torch.rand(1, generator=rng) * 2 - 1) * max_offset
+        ty = (torch.rand(1, generator=rng) * 2 - 1) * max_offset
+        uv_true = torch.stack([xs[sel], ys[sel]], dim=1)
+        uv_dist = uv_true + torch.tensor([[tx.item(), ty.item()]])
+        # keep only points whose distorted position is inside the image
+        visible = ((uv_dist[:, 0] >= 0) & (uv_dist[:, 0] < W) &
+                   (uv_dist[:, 1] >= 0) & (uv_dist[:, 1] < H))
+        if not visible.any():
+            continue
+        d_col = torch.full((visible.sum(), 1), d_val)
+        true_parts.append(torch.cat([uv_true[visible], d_col], dim=1))
+        dist_parts.append(torch.cat([uv_dist[visible], d_col], dim=1))
+
+    true_uvd = torch.cat(true_parts, dim=0)
+    dist_uvd = torch.cat(dist_parts, dim=0)
+    return image, true_uvd, dist_uvd
+
+
+def collate_grid_depth(batch):
+    """Collate variable-length point clouds by zero-padding to max N in batch."""
+    imgs, true_list, dist_list = zip(*batch)
+    imgs    = torch.stack(imgs)
+    max_n   = max(t.shape[0] for t in true_list)
+    B       = len(true_list)
+    true_p  = torch.zeros(B, max_n, 3)
+    dist_p  = torch.zeros(B, max_n, 3)
+    pad_mask = torch.ones(B, max_n, dtype=torch.bool)   # True = padding (ignored in attn)
+    for i, (t, d) in enumerate(zip(true_list, dist_list)):
+        n = t.shape[0]
+        true_p[i, :n] = t
+        dist_p[i, :n] = d
+        pad_mask[i, :n] = False
+    return imgs, true_p, dist_p, pad_mask
+
+
+class GridDepthDataset(Dataset):
+    def __init__(self, length=4000, img_size=64,
+                 max_offset=8.0, base_seed=0, random_each_epoch=False):
+        self.length = length
+        self.img_size = img_size
+        self.max_offset = max_offset
+        self.base_seed = base_seed
+        self.random_each_epoch = random_each_epoch
+
+    def __len__(self): return self.length
+
+    def __getitem__(self, idx):
+        seed = (int(torch.randint(0, 2 ** 30, (1,)).item())
+                if self.random_each_epoch else self.base_seed + idx)
+        return make_image_and_points_grid_depth(
+            img_size=self.img_size,
+            max_offset=self.max_offset,
+            seed=seed,
+        )
 
 
 def make_image_and_points(
@@ -189,10 +475,10 @@ def _sample_shape_points(shape_type, cx, cy, hw_or_r, hh_or_r, n, rng, img_size)
 def _shapes_overlap(s1, s2, margin=4):
     """Returns True if two bounding boxes overlap (with margin)."""
     t1, t2 = s1[0], s2[0]  # shape type
-    if t1 == 0:  cx1,cy1,hw1,hh1 = s1[1],s1[2],s1[3],s1[4]
-    else:        cx1,cy1,hw1,hh1 = s1[1],s1[2],s1[3],s1[3]
-    if t2 == 0:  cx2,cy2,hw2,hh2 = s2[1],s2[2],s2[3],s2[4]
-    else:        cx2,cy2,hw2,hh2 = s2[1],s2[2],s2[3],s2[3]
+    if t1 in (0, 3): cx1,cy1,hw1,hh1 = s1[1],s1[2],s1[3],s1[4]
+    else:            cx1,cy1,hw1,hh1 = s1[1],s1[2],s1[3],s1[3]
+    if t2 in (0, 3): cx2,cy2,hw2,hh2 = s2[1],s2[2],s2[3],s2[4]
+    else:            cx2,cy2,hw2,hh2 = s2[1],s2[2],s2[3],s2[3]
     return (abs(cx1-cx2) < hw1+hw2+margin and abs(cy1-cy2) < hh1+hh2+margin)
 
 

@@ -8,7 +8,9 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
 from flask import Flask, jsonify, request, send_from_directory, redirect
 
-from dataset import make_image_and_points, make_image_and_points_multi, make_image_and_points_depth
+from dataset import (make_image_and_points, make_image_and_points_multi,
+                     make_image_and_points_depth, make_image_and_points_grid,
+                     make_image_and_points_grid_depth)
 from sim3d import make_sample as make_sample_sim3d
 from model import CalibNet
 from model_depth import CalibNetDepth
@@ -62,15 +64,47 @@ def _draw_arrows(ax, src, dst, color, n_max=15):
                     annotation_clip=True)
 
 
-def render_png(img_np, true_uv, dist_uv, pred_uv=None, multi=False, depth=False, gt_only=False):
-    fig, ax = plt.subplots(1, 1, figsize=(4, 4), dpi=128)
-    if img_np.ndim == 3:   # RGB (H, W, 3)
-        ax.imshow(img_np, origin="upper", extent=[0, IMG_SIZE, IMG_SIZE, 0])
-    else:                  # grayscale (H, W)
-        ax.imshow(img_np, cmap="gray", vmin=0, vmax=1,
-                  origin="upper", extent=[0, IMG_SIZE, IMG_SIZE, 0])
+def _detect_groups(uvd):
+    """Return list of (start, end, depth_val) for contiguous depth groups."""
+    depths = uvd[:, 2]
+    groups, start, cur = [], 0, depths[0].item()
+    for i in range(1, len(depths)):
+        d = depths[i].item()
+        if abs(d - cur) > 1e-4:
+            groups.append((start, i, cur)); start = i; cur = d
+    groups.append((start, len(depths), cur))
+    return groups
 
-    if depth:
+
+def render_png(img_np, true_uv, dist_uv, pred_uv=None, multi=False, depth=False,
+               gt_only=False, img_size=None, grid_depth_uvd=None):
+    """
+    grid_depth_uvd: pass true_uvd (N,3) to enable depth-coloured grid_depth rendering.
+    """
+    sz = img_size or IMG_SIZE
+    fig, ax = plt.subplots(1, 1, figsize=(4, 4), dpi=128)
+    if img_np.ndim == 3:
+        ax.imshow(img_np, origin="upper", extent=[0, sz, sz, 0])
+    else:
+        ax.imshow(img_np, cmap="gray", vmin=0, vmax=1,
+                  origin="upper", extent=[0, sz, sz, 0])
+
+    if grid_depth_uvd is not None:
+        groups = _detect_groups(grid_depth_uvd)
+        cmap   = plt.cm.tab10
+        for gi, (s, e, d) in enumerate(groups):
+            c     = cmap(gi % 10)
+            label = "bg" if d >= 0.95 else f"obj{gi+1}"
+            ax.scatter(true_uv[s:e, 0], true_uv[s:e, 1],
+                       color=c, s=30, alpha=0.9, marker='x', linewidths=1.2, label=f"GT {label}")
+            if not gt_only:
+                ax.scatter(dist_uv[s:e, 0], dist_uv[s:e, 1],
+                           color=c, s=8, alpha=0.45, linewidths=0)
+                if pred_uv is not None:
+                    ax.scatter(pred_uv[s:e, 0], pred_uv[s:e, 1],
+                               color=c, s=30, alpha=0.9, marker='+', linewidths=1.5, label=f"pred {label}")
+                    _draw_arrows(ax, dist_uv[s:e], pred_uv[s:e], c, n_max=8)
+    elif depth:
         n = len(true_uv) // 3
         ax.scatter(true_uv[:n,0],   true_uv[:n,1],   c="#00ff88", s=30, alpha=0.9, marker='x', linewidths=1.2, label="GT obj1")
         ax.scatter(true_uv[n:2*n,0],true_uv[n:2*n,1],c="#00ccff", s=30, alpha=0.9, marker='x', linewidths=1.2, label="GT obj2")
@@ -105,7 +139,7 @@ def render_png(img_np, true_uv, dist_uv, pred_uv=None, multi=False, depth=False,
                 ax.scatter(pred_uv[:,0], pred_uv[:,1], c="deepskyblue", s=30, alpha=0.9, marker='+', linewidths=1.5, label="corrected")
                 _draw_arrows(ax, dist_uv, pred_uv, "deepskyblue", n_max=20)
 
-    ax.set_xlim(0, IMG_SIZE); ax.set_ylim(IMG_SIZE, 0)
+    ax.set_xlim(0, sz); ax.set_ylim(sz, 0)
     ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=5, loc="upper right", framealpha=0.6)
     plt.tight_layout(pad=0.2)
@@ -127,38 +161,90 @@ def api_sample():
     dataset  = request.args.get("dataset", "synthetic")
     bg_ratio = int(request.args.get("bg_ratio", 1))
     gt_only  = request.args.get("gt_only", "0") == "1"
-    multi    = (mode == "multi")
-    depth    = (mode == "depth") or (dataset == "sim3d")
+    res      = int(request.args.get("res", 128))   # 64 or 128
+    sampling = request.args.get("sampling", "dense")  # dense / grid4 / grid8
+    multi      = (mode == "multi")
+    depth      = (mode == "depth") or (dataset == "sim3d")
+    gd_mode    = (mode == "grid_depth")   # grid_depth handled separately
 
-    if dataset == "sim3d":
+    # Determine resolution: grid_depth and sim3d are always 64/128 respectively
+    if mode == "grid_depth":
+        cur_size = 64
+    elif dataset == "sim3d" or (mode == "depth"):
+        cur_size = IMG_SIZE
+    else:
+        cur_size = res
+
+    img_gray = None  # only used for sim3d
+
+    if mode == "grid_depth":
+        from config_grid_depth import CFG as _GD_CFG
+        from pathlib import Path as _Path
+        ckpt = str(_Path("experiments") / _GD_CFG["name"] / "best_model.pt")
+        img, true_uvd, dist_uvd = make_image_and_points_grid_depth(
+            img_size=64, seed=seed + 700_000)
+        true_uv = true_uvd[:, :2]
+        dist_uv = dist_uvd[:, :2]
+        bg_ratio = 1   # 3 equal groups
+    elif dataset == "sim3d":
         ckpt = "best_model_sim3d.pt"
         img, true_uvd, dist_uvd = make_sample_sim3d(
             seed=seed + 500_100, bg_ratio=bg_ratio)
         true_uv = true_uvd[:, :2]
         dist_uv = dist_uvd[:, :2]
-        img_gray = img.mean(dim=0, keepdim=True)   # (1,H,W) for model
-    elif depth:
+        img_gray = img.mean(dim=0, keepdim=True)
+    elif mode == "depth":
         ckpt = "best_model_depth.pt"
         img, true_uvd, dist_uvd = make_image_and_points_depth(
             seed=seed + 400_100, bg_ratio=bg_ratio)
         true_uv = true_uvd[:, :2]
         dist_uv = dist_uvd[:, :2]
     elif multi:
-        ckpt = "best_model_multi.pt"
-        img, true_uv, dist_uv = make_image_and_points_multi(img_size=IMG_SIZE, seed=seed + 300_100)
+        ckpt = "best_model_multi_64.pt" if cur_size == 64 else "best_model_multi.pt"
+        img, true_uv, dist_uv = make_image_and_points_multi(img_size=cur_size, seed=seed + 300_100)
+    elif cur_size == 64:
+        ckpt = "best_model_64.pt"
+        gs = {"grid4": 4, "grid8": 8}.get(sampling)
+        if gs:
+            img, true_uv, dist_uv = make_image_and_points_grid(
+                img_size=64, grid_size=gs, seed=seed + 200_000)
+        else:
+            img, true_uv, dist_uv = make_image_and_points(img_size=64, seed=seed + 200_000)
     else:
         ckpt = "best_model.pt"
-        img, true_uv, dist_uv = make_image_and_points(img_size=IMG_SIZE, seed=seed + 200_000)
+        gs = {"grid4": 4, "grid8": 8}.get(sampling)
+        if gs:
+            img, true_uv, dist_uv = make_image_and_points_grid(
+                img_size=IMG_SIZE, grid_size=gs, seed=seed + 200_000)
+        else:
+            img, true_uv, dist_uv = make_image_and_points(img_size=IMG_SIZE, seed=seed + 200_000)
 
-    model_cls  = CalibNetDepth if depth else CalibNet
-    model      = get_model(ckpt, model_cls)
-    pred_uv    = None
-    err_after  = None
-    shifts_gt  = []
-    shifts_pred = []
-    sigma_stats = None
+    if gd_mode:
+        from config_grid_depth import CFG as _GD
+        model = get_model(ckpt, lambda: CalibNetDepth(
+            img_size=_GD["img_size"], in_channels=_GD["in_channels"],
+            n_layers=_GD["n_layers"], self_first=_GD["self_first"]))
+    elif cur_size == 64 and not depth:
+        model = get_model(ckpt, lambda: CalibNet(img_size=64))
+    elif depth:
+        model = get_model(ckpt, CalibNetDepth)
+    else:
+        model = get_model(ckpt, CalibNet)
+    pred_uv      = None
+    err_after    = None
+    shifts_gt    = []
+    shifts_pred  = []
+    sigma_stats  = None
+    group_errors = None
+    gd_groups    = None   # for render_png grid_depth path
 
-    if depth:  # covers both mode=depth and dataset=sim3d
+    if gd_mode:
+        gd_groups = _detect_groups(true_uvd)
+        for gi, (s, e, d) in enumerate(gd_groups):
+            label = "bg" if d >= 0.95 else f"obj{gi+1}"
+            off = (true_uv[s:e] - dist_uv[s:e]).mean(0)
+            shifts_gt.append({"label": label, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
+    elif depth:  # mode=depth or sim3d
         n_total = len(true_uv)
         n_obj = n_total // (2 + bg_ratio)
         n_bg  = n_total - 2 * n_obj
@@ -181,13 +267,25 @@ def api_sample():
 
     if model is not None:
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if depth:
-                # sim3d returns 3-ch RGB; use grayscale for model inference
+            if gd_mode:
+                params = model(img.unsqueeze(0).to(DEVICE),
+                               dist_uvd.unsqueeze(0).to(DEVICE))[0].cpu().float()
+                offset_pred = params[:, :2]
+                sx = params[:, 2].exp().numpy()
+                sy = params[:, 3].exp().numpy()
+                gd_groups_s = _detect_groups(true_uvd)
+                sigma_stats = {}
+                for gi, (s, e, d) in enumerate(gd_groups_s):
+                    label = "bg" if d >= 0.95 else f"obj{gi+1}"
+                    sigma_stats[label] = {
+                        "sx": round(float(sx[s:e].mean()), 3),
+                        "sy": round(float(sy[s:e].mean()), 3),
+                    }
+            elif depth:
                 img_in = img_gray if dataset == "sim3d" else img
                 params = model(img_in.unsqueeze(0).to(DEVICE),
                                dist_uvd.unsqueeze(0).to(DEVICE))[0].cpu().float()
-                tx_pred = params[:, 0]; ty_pred = params[:, 1]
-                offset_pred = torch.stack([tx_pred, ty_pred], dim=1)
+                offset_pred = params[:, :2]
                 sx = params[:, 2].exp().numpy()
                 sy = params[:, 3].exp().numpy()
                 sigma_stats = {
@@ -199,15 +297,27 @@ def api_sample():
                 offset_pred = model(img.unsqueeze(0).to(DEVICE),
                                     dist_uv.unsqueeze(0).to(DEVICE))[0].cpu()
 
-        pred_uv_t = (dist_uv + offset_pred).clamp(0, IMG_SIZE - 1)
+        pred_uv_t = (dist_uv + offset_pred).clamp(0, cur_size - 1)
         err_after = float((pred_uv_t - true_uv).norm(dim=1).mean())
         pred_uv   = pred_uv_t.numpy()
 
-        if depth:
+        if gd_mode:
+            group_errors = []
+            for gi, (s, e, d) in enumerate(gd_groups):
+                lbl = "bg" if d >= 0.95 else f"obj{gi+1}"
+                eb  = float((dist_uv[s:e] - true_uv[s:e]).norm(dim=1).mean())
+                ea  = float((pred_uv_t[s:e] - true_uv[s:e]).norm(dim=1).mean())
+                group_errors.append({"label": lbl, "before": round(eb,3), "after": round(ea,3)})
+
+        if gd_mode:
+            for gi, (s, e, d) in enumerate(gd_groups):
+                label = "bg" if d >= 0.95 else f"obj{gi+1}"
+                off = offset_pred[s:e].mean(0)
+                shifts_pred.append({"label": label, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
+        elif depth:
             for j, (name, sz) in enumerate(zip(group_names, [n_obj, n_obj, n_bg])):
                 start = sum([n_obj, n_obj, n_bg][:j])
-                sl = slice(start, start + sz)
-                off = offset_pred[sl].mean(0)
+                off = offset_pred[start:start+sz].mean(0)
                 shifts_pred.append({"label": name, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
         elif multi:
             n = len(true_uv) // 2
@@ -218,16 +328,21 @@ def api_sample():
             off = offset_pred.mean(0)
             shifts_pred.append({"tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
 
-    # Build display image: sim3d returns (3,H,W) RGB, others (1,H,W) grayscale
-    if dataset == "sim3d":
-        img_disp = img.numpy().transpose(1, 2, 0)  # (H, W, 3)
+    if dataset == "sim3d" or (gd_mode and img.shape[0] == 3):
+        img_disp = img.numpy().transpose(1, 2, 0)  # (H, W, 3) RGB
     else:
-        img_disp = img[0].numpy()                  # (H, W)
+        img_disp = img[0].numpy()                  # (H, W) grayscale
 
-    if depth:
-        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv, depth=True,  gt_only=gt_only)
+    if gd_mode:
+        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv,
+                         gt_only=gt_only, img_size=cur_size,
+                         grid_depth_uvd=true_uvd.numpy())
+    elif depth:
+        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv,
+                         depth=True, gt_only=gt_only, img_size=cur_size)
     else:
-        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv, multi=multi, gt_only=gt_only)
+        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv,
+                         multi=multi, gt_only=gt_only, img_size=cur_size)
 
     return jsonify({
         "png":          png,
@@ -238,6 +353,7 @@ def api_sample():
         "err_after":    round(err_after, 3) if err_after is not None else None,
         "model_loaded": model is not None,
         "sigma_stats":  sigma_stats,
+        "group_errors": group_errors if gd_mode and pred_uv is not None else None,
         "dataset":      dataset,
     })
 
@@ -245,10 +361,14 @@ def api_sample():
 @app.route("/api/model_status")
 def api_model_status():
     return jsonify({
-        "single": os.path.exists("best_model.pt"),
-        "multi":  os.path.exists("best_model_multi.pt"),
-        "depth":  os.path.exists("best_model_depth.pt"),
-        "sim3d":  os.path.exists("best_model_sim3d.pt"),
+        "single":      os.path.exists("best_model.pt"),
+        "multi":       os.path.exists("best_model_multi.pt"),
+        "depth":       os.path.exists("best_model_depth.pt"),
+        "sim3d":       os.path.exists("best_model_sim3d.pt"),
+        "64":          os.path.exists("best_model_64.pt"),
+        "grid_depth":  os.path.exists(
+            str(__import__("pathlib").Path("experiments") /
+                __import__("config_grid_depth").CFG["name"] / "best_model.pt")),
     })
 
 

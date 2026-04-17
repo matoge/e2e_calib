@@ -126,8 +126,8 @@
   }
   .viewer-toolbar {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
+    gap: .4rem;
     padding: .5rem .85rem;
     border-bottom: 1px solid var(--border2);
     background: var(--bg3);
@@ -157,7 +157,8 @@
   }
   .seed-display strong { color: var(--accent); }
   .toolbar-right {
-    display: flex; align-items: center; gap: .6rem;
+    display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
+    row-gap: .4rem;
   }
   .auto-label {
     font-size: .7rem;
@@ -488,31 +489,43 @@
     <!-- ── Left: image viewer ── -->
     <div class="viewer-card">
       <div class="viewer-toolbar">
-        <div class="seed-nav">
-          <button class="nav-btn" id="btn-prev" title="Previous (←)">&#8592;</button>
-          <div class="seed-display">seed <strong id="seed-num">0</strong></div>
-          <button class="nav-btn" id="btn-next" title="Next (→)">&#8594;</button>
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div class="seed-nav">
+            <button class="nav-btn" id="btn-prev" title="Previous (←)">&#8592;</button>
+            <div class="seed-display">seed <strong id="seed-num">0</strong></div>
+            <button class="nav-btn" id="btn-next" title="Next (→)">&#8594;</button>
+          </div>
         </div>
         <div class="toolbar-right">
-          <div class="mode-tabs">
-            <button class="mode-tab active" id="tab-single" onclick="setMode('single')">1 Object</button>
-            <button class="mode-tab"        id="tab-multi"  onclick="setMode('multi')">2 Objects</button>
-            <button class="mode-tab"        id="tab-depth"  onclick="setMode('depth')">Depth+σ</button>
+          <!-- Row 1: mode + dataset + res -->
+          <div style="display:flex;flex-wrap:wrap;gap:.4rem;width:100%">
+            <div class="mode-tabs">
+              <button class="mode-tab active" id="tab-single"     onclick="setMode('single')">1 Obj</button>
+              <button class="mode-tab"        id="tab-multi"      onclick="setMode('multi')">2 Obj</button>
+              <button class="mode-tab"        id="tab-depth"      onclick="setMode('depth')">Depth</button>
+              <button class="mode-tab"        id="tab-grid_depth" onclick="setMode('grid_depth')">Grid+D</button>
+            </div>
+            <div class="mode-tabs">
+              <button class="mode-tab active" id="ds-synthetic" onclick="setDataset('synthetic')">Synth</button>
+              <button class="mode-tab"        id="ds-sim3d"     onclick="setDataset('sim3d')">Sim3D</button>
+            </div>
+            <div class="mode-tabs">
+              <button class="mode-tab active" id="res-128" onclick="setRes(128)">128px</button>
+              <button class="mode-tab"        id="res-64"  onclick="setRes(64)">64px</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:.4rem;margin-left:auto">
+              <span class="auto-label">GT only</span>
+              <label class="toggle">
+                <input type="checkbox" id="gt-toggle">
+                <div class="toggle-track"><div class="toggle-thumb"></div></div>
+              </label>
+              <span class="auto-label">Auto</span>
+              <label class="toggle">
+                <input type="checkbox" id="auto-toggle">
+                <div class="toggle-track"><div class="toggle-thumb"></div></div>
+              </label>
+            </div>
           </div>
-          <div class="mode-tabs" style="margin-left:.5rem">
-            <button class="mode-tab active" id="ds-synthetic" onclick="setDataset('synthetic')" title="Synthetic shapes">Synth</button>
-            <button class="mode-tab"        id="ds-sim3d"     onclick="setDataset('sim3d')"     title="3D ray-cast scene">Sim3D</button>
-          </div>
-          <span class="auto-label">GT only</span>
-          <label class="toggle">
-            <input type="checkbox" id="gt-toggle">
-            <div class="toggle-track"><div class="toggle-thumb"></div></div>
-          </label>
-          <span class="auto-label">Auto</span>
-          <label class="toggle">
-            <input type="checkbox" id="auto-toggle">
-            <div class="toggle-track"><div class="toggle-thumb"></div></div>
-          </label>
         </div>
       </div>
       <div class="img-wrap">
@@ -558,6 +571,14 @@
         </div>
         <div class="imp-bar-wrap">
           <div class="imp-bar" id="imp-bar" style="width:0%"></div>
+        </div>
+        <!-- per-group errors (grid_depth mode) -->
+        <div id="group-err-section" style="display:none;margin-top:.75rem;border-top:1px solid var(--border2);padding-top:.6rem">
+          <div style="font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.45rem">Per group</div>
+          <table class="sigma-table" id="group-err-table">
+            <thead><tr><th>Group</th><th>Before</th><th>After</th><th>Impr.</th></tr></thead>
+            <tbody id="group-err-body"></tbody>
+          </table>
         </div>
       </div>
 
@@ -619,15 +640,34 @@
   let currentSeed    = 0;
   let currentMode    = 'single';
   let currentDataset = 'synthetic';
+  let currentRes     = 128;
   let gtOnly         = false;
   let autoTimer      = null;
   const MAX_SEED     = 199;
+
+  function setRes(r) {
+    currentRes = r;
+    document.getElementById('res-128').classList.toggle('active', r===128);
+    document.getElementById('res-64').classList.toggle('active',  r===64);
+    go(currentSeed);
+  }
+
+  let currentSampling = 'dense';
+  function setSampling(s) {
+    currentSampling = s;
+    document.getElementById('smp-dense').classList.toggle('active', s==='dense');
+    document.getElementById('smp-grid4').classList.toggle('active', s==='grid4');
+    document.getElementById('smp-grid8').classList.toggle('active', s==='grid8');
+    go(currentSeed);
+  }
 
   function setMode(m) {
     currentMode = m;
     document.getElementById('tab-single').classList.toggle('active', m==='single');
     document.getElementById('tab-multi').classList.toggle('active', m==='multi');
     document.getElementById('tab-depth').classList.toggle('active', m==='depth');
+    document.getElementById('tab-grid_depth').classList.toggle('active', m==='grid_depth');
+    if (m === 'grid_depth') { currentRes = 64; setRes(64); }
     updateLegend();
     go(currentSeed);
   }
@@ -647,7 +687,7 @@
   }
 
   function updateLegend() {
-    const isDepth = currentMode==='depth' || currentDataset==='sim3d';
+    const isDepth = currentMode==='depth' || currentMode==='grid_depth' || currentDataset==='sim3d';
     document.getElementById('legend-single').style.display = (!isDepth && currentMode==='single') ? '' : 'none';
     document.getElementById('legend-multi').style.display  = (!isDepth && currentMode==='multi')  ? '' : 'none';
     document.getElementById('legend-depth').style.display  = isDepth ? '' : 'none';
@@ -673,7 +713,7 @@
     seedInput.value     = seed;
 
     try {
-      const r = await fetch(`/api/sample?seed=${seed}&mode=${currentMode}&dataset=${currentDataset}&gt_only=${gtOnly?1:0}`);
+      const r = await fetch(`/api/sample?seed=${seed}&mode=${currentMode}&dataset=${currentDataset}&gt_only=${gtOnly?1:0}&res=${currentRes}&sampling=${currentSampling}`);
       const d = await r.json();
 
       imgEl.src = 'data:image/png;base64,' + d.png;
@@ -737,6 +777,27 @@
         impEl.textContent = '—';
         impEl.className   = 'err-val';
         barEl.style.width = '0%';
+      }
+
+      // per-group errors
+      const geSection = document.getElementById('group-err-section');
+      const geBody    = document.getElementById('group-err-body');
+      if (d.group_errors && d.group_errors.length) {
+        const colorMap = { bg: '#cc88ff', obj1: '#00ff88', obj2: '#00ccff' };
+        geBody.innerHTML = d.group_errors.map(g => {
+          const col  = colorMap[g.label] || '#e6edf3';
+          const pct  = g.after != null ? ((g.before - g.after) / g.before * 100) : null;
+          const pctStr = pct != null ? `<span style="color:${pct>=0?'var(--green)':'var(--red)'}">${pct>=0?'+':''}${pct.toFixed(0)}%</span>` : '—';
+          return `<tr>
+            <td style="color:${col}">${g.label}</td>
+            <td style="color:var(--red)">${g.before.toFixed(2)}</td>
+            <td style="color:var(--blue)">${g.after != null ? g.after.toFixed(2) : '—'}</td>
+            <td>${pctStr}</td>
+          </tr>`;
+        }).join('');
+        geSection.style.display = '';
+      } else {
+        geSection.style.display = 'none';
       }
 
     } catch(e) {
