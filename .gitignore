@@ -1,4 +1,5 @@
-*.pt
+sim3d_train.pt
+sim3d_val.pt
 *.onnx
 *.png
 __pycache__/
