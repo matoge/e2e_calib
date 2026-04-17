@@ -19,17 +19,25 @@ def _randint(lo: int, hi: int, rng: torch.Generator) -> int:
 
 
 def _rand_pole(rng: torch.Generator, img_size: int = 128):
-    """Returns (cx, cy, hw, hh) for a thin pole (extreme aspect-ratio rectangle)."""
-    s = img_size / 128
-    vertical = int(torch.randint(0, 2, (1,), generator=rng).item())
-    if vertical:
-        hw = max(1, _randint(1, 3, rng))
-        hh = max(hw + 4, _randint(max(5, int(12 * s)), max(6, int(30 * s)) + 1, rng))
+    """Returns (cx, cy, hw, hh) for a thin pole — thin width, long length.
+    50% chance of spanning the full image (hh = img_size//2 - 1).
+    """
+    vertical  = int(torch.randint(0, 2, (1,), generator=rng).item())
+    spanning  = int(torch.randint(0, 2, (1,), generator=rng).item())  # 50% full-span
+    thin = max(3, _randint(3, 6, rng))                                # 3-5 px half-width → 6-10px visible
+    if spanning:
+        long = img_size // 2 - 1                                      # edge-to-edge
     else:
-        hh = max(1, _randint(1, 3, rng))
-        hw = max(hh + 4, _randint(max(5, int(12 * s)), max(6, int(30 * s)) + 1, rng))
-    cx = _randint(hw + 1, img_size - hw - 1, rng)
-    cy = _randint(hh + 1, img_size - hh - 1, rng)
+        s    = img_size / 128
+        long = max(thin + 4, _randint(max(8, int(15 * s)), max(9, int(45 * s)) + 1, rng))
+    if vertical:
+        hw, hh = thin, long
+        cx = _randint(hw + 1, img_size - hw - 1, rng)
+        cy = img_size // 2 if spanning else _randint(hh + 1, img_size - hh - 1, rng)
+    else:
+        hw, hh = long, thin
+        cy = _randint(hh + 1, img_size - hh - 1, rng)
+        cx = img_size // 2 if spanning else _randint(hw + 1, img_size - hw - 1, rng)
     return cx, cy, hw, hh
 
 
@@ -140,6 +148,7 @@ def make_image_and_points_grid_depth(
     grid_size: float | None = None,  # None → random [4.0, 8.0]
     jitter: float | None = None,     # None → random [0.5, 2.0]
     seed: int | None = None,
+    random_depths: bool = False,     # True → all 3 depths random; False → legacy fixed ranges
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Grayscale image, 2 white shapes on black background.
@@ -230,8 +239,19 @@ def make_image_and_points_grid_depth(
         image[:, mask] = obj_colors[i][:, None]
         masks.append(mask)
 
-    d1  = float(torch.rand(1, generator=rng).item() * 0.35 + 0.10)  # [0.10, 0.45]
-    d2  = float(torch.rand(1, generator=rng).item() * 0.35 + 0.50)  # [0.50, 0.85]
+    if random_depths:
+        for _ in range(30):
+            _d = torch.rand(3, generator=rng)
+            _ds, _ = _d.sort()
+            if (_ds[1:] - _ds[:-1]).min().item() >= 0.10:
+                break
+        else:
+            _ds = torch.tensor([0.10, 0.40, 0.80])
+        d1, d2, d_bg = _ds[0].item(), _ds[1].item(), _ds[2].item()
+    else:
+        d1   = float(torch.rand(1, generator=rng).item() * 0.35 + 0.10)  # [0.10, 0.45]
+        d2   = float(torch.rand(1, generator=rng).item() * 0.35 + 0.50)  # [0.50, 0.85]
+        d_bg = 1.0
 
     # grid over extended area (image + max_offset margin on all sides)
     # After shifting, only keep points whose DISTORTED position falls inside [0, img_size).
@@ -252,7 +272,7 @@ def make_image_and_points_grid_depth(
     xi = xs.long().clamp(0, W - 1)
     yi = ys.long().clamp(0, H - 1)
     in_frame = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
-    depths = torch.full((n,), 1.0)
+    depths = torch.full((n,), d_bg)
     depths[in_frame & masks[0][yi, xi]] = d1
     depths[in_frame & masks[1][yi, xi]] = d2
 
@@ -260,8 +280,8 @@ def make_image_and_points_grid_depth(
     # BG uses ALL grid points (including those on objects) so there is no
     # object-shaped hole in the BG dist cloud that would reveal the BG shift.
     true_parts, dist_parts = [], []
-    for d_val in [d1, d2, 1.0]:
-        if d_val >= 0.95:          # BG: include every grid point
+    for d_val in [d1, d2, d_bg]:
+        if abs(d_val - d_bg) < 1e-5:  # BG: include every grid point
             sel = torch.ones(n, dtype=torch.bool)
         else:
             sel = (torch.abs(depths - d_val) < 1e-5)
@@ -304,12 +324,14 @@ def collate_grid_depth(batch):
 
 class GridDepthDataset(Dataset):
     def __init__(self, length=4000, img_size=64,
-                 max_offset=8.0, base_seed=0, random_each_epoch=False):
+                 max_offset=8.0, base_seed=0, random_each_epoch=False,
+                 random_depths=False):
         self.length = length
         self.img_size = img_size
         self.max_offset = max_offset
         self.base_seed = base_seed
         self.random_each_epoch = random_each_epoch
+        self.random_depths = random_depths
 
     def __len__(self): return self.length
 
@@ -320,6 +342,7 @@ class GridDepthDataset(Dataset):
             img_size=self.img_size,
             max_offset=self.max_offset,
             seed=seed,
+            random_depths=self.random_depths,
         )
 
 

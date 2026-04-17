@@ -94,7 +94,7 @@ def render_png(img_np, true_uv, dist_uv, pred_uv=None, multi=False, depth=False,
         cmap   = plt.cm.tab10
         for gi, (s, e, d) in enumerate(groups):
             c     = cmap(gi % 10)
-            label = "bg" if d >= 0.95 else f"obj{gi+1}"
+            label = "bg" if gi == len(groups) - 1 else f"obj{gi+1}"
             ax.scatter(true_uv[s:e, 0], true_uv[s:e, 1],
                        color=c, s=30, alpha=0.9, marker='x', linewidths=1.2, label=f"GT {label}")
             if not gt_only:
@@ -182,7 +182,8 @@ def api_sample():
         from pathlib import Path as _Path
         ckpt = str(_Path("experiments") / _GD_CFG["name"] / "best_model.pt")
         img, true_uvd, dist_uvd = make_image_and_points_grid_depth(
-            img_size=64, seed=seed + 700_000)
+            img_size=64, seed=seed + 700_000,
+            random_depths=_GD_CFG.get("random_depths", False))
         true_uv = true_uvd[:, :2]
         dist_uv = dist_uvd[:, :2]
         bg_ratio = 1   # 3 equal groups
@@ -241,7 +242,7 @@ def api_sample():
     if gd_mode:
         gd_groups = _detect_groups(true_uvd)
         for gi, (s, e, d) in enumerate(gd_groups):
-            label = "bg" if d >= 0.95 else f"obj{gi+1}"
+            label = "bg" if gi == len(gd_groups) - 1 else f"obj{gi+1}"
             off = (true_uv[s:e] - dist_uv[s:e]).mean(0)
             shifts_gt.append({"label": label, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
     elif depth:  # mode=depth or sim3d
@@ -276,7 +277,7 @@ def api_sample():
                 gd_groups_s = _detect_groups(true_uvd)
                 sigma_stats = {}
                 for gi, (s, e, d) in enumerate(gd_groups_s):
-                    label = "bg" if d >= 0.95 else f"obj{gi+1}"
+                    label = "bg" if gi == len(gd_groups) - 1 else f"obj{gi+1}"
                     sigma_stats[label] = {
                         "sx": round(float(sx[s:e].mean()), 3),
                         "sy": round(float(sy[s:e].mean()), 3),
@@ -304,14 +305,14 @@ def api_sample():
         if gd_mode:
             group_errors = []
             for gi, (s, e, d) in enumerate(gd_groups):
-                lbl = "bg" if d >= 0.95 else f"obj{gi+1}"
+                lbl = "bg" if gi == len(gd_groups) - 1 else f"obj{gi+1}"
                 eb  = float((dist_uv[s:e] - true_uv[s:e]).norm(dim=1).mean())
                 ea  = float((pred_uv_t[s:e] - true_uv[s:e]).norm(dim=1).mean())
                 group_errors.append({"label": lbl, "before": round(eb,3), "after": round(ea,3)})
 
         if gd_mode:
             for gi, (s, e, d) in enumerate(gd_groups):
-                label = "bg" if d >= 0.95 else f"obj{gi+1}"
+                label = "bg" if gi == len(gd_groups) - 1 else f"obj{gi+1}"
                 off = offset_pred[s:e].mean(0)
                 shifts_pred.append({"label": label, "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
         elif depth:
