@@ -87,9 +87,9 @@ def _ns_process_scene(args):
             img_64 = np.array(img_full.crop(box).resize((64,64), Image.BILINEAR), dtype=np.uint8)
             obj_yaw = Rotation.from_quat([quat[1],quat[2],quat[3],quat[0]]).as_euler('zyx')[0]
 
-            # Grid-sample points from 3× enlarged crop region (32×32)
+            # 2× crop ROI; 2px grid in 64×64-view → 64×64 cells over ROI
             uv_vis = uv_gt[vis]
-            GS = 32; margin = crop_size * 1.5; roi_w = crop_size + 2*margin
+            GS = 64; margin = crop_size * 0.5; roi_w = crop_size + 2*margin
             in_roi = ((uv_vis[:,0] >= u0-margin) & (uv_vis[:,0] < u0+crop_size+margin) &
                       (uv_vis[:,1] >= v0-margin) & (uv_vis[:,1] < v0+crop_size+margin))
             pts_roi = pts_vis[in_roi]; uv_roi = uv_vis[in_roi]
@@ -175,7 +175,8 @@ def _sensor_to_world(cal, ego_pose):
 def _project(pts_world, T_world2cam, K):
     pts_cam = (T_world2cam[:3,:3] @ pts_world.T + T_world2cam[:3,3:]).T
     z = pts_cam[:,2]
-    uv = (K @ pts_cam.T)[:2] / z
+    safe = np.where(np.abs(z) > 1e-6, z, 1e-6)
+    uv = (K @ pts_cam.T)[:2] / safe
     return uv.T, z
 
 
@@ -206,7 +207,8 @@ def build_cache(nuscenes_root: str,
                 min_pts: int = 8,
                 target_cats: set = None,
                 frame_sample: float = 1.0,
-                num_workers: int = 16):
+                num_workers: int = 16,
+                max_scenes: int = None):
 
     root    = Path(nuscenes_root)
     meta    = root / version
@@ -238,6 +240,8 @@ def build_cache(nuscenes_root: str,
 
     rng = random.Random(seed)
     rng.shuffle(scenes)
+    if max_scenes:
+        scenes = scenes[:max_scenes]
     n_val = max(0, int(len(scenes) * val_fraction))
 
     use_cats = target_cats if target_cats is not None else USEFUL_CATS
@@ -319,15 +323,20 @@ class NuScenesCalibDataset(Dataset):
         uv_d_crop = np.stack([(uv_off[in_crop,0]-cu0)*scale,
                                (uv_off[in_crop,1]-cv0)*scale], axis=1)
 
-        # 16×16 grid sample
-        grid, cell = 16, float(S)/16
+        # 32×32 grid: bin each pt to its 2px cell, keep nearest-to-center per cell.
+        # Empty cells stay empty (no argmin fallback → no over-densification of edges).
+        grid, cell = 32, float(S)/32
+        ci = np.clip((uv_d_crop[:,1] / cell).astype(np.int64), 0, grid-1)
+        cj = np.clip((uv_d_crop[:,0] / cell).astype(np.int64), 0, grid-1)
+        cell_id = ci * grid + cj
+        du = uv_d_crop[:,0] - (cj + 0.5) * cell
+        dv = uv_d_crop[:,1] - (ci + 0.5) * cell
+        d2 = du*du + dv*dv
         sel = []
-        for gi in range(grid):
-            for gj in range(grid):
-                d2 = ((uv_d_crop[:,0]-(gj+.5)*cell)**2 +
-                      (uv_d_crop[:,1]-(gi+.5)*cell)**2)
-                sel.append(int(d2.argmin()))
-        sel = sorted(set(sel))
+        for cid in np.unique(cell_id):
+            members = np.where(cell_id == cid)[0]
+            sel.append(int(members[d2[members].argmin()]))
+        sel = sorted(sel)
 
         idx_in  = np.where(in_crop)[0][sel]
         pts_sel = pts[idx_in]
@@ -349,8 +358,10 @@ class NuScenesCalibDataset(Dataset):
             R_obj    = np.array([[c_y,s_y,0],[-s_y,c_y,0],[0,0,1]], dtype=np.float32)
             pts_local = (R_obj @ (pts_sel - obj_pos).T).T
             half = obj_dims / 2.0
-            is_obj = ((np.abs(pts_local[:,0])<=half[0]) &
-                      (np.abs(pts_local[:,1])<=half[1]) &
+            # nuScenes Box: local_x = length, local_y = width, local_z = height
+            # obj_dims = [w, l, h] so half = [w/2, l/2, h/2]
+            is_obj = ((np.abs(pts_local[:,0])<=half[1]) &
+                      (np.abs(pts_local[:,1])<=half[0]) &
                       (np.abs(pts_local[:,2])<=half[2])).astype(np.float32)
         else:
             is_obj = np.zeros(len(pts_sel), dtype=np.float32)
