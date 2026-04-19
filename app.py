@@ -3,10 +3,11 @@ app.py  –  Flask backend for the interactive UV correction demo
 Supports single-object (?mode=single), multi-object (?mode=multi),
 and depth-aware covariance (?mode=depth) modes.
 """
-import io, base64, os, torch, numpy as np
+import io, base64, os, re, torch, numpy as np, importlib.util
 import matplotlib; matplotlib.use("Agg")
-import matplotlib.pyplot as plt, matplotlib.patches as mpatches
+import matplotlib.pyplot as plt, matplotlib.patches as mpatches, matplotlib.patheffects as pe
 from flask import Flask, jsonify, request, send_from_directory, redirect
+from pathlib import Path
 
 from dataset import (make_image_and_points, make_image_and_points_multi,
                      make_image_and_points_depth, make_image_and_points_grid,
@@ -15,10 +16,62 @@ from sim3d import make_sample as make_sample_sim3d
 from model import CalibNet
 from model_depth import CalibNetDepth
 
+_ps_dataset = None
+def _get_ps_dataset(cache='/tmp/pandaset_full_cache.pt'):
+    global _ps_dataset
+    if _ps_dataset is None:
+        try:
+            from dataset_pandaset import PandaSetCalibDataset
+            _ps_dataset = PandaSetCalibDataset(cache, split='val')
+        except Exception:
+            pass
+    return _ps_dataset
+
+_ns_dataset = None
+def _get_ns_dataset(cache='/tmp/nuscenes_static_cache.pt'):
+    global _ns_dataset
+    if _ns_dataset is None:
+        try:
+            from dataset_nuscenes import NuScenesCalibDataset
+            _ns_dataset = NuScenesCalibDataset(cache, split='val')
+        except Exception as e:
+            print(f"NuScenes load error: {e}")
+    return _ns_dataset
+
+_ns_ps_dataset = None
+def _get_ns_ps_dataset():
+    global _ns_ps_dataset
+    if _ns_ps_dataset is None:
+        try:
+            from torch.utils.data import ConcatDataset
+            ns = _get_ns_dataset()
+            ps = _get_ps_dataset('/tmp/pandaset_cache.pt')
+            if ns is not None and ps is not None:
+                _ns_ps_dataset = ConcatDataset([ns, ps])
+        except Exception as e:
+            print(f"NS+PS load error: {e}")
+    return _ns_ps_dataset
+
 app = Flask(__name__, static_folder="static", static_url_path="")
 DEVICE   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMG_SIZE = 128
 _models  = {}   # cache per ckpt path
+_exp_cfg_cache = {}  # cache parsed experiment configs
+
+
+def _load_exp_cfg(exp_name: str) -> dict | None:
+    """Load config from experiments/{exp_name}/config.py."""
+    if exp_name in _exp_cfg_cache:
+        return _exp_cfg_cache[exp_name]
+    cfg_path = Path("experiments") / exp_name / "config.py"
+    if not cfg_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("_exp_cfg", cfg_path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cfg = mod.CFG
+    _exp_cfg_cache[exp_name] = cfg
+    return cfg
 
 
 def get_model(ckpt, model_cls=None):
@@ -170,17 +223,43 @@ def api_sample():
     # Determine resolution: grid_depth and sim3d are always 64/128 respectively
     if mode == "grid_depth":
         cur_size = 64
-    elif dataset == "sim3d" or (mode == "depth"):
-        cur_size = IMG_SIZE
+    elif dataset in ("sim3d", "pandaset", "nuscenes", "ns_ps") or (mode == "depth"):
+        cur_size = IMG_SIZE if dataset == "sim3d" else 64
     else:
         cur_size = res
 
     img_gray = None  # only used for sim3d
 
-    if mode == "grid_depth":
-        from config_grid_depth import CFG as _GD_CFG
-        from pathlib import Path as _Path
-        ckpt = str(_Path("experiments") / _GD_CFG["name"] / "best_model.pt")
+    if dataset in ("pandaset", "nuscenes", "ns_ps"):
+        if dataset == "pandaset":
+            ds = _get_ps_dataset()
+            default_exp = "ps_v7_frustum"
+        elif dataset == "nuscenes":
+            ds = _get_ns_dataset()
+            default_exp = "ns_ps_v2"
+        else:  # ns_ps
+            ds = _get_ns_ps_dataset()
+            default_exp = "ns_ps_v2"
+        if ds is None:
+            return jsonify({"error": f"{dataset} cache not found"}), 404
+        img, true_uvd, dist_uvd = ds[seed % len(ds)]
+        true_uv = true_uvd[:, :2]
+        dist_uv = dist_uvd[:, :2]
+        is_obj  = dist_uvd[:, 3].numpy() > 0.5
+        exp_name = request.args.get("experiment", default_exp)
+        ckpt     = str(Path("experiments") / exp_name / "best_model.pt")
+        cfg_ps   = _load_exp_cfg(exp_name) or {}
+        cur_size = 64
+    elif mode == "grid_depth":
+        exp_name = request.args.get("experiment", None)
+        if exp_name:
+            _GD_CFG = _load_exp_cfg(exp_name) or {}
+            if not _GD_CFG:
+                from config_grid_depth import CFG as _GD_CFG
+        else:
+            from config_grid_depth import CFG as _GD_CFG
+            exp_name = _GD_CFG["name"]
+        ckpt = str(Path("experiments") / exp_name / "best_model.pt")
         img, true_uvd, dist_uvd = make_image_and_points_grid_depth(
             img_size=64, seed=seed + 700_000,
             random_depths=_GD_CFG.get("random_depths", False))
@@ -220,11 +299,20 @@ def api_sample():
         else:
             img, true_uv, dist_uv = make_image_and_points(img_size=IMG_SIZE, seed=seed + 200_000)
 
-    if gd_mode:
-        from config_grid_depth import CFG as _GD
+    if dataset in ("pandaset", "nuscenes", "ns_ps"):
+        _PS = cfg_ps
+        model = get_model(ckpt, lambda: CalibNetDepth(
+            img_size=64, in_channels=_PS.get("in_channels", 3),
+            n_layers=_PS.get("n_layers", 3), self_first=False,
+            use_convnext=_PS.get("use_convnext", False),
+            use_frustum=_PS.get("use_frustum", False)))
+    elif gd_mode:
+        _GD = _GD_CFG
         model = get_model(ckpt, lambda: CalibNetDepth(
             img_size=_GD["img_size"], in_channels=_GD["in_channels"],
-            n_layers=_GD["n_layers"], self_first=_GD["self_first"]))
+            n_layers=_GD["n_layers"], self_first=_GD["self_first"],
+            kv_self_attn=_GD.get("kv_self_attn", False),
+            cross_temp=_GD.get("cross_temp", 1.0)))
     elif cur_size == 64 and not depth:
         model = get_model(ckpt, lambda: CalibNet(img_size=64))
     elif depth:
@@ -266,9 +354,29 @@ def api_sample():
 
     err_before = float((dist_uv - true_uv).norm(dim=1).mean())
 
+    if dataset in ("pandaset", "nuscenes", "ns_ps"):
+        off = (true_uv - dist_uv).mean(0)
+        shifts_gt.append({"label": "obj", "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
+
+    err_before = float((dist_uv - true_uv).norm(dim=1).mean())
+
     if model is not None:
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if gd_mode:
+            if dataset in ("pandaset", "nuscenes", "ns_ps"):
+                params = model(img.unsqueeze(0).to(DEVICE),
+                               dist_uvd[:, :3].unsqueeze(0).to(DEVICE))[0].cpu().float()
+                offset_pred = params[:, :2]
+                sx = params[:, 2].exp().numpy()
+                sy = params[:, 3].exp().numpy()
+                sigma_stats = {
+                    "obj": {"sx": round(float(sx[is_obj].mean()) if is_obj.any() else 0, 3),
+                            "sy": round(float(sy[is_obj].mean()) if is_obj.any() else 0, 3)},
+                    "bg":  {"sx": round(float(sx[~is_obj].mean()) if (~is_obj).any() else 0, 3),
+                            "sy": round(float(sy[~is_obj].mean()) if (~is_obj).any() else 0, 3)},
+                }
+                off = offset_pred.mean(0)
+                shifts_pred.append({"label": "obj", "tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
+            elif gd_mode:
                 params = model(img.unsqueeze(0).to(DEVICE),
                                dist_uvd.unsqueeze(0).to(DEVICE))[0].cpu().float()
                 offset_pred = params[:, :2]
@@ -329,16 +437,52 @@ def api_sample():
             off = offset_pred.mean(0)
             shifts_pred.append({"tx": round(float(off[0]),2), "ty": round(float(off[1]),2)})
 
-    if dataset == "sim3d" or (gd_mode and img.shape[0] == 3):
+    if dataset in ("sim3d", "pandaset", "nuscenes", "ns_ps") or (gd_mode and img.shape[0] == 3):
         img_disp = img.numpy().transpose(1, 2, 0)  # (H, W, 3) RGB
     else:
         img_disp = img[0].numpy()                  # (H, W) grayscale
 
-    if gd_mode:
-        png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv,
-                         gt_only=gt_only, img_size=cur_size,
-                         grid_depth_uvd=true_uvd.numpy())
-    elif depth:
+    if dataset in ("pandaset", "nuscenes", "ns_ps"):
+        # render with obj/bg coloring
+        pred_uv_ps = (dist_uv + offset_pred).clamp(0, 63).numpy() if model is not None else None
+        err_after  = float(((torch.from_numpy(pred_uv_ps) if pred_uv_ps is not None
+                             else dist_uv) - true_uv).norm(dim=1).mean()) if pred_uv_ps is not None else None
+        fig, ax = plt.subplots(figsize=(4,4), dpi=128)
+        ax.imshow(img_disp, extent=[0,64,64,0], origin='upper')
+        t_uv = true_uv.numpy(); d_uv = dist_uv.numpy()
+        for mask, cgt, cd, cp, lbl in [
+            (is_obj,   'lime',  'red',    'cyan',        'obj'),
+            (~is_obj,  'yellow','orange', 'deepskyblue', 'bg'),
+        ]:
+            if not mask.any(): continue
+            ax.scatter(t_uv[mask,0], t_uv[mask,1], c=cgt, s=18, marker='x', linewidths=1.1, label=f'GT {lbl}', zorder=3)
+            if not gt_only:
+                ax.scatter(d_uv[mask,0], d_uv[mask,1], c=cd, s=7, alpha=0.5, zorder=2)
+                if pred_uv_ps is not None:
+                    ax.scatter(pred_uv_ps[mask,0], pred_uv_ps[mask,1], c=cp, s=18, marker='+', linewidths=1.3, zorder=4)
+                    _draw_arrows(ax, d_uv[mask], pred_uv_ps[mask], cp, n_max=10)
+        # obj BB: red around dist, cyan dashed shifted by mean predicted offset
+        if is_obj.any() and not gt_only and pred_uv_ps is not None:
+            d_obj = d_uv[is_obj]; p_obj = pred_uv_ps[is_obj]
+            x0, y0 = float(d_obj[:,0].min()), float(d_obj[:,1].min())
+            x1, y1 = float(d_obj[:,0].max()), float(d_obj[:,1].max())
+            dx = float((p_obj - d_obj)[:,0].mean()); dy = float((p_obj - d_obj)[:,1].mean())
+            ax.add_patch(plt.Rectangle((x0, y0), x1-x0, y1-y0, fill=False, ec='red',  lw=1.2, zorder=5))
+            ax.add_patch(plt.Rectangle((x0+dx, y0+dy), x1-x0, y1-y0, fill=False, ec='cyan', lw=1.2, linestyle='--', zorder=5))
+            cx, cy = (x0+x1)/2, (y0+y1)/2
+            arr = ax.annotate("", xy=(cx+dx, cy+dy), xytext=(cx, cy),
+                              arrowprops=dict(arrowstyle='-|>,head_width=0.45,head_length=0.6',
+                                              color='white', lw=2.2, mutation_scale=14),
+                              zorder=7)
+            arr.arrow_patch.set_path_effects([
+                pe.Stroke(linewidth=4.5, foreground='black'), pe.Normal()])
+        ax.set_xlim(0,64); ax.set_ylim(64,0); ax.set_xticks([]); ax.set_yticks([])
+        ax.legend(fontsize=5, loc='upper right', framealpha=0.6, ncol=2)
+        buf = io.BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', dpi=128)
+        plt.close(fig); buf.seek(0)
+        png = base64.b64encode(buf.read()).decode()
+        pred_uv = pred_uv_ps
+    elif gd_mode:
         png = render_png(img_disp, true_uv.numpy(), dist_uv.numpy(), pred_uv,
                          depth=True, gt_only=gt_only, img_size=cur_size)
     else:
@@ -359,6 +503,55 @@ def api_sample():
     })
 
 
+def _parse_best_epoch(log_path: Path) -> dict:
+    """Parse train.log to get metrics at the best val NLL epoch."""
+    result = {"best_nll": None, "best_obj_nll": None, "best_mse": None}
+    if not log_path.exists():
+        return result
+    best_nll, best_line = None, ""
+    for line in log_path.read_text().splitlines():
+        m = re.search(r"Best val NLL: ([\d.]+)", line)
+        if m:
+            best_nll = float(m.group(1))
+        # keep track of the saved-epoch line just before each "↳ saved"
+        if "↳ saved" in line and best_line:
+            pass  # best_line already set
+        if re.search(r"\[\s*\d+/\d+\]", line):
+            best_line = line
+    result["best_nll"] = best_nll
+    # find the epoch line matching best_nll
+    if best_nll is not None:
+        for line in log_path.read_text().splitlines():
+            m = re.search(r"val nll=([+-]?[\d.]+)\(obj=([+-]?[\d.]+).*?mse=([\d.]+)", line)
+            if m and abs(float(m.group(1)) - best_nll) < 1e-3:
+                result["best_obj_nll"] = float(m.group(2))
+                result["best_mse"]     = float(m.group(3))
+    return result
+
+
+@app.route("/api/experiments")
+def api_experiments():
+    exps = []
+    for cfg_path in sorted(Path("experiments").glob("*/config.py")):
+        name = cfg_path.parent.name
+        try:
+            cfg     = _load_exp_cfg(name)
+            metrics = _parse_best_epoch(cfg_path.parent / "train.log")
+            exps.append({
+                "name":          name,
+                "n_layers":      cfg.get("n_layers"),
+                "random_depths": cfg.get("random_depths", False),
+                "cross_temp":    cfg.get("cross_temp", 1.0),
+                "best_nll":      metrics["best_nll"],
+                "best_obj_nll":  metrics["best_obj_nll"],
+                "best_mse":      metrics["best_mse"],
+                "ckpt_exists":   (cfg_path.parent / "best_model.pt").exists(),
+            })
+        except Exception:
+            pass
+    return jsonify(exps)
+
+
 @app.route("/api/model_status")
 def api_model_status():
     return jsonify({
@@ -371,6 +564,29 @@ def api_model_status():
             str(__import__("pathlib").Path("experiments") /
                 __import__("config_grid_depth").CFG["name"] / "best_model.pt")),
     })
+
+
+@app.route("/experiments/<path:filename>")
+def serve_experiment_file(filename):
+    return send_from_directory("experiments", filename)
+
+
+@app.route("/api/report_list")
+def api_report_list():
+    reports = []
+    for p in sorted(Path("experiments").glob("*/report.html")):
+        name = p.parent.name
+        log  = p.parent / "train.log"
+        best_nll = None
+        if log.exists():
+            for line in log.read_text().splitlines():
+                m = re.search(r"Best val NLL: ([\d.]+)", line)
+                if m:
+                    best_nll = float(m.group(1))
+        reports.append({"name": name, "url": f"/experiments/{name}/report.html",
+                         "best_nll": best_nll})
+    reports.sort(key=lambda x: (x["best_nll"] or 99))
+    return jsonify(reports)
 
 
 @app.route("/model-graph")

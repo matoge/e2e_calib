@@ -4,12 +4,14 @@
 
 CFG = dict(
     # ── Experiment ─────────────────────────────────────────────────────────
-    name        = "v16_4layer_vanilla",   # → experiments/v16_4layer_vanilla/
+    name             = "v21_3layer_bgfixed",   # → experiments/v21_3layer_bgfixed/
 
     # ── Model ──────────────────────────────────────────────────────────────
-    n_layers      = 4,        # 2/3/4
-    self_first    = False,    # True = self-attn before cross-attn in each block
-    kv_self_attn  = False,    # True = image tokens self-attn before cross-attn
+    n_layers         = 3,
+    self_first       = False,
+    kv_self_attn     = False,
+    cross_temp       = 1.0,
+    cross_temp_start = 1.0,
     img_size    = 64,
     in_channels = 3,
 
@@ -21,5 +23,5 @@ CFG = dict(
     train_size  = 8000,
     val_size    = 800,
     max_offset     = 16.0,
-    random_depths  = True,    # True → all 3 depths random (v9+)
+    random_depths  = False,   # False → BG fixed at 1.0
 )

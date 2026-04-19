@@ -24,7 +24,8 @@ class CrossAttentionBlockCov(nn.Module):
     """Cross-attn block. Order: [kv_self_attn →] cross → [self_first? sa :] sa → FFN.
     kv_self_attn=True enriches image tokens with self-attn before cross-attn.
     """
-    def __init__(self, d: int = D, n_heads: int = 4, kv_self_attn: bool = False):
+    def __init__(self, d: int = D, n_heads: int = 4, kv_self_attn: bool = False,
+                 cross_temp: float = 1.0):
         super().__init__()
         self.cross_attn  = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
         self.norm_q      = nn.LayerNorm(d)
@@ -47,6 +48,7 @@ class CrossAttentionBlockCov(nn.Module):
             self.kv_sa      = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
             self.norm_kv_sa = nn.LayerNorm(d)
         self._kv_self_attn = kv_self_attn
+        self._cross_temp   = cross_temp
 
     def forward(self, q, feat, uv_01, key_padding_mask=None, self_first=False):
         B, D_, H, W = feat.shape
@@ -57,14 +59,17 @@ class CrossAttentionBlockCov(nn.Module):
             img_sa, _ = self.kv_sa(self.norm_kv_sa(kv), self.norm_kv_sa(kv), self.norm_kv_sa(kv))
             kv = kv + self.drop(img_sa)
 
+        # temperature scaling: divide Q by T → softmax(QK^T / (T·√d_k))
+        nq = self.norm_q(q) / self._cross_temp
+
         if self_first:
             sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
                                    key_padding_mask=key_padding_mask)
             q = q + self.drop(sa)
-            ca, _ = self.cross_attn(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv))
+            ca, _ = self.cross_attn(nq, self.norm_kv(kv), self.norm_kv(kv))
             q = q + self.drop(ca)
         else:
-            ca, _ = self.cross_attn(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv))
+            ca, _ = self.cross_attn(nq, self.norm_kv(kv), self.norm_kv(kv))
             q = q + self.drop(ca)
             sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
                                    key_padding_mask=key_padding_mask)
