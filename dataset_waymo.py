@@ -165,7 +165,6 @@ def _process_seg(args):
             boxes = box_df[(box_df['key.frame_timestamp_micros'] == ts) &
                             (box_df['[LiDARBoxComponent].type'].isin(obj_types))]
 
-            GS = 32
             for _, b in boxes.iterrows():
                 bx = float(b['[LiDARBoxComponent].box.center.x'])
                 by = float(b['[LiDARBoxComponent].box.center.y'])
@@ -194,18 +193,19 @@ def _process_seg(args):
                 ch, sh = math.cos(heading), math.sin(heading)
                 R_obj = np.array([[ch, sh, 0], [-sh, ch, 0], [0, 0, 1]], dtype=np.float32)
 
-                # Grid-sample points from 3× enlarged crop region
-                margin = crop_size * 1.5
+                # 2× crop ROI; 2px grid in the 64×64-view → 64×64 cells over ROI
+                margin = crop_size * 0.5
+                roi_w  = crop_size + 2 * margin
                 in_roi = ((uv_gt_vis[:, 0] >= u0 - margin) & (uv_gt_vis[:, 0] < u0 + crop_size + margin) &
                           (uv_gt_vis[:, 1] >= v0 - margin) & (uv_gt_vis[:, 1] < v0 + crop_size + margin))
-                pts_roi   = pts_vis[in_roi]
-                uv_roi    = uv_gt_vis[in_roi]
-                roi_w = crop_size + 2 * margin
-                gu = u0 - margin + (np.arange(GS) + 0.5) * (roi_w / GS)
-                gv = v0 - margin + (np.arange(GS) + 0.5) * (roi_w / GS)
-                ggu, ggv = np.meshgrid(gu, gv)
-                ggu = ggu.ravel()[:, None]; ggv = ggv.ravel()[:, None]
+                pts_roi = pts_vis[in_roi]
+                uv_roi  = uv_gt_vis[in_roi]
                 if len(pts_roi) >= MIN_PTS:
+                    GS = 64
+                    gu = u0 - margin + (np.arange(GS) + 0.5) * (roi_w / GS)
+                    gv = v0 - margin + (np.arange(GS) + 0.5) * (roi_w / GS)
+                    ggu, ggv = np.meshgrid(gu, gv)
+                    ggu = ggu.ravel()[:, None]; ggv = ggv.ravel()[:, None]
                     d2 = (uv_roi[:, 0][None] - ggu) ** 2 + (uv_roi[:, 1][None] - ggv) ** 2
                     g_sel = sorted(set(d2.argmin(axis=1).tolist()))
                     pts_samp = pts_roi[g_sel]
@@ -238,7 +238,7 @@ def _process_seg(args):
                 for _ in range(n_rand * 3):
                     ru0 = random.randint(0, IW - rand_crop_size)
                     rv0 = random.randint(0, IH - rand_crop_size)
-                    r_margin = rand_crop_size * 1.5
+                    r_margin = rand_crop_size * 0.5
                     in_roi_r = ((uv_gt_vis[:, 0] >= ru0 - r_margin) & (uv_gt_vis[:, 0] < ru0 + rand_crop_size + r_margin) &
                                 (uv_gt_vis[:, 1] >= rv0 - r_margin) & (uv_gt_vis[:, 1] < rv0 + rand_crop_size + r_margin))
                     if in_roi_r.sum() < MIN_PTS:
@@ -249,6 +249,7 @@ def _process_seg(args):
                         continue
                     pts_roi_r = pts_vis[in_roi_r]; uv_roi_r = uv_gt_vis[in_roi_r]
                     roi_w_r = rand_crop_size + 2 * r_margin
+                    GS = 64
                     gu_r = ru0 - r_margin + (np.arange(GS) + 0.5) * (roi_w_r / GS)
                     gv_r = rv0 - r_margin + (np.arange(GS) + 0.5) * (roi_w_r / GS)
                     ggu_r, ggv_r = np.meshgrid(gu_r, gv_r)
@@ -386,15 +387,32 @@ class WaymoCalibDataset(Dataset):
         u_off_c = (u_off[in_crop] - u0) * scale
         v_off_c = (v_off[in_crop] - v0) * scale
 
+        # 32×32 grid (2px in 64-view): bin each pt to its cell, keep nearest-to-center.
+        grid, cell = 32, float(S) / 32
+        ci = np.clip((v_off_c / cell).astype(np.int64), 0, grid - 1)
+        cj = np.clip((u_off_c / cell).astype(np.int64), 0, grid - 1)
+        cell_id = ci * grid + cj
+        du = u_off_c - (cj + 0.5) * cell
+        dv = v_off_c - (ci + 0.5) * cell
+        d2 = du * du + dv * dv
+        sel = []
+        for cid in np.unique(cell_id):
+            members = np.where(cell_id == cid)[0]
+            sel.append(int(members[d2[members].argmin()]))
+        sel = np.array(sorted(sel), dtype=np.int64)
+        u_off_c = u_off_c[sel]
+        v_off_c = v_off_c[sel]
+        idx_in  = np.where(in_crop)[0][sel]
+
         # GT projection
-        h2 = np.hstack([pts_vis[in_crop], np.ones((in_crop.sum(), 1), dtype=np.float32)])
+        h2 = np.hstack([pts_vis[idx_in], np.ones((len(idx_in), 1), dtype=np.float32)])
         c_gt = (T_cam_gt @ h2.T).T
         d_gt = c_gt[:, 0]
         u_gt_c = (fu * (-c_gt[:, 1]) / d_gt + cu - u0) * scale
         v_gt_c = (fv * (-c_gt[:, 2]) / d_gt + cv - v0) * scale
 
-        dist_m  = (np.linalg.norm(pts_vis[in_crop], axis=1) / 100.0).astype(np.float32)
-        is_obj  = is_obj_full[in_crop].astype(np.float32)
+        dist_m  = (np.linalg.norm(pts_vis[idx_in], axis=1) / 100.0).astype(np.float32)
+        is_obj  = is_obj_full[idx_in].astype(np.float32)
 
         dist_uvd = np.stack([u_off_c.astype(np.float32), v_off_c.astype(np.float32),
                               dist_m, is_obj], axis=1)
