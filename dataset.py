@@ -239,9 +239,13 @@ def make_image_and_points_grid_depth(
         image[:, mask] = obj_colors[i][:, None]
         masks.append(mask)
 
+    # depth uses a separate RNG so main rng sequence (image/grid/offsets)
+    # is identical regardless of random_depths flag
+    rng_d = torch.Generator()
+    rng_d.manual_seed((seed if seed is not None else 0) + 1_000_000)
     if random_depths:
         for _ in range(30):
-            _d = torch.rand(3, generator=rng)
+            _d = torch.rand(3, generator=rng_d)
             _ds, _ = _d.sort()
             if (_ds[1:] - _ds[:-1]).min().item() >= 0.10:
                 break
@@ -249,8 +253,8 @@ def make_image_and_points_grid_depth(
             _ds = torch.tensor([0.10, 0.40, 0.80])
         d1, d2, d_bg = _ds[0].item(), _ds[1].item(), _ds[2].item()
     else:
-        d1   = float(torch.rand(1, generator=rng).item() * 0.35 + 0.10)  # [0.10, 0.45]
-        d2   = float(torch.rand(1, generator=rng).item() * 0.35 + 0.50)  # [0.50, 0.85]
+        d1   = float(torch.rand(1, generator=rng_d).item() * 0.35 + 0.10)
+        d2   = float(torch.rand(1, generator=rng_d).item() * 0.35 + 0.50)
         d_bg = 1.0
 
     # grid over extended area (image + max_offset margin on all sides)

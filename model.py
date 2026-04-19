@@ -75,6 +75,50 @@ class CNNBackbone(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# ConvNeXt Backbone
+# ---------------------------------------------------------------------------
+class _ConvNeXtBlock(nn.Module):
+    def __init__(self, dim, expansion=4):
+        super().__init__()
+        self.dw   = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
+        self.norm = nn.LayerNorm(dim)
+        self.pw1  = nn.Linear(dim, dim * expansion)
+        self.act  = nn.GELU()
+        self.pw2  = nn.Linear(dim * expansion, dim)
+
+    def forward(self, x):
+        h = self.dw(x).permute(0, 2, 3, 1)   # BCHW→BHWC
+        h = self.pw2(self.act(self.pw1(self.norm(h))))
+        return x + h.permute(0, 3, 1, 2)
+
+
+class ConvNeXtBackbone(nn.Module):
+    def __init__(self, d: int = D, in_channels: int = 3, n_blocks: int = 2):
+        super().__init__()
+        # 64→32, 3→64
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, 64, 3, stride=2, padding=1),
+            nn.BatchNorm2d(64), nn.GELU(),
+        )
+        # 32→16, fine features
+        self.fine_down   = nn.Conv2d(64, d, 3, stride=2, padding=1)
+        self.fine_norm   = nn.BatchNorm2d(d)
+        self.fine_blocks = nn.Sequential(*[_ConvNeXtBlock(d) for _ in range(n_blocks)])
+        # 16→8, coarse features
+        self.coarse_down   = nn.Conv2d(d, d, 3, stride=2, padding=1)
+        self.coarse_norm   = nn.BatchNorm2d(d)
+        self.coarse_blocks = nn.Sequential(*[_ConvNeXtBlock(d) for _ in range(n_blocks)])
+        self.pe_fine   = PosEnc2D(d)
+        self.pe_coarse = PosEnc2D(d)
+
+    def forward(self, x):
+        s      = self.stem(x)
+        fine   = self.fine_blocks(torch.relu(self.fine_norm(self.fine_down(s))))
+        coarse = self.coarse_blocks(torch.relu(self.coarse_norm(self.coarse_down(fine))))
+        return self.pe_coarse(coarse), self.pe_fine(fine)
+
+
+# ---------------------------------------------------------------------------
 # Point MLP  (UV in [0,1] → D)
 # ---------------------------------------------------------------------------
 class PointMLP(nn.Module):

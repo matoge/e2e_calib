@@ -1,0 +1,12 @@
+CFG = dict(
+    name         = 'ps_v9_full',
+    n_layers     = 4,
+    img_size     = 64,
+    in_channels  = 3,
+    use_convnext = True,
+    use_frustum  = True,
+    epochs       = 300,
+    batch_size   = 64,
+    lr           = 0.001,
+    lr_min       = 1e-06,
+)

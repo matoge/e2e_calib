@@ -1,0 +1,156 @@
+22:03:12  name=v18_3layer_randdepth_fix  n_layers=3 self_first=False max_offset=16.0  batch=64  epochs=100  lr=0.001→1e-06
+22:03:12  params: 1.16M
+22:03:16  [  1/100]  train nll=+5.461(obj=+5.432 bg=+5.466) mse=12.260(obj=12.057 bg=12.285)  val nll=+5.446(obj=+5.377 bg=+5.457) mse=12.137(obj=11.649 bg=12.201)  lr=4.00e-04  temp=1.000  tot=0.1min
+22:03:16    ↳ saved (val_nll=5.4461)
+22:03:20  [  2/100]  train nll=+5.480(obj=+5.405 bg=+5.490) mse=12.355(obj=11.874 bg=12.414)  val nll=+5.437(obj=+5.348 bg=+5.448) mse=12.123(obj=11.504 bg=12.203)  lr=6.00e-04  temp=1.000  tot=0.1min
+22:03:20    ↳ saved (val_nll=5.4367)
+22:03:23  [  3/100]  train nll=+5.500(obj=+5.414 bg=+5.512) mse=12.467(obj=11.871 bg=12.541)  val nll=+5.449(obj=+5.386 bg=+5.461) mse=12.131(obj=11.546 bg=12.207)  lr=8.00e-04  temp=1.000  tot=0.2min
+22:03:26  [  4/100]  train nll=+5.479(obj=+5.410 bg=+5.490) mse=12.287(obj=11.852 bg=12.342)  val nll=+5.480(obj=+5.397 bg=+5.489) mse=12.231(obj=11.768 bg=12.290)  lr=1.00e-03  temp=1.000  tot=0.2min
+22:03:29  [  5/100]  train nll=+5.476(obj=+5.403 bg=+5.487) mse=12.289(obj=11.804 bg=12.349)  val nll=+5.446(obj=+5.352 bg=+5.462) mse=12.134(obj=11.531 bg=12.213)  lr=1.00e-03  temp=1.000  tot=0.3min
+22:03:32  [  6/100]  train nll=+5.489(obj=+5.414 bg=+5.500) mse=12.410(obj=11.887 bg=12.474)  val nll=+5.504(obj=+5.415 bg=+5.517) mse=12.463(obj=11.787 bg=12.554)  lr=1.00e-03  temp=1.000  tot=0.3min
+22:03:35  [  7/100]  train nll=+5.483(obj=+5.398 bg=+5.495) mse=12.369(obj=11.804 bg=12.439)  val nll=+5.432(obj=+5.346 bg=+5.443) mse=12.089(obj=11.510 bg=12.164)  lr=9.99e-04  temp=1.000  tot=0.4min
+22:03:35    ↳ saved (val_nll=5.4319)
+22:03:39  [  8/100]  train nll=+5.481(obj=+5.396 bg=+5.494) mse=12.347(obj=11.769 bg=12.418)  val nll=+5.611(obj=+5.463 bg=+5.631) mse=12.736(obj=11.923 bg=12.839)  lr=9.98e-04  temp=1.000  tot=0.4min
+22:03:42  [  9/100]  train nll=+5.470(obj=+5.356 bg=+5.486) mse=12.294(obj=11.519 bg=12.390)  val nll=+5.425(obj=+5.273 bg=+5.444) mse=12.034(obj=10.984 bg=12.167)  lr=9.96e-04  temp=1.000  tot=0.5min
+22:03:42    ↳ saved (val_nll=5.4249)
+22:03:46  [ 10/100]  train nll=+5.468(obj=+5.304 bg=+5.490) mse=12.297(obj=11.221 bg=12.430)  val nll=+5.420(obj=+5.220 bg=+5.446) mse=11.998(obj=10.749 bg=12.156)  lr=9.93e-04  temp=1.000  tot=0.6min
+22:03:46    ↳ saved (val_nll=5.4196)
+22:03:49  [ 11/100]  train nll=+5.438(obj=+5.258 bg=+5.462) mse=12.128(obj=10.917 bg=12.279)  val nll=+5.465(obj=+5.265 bg=+5.493) mse=12.210(obj=10.799 bg=12.391)  lr=9.90e-04  temp=1.000  tot=0.6min
+22:03:52  [ 12/100]  train nll=+5.459(obj=+5.257 bg=+5.485) mse=12.272(obj=10.914 bg=12.440)  val nll=+5.452(obj=+5.248 bg=+5.481) mse=12.139(obj=10.802 bg=12.310)  lr=9.87e-04  temp=1.000  tot=0.7min
+22:03:55  [ 13/100]  train nll=+5.444(obj=+5.207 bg=+5.475) mse=12.178(obj=10.651 bg=12.365)  val nll=+5.419(obj=+5.170 bg=+5.452) mse=12.028(obj=10.516 bg=12.220)  lr=9.83e-04  temp=1.000  tot=0.7min
+22:03:55    ↳ saved (val_nll=5.4187)
+22:03:59  [ 14/100]  train nll=+5.442(obj=+5.207 bg=+5.472) mse=12.149(obj=10.663 bg=12.334)  val nll=+5.435(obj=+5.194 bg=+5.467) mse=12.097(obj=10.524 bg=12.298)  lr=9.78e-04  temp=1.000  tot=0.8min
+22:04:02  [ 15/100]  train nll=+5.434(obj=+5.179 bg=+5.466) mse=12.100(obj=10.486 bg=12.298)  val nll=+5.428(obj=+5.107 bg=+5.470) mse=12.040(obj=10.175 bg=12.279)  lr=9.73e-04  temp=1.000  tot=0.8min
+22:04:05  [ 16/100]  train nll=+5.432(obj=+5.157 bg=+5.467) mse=12.121(obj=10.415 bg=12.335)  val nll=+5.410(obj=+5.135 bg=+5.448) mse=11.920(obj=10.266 bg=12.129)  lr=9.67e-04  temp=1.000  tot=0.9min
+22:04:05    ↳ saved (val_nll=5.4099)
+22:04:09  [ 17/100]  train nll=+5.429(obj=+5.113 bg=+5.468) mse=12.123(obj=10.234 bg=12.353)  val nll=+5.403(obj=+5.060 bg=+5.446) mse=11.914(obj=9.878 bg=12.174)  lr=9.61e-04  temp=1.000  tot=0.9min
+22:04:09    ↳ saved (val_nll=5.4033)
+22:04:12  [ 18/100]  train nll=+5.425(obj=+5.106 bg=+5.466) mse=12.081(obj=10.198 bg=12.314)  val nll=+5.424(obj=+5.140 bg=+5.461) mse=12.040(obj=10.405 bg=12.246)  lr=9.55e-04  temp=1.000  tot=1.0min
+22:04:15  [ 19/100]  train nll=+5.421(obj=+5.119 bg=+5.460) mse=12.026(obj=10.260 bg=12.247)  val nll=+5.418(obj=+5.106 bg=+5.458) mse=11.969(obj=10.088 bg=12.207)  lr=9.47e-04  temp=1.000  tot=1.0min
+22:04:18  [ 20/100]  train nll=+5.424(obj=+5.081 bg=+5.467) mse=12.079(obj=10.111 bg=12.322)  val nll=+5.409(obj=+5.080 bg=+5.453) mse=11.924(obj=9.920 bg=12.178)  lr=9.40e-04  temp=1.000  tot=1.1min
+22:04:21  [ 21/100]  train nll=+5.414(obj=+5.071 bg=+5.457) mse=12.010(obj=10.013 bg=12.257)  val nll=+5.405(obj=+5.039 bg=+5.451) mse=11.954(obj=9.896 bg=12.217)  lr=9.32e-04  temp=1.000  tot=1.2min
+22:04:25  [ 22/100]  train nll=+5.412(obj=+5.073 bg=+5.455) mse=12.005(obj=10.073 bg=12.247)  val nll=+5.398(obj=+5.009 bg=+5.446) mse=11.907(obj=9.782 bg=12.177)  lr=9.23e-04  temp=1.000  tot=1.2min
+22:04:25    ↳ saved (val_nll=5.3981)
+22:04:28  [ 23/100]  train nll=+5.425(obj=+5.033 bg=+5.475) mse=12.108(obj=9.895 bg=12.383)  val nll=+5.399(obj=+4.974 bg=+5.456) mse=11.911(obj=9.593 bg=12.205)  lr=9.14e-04  temp=1.000  tot=1.3min
+22:04:31  [ 24/100]  train nll=+5.410(obj=+5.038 bg=+5.457) mse=12.008(obj=9.943 bg=12.261)  val nll=+5.386(obj=+4.958 bg=+5.440) mse=11.873(obj=9.578 bg=12.164)  lr=9.05e-04  temp=1.000  tot=1.3min
+22:04:31    ↳ saved (val_nll=5.3860)
+22:04:35  [ 25/100]  train nll=+5.407(obj=+4.997 bg=+5.458) mse=12.018(obj=9.737 bg=12.301)  val nll=+5.412(obj=+4.913 bg=+5.478) mse=11.962(obj=9.358 bg=12.291)  lr=8.95e-04  temp=1.000  tot=1.4min
+22:04:38  [ 26/100]  train nll=+5.401(obj=+4.970 bg=+5.455) mse=11.970(obj=9.574 bg=12.265)  val nll=+5.384(obj=+4.921 bg=+5.444) mse=11.854(obj=9.467 bg=12.157)  lr=8.84e-04  temp=1.000  tot=1.4min
+22:04:38    ↳ saved (val_nll=5.3843)
+22:04:41  [ 27/100]  train nll=+5.411(obj=+4.964 bg=+5.467) mse=12.041(obj=9.607 bg=12.345)  val nll=+5.392(obj=+4.861 bg=+5.458) mse=11.920(obj=9.246 bg=12.259)  lr=8.74e-04  temp=1.000  tot=1.5min
+22:04:44  [ 28/100]  train nll=+5.400(obj=+4.953 bg=+5.455) mse=11.928(obj=9.572 bg=12.215)  val nll=+5.376(obj=+4.862 bg=+5.442) mse=11.822(obj=9.219 bg=12.154)  lr=8.62e-04  temp=1.000  tot=1.5min
+22:04:44    ↳ saved (val_nll=5.3763)
+22:04:48  [ 29/100]  train nll=+5.402(obj=+4.917 bg=+5.463) mse=11.975(obj=9.421 bg=12.292)  val nll=+5.379(obj=+4.854 bg=+5.446) mse=11.841(obj=9.107 bg=12.189)  lr=8.51e-04  temp=1.000  tot=1.6min
+22:04:51  [ 30/100]  train nll=+5.400(obj=+4.925 bg=+5.459) mse=11.973(obj=9.447 bg=12.287)  val nll=+5.373(obj=+4.867 bg=+5.438) mse=11.794(obj=9.078 bg=12.140)  lr=8.39e-04  temp=1.000  tot=1.6min
+22:04:51    ↳ saved (val_nll=5.3731)
+22:04:54  [ 31/100]  train nll=+5.385(obj=+4.891 bg=+5.447) mse=11.870(obj=9.266 bg=12.195)  val nll=+5.375(obj=+4.849 bg=+5.442) mse=11.827(obj=9.049 bg=12.181)  lr=8.26e-04  temp=1.000  tot=1.7min
+22:04:57  [ 32/100]  train nll=+5.410(obj=+4.887 bg=+5.474) mse=12.043(obj=9.206 bg=12.392)  val nll=+5.379(obj=+4.812 bg=+5.451) mse=11.835(obj=8.898 bg=12.209)  lr=8.14e-04  temp=1.000  tot=1.7min
+22:05:01  [ 33/100]  train nll=+5.395(obj=+4.883 bg=+5.459) mse=11.957(obj=9.189 bg=12.302)  val nll=+5.371(obj=+4.817 bg=+5.445) mse=11.807(obj=9.010 bg=12.164)  lr=8.01e-04  temp=1.000  tot=1.8min
+22:05:01    ↳ saved (val_nll=5.3712)
+22:05:04  [ 34/100]  train nll=+5.405(obj=+4.858 bg=+5.474) mse=12.013(obj=9.074 bg=12.381)  val nll=+5.380(obj=+4.809 bg=+5.452) mse=11.822(obj=8.820 bg=12.204)  lr=7.87e-04  temp=1.000  tot=1.9min
+22:05:07  [ 35/100]  train nll=+5.392(obj=+4.828 bg=+5.464) mse=11.940(obj=8.964 bg=12.310)  val nll=+5.367(obj=+4.753 bg=+5.446) mse=11.789(obj=8.723 bg=12.180)  lr=7.74e-04  temp=1.000  tot=1.9min
+22:05:07    ↳ saved (val_nll=5.3667)
+22:05:11  [ 36/100]  train nll=+5.381(obj=+4.809 bg=+5.452) mse=11.845(obj=8.804 bg=12.220)  val nll=+5.363(obj=+4.754 bg=+5.441) mse=11.757(obj=8.544 bg=12.164)  lr=7.60e-04  temp=1.000  tot=2.0min
+22:05:11    ↳ saved (val_nll=5.3634)
+22:05:14  [ 37/100]  train nll=+5.372(obj=+4.779 bg=+5.446) mse=11.806(obj=8.668 bg=12.196)  val nll=+5.375(obj=+4.753 bg=+5.454) mse=11.779(obj=8.454 bg=12.199)  lr=7.45e-04  temp=1.000  tot=2.0min
+22:05:17  [ 38/100]  train nll=+5.385(obj=+4.728 bg=+5.467) mse=11.866(obj=8.403 bg=12.298)  val nll=+5.353(obj=+4.660 bg=+5.441) mse=11.692(obj=8.056 bg=12.154)  lr=7.31e-04  temp=1.000  tot=2.1min
+22:05:17    ↳ saved (val_nll=5.3528)
+22:05:20  [ 39/100]  train nll=+5.359(obj=+4.655 bg=+5.446) mse=11.743(obj=8.055 bg=12.198)  val nll=+5.334(obj=+4.463 bg=+5.445) mse=11.620(obj=7.209 bg=12.180)  lr=7.16e-04  temp=1.000  tot=2.1min
+22:05:20    ↳ saved (val_nll=5.3340)
+22:05:24  [ 40/100]  train nll=+5.351(obj=+4.511 bg=+5.456) mse=11.727(obj=7.397 bg=12.261)  val nll=+5.318(obj=+4.367 bg=+5.439) mse=11.576(obj=7.073 bg=12.148)  lr=7.01e-04  temp=1.000  tot=2.2min
+22:05:24    ↳ saved (val_nll=5.3176)
+22:05:27  [ 41/100]  train nll=+5.324(obj=+4.326 bg=+5.448) mse=11.599(obj=6.691 bg=12.206)  val nll=+5.296(obj=+4.136 bg=+5.443) mse=11.485(obj=6.151 bg=12.161)  lr=6.86e-04  temp=1.000  tot=2.2min
+22:05:27    ↳ saved (val_nll=5.2961)
+22:05:30  [ 42/100]  train nll=+5.323(obj=+4.165 bg=+5.467) mse=11.671(obj=6.137 bg=12.359)  val nll=+5.276(obj=+3.975 bg=+5.440) mse=11.427(obj=5.582 bg=12.167)  lr=6.70e-04  temp=1.000  tot=2.3min
+22:05:30    ↳ saved (val_nll=5.2755)
+22:05:33  [ 43/100]  train nll=+5.294(obj=+4.003 bg=+5.454) mse=11.546(obj=5.669 bg=12.272)  val nll=+5.267(obj=+3.877 bg=+5.443) mse=11.402(obj=5.437 bg=12.158)  lr=6.55e-04  temp=1.000  tot=2.4min
+22:05:33    ↳ saved (val_nll=5.2670)
+22:05:36  [ 44/100]  train nll=+5.297(obj=+3.912 bg=+5.471) mse=11.611(obj=5.448 bg=12.383)  val nll=+5.264(obj=+3.844 bg=+5.443) mse=11.393(obj=5.331 bg=12.159)  lr=6.39e-04  temp=1.000  tot=2.4min
+22:05:36    ↳ saved (val_nll=5.2640)
+22:05:40  [ 45/100]  train nll=+5.271(obj=+3.802 bg=+5.454) mse=11.473(obj=5.184 bg=12.254)  val nll=+5.248(obj=+3.638 bg=+5.452) mse=11.398(obj=4.766 bg=12.241)  lr=6.23e-04  temp=1.000  tot=2.5min
+22:05:40    ↳ saved (val_nll=5.2481)
+22:05:43  [ 46/100]  train nll=+5.245(obj=+3.569 bg=+5.453) mse=11.410(obj=4.655 bg=12.243)  val nll=+5.217(obj=+3.469 bg=+5.438) mse=11.293(obj=4.489 bg=12.155)  lr=6.07e-04  temp=1.000  tot=2.5min
+22:05:43    ↳ saved (val_nll=5.2168)
+22:05:46  [ 47/100]  train nll=+5.245(obj=+3.573 bg=+5.450) mse=11.393(obj=4.674 bg=12.217)  val nll=+5.214(obj=+3.424 bg=+5.442) mse=11.293(obj=4.388 bg=12.171)  lr=5.91e-04  temp=1.000  tot=2.6min
+22:05:46    ↳ saved (val_nll=5.2138)
+22:05:49  [ 48/100]  train nll=+5.247(obj=+3.434 bg=+5.469) mse=11.490(obj=4.409 bg=12.355)  val nll=+5.183(obj=+3.154 bg=+5.441) mse=11.223(obj=3.924 bg=12.150)  lr=5.75e-04  temp=1.000  tot=2.6min
+22:05:49    ↳ saved (val_nll=5.1832)
+22:05:53  [ 49/100]  train nll=+5.212(obj=+3.318 bg=+5.450) mse=11.340(obj=4.187 bg=12.236)  val nll=+5.169(obj=+3.026 bg=+5.443) mse=11.208(obj=3.777 bg=12.152)  lr=5.58e-04  temp=1.000  tot=2.7min
+22:05:53    ↳ saved (val_nll=5.1691)
+22:05:56  [ 50/100]  train nll=+5.207(obj=+3.209 bg=+5.454) mse=11.322(obj=3.969 bg=12.229)  val nll=+5.172(obj=+3.010 bg=+5.447) mse=11.230(obj=3.670 bg=12.190)  lr=5.42e-04  temp=1.000  tot=2.7min
+22:06:00  [ 51/100]  train nll=+5.220(obj=+3.188 bg=+5.468) mse=11.427(obj=3.947 bg=12.339)  val nll=+5.141(obj=+2.811 bg=+5.438) mse=11.148(obj=3.365 bg=12.135)  lr=5.25e-04  temp=1.000  tot=2.8min
+22:06:00    ↳ saved (val_nll=5.1414)
+22:06:03  [ 52/100]  train nll=+5.211(obj=+3.221 bg=+5.455) mse=11.372(obj=4.013 bg=12.274)  val nll=+5.157(obj=+2.859 bg=+5.448) mse=11.210(obj=3.453 bg=12.193)  lr=5.09e-04  temp=1.000  tot=2.8min
+22:06:06  [ 53/100]  train nll=+5.178(obj=+3.038 bg=+5.445) mse=11.274(obj=3.717 bg=12.214)  val nll=+5.158(obj=+2.953 bg=+5.438) mse=11.181(obj=3.546 bg=12.150)  lr=4.92e-04  temp=1.000  tot=2.9min
+22:06:09  [ 54/100]  train nll=+5.192(obj=+3.043 bg=+5.461) mse=11.352(obj=3.706 bg=12.308)  val nll=+5.136(obj=+2.711 bg=+5.446) mse=11.161(obj=3.201 bg=12.171)  lr=4.76e-04  temp=1.000  tot=2.9min
+22:06:09    ↳ saved (val_nll=5.1359)
+22:06:12  [ 55/100]  train nll=+5.175(obj=+2.947 bg=+5.452) mse=11.292(obj=3.550 bg=12.251)  val nll=+5.102(obj=+2.435 bg=+5.442) mse=11.118(obj=2.856 bg=12.167)  lr=4.59e-04  temp=1.000  tot=3.0min
+22:06:12    ↳ saved (val_nll=5.1016)
+22:06:16  [ 56/100]  train nll=+5.172(obj=+2.866 bg=+5.455) mse=11.296(obj=3.425 bg=12.260)  val nll=+5.116(obj=+2.571 bg=+5.440) mse=11.131(obj=3.021 bg=12.160)  lr=4.43e-04  temp=1.000  tot=3.1min
+22:06:19  [ 57/100]  train nll=+5.172(obj=+2.869 bg=+5.455) mse=11.325(obj=3.454 bg=12.291)  val nll=+5.097(obj=+2.379 bg=+5.442) mse=11.102(obj=2.755 bg=12.161)  lr=4.26e-04  temp=1.000  tot=3.1min
+22:06:19    ↳ saved (val_nll=5.0972)
+22:06:22  [ 58/100]  train nll=+5.149(obj=+2.775 bg=+5.446) mse=11.237(obj=3.311 bg=12.228)  val nll=+5.101(obj=+2.432 bg=+5.439) mse=11.107(obj=2.809 bg=12.160)  lr=4.10e-04  temp=1.000  tot=3.2min
+22:06:25  [ 59/100]  train nll=+5.167(obj=+2.760 bg=+5.463) mse=11.348(obj=3.289 bg=12.337)  val nll=+5.074(obj=+2.182 bg=+5.442) mse=11.081(obj=2.536 bg=12.165)  lr=3.94e-04  temp=1.000  tot=3.2min
+22:06:25    ↳ saved (val_nll=5.0744)
+22:06:28  [ 60/100]  train nll=+5.150(obj=+2.686 bg=+5.457) mse=11.270(obj=3.177 bg=12.280)  val nll=+5.091(obj=+2.332 bg=+5.441) mse=11.094(obj=2.705 bg=12.158)  lr=3.78e-04  temp=1.000  tot=3.3min
+22:06:32  [ 61/100]  train nll=+5.141(obj=+2.658 bg=+5.450) mse=11.228(obj=3.128 bg=12.233)  val nll=+5.082(obj=+2.269 bg=+5.439) mse=11.080(obj=2.624 bg=12.153)  lr=3.62e-04  temp=1.000  tot=3.3min
+22:06:35  [ 62/100]  train nll=+5.116(obj=+2.589 bg=+5.433) mse=11.114(obj=3.049 bg=12.128)  val nll=+5.068(obj=+2.141 bg=+5.440) mse=11.058(obj=2.470 bg=12.147)  lr=3.46e-04  temp=1.000  tot=3.4min
+22:06:35    ↳ saved (val_nll=5.0677)
+22:06:39  [ 63/100]  train nll=+5.141(obj=+2.586 bg=+5.458) mse=11.265(obj=3.025 bg=12.285)  val nll=+5.086(obj=+2.281 bg=+5.441) mse=11.080(obj=2.626 bg=12.152)  lr=3.31e-04  temp=1.000  tot=3.4min
+22:06:42  [ 64/100]  train nll=+5.123(obj=+2.525 bg=+5.449) mse=11.211(obj=2.931 bg=12.249)  val nll=+5.059(obj=+2.048 bg=+5.439) mse=11.076(obj=2.448 bg=12.170)  lr=3.15e-04  temp=1.000  tot=3.5min
+22:06:42    ↳ saved (val_nll=5.0592)
+22:06:45  [ 65/100]  train nll=+5.144(obj=+2.512 bg=+5.466) mse=11.318(obj=2.940 bg=12.343)  val nll=+5.085(obj=+2.283 bg=+5.440) mse=11.083(obj=2.678 bg=12.149)  lr=3.00e-04  temp=1.000  tot=3.5min
+22:06:49  [ 66/100]  train nll=+5.126(obj=+2.532 bg=+5.443) mse=11.187(obj=2.963 bg=12.193)  val nll=+5.080(obj=+2.261 bg=+5.435) mse=11.078(obj=2.674 bg=12.143)  lr=2.85e-04  temp=1.000  tot=3.6min
+22:06:52  [ 67/100]  train nll=+5.120(obj=+2.457 bg=+5.450) mse=11.221(obj=2.865 bg=12.255)  val nll=+5.062(obj=+2.110 bg=+5.438) mse=11.046(obj=2.445 bg=12.137)  lr=2.70e-04  temp=1.000  tot=3.7min
+22:06:55  [ 68/100]  train nll=+5.118(obj=+2.455 bg=+5.445) mse=11.171(obj=2.875 bg=12.190)  val nll=+5.099(obj=+2.402 bg=+5.441) mse=11.091(obj=2.638 bg=12.163)  lr=2.56e-04  temp=1.000  tot=3.7min
+22:06:58  [ 69/100]  train nll=+5.125(obj=+2.419 bg=+5.461) mse=11.250(obj=2.803 bg=12.301)  val nll=+5.067(obj=+2.090 bg=+5.445) mse=11.076(obj=2.477 bg=12.167)  lr=2.41e-04  temp=1.000  tot=3.8min
+22:07:02  [ 70/100]  train nll=+5.109(obj=+2.350 bg=+5.455) mse=11.195(obj=2.716 bg=12.256)  val nll=+5.050(obj=+1.986 bg=+5.439) mse=11.045(obj=2.269 bg=12.158)  lr=2.27e-04  temp=1.000  tot=3.8min
+22:07:02    ↳ saved (val_nll=5.0496)
+22:07:05  [ 71/100]  train nll=+5.111(obj=+2.415 bg=+5.445) mse=11.159(obj=2.804 bg=12.193)  val nll=+5.039(obj=+1.926 bg=+5.435) mse=11.021(obj=2.261 bg=12.131)  lr=2.14e-04  temp=1.000  tot=3.9min
+22:07:05    ↳ saved (val_nll=5.0388)
+22:07:08  [ 72/100]  train nll=+5.104(obj=+2.316 bg=+5.442) mse=11.156(obj=2.653 bg=12.183)  val nll=+5.043(obj=+1.929 bg=+5.437) mse=11.033(obj=2.249 bg=12.147)  lr=2.00e-04  temp=1.000  tot=3.9min
+22:07:11  [ 73/100]  train nll=+5.106(obj=+2.281 bg=+5.454) mse=11.229(obj=2.634 bg=12.288)  val nll=+5.029(obj=+1.820 bg=+5.436) mse=11.012(obj=2.120 bg=12.140)  lr=1.87e-04  temp=1.000  tot=4.0min
+22:07:11    ↳ saved (val_nll=5.0287)
+22:07:14  [ 74/100]  train nll=+5.087(obj=+2.275 bg=+5.436) mse=11.101(obj=2.620 bg=12.155)  val nll=+5.033(obj=+1.853 bg=+5.436) mse=11.007(obj=2.144 bg=12.131)  lr=1.75e-04  temp=1.000  tot=4.0min
+22:07:18  [ 75/100]  train nll=+5.106(obj=+2.261 bg=+5.459) mse=11.231(obj=2.601 bg=12.299)  val nll=+5.030(obj=+1.840 bg=+5.436) mse=11.013(obj=2.150 bg=12.137)  lr=1.62e-04  temp=1.000  tot=4.1min
+22:07:21  [ 76/100]  train nll=+5.097(obj=+2.262 bg=+5.452) mse=11.178(obj=2.626 bg=12.246)  val nll=+5.033(obj=+1.848 bg=+5.438) mse=11.023(obj=2.235 bg=12.137)  lr=1.50e-04  temp=1.000  tot=4.1min
+22:07:24  [ 77/100]  train nll=+5.096(obj=+2.172 bg=+5.459) mse=11.218(obj=2.526 bg=12.296)  val nll=+5.028(obj=+1.802 bg=+5.439) mse=11.017(obj=2.118 bg=12.146)  lr=1.39e-04  temp=1.000  tot=4.2min
+22:07:24    ↳ saved (val_nll=5.0278)
+22:07:28  [ 78/100]  train nll=+5.077(obj=+2.188 bg=+5.435) mse=11.103(obj=2.537 bg=12.163)  val nll=+5.019(obj=+1.730 bg=+5.438) mse=11.005(obj=2.064 bg=12.140)  lr=1.27e-04  temp=1.000  tot=4.3min
+22:07:28    ↳ saved (val_nll=5.0195)
+22:07:31  [ 79/100]  train nll=+5.077(obj=+2.175 bg=+5.437) mse=11.094(obj=2.513 bg=12.158)  val nll=+5.019(obj=+1.740 bg=+5.435) mse=11.008(obj=2.016 bg=12.148)  lr=1.17e-04  temp=1.000  tot=4.3min
+22:07:31    ↳ saved (val_nll=5.0187)
+22:07:34  [ 80/100]  train nll=+5.096(obj=+2.147 bg=+5.462) mse=11.215(obj=2.472 bg=12.300)  val nll=+5.017(obj=+1.692 bg=+5.440) mse=11.004(obj=2.012 bg=12.144)  lr=1.06e-04  temp=1.000  tot=4.4min
+22:07:34    ↳ saved (val_nll=5.0171)
+22:07:37  [ 81/100]  train nll=+5.084(obj=+2.130 bg=+5.450) mse=11.161(obj=2.478 bg=12.237)  val nll=+5.023(obj=+1.728 bg=+5.442) mse=11.023(obj=2.040 bg=12.162)  lr=9.64e-05  temp=1.000  tot=4.4min
+22:07:41  [ 82/100]  train nll=+5.083(obj=+2.105 bg=+5.455) mse=11.169(obj=2.463 bg=12.256)  val nll=+5.015(obj=+1.689 bg=+5.439) mse=10.998(obj=2.019 bg=12.137)  lr=8.69e-05  temp=1.000  tot=4.5min
+22:07:41    ↳ saved (val_nll=5.0154)
+22:07:44  [ 83/100]  train nll=+5.072(obj=+2.108 bg=+5.444) mse=11.111(obj=2.450 bg=12.196)  val nll=+5.015(obj=+1.682 bg=+5.438) mse=10.998(obj=1.991 bg=12.141)  lr=7.79e-05  temp=1.000  tot=4.5min
+22:07:44    ↳ saved (val_nll=5.0153)
+22:07:47  [ 84/100]  train nll=+5.079(obj=+2.096 bg=+5.446) mse=11.159(obj=2.449 bg=12.230)  val nll=+5.019(obj=+1.697 bg=+5.441) mse=11.010(obj=2.008 bg=12.153)  lr=6.93e-05  temp=1.000  tot=4.6min
+22:07:50  [ 85/100]  train nll=+5.075(obj=+2.081 bg=+5.444) mse=11.139(obj=2.400 bg=12.213)  val nll=+5.015(obj=+1.682 bg=+5.439) mse=11.010(obj=1.991 bg=12.154)  lr=6.12e-05  temp=1.000  tot=4.6min
+22:07:54  [ 86/100]  train nll=+5.082(obj=+2.071 bg=+5.455) mse=11.180(obj=2.406 bg=12.264)  val nll=+5.010(obj=+1.624 bg=+5.441) mse=10.998(obj=1.952 bg=12.145)  lr=5.36e-05  temp=1.000  tot=4.7min
+22:07:54    ↳ saved (val_nll=5.0102)
+22:07:57  [ 87/100]  train nll=+5.081(obj=+2.032 bg=+5.458) mse=11.224(obj=2.370 bg=12.320)  val nll=+5.009(obj=+1.607 bg=+5.441) mse=10.992(obj=1.936 bg=12.141)  lr=4.65e-05  temp=1.000  tot=4.7min
+22:07:57    ↳ saved (val_nll=5.0087)
+22:08:00  [ 88/100]  train nll=+5.068(obj=+2.027 bg=+5.446) mse=11.130(obj=2.343 bg=12.221)  val nll=+5.005(obj=+1.635 bg=+5.435) mse=10.994(obj=1.952 bg=12.141)  lr=3.98e-05  temp=1.000  tot=4.8min
+22:08:00    ↳ saved (val_nll=5.0054)
+22:08:03  [ 89/100]  train nll=+5.075(obj=+2.028 bg=+5.449) mse=11.169(obj=2.337 bg=12.253)  val nll=+5.001(obj=+1.581 bg=+5.436) mse=10.997(obj=1.918 bg=12.149)  lr=3.37e-05  temp=1.000  tot=4.9min
+22:08:03    ↳ saved (val_nll=5.0008)
+22:08:07  [ 90/100]  train nll=+5.076(obj=+2.023 bg=+5.454) mse=11.200(obj=2.368 bg=12.292)  val nll=+4.997(obj=+1.557 bg=+5.436) mse=10.997(obj=1.897 bg=12.151)  lr=2.81e-05  temp=1.000  tot=4.9min
+22:08:07    ↳ saved (val_nll=4.9967)
+22:08:10  [ 91/100]  train nll=+5.052(obj=+1.976 bg=+5.433) mse=11.037(obj=2.302 bg=12.117)  val nll=+5.002(obj=+1.558 bg=+5.440) mse=10.989(obj=1.892 bg=12.143)  lr=2.30e-05  temp=1.000  tot=5.0min
+22:08:14  [ 92/100]  train nll=+5.081(obj=+1.995 bg=+5.459) mse=11.212(obj=2.322 bg=12.298)  val nll=+4.997(obj=+1.569 bg=+5.435) mse=10.989(obj=1.884 bg=12.144)  lr=1.84e-05  temp=1.000  tot=5.0min
+22:08:17  [ 93/100]  train nll=+5.060(obj=+1.993 bg=+5.444) mse=11.110(obj=2.326 bg=12.208)  val nll=+4.996(obj=+1.565 bg=+5.434) mse=10.984(obj=1.880 bg=12.139)  lr=1.43e-05  temp=1.000  tot=5.1min
+22:08:17    ↳ saved (val_nll=4.9963)
+22:08:20  [ 94/100]  train nll=+5.067(obj=+2.002 bg=+5.443) mse=11.116(obj=2.338 bg=12.191)  val nll=+4.993(obj=+1.534 bg=+5.433) mse=10.979(obj=1.865 bg=12.135)  lr=1.08e-05  temp=1.000  tot=5.1min
+22:08:20    ↳ saved (val_nll=4.9927)
+22:08:23  [ 95/100]  train nll=+5.056(obj=+1.967 bg=+5.433) mse=11.072(obj=2.305 bg=12.143)  val nll=+4.993(obj=+1.531 bg=+5.434) mse=10.977(obj=1.854 bg=12.134)  lr=7.81e-06  temp=1.000  tot=5.2min
+22:08:26  [ 96/100]  train nll=+5.068(obj=+2.003 bg=+5.446) mse=11.155(obj=2.321 bg=12.242)  val nll=+4.994(obj=+1.551 bg=+5.433) mse=10.979(obj=1.877 bg=12.133)  lr=5.36e-06  temp=1.000  tot=5.2min
+22:08:29  [ 97/100]  train nll=+5.059(obj=+1.966 bg=+5.448) mse=11.133(obj=2.291 bg=12.243)  val nll=+4.993(obj=+1.545 bg=+5.432) mse=10.977(obj=1.866 bg=12.133)  lr=3.46e-06  temp=1.000  tot=5.3min
+22:08:32  [ 98/100]  train nll=+5.061(obj=+1.973 bg=+5.445) mse=11.130(obj=2.322 bg=12.221)  val nll=+4.992(obj=+1.532 bg=+5.433) mse=10.977(obj=1.860 bg=12.134)  lr=2.09e-06  temp=1.000  tot=5.3min
+22:08:32    ↳ saved (val_nll=4.9917)
+22:08:36  [ 99/100]  train nll=+5.061(obj=+1.964 bg=+5.442) mse=11.122(obj=2.289 bg=12.207)  val nll=+4.992(obj=+1.529 bg=+5.433) mse=10.977(obj=1.857 bg=12.134)  lr=1.27e-06  temp=1.000  tot=5.4min
+22:08:36    ↳ saved (val_nll=4.9915)
+22:08:39  [100/100]  train nll=+5.074(obj=+1.982 bg=+5.459) mse=11.225(obj=2.320 bg=12.332)  val nll=+4.992(obj=+1.533 bg=+5.433) mse=10.978(obj=1.862 bg=12.135)  lr=1.00e-06  temp=1.000  tot=5.4min
+22:08:39  Best val NLL: 4.9915  |  time: 5.4min

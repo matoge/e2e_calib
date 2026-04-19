@@ -128,3 +128,20 @@
 12:22:45  [ 89/100]  train nll=+5.041(obj=+1.788 bg=+5.444) mse=11.080  val nll=+5.016(obj=+1.490 bg=+5.467) mse=11.147  lr=3.37e-05  tot=6.2min
 12:22:49  [ 90/100]  train nll=+5.037(obj=+1.785 bg=+5.439) mse=11.080  val nll=+5.012(obj=+1.478 bg=+5.464) mse=11.136  lr=2.81e-05  tot=6.3min
 12:22:49    ↳ saved (val_nll=5.0116)
+12:22:53  [ 91/100]  train nll=+5.052(obj=+1.794 bg=+5.454) mse=11.154  val nll=+5.017(obj=+1.502 bg=+5.467) mse=11.145  lr=2.30e-05  tot=6.4min
+12:22:58  [ 92/100]  train nll=+5.052(obj=+1.770 bg=+5.453) mse=11.147  val nll=+5.010(obj=+1.474 bg=+5.464) mse=11.148  lr=1.84e-05  tot=6.5min
+12:22:58    ↳ saved (val_nll=5.0103)
+12:23:02  [ 93/100]  train nll=+5.048(obj=+1.787 bg=+5.451) mse=11.166  val nll=+5.009(obj=+1.463 bg=+5.464) mse=11.148  lr=1.43e-05  tot=6.5min
+12:23:02    ↳ saved (val_nll=5.0091)
+12:23:06  [ 94/100]  train nll=+5.044(obj=+1.761 bg=+5.451) mse=11.130  val nll=+5.010(obj=+1.455 bg=+5.466) mse=11.141  lr=1.08e-05  tot=6.6min
+12:23:10  [ 95/100]  train nll=+5.043(obj=+1.812 bg=+5.444) mse=11.083  val nll=+5.006(obj=+1.451 bg=+5.462) mse=11.139  lr=7.81e-06  tot=6.7min
+12:23:10    ↳ saved (val_nll=5.0064)
+12:23:14  [ 96/100]  train nll=+5.034(obj=+1.731 bg=+5.442) mse=11.086  val nll=+5.006(obj=+1.436 bg=+5.464) mse=11.145  lr=5.36e-06  tot=6.7min
+12:23:14    ↳ saved (val_nll=5.0057)
+12:23:18  [ 97/100]  train nll=+5.040(obj=+1.754 bg=+5.447) mse=11.088  val nll=+5.006(obj=+1.440 bg=+5.463) mse=11.143  lr=3.46e-06  tot=6.8min
+12:23:18    ↳ saved (val_nll=5.0056)
+12:23:22  [ 98/100]  train nll=+5.049(obj=+1.796 bg=+5.450) mse=11.142  val nll=+5.004(obj=+1.432 bg=+5.463) mse=11.140  lr=2.09e-06  tot=6.9min
+12:23:22    ↳ saved (val_nll=5.0044)
+12:23:27  [ 99/100]  train nll=+5.039(obj=+1.761 bg=+5.445) mse=11.080  val nll=+5.005(obj=+1.437 bg=+5.463) mse=11.141  lr=1.27e-06  tot=6.9min
+12:23:31  [100/100]  train nll=+5.026(obj=+1.759 bg=+5.435) mse=11.046  val nll=+5.005(obj=+1.434 bg=+5.463) mse=11.141  lr=1.00e-06  tot=7.0min
+12:23:31  Best val NLL: 5.0044  |  time: 7.0min
