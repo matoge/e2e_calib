@@ -936,7 +936,31 @@ footer {{
 </tbody>
 </table>
 
-<h2><span class="num">§ 05 &nbsp; Analysis</span>Where the generalisation gap lives.</h2>
+<h2><span class="num">§ 05 &nbsp; Ablations</span>What actually carries the performance.</h2>
+<div class="text">
+<p>Two design choices from §03 were isolated by re-training with a single change each — same object-level split, same 200-epoch schedule, same seed — so the comparison is apples-to-apples. The question each answers:</p>
+<ul style="margin: 0 0 1.2em 0; padding-left: 1.2em; color: var(--ink);">
+  <li><strong>Block ordering: self-first vs. cross-first.</strong> Should the query token talk to its peers <em>before</em> reaching for image features, or the other way around?</li>
+  <li><strong>Frustum encoding on / off.</strong> Is the per-point local neighbourhood descriptor (Figure 4) paying its keep, or does a plain PointMLP on <code>(u, v, d)</code> already give the decoder enough positional information?</li>
+</ul>
+</div>
+
+<table class="stats">
+<thead><tr><th>config</th><th>best&nbsp;val&nbsp;NLL</th><th>Δ&nbsp;vs&nbsp;base</th><th>val&nbsp;obj&nbsp;NLL</th><th>val&nbsp;bg&nbsp;NLL</th><th>val&nbsp;MSE</th></tr></thead>
+<tbody>
+<tr><td>baseline&nbsp; cross-first&nbsp;+&nbsp;frustum</td><td class="hl">+1.949</td><td>—</td><td>+0.19</td><td>+2.26</td><td>2.76</td></tr>
+<tr><td>self-first&nbsp; SA&nbsp;→&nbsp;CA per block</td><td>+2.045</td><td>+0.10</td><td>+0.17</td><td>+2.25</td><td>2.73</td></tr>
+<tr><td>no&nbsp;frustum&nbsp; plain PointMLP only</td><td>+2.758</td><td class="hl">+0.81</td><td>+1.52</td><td>+3.25</td><td>3.63</td></tr>
+</tbody>
+</table>
+
+<div class="text">
+<p><strong>Self-first is a wash</strong> (+0.10 NLL). The two block orderings give essentially the same final model — obj NLL and bg NLL at the last epoch are within measurement noise of the baseline. This sharpens the earlier v10 finding, where <code>self_first=True</code> hurt a smaller 3-layer toy-dataset decoder: on the 4-layer ConvNeXt-plus-frustum setup the choice no longer matters much.</p>
+
+<p><strong>Frustum encoding is load-bearing.</strong> Removing it costs <strong>+0.81 NLL</strong> overall, and the damage is concentrated exactly where the design was supposed to help — <strong>obj NLL jumps from +0.19 to +1.52</strong>, an 8× increase. Background is less sensitive (+0.99). The plain PointMLP can position a token globally on <code>(u, v, d)</code>, but it cannot see that <em>this</em> point sits alongside six other points forming a vertical line (a pole), or a dense cluster on a metal surface (a car roof). Those are exactly the cues object-point calibration hinges on. Figure 4's box-and-maxpool is doing real work, not decoration.</p>
+</div>
+
+<h2><span class="num">§ 06 &nbsp; Analysis</span>Where the generalisation gap lives.</h2>
 <div class="text">
 <p>The sub-pixel headline obscures a more nuanced story. Training NLL continues to fall through epoch 200 (<code>obj</code>&nbsp;{tr_obj_nll_last:+.2f}, <code>bg</code>&nbsp;{tr_bg_nll_last:+.2f}) while <strong>val NLL flattens around epoch 130</strong>. This is not uniform overfitting: val <em>MSE</em> continues to decrease even while val NLL stalls.</p>
 
@@ -947,7 +971,7 @@ footer {{
 <p>Two directions follow naturally. <strong>(i) Multi-dataset training.</strong> Adding NuScenes and Waymo gives the covariance head a more diverse residual distribution to calibrate against. <strong>(ii) σ regularisation.</strong> Penalising <code>log|Σ|</code> shrinkage, or swapping to a Student-t likelihood, prevents the covariance from chasing training-set minutiae.</p>
 </div>
 
-<h2><span class="num">§ 06 &nbsp; Samples</span>48 held-out val crops.</h2>
+<h2><span class="num">§ 07 &nbsp; Samples</span>48 held-out val crops.</h2>
 <div class="text">
 <p>Each tile shows per-point correction arrows (orange for object, blue for background), the raw object bounding box (red solid), the predicted-shifted box (cyan dashed), and a white centre-shift arrow. Titles read <code>obj_err&nbsp;before → after, bg_err&nbsp;before → after, mean&nbsp;obj&nbsp;shift (dx, dy)</code> in pixels.</p>
 </div>
