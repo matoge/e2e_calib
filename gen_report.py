@@ -516,106 +516,121 @@ footer {{
 <h2><span class="num">§ 01 &nbsp; Motivation</span>Automating the calibration engineer's eye.</h2>
 
 <figure class="arch-fig">
-<svg viewBox="0 0 820 380" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Calibration drift: true points sit on object surfaces; observed points are shifted">
+<svg viewBox="0 0 820 410" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Calibration drift: true points sit on object surfaces; observed points are shifted">
   <defs>
     <marker id="dr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#8d8a80"/>
     </marker>
   </defs>
 
-  <!-- paper background + ground line -->
-  <rect x="0" y="0" width="820" height="380" fill="#f5f2ea"/>
-  <line x1="40" y1="320" x2="780" y2="320" stroke="#c1bcae" stroke-width="1.2"/>
+  <!-- paper background -->
+  <rect x="0" y="0" width="820" height="410" fill="#f5f2ea"/>
+
+  <!-- HEADER legend strip (y = 20 – 50, safely above scene) -->
+  <circle cx="50"  cy="30" r="4.5" fill="#c13c14"/>
+  <text   x="62"  y="34" font-family="JetBrains Mono,monospace" font-size="12" fill="#0f0f0e">true projection   (on object surface)</text>
+  <circle cx="340" cy="30" r="4.5" fill="#2f6fbf"/>
+  <text   x="352" y="34" font-family="JetBrains Mono,monospace" font-size="12" fill="#0f0f0e">observed projection   (drifted)</text>
+  <text   x="620" y="34" font-family="-apple-system,Segoe UI,sans-serif" font-size="14" font-style="italic" fill="#c13c14">~ 15 px drift</text>
+
+  <!-- ground line (scene starts at y = 80) -->
+  <line x1="30" y1="370" x2="790" y2="370" stroke="#c1bcae" stroke-width="1.2"/>
 
   <!-- POLE (stick) -->
-  <rect x="200" y="60" width="10" height="260" fill="#5e5b52"/>
-  <text x="178" y="345" font-family="JetBrains Mono,monospace" font-size="11" fill="#6b6a63">pole</text>
+  <rect x="180" y="85" width="10" height="285" fill="#5e5b52"/>
+  <text x="170" y="395" font-family="JetBrains Mono,monospace" font-size="11" fill="#6b6a63">pole</text>
 
   <!-- CAR (box + wheels) -->
-  <rect x="470" y="230" width="200" height="80" fill="#5e5b52"/>
-  <circle cx="500" cy="320" r="12" fill="#2a2a28"/>
-  <circle cx="640" cy="320" r="12" fill="#2a2a28"/>
-  <text x="556" y="345" font-family="JetBrains Mono,monospace" font-size="11" fill="#6b6a63">car</text>
+  <rect x="470" y="270" width="200" height="95" fill="#5e5b52"/>
+  <circle cx="500" cy="370" r="10" fill="#2a2a28"/>
+  <circle cx="640" cy="370" r="10" fill="#2a2a28"/>
+  <text x="559" y="395" font-family="JetBrains Mono,monospace" font-size="11" fill="#6b6a63">car</text>
 
   <!-- TRUE points (red) — ON pole surface -->
   <g fill="#c13c14">
-    <circle cx="205" cy="80"  r="3.5"/>
-    <circle cx="205" cy="100" r="3.5"/>
-    <circle cx="205" cy="120" r="3.5"/>
-    <circle cx="205" cy="140" r="3.5"/>
-    <circle cx="205" cy="160" r="3.5"/>
-    <circle cx="205" cy="180" r="3.5"/>
-    <circle cx="205" cy="200" r="3.5"/>
-    <circle cx="205" cy="220" r="3.5"/>
-    <circle cx="205" cy="240" r="3.5"/>
-    <circle cx="205" cy="260" r="3.5"/>
-    <circle cx="205" cy="280" r="3.5"/>
-    <circle cx="205" cy="300" r="3.5"/>
-  </g>
-  <!-- TRUE points (red) — ON car surface (top edge + side edges) -->
-  <g fill="#c13c14">
-    <circle cx="490" cy="230" r="3.5"/>
-    <circle cx="515" cy="230" r="3.5"/>
-    <circle cx="540" cy="230" r="3.5"/>
-    <circle cx="570" cy="230" r="3.5"/>
-    <circle cx="600" cy="230" r="3.5"/>
-    <circle cx="630" cy="230" r="3.5"/>
-    <circle cx="655" cy="230" r="3.5"/>
-    <circle cx="470" cy="255" r="3.5"/>
-    <circle cx="470" cy="285" r="3.5"/>
-    <circle cx="670" cy="255" r="3.5"/>
-    <circle cx="670" cy="285" r="3.5"/>
+    <circle cx="185" cy="100" r="3.5"/>
+    <circle cx="185" cy="120" r="3.5"/>
+    <circle cx="185" cy="140" r="3.5"/>
+    <circle cx="185" cy="160" r="3.5"/>
+    <circle cx="185" cy="180" r="3.5"/>
+    <circle cx="185" cy="200" r="3.5"/>
+    <circle cx="185" cy="220" r="3.5"/>
+    <circle cx="185" cy="240" r="3.5"/>
+    <circle cx="185" cy="260" r="3.5"/>
+    <circle cx="185" cy="280" r="3.5"/>
+    <circle cx="185" cy="300" r="3.5"/>
+    <circle cx="185" cy="320" r="3.5"/>
+    <circle cx="185" cy="340" r="3.5"/>
   </g>
 
-  <!-- OBSERVED points (blue) — same set, shifted ~30 px right -->
+  <!-- TRUE points (red) — ON CAR SURFACE: 6 × 3 grid covering the body panel -->
+  <g fill="#c13c14">
+    <circle cx="490" cy="290" r="3.5"/>
+    <circle cx="525" cy="290" r="3.5"/>
+    <circle cx="560" cy="290" r="3.5"/>
+    <circle cx="595" cy="290" r="3.5"/>
+    <circle cx="625" cy="290" r="3.5"/>
+    <circle cx="655" cy="290" r="3.5"/>
+    <circle cx="490" cy="320" r="3.5"/>
+    <circle cx="525" cy="320" r="3.5"/>
+    <circle cx="560" cy="320" r="3.5"/>
+    <circle cx="595" cy="320" r="3.5"/>
+    <circle cx="625" cy="320" r="3.5"/>
+    <circle cx="655" cy="320" r="3.5"/>
+    <circle cx="490" cy="350" r="3.5"/>
+    <circle cx="525" cy="350" r="3.5"/>
+    <circle cx="560" cy="350" r="3.5"/>
+    <circle cx="595" cy="350" r="3.5"/>
+    <circle cx="625" cy="350" r="3.5"/>
+    <circle cx="655" cy="350" r="3.5"/>
+  </g>
+
+  <!-- OBSERVED points (blue) — same set, each shifted ~30 px right -->
   <g fill="#2f6fbf">
-    <circle cx="235" cy="80"  r="3.5"/>
-    <circle cx="235" cy="100" r="3.5"/>
-    <circle cx="235" cy="120" r="3.5"/>
-    <circle cx="235" cy="140" r="3.5"/>
-    <circle cx="235" cy="160" r="3.5"/>
-    <circle cx="235" cy="180" r="3.5"/>
-    <circle cx="235" cy="200" r="3.5"/>
-    <circle cx="235" cy="220" r="3.5"/>
-    <circle cx="235" cy="240" r="3.5"/>
-    <circle cx="235" cy="260" r="3.5"/>
-    <circle cx="235" cy="280" r="3.5"/>
-    <circle cx="235" cy="300" r="3.5"/>
+    <circle cx="215" cy="100" r="3.5"/>
+    <circle cx="215" cy="120" r="3.5"/>
+    <circle cx="215" cy="140" r="3.5"/>
+    <circle cx="215" cy="160" r="3.5"/>
+    <circle cx="215" cy="180" r="3.5"/>
+    <circle cx="215" cy="200" r="3.5"/>
+    <circle cx="215" cy="220" r="3.5"/>
+    <circle cx="215" cy="240" r="3.5"/>
+    <circle cx="215" cy="260" r="3.5"/>
+    <circle cx="215" cy="280" r="3.5"/>
+    <circle cx="215" cy="300" r="3.5"/>
+    <circle cx="215" cy="320" r="3.5"/>
+    <circle cx="215" cy="340" r="3.5"/>
   </g>
   <g fill="#2f6fbf">
-    <circle cx="520" cy="230" r="3.5"/>
-    <circle cx="545" cy="230" r="3.5"/>
-    <circle cx="570" cy="230" r="3.5"/>
-    <circle cx="600" cy="230" r="3.5"/>
-    <circle cx="630" cy="230" r="3.5"/>
-    <circle cx="660" cy="230" r="3.5"/>
-    <circle cx="685" cy="230" r="3.5"/>
-    <circle cx="500" cy="255" r="3.5"/>
-    <circle cx="500" cy="285" r="3.5"/>
-    <circle cx="700" cy="255" r="3.5"/>
-    <circle cx="700" cy="285" r="3.5"/>
+    <circle cx="520" cy="290" r="3.5"/>
+    <circle cx="555" cy="290" r="3.5"/>
+    <circle cx="590" cy="290" r="3.5"/>
+    <circle cx="625" cy="290" r="3.5"/>
+    <circle cx="655" cy="290" r="3.5"/>
+    <circle cx="685" cy="290" r="3.5"/>
+    <circle cx="520" cy="320" r="3.5"/>
+    <circle cx="555" cy="320" r="3.5"/>
+    <circle cx="590" cy="320" r="3.5"/>
+    <circle cx="625" cy="320" r="3.5"/>
+    <circle cx="655" cy="320" r="3.5"/>
+    <circle cx="685" cy="320" r="3.5"/>
+    <circle cx="520" cy="350" r="3.5"/>
+    <circle cx="555" cy="350" r="3.5"/>
+    <circle cx="590" cy="350" r="3.5"/>
+    <circle cx="625" cy="350" r="3.5"/>
+    <circle cx="655" cy="350" r="3.5"/>
+    <circle cx="685" cy="350" r="3.5"/>
   </g>
 
   <!-- a few sample displacement arrows (red → blue) -->
   <g stroke="#8d8a80" stroke-width="1" fill="none">
-    <line x1="209" y1="140" x2="231" y2="140" marker-end="url(#dr)"/>
-    <line x1="209" y1="220" x2="231" y2="220" marker-end="url(#dr)"/>
-    <line x1="209" y1="280" x2="231" y2="280" marker-end="url(#dr)"/>
-    <line x1="494" y1="230" x2="516" y2="230" marker-end="url(#dr)"/>
-    <line x1="474" y1="255" x2="496" y2="255" marker-end="url(#dr)"/>
-    <line x1="659" y1="230" x2="681" y2="230" marker-end="url(#dr)"/>
+    <line x1="189" y1="140" x2="211" y2="140" marker-end="url(#dr)"/>
+    <line x1="189" y1="220" x2="211" y2="220" marker-end="url(#dr)"/>
+    <line x1="189" y1="300" x2="211" y2="300" marker-end="url(#dr)"/>
+    <line x1="494" y1="290" x2="516" y2="290" marker-end="url(#dr)"/>
+    <line x1="494" y1="350" x2="516" y2="350" marker-end="url(#dr)"/>
+    <line x1="659" y1="320" x2="681" y2="320" marker-end="url(#dr)"/>
   </g>
-
-  <!-- legend -->
-  <g transform="translate(40, 46)" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#0f0f0e">
-    <circle cx="0"  cy="0"  r="4" fill="#c13c14"/>
-    <text   x="10"  y="4">true projection   (where the voxel lands on the surface)</text>
-    <circle cx="0"  cy="22" r="4" fill="#2f6fbf"/>
-    <text   x="10"  y="26">observed projection   (drifted by calibration error)</text>
-  </g>
-
-  <!-- callout -->
-  <text x="320" y="100" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-style="italic" fill="#c13c14">~ 15 px drift   →   recalibrate</text>
 </svg>
 <figcaption class="arch-cap"><b>Figure 1</b> What a calibration engineer has always looked at. Red dots are where projected LiDAR points <em>should</em> land — on the surface of real objects in the image, a pole and a car. Blue dots are where the sensor rig <em>actually</em> places them after a small calibration drift: the same set of points, uniformly offset. Engineers have recalibrated rigs for decades by eyeballing patterns like this. This report is about automating that step: for every such projected point, the network emits a 2-D Gaussian saying where it should really land, and how confidently. Accumulate enough of those and bundle adjustment solves for the rig.</figcaption>
 </figure>
