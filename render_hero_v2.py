@@ -175,14 +175,52 @@ def main():
                               max_rot_deg=MAX_ROT_DEG)
     candidates = scan_candidates(ds, n_candidates=800, seed=7)
     print(f"scanned → {len(candidates)} candidates (close + large obj + ≥8px shift)")
+
+    # Diversify: for each candidate compute dominant shift direction + depth.
+    # Pick 4 whose (angle_bucket, depth_bucket) tuples are all distinct.
+    def _aug(c):
+        _, idx, ypr, t, mmag, obj_dist, size = c
+        inst = ds.instances[idx]
+        out = reproject(inst, ypr, t, 64)
+        shift = out['uv_dist'] - out['uv_gt']
+        dx, dy = shift.mean(0)
+        ang = float(np.degrees(np.arctan2(dy, dx)))  # −180..+180
+        # 8 directional buckets (45 deg each)
+        ang_bucket = int(((ang + 180 + 22.5) % 360) // 45)
+        # 4 depth buckets
+        d_bucket = min(3, int(obj_dist // 10))
+        return ang_bucket, d_bucket, c
+    aug = [_aug(c) for c in candidates]
+
     picks = []
-    seen_idx = set()
-    for key, idx, ypr, t, mmag, obj_dist, size_score in candidates:
-        if idx in seen_idx: continue
-        seen_idx.add(idx)
-        picks.append((idx, ypr, t, key, mmag, obj_dist, size_score))
+    used_idx  = set()
+    used_ang  = set()
+    used_dep  = set()
+    # Pass 1: strict — distinct direction AND distinct depth
+    for ab, db, c in aug:
+        _, idx, *_ = c
+        if idx in used_idx: continue
+        if ab in used_ang or db in used_dep: continue
+        picks.append(c); used_idx.add(idx); used_ang.add(ab); used_dep.add(db)
         if len(picks) == 4: break
-    assert len(picks) == 4, "couldn't find 4 suitable samples"
+    # Pass 2: relax — only distinct direction
+    if len(picks) < 4:
+        for ab, db, c in aug:
+            _, idx, *_ = c
+            if idx in used_idx: continue
+            if ab in used_ang: continue
+            picks.append(c); used_idx.add(idx); used_ang.add(ab)
+            if len(picks) == 4: break
+    # Pass 3: fill remainder from best-scoring untouched
+    for ab, db, c in aug:
+        if len(picks) == 4: break
+        _, idx, *_ = c
+        if idx in used_idx: continue
+        picks.append(c); used_idx.add(idx)
+
+    picks = [(idx, ypr, t, key, mmag, obj_dist, size_score)
+             for (key, idx, ypr, t, mmag, obj_dist, size_score) in picks]
+    assert len(picks) == 4, f"only found {len(picks)} suitable samples"
 
     S = 64
     panels = []
