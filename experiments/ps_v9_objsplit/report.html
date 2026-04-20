@@ -253,6 +253,7 @@ body.lang-ja .arch-cap { font-family: var(--jasans); font-size: 13px; letter-spa
   gap: 2px; margin: 22px 0 40px;
   border: 1px solid var(--line); background: var(--line);
 }
+.vis-grid.xsix { grid-template-columns: repeat(3, 1fr); margin: 14px 0 22px; }
 .vis-grid img {
   width: 100%; display: block; background: var(--card);
   aspect-ratio: 1 / 1; object-fit: cover;
@@ -888,8 +889,78 @@ footer {
 </div>
 
 <h2>
-  <span class="num en-only">§ 08 &nbsp; Next work</span>
-  <span class="num ja-only">§ 08 &nbsp; これから</span>
+  <span class="num en-only">§ 08 &nbsp; Cross-dataset joint training</span>
+  <span class="num ja-only">§ 08 &nbsp; 3 データセット同時学習</span>
+  <span class="en-only">One network, three sensor rigs.</span>
+  <span class="ja-only">ひとつのモデル、3 つのセンサーリグ。</span>
+</h2>
+
+<p class="en-only">Everything above was PandaSet-only. The same architecture can be trained jointly on <strong>NuScenes + PandaSet + Waymo</strong> — three completely different sensor rigs, camera intrinsics, LiDAR beam counts, and scene statistics — as a single run. <em>Object-level shuffle</em> across all three datasets, balanced 20 000 train / 500 val per dataset (<code>seed = 42</code>), same 1.62 M-parameter CalibNetDepth. The checkpoint below is a mid-training snapshot (<code>all_v2 · ep 95/200 · val NLL 2.647</code>) — training is still descending; numbers will improve.</p>
+<p class="ja-only">ここまでの章はすべて PandaSet 単独。同じアーキテクチャを <strong>NuScenes + PandaSet + Waymo</strong> で同時学習できる — センサーリグもカメラ内部パラメータも LiDAR ビーム数もシーン統計も全く違う 3 データセットを、1 回の学習で束ねる。全データセット横断の<em>物体単位シャッフル</em>、データセットあたり 20 000 train / 500 val （<code>seed = 42</code>）、同じ 1.62M パラメータの CalibNetDepth。以下のチェックポイントは学習途中のスナップショット（<code>all_v2 · ep 95/200 · val NLL 2.647</code>）— まだ下がっている最中で、数字は今後さらに良くなる。</p>
+
+<h3 class="en-only">Per-dataset held-out val metrics (500 samples each)</h3>
+<h3 class="ja-only">データセットごとの val メトリクス（各 500 サンプル）</h3>
+
+<table class="stats">
+  <thead>
+    <tr>
+      <th>dataset</th>
+      <th>nll (all)</th>
+      <th>nll (obj)</th>
+      <th>nll (bg)</th>
+      <th>mse (obj)</th>
+      <th>mse (bg)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>NuScenes</td> <td>+2.92</td> <td>+1.98</td> <td>+2.96</td> <td>2.32</td> <td>5.23</td></tr>
+    <tr><td>PandaSet</td> <td class="hl">+2.22</td> <td class="hl">+0.55</td> <td class="hl">+2.27</td> <td class="hl">1.25</td> <td class="hl">3.16</td></tr>
+    <tr><td>Waymo</td>    <td>+3.01</td> <td>+1.63</td> <td>+3.10</td> <td>1.93</td> <td>4.35</td></tr>
+  </tbody>
+</table>
+
+<p class="en-only">PandaSet is the easiest for the joint model — <strong>1.25 px mean object error</strong>, basically matching the PandaSet-specialist above (<code>1.20 px</code> in the §03 table) even though the shared network now also has to cover NuScenes' wide-FOV roof-rig and Waymo's narrow front-cam. Waymo finishes the strongest on <em>absolute difficulty</em>: its cache contains samples with 20–40 px input drift (from the higher focal length × closer objects), and the network still pulls them back to <strong>~2 px</strong>. NuScenes is the hardest — its roof-rig crops often look nothing like PandaSet's (lower-mounted cameras, different night/rain statistics), and the object-scale distribution is wider. It still reaches <strong>2.32 px obj MSE</strong>, well inside the native LiDAR-beam spacing, from a model that has seen one-third as many NS-specific gradients as a dedicated run.</p>
+<p class="ja-only">PandaSet は結合モデルに対して最も容易 — <strong>物体平均誤差 1.25 px</strong>、§03 の表の PandaSet 専用モデル（<code>1.20 px</code>）とほぼ一致する。NuScenes の広視野ルーフリグや Waymo の狭視野フロントカメラまで同じネットワークが背負っているにも関わらずだ。<em>絶対的な難易度</em>では Waymo が最も厳しい — キャッシュには 20〜40 px の入力ドリフトを持つサンプル（焦点距離の大きさ × 近距離の物体から生じる）が混ざる。それでもネットワークは<strong>約 2 px</strong> まで引き戻す。NuScenes が一番難しい — ルーフリグのクロップは PandaSet と似ていない（カメラ取付が低い、夜間・雨のサンプルが多い）、物体のスケール分布も広い。それでも <strong>2.32 px</strong> に収束する。NS 固有の勾配はモデルが見た全体の 1/3 しかないのにだ。</p>
+
+<h3 class="en-only">Sample tiles — NuScenes</h3>
+<h3 class="ja-only">サンプル — NuScenes</h3>
+<div class="vis-grid xsix">
+  <img src="../all_v2/vis/ns_00.png" loading="lazy" alt="NS val 0">
+  <img src="../all_v2/vis/ns_01.png" loading="lazy" alt="NS val 1">
+  <img src="../all_v2/vis/ns_02.png" loading="lazy" alt="NS val 2">
+  <img src="../all_v2/vis/ns_03.png" loading="lazy" alt="NS val 3">
+  <img src="../all_v2/vis/ns_04.png" loading="lazy" alt="NS val 4">
+  <img src="../all_v2/vis/ns_05.png" loading="lazy" alt="NS val 5">
+</div>
+
+<h3 class="en-only">Sample tiles — PandaSet</h3>
+<h3 class="ja-only">サンプル — PandaSet</h3>
+<div class="vis-grid xsix">
+  <img src="../all_v2/vis/ps_00.png" loading="lazy" alt="PS val 0">
+  <img src="../all_v2/vis/ps_01.png" loading="lazy" alt="PS val 1">
+  <img src="../all_v2/vis/ps_02.png" loading="lazy" alt="PS val 2">
+  <img src="../all_v2/vis/ps_03.png" loading="lazy" alt="PS val 3">
+  <img src="../all_v2/vis/ps_04.png" loading="lazy" alt="PS val 4">
+  <img src="../all_v2/vis/ps_05.png" loading="lazy" alt="PS val 5">
+</div>
+
+<h3 class="en-only">Sample tiles — Waymo</h3>
+<h3 class="ja-only">サンプル — Waymo</h3>
+<div class="vis-grid xsix">
+  <img src="../all_v2/vis/wm_00.png" loading="lazy" alt="WM val 0">
+  <img src="../all_v2/vis/wm_01.png" loading="lazy" alt="WM val 1">
+  <img src="../all_v2/vis/wm_02.png" loading="lazy" alt="WM val 2">
+  <img src="../all_v2/vis/wm_03.png" loading="lazy" alt="WM val 3">
+  <img src="../all_v2/vis/wm_04.png" loading="lazy" alt="WM val 4">
+  <img src="../all_v2/vis/wm_05.png" loading="lazy" alt="WM val 5">
+</div>
+
+<p class="en-only">Each tile shows the same legend as §07: orange per-point arrows over the object, blue over background, red solid = distorted obj bbox, green dashed = model-corrected bbox. Titles read <code>dataset &nbsp; obj&nbsp;err&nbsp;before→after &nbsp; bg&nbsp;err&nbsp;before→after</code>. The Waymo row is the clearest illustration of magnitude: several tiles have input drifts in the 20–30 px range, and every one of them lands within ~2–3 px of ground truth. This is what "generalises across rigs" looks like in practice — one network, three cameras, three LiDARs, one loss.</p>
+<p class="ja-only">各タイルの凡例は §07 と同じ: 物体上の橙の点ごと矢印、背景上の青の矢印、赤実線 = 歪んだ物体バウンディングボックス、緑破線 = モデル補正後のボックス。タイトルは <code>dataset &nbsp; obj 誤差 前→後 &nbsp; bg 誤差 前→後</code>。Waymo 行がスケールの違いを最もよく示す: 複数タイルで入力ドリフトが 20〜30 px 台、そのすべてが GT から ~2〜3 px 以内に着地している。「リグをまたいで汎化する」とは、実践的にはこういうこと — 1 つのネットワーク、3 種のカメラ、3 種の LiDAR、1 つの損失。</p>
+
+<h2>
+  <span class="num en-only">§ 09 &nbsp; Next work</span>
+  <span class="num ja-only">§ 09 &nbsp; これから</span>
   <span class="en-only">From the bench to a production foundation.</span>
   <span class="ja-only">ベンチから、量産の土台へ。</span>
 </h2>
