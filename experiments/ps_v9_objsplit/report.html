@@ -422,6 +422,13 @@ footer {
   <li><strong>RADAR → camera.</strong> Coarse radar points projected onto image, corrected to nearest RCS-consistent visual structure.</li>
 </ul>
 <p>The dataset used for this report is <strong>PandaSet</strong> — 103 outdoor driving scenes with synchronised Hesai Pandar64 LiDAR and six RGB cameras — perturbed with small synthetic calibration drift at load time, so the model sees a consistent training signal. The narrow research question here: <strong>how well does the residual generalise across object instances the model has not seen</strong>? Earlier runs held out whole scenes; here we hold out <em>objects</em>, isolating appearance-level generalisation from the larger scene-domain shift.</p>
+
+<h3>1.1&nbsp; Prehistory: the toy-data lineage</h3>
+<p>Before real LiDAR ever touched the model, the whole stack was shaken out on a fully synthetic 2-D toy: coloured rectangles on a flat background, points sampled on each shape at a fixed depth, and a uniform (tx, ty) shift applied to simulate calibration drift. We iterated through a dozen small variants (<code>v7</code>…<code>v20</code>) to lock down the architecture before committing to the expensive real-data pipeline. The last of these — <code>v20_3layer_randdepth</code> — was a three-layer coarse-to-fine cross-attention decoder on 64×64 crops with two objects per scene at randomised depths and a ±16 px offset budget; it reached <strong>obj NLL&nbsp;1.61</strong> on held-out synthetic scenes (100 ep, 5.5&nbsp;min, 1.16 M params). The PandaSet model below is the same architecture, widened to four layers with a ConvNeXt stem and a frustum-pooling head; everything that carried over from the toy stage is unchanged.</p>
+<figure style="margin:1rem auto;max-width:420px">
+  <img src="vis/synthetic_toy.png" alt="v20 synthetic toy validation sample" style="width:100%;display:block;border:1px solid var(--rule)">
+  <figcaption style="color:var(--muted);font-size:.85rem;margin-top:.4rem;text-align:center">Synthetic predecessor (<code>v20_3layer_randdepth</code>). Green ×&nbsp;= GT projection, coloured dots&nbsp;= distorted input, arrows&nbsp;= predicted correction. Two objects with independent depths; background points on the flat plane. Per-crop obj error 13.27 px → 1.15 px after the model's pull-back.</figcaption>
+</figure>
 </div>
 
 <h2><span class="num">§ 02 &nbsp; Problem Setup</span>One crop, one evidence packet.</h2>

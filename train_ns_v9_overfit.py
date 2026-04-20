@@ -8,6 +8,7 @@ if __name__ == "__main__":
            "name":        "ns_v9_overfit500",
            "min_pts":     80,
            "subset_size": 500,
+           "overfit":     True,
            "epochs":      1000,
            "batch_size":  32}
     main(cfg)
