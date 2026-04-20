@@ -387,8 +387,8 @@ class WaymoCalibDataset(Dataset):
         u_off_c = (u_off[in_crop] - u0) * scale
         v_off_c = (v_off[in_crop] - v0) * scale
 
-        # 32×32 grid (2px in 64-view): bin each pt to its cell, keep nearest-to-center.
-        grid, cell = 32, float(S) / 32
+        # 16×16 grid (4px in 64-view): bin each pt to its cell, keep nearest-to-center.
+        grid, cell = 16, float(S) / 16
         ci = np.clip((v_off_c / cell).astype(np.int64), 0, grid - 1)
         cj = np.clip((u_off_c / cell).astype(np.int64), 0, grid - 1)
         cell_id = ci * grid + cj

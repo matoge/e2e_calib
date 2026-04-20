@@ -323,9 +323,9 @@ class NuScenesCalibDataset(Dataset):
         uv_d_crop = np.stack([(uv_off[in_crop,0]-cu0)*scale,
                                (uv_off[in_crop,1]-cv0)*scale], axis=1)
 
-        # 32×32 grid: bin each pt to its 2px cell, keep nearest-to-center per cell.
+        # 16×16 grid: bin each pt to its 4px cell, keep nearest-to-center per cell.
         # Empty cells stay empty (no argmin fallback → no over-densification of edges).
-        grid, cell = 32, float(S)/32
+        grid, cell = 16, float(S)/16
         ci = np.clip((uv_d_crop[:,1] / cell).astype(np.int64), 0, grid-1)
         cj = np.clip((uv_d_crop[:,0] / cell).astype(np.int64), 0, grid-1)
         cell_id = ci * grid + cj
