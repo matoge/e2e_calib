@@ -110,11 +110,12 @@ def draw_perturbation(rng):
     return ypr, t
 
 
-def scan_candidates(ds, n_candidates=400, seed=1):
+def scan_candidates(ds, n_candidates=400, seed=1, min_mean_shift=8.0):
     """Find val samples that (a) are well framed, (b) have objects of
-    sensible size, (c) their random __getitem__-style perturbation produces
-    per-point shifts with high coefficient of variation (σ / μ) — meaning
-    the 'not uniform' story is visually obvious."""
+    sensible size, (c) their __getitem__-style perturbation produces a
+    per-point mean shift >= min_mean_shift px so the correction story is
+    unmistakable at a glance. Within those we still favour high CV
+    (σ / μ) so the per-point-variation point also reads."""
     S = 64
     rng = np.random.default_rng(seed)
     idxs = list(range(len(ds))); _r.Random(seed).shuffle(idxs)
@@ -122,25 +123,27 @@ def scan_candidates(ds, n_candidates=400, seed=1):
     for idx in idxs:
         inst = ds.instances[idx]
         if 'obj_pos' not in inst: continue
-        ypr, t = draw_perturbation(rng)
-        out = reproject(inst, ypr, t, S)
-        if out is None: continue
-        is_obj = out['is_obj'].astype(bool)
-        if is_obj.sum() < 10: continue
-        tu = out['uv_gt']; obj = tu[is_obj]
-        w = obj[:,0].max() - obj[:,0].min()
-        h = obj[:,1].max() - obj[:,1].min()
-        cx, cy = obj[:,0].mean(), obj[:,1].mean()
-        if max(w, h) < 0.22*S or max(w, h) > 0.65*S: continue
-        if min(w, h) < 0.10*S: continue
-        if abs(cx - S/2) > 0.22*S or abs(cy - S/2) > 0.22*S: continue
-        # per-point shift magnitude stats
-        shift = out['uv_dist'] - out['uv_gt']
-        mag = np.linalg.norm(shift, axis=1)
-        if mag.mean() < 1.0: continue      # need visible shift
-        cv = float(mag.std() / max(mag.mean(), 1e-6))
-        # prefer high cv = per-point variation is obvious
-        found.append((cv, idx, ypr, t, mag.mean()))
+        # allow several random re-draws per instance so we actually hit
+        # the ≥8 px tail
+        for _k in range(4):
+            ypr, t = draw_perturbation(rng)
+            out = reproject(inst, ypr, t, S)
+            if out is None: continue
+            is_obj = out['is_obj'].astype(bool)
+            if is_obj.sum() < 10: continue
+            tu = out['uv_gt']; obj = tu[is_obj]
+            w = obj[:,0].max() - obj[:,0].min()
+            h = obj[:,1].max() - obj[:,1].min()
+            cx, cy = obj[:,0].mean(), obj[:,1].mean()
+            if max(w, h) < 0.22*S or max(w, h) > 0.65*S: continue
+            if min(w, h) < 0.10*S: continue
+            if abs(cx - S/2) > 0.22*S or abs(cy - S/2) > 0.22*S: continue
+            shift = out['uv_dist'] - out['uv_gt']
+            mag = np.linalg.norm(shift, axis=1)
+            if mag.mean() < min_mean_shift: continue
+            cv = float(mag.std() / max(mag.mean(), 1e-6))
+            found.append((cv, idx, ypr, t, float(mag.mean())))
+            break
         if len(found) >= n_candidates: break
     found.sort(key=lambda x: -x[0])
     return found
