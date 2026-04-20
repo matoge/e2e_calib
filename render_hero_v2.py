@@ -110,12 +110,14 @@ def draw_perturbation(rng):
     return ypr, t
 
 
-def scan_candidates(ds, n_candidates=400, seed=1, min_mean_shift=8.0):
-    """Find val samples that (a) are well framed, (b) have objects of
-    sensible size, (c) their __getitem__-style perturbation produces a
-    per-point mean shift >= min_mean_shift px so the correction story is
-    unmistakable at a glance. Within those we still favour high CV
-    (σ / μ) so the per-point-variation point also reads."""
+def scan_candidates(ds, n_candidates=400, seed=1,
+                    min_mean_shift=6.0, max_obj_depth=35.0,
+                    min_obj_span_frac=0.28):
+    """Find val samples where (a) the object is CLOSE (mean obj depth <
+    max_obj_depth m) so it fills the crop and reads clearly in the image,
+    (b) the object occupies at least min_obj_span_frac of the crop side,
+    (c) the __getitem__-style perturbation yields a per-point mean shift
+    >= min_mean_shift px so the correction is obvious."""
     S = 64
     rng = np.random.default_rng(seed)
     idxs = list(range(len(ds))); _r.Random(seed).shuffle(idxs)
@@ -123,26 +125,33 @@ def scan_candidates(ds, n_candidates=400, seed=1, min_mean_shift=8.0):
     for idx in idxs:
         inst = ds.instances[idx]
         if 'obj_pos' not in inst: continue
-        # allow several random re-draws per instance so we actually hit
-        # the ≥8 px tail
-        for _k in range(4):
+        # quick pre-filter: reject far objects by instance-level obj_pos
+        obj_dist = float(np.linalg.norm(inst['obj_pos'].numpy() -
+                                        inst['cam_pos'].numpy()))
+        if obj_dist > max_obj_depth: continue
+        # allow several re-draws per instance to hit the ≥ min_mean_shift tail
+        for _k in range(8):
             ypr, t = draw_perturbation(rng)
             out = reproject(inst, ypr, t, S)
             if out is None: continue
             is_obj = out['is_obj'].astype(bool)
-            if is_obj.sum() < 10: continue
+            if is_obj.sum() < 14: continue
             tu = out['uv_gt']; obj = tu[is_obj]
             w = obj[:,0].max() - obj[:,0].min()
             h = obj[:,1].max() - obj[:,1].min()
             cx, cy = obj[:,0].mean(), obj[:,1].mean()
-            if max(w, h) < 0.22*S or max(w, h) > 0.65*S: continue
-            if min(w, h) < 0.10*S: continue
+            if max(w, h) < min_obj_span_frac * S: continue
+            if max(w, h) > 0.80 * S: continue
+            if min(w, h) < 0.18 * S: continue
             if abs(cx - S/2) > 0.22*S or abs(cy - S/2) > 0.22*S: continue
             shift = out['uv_dist'] - out['uv_gt']
             mag = np.linalg.norm(shift, axis=1)
             if mag.mean() < min_mean_shift: continue
             cv = float(mag.std() / max(mag.mean(), 1e-6))
-            found.append((cv, idx, ypr, t, float(mag.mean())))
+            # sort key: bigger obj × closer × reasonable cv
+            size_score = max(w, h) / S
+            key = size_score * 10 + cv + (max_obj_depth - obj_dist) * 0.05
+            found.append((key, idx, ypr, t, float(mag.mean()), obj_dist, size_score))
             break
         if len(found) >= n_candidates: break
     found.sort(key=lambda x: -x[0])
@@ -165,20 +174,19 @@ def main():
                               max_offset_m=MAX_OFFSET_M,
                               max_rot_deg=MAX_ROT_DEG)
     candidates = scan_candidates(ds, n_candidates=800, seed=7)
-    print(f"scanned → {len(candidates)} candidates with high per-point CV")
-    # take top 4, each from a different instance idx
+    print(f"scanned → {len(candidates)} candidates (close + large obj + ≥8px shift)")
     picks = []
     seen_idx = set()
-    for cv, idx, ypr, t, mmag in candidates:
+    for key, idx, ypr, t, mmag, obj_dist, size_score in candidates:
         if idx in seen_idx: continue
         seen_idx.add(idx)
-        picks.append((idx, ypr, t, cv, mmag))
+        picks.append((idx, ypr, t, key, mmag, obj_dist, size_score))
         if len(picks) == 4: break
     assert len(picks) == 4, "couldn't find 4 suitable samples"
 
     S = 64
     panels = []
-    for idx, ypr, t, cv, mmag in picks:
+    for idx, ypr, t, key, mmag, obj_dist, size_score in picks:
         inst = ds.instances[idx]
         out = reproject(inst, ypr, t, S)
         is_obj = out['is_obj'].astype(bool)
@@ -195,9 +203,8 @@ def main():
 
         eb = float(np.linalg.norm(dist_uv[is_obj] - true_uv[is_obj], axis=1).mean())
         ea = float(np.linalg.norm(pred_uv[is_obj] - true_uv[is_obj], axis=1).mean())
-        print(f" idx={idx:5d}  ypr=({ypr[0]:+.2f},{ypr[1]:+.2f},{ypr[2]:+.2f})°  "
-              f"t=({t[0]:+.2f},{t[1]:+.2f},{t[2]:+.2f})m  "
-              f"shift μ={mmag:.2f} cv={cv:.2f}  obj_err {eb:.2f} → {ea:.2f} px")
+        print(f" idx={idx:5d}  dist={obj_dist:5.1f}m  size={size_score:.2f}  "
+              f"shift μ={mmag:.2f}  obj_err {eb:.2f} → {ea:.2f} px")
 
         panels.append(dict(idx=idx, ypr=ypr, t=t,
                            dist_uv=dist_uv, true_uv=true_uv, pred_uv=pred_uv,
