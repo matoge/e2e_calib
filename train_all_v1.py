@@ -18,17 +18,18 @@ torch.set_float32_matmul_precision("high")
 DEVICE = torch.device("cuda")
 
 CFG = dict(
-    name          = "all_v1",
+    name          = "all_v2",
     n_layers      = 4,
     img_size      = 64,
     in_channels   = 3,
     use_convnext  = True,
     use_frustum   = True,
-    epochs        = 100,
-    batch_size    = 32,
+    epochs        = 200,
+    batch_size    = 64,
     lr            = 1e-3,
-    lr_min        = 1e-6,
-    val_fraction  = 0.1,
+    lr_min        = 1e-7,
+    n_train_per   = 20000,
+    n_val_per     = 500,
     split_seed    = 42,
 )
 
@@ -109,19 +110,26 @@ def main(cfg=None):
     ps_va = PandaSetCalibDataset(PS_CACHE, split='val')
     wm_tr = WaymoCalibDataset(WM_CACHE, split='train')
     wm_va = WaymoCalibDataset(WM_CACHE, split='val')
-    full_ds = ConcatDataset([ns_tr, ns_va, ps_tr, ps_va, wm_tr, wm_va])
-    log(f"NS: {len(ns_tr)+len(ns_va)} | PS: {len(ps_tr)+len(ps_va)} | "
-        f"WM: {len(wm_tr)+len(wm_va)} | total: {len(full_ds)}")
+    ns_full = ConcatDataset([ns_tr, ns_va])
+    ps_full = ConcatDataset([ps_tr, ps_va])
+    wm_full = ConcatDataset([wm_tr, wm_va])
+    log(f"NS: {len(ns_full)} | PS: {len(ps_full)} | WM: {len(wm_full)}")
 
-    idxs = list(range(len(full_ds)))
-    _r.Random(c["split_seed"]).shuffle(idxs)
-    n_val_obj = int(len(idxs) * c["val_fraction"])
-    val_idxs, train_idxs = idxs[:n_val_obj], idxs[n_val_obj:]
-    train_ds = Subset(full_ds, train_idxs)
-    val_ds   = Subset(full_ds, val_idxs)
-    log(f"object-level split: train={len(train_ds)} val={len(val_ds)} (seed={c['split_seed']})")
+    n_tr, n_va = c["n_train_per"], c["n_val_per"]
+    rng = _r.Random(c["split_seed"])
+    train_subsets, val_subsets = [], []
+    for name, ds in [('NS', ns_full), ('PS', ps_full), ('WM', wm_full)]:
+        idxs = list(range(len(ds))); rng.shuffle(idxs)
+        val_part   = idxs[:n_va]
+        train_part = idxs[n_va:n_va + n_tr]
+        train_subsets.append(Subset(ds, train_part))
+        val_subsets.append(Subset(ds, val_part))
+        log(f"{name}: train={len(train_part)} val={len(val_part)}")
+    train_ds = ConcatDataset(train_subsets)
+    val_ds   = ConcatDataset(val_subsets)
+    log(f"joint: train={len(train_ds)} val={len(val_ds)} (seed={c['split_seed']})")
 
-    kw = dict(num_workers=6, pin_memory=True, persistent_workers=True,
+    kw = dict(num_workers=2, pin_memory=True, persistent_workers=False,
               collate_fn=collate_mixed)
     train_loader = DataLoader(train_ds, batch_size=c["batch_size"], shuffle=True,  **kw)
     val_loader   = DataLoader(val_ds,   batch_size=c["batch_size"], shuffle=False, **kw)

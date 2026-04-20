@@ -411,7 +411,8 @@ class WaymoCalibDataset(Dataset):
         u_gt_c = (fu * (-c_gt[:, 1]) / d_gt + cu - u0) * scale
         v_gt_c = (fv * (-c_gt[:, 2]) / d_gt + cv - v0) * scale
 
-        dist_m  = (np.linalg.norm(pts_vis[idx_in], axis=1) / 100.0).astype(np.float32)
+        # distance from CAMERA (not vehicle origin) — match NS/PS convention
+        dist_m  = (np.linalg.norm(c_gt[:, :3], axis=1) / 100.0).astype(np.float32)
         is_obj  = is_obj_full[idx_in].astype(np.float32)
 
         dist_uvd = np.stack([u_off_c.astype(np.float32), v_off_c.astype(np.float32),

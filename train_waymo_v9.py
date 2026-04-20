@@ -103,6 +103,9 @@ def main(cfg=None):
         k = int(c["subset_size"])
         train_idxs = train_idxs[:k]
         val_idxs   = val_idxs[:max(1, k // 10)]
+    if c.get("overfit"):
+        val_idxs = list(train_idxs)
+        log(f"overfit on {len(train_idxs)} samples (val == train)")
     train_ds = Subset(full_ds, train_idxs)
     val_ds   = Subset(full_ds, val_idxs)
     log(f"object-level split: train={len(train_ds)} val={len(val_ds)} (seed={c['split_seed']})")
