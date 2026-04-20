@@ -6,7 +6,7 @@
 <title>PS_V9_OBJSPLIT — Technical Report</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet">
 <style>
 :root {
   --bg:       #f6f4ed;
@@ -17,6 +17,8 @@
   --accent2:  #174734;
   --line:     #d9d6cd;
   --sans:     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --jasans:   "Zen Kaku Gothic New", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+  --jaserif:  "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
   --mono:     "JetBrains Mono", Consolas, ui-monospace, monospace;
   --col:      880px;
 }
@@ -30,6 +32,49 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+
+/* ── bilingual toggle ── */
+.lang-toggle {
+  position: fixed; top: 18px; right: 22px;
+  z-index: 100;
+  font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  display: flex; gap: 0;
+  border: 1px solid var(--ink);
+  background: var(--card);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+.lang-toggle button {
+  background: transparent; border: 0;
+  padding: 8px 14px;
+  font: inherit; color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.lang-toggle button.active {
+  background: var(--ink); color: var(--card);
+}
+.lang-toggle button:not(.active):hover {
+  background: var(--bg); color: var(--ink);
+}
+body.lang-en .ja-only { display: none !important; }
+body.lang-ja .en-only { display: none !important; }
+body.lang-ja,
+body.lang-ja .subtitle,
+body.lang-ja p, body.lang-ja li,
+body.lang-ja .hero-cap, body.lang-ja figcaption { font-family: var(--jasans); font-feature-settings: "palt" 1; }
+body.lang-ja h1.title, body.lang-ja h2, body.lang-ja h3 {
+  font-family: var(--jaserif);
+  font-weight: 700;
+  font-feature-settings: "palt" 1;
+}
+body.lang-ja h1.title { line-height: 1.28; letter-spacing: 0.01em; font-size: 54px; }
+body.lang-ja h2 { font-size: 38px; line-height: 1.3; letter-spacing: 0.005em; }
+body.lang-ja h3 { font-size: 22px; letter-spacing: 0.005em; }
+body.lang-ja .subtitle { font-weight: 500; font-size: 19px; line-height: 1.75; letter-spacing: 0.02em; }
+body.lang-ja p { line-height: 1.92; letter-spacing: 0.015em; }
+body.lang-ja li { line-height: 1.85; letter-spacing: 0.015em; }
+body.lang-ja strong { font-weight: 700; }
 
 .page {
   max-width: var(--col);
@@ -174,10 +219,12 @@ code {
   padding-top: 14px; margin-top: 6px;
   border-top: 1px dashed var(--line);
 }
+body.lang-ja .arch-cap { font-family: var(--jasans); font-size: 13px; letter-spacing: 0.015em; line-height: 1.85; }
 .arch-cap b {
   color: var(--accent); text-transform: uppercase;
   letter-spacing: 0.14em; font-size: 10.5px;
   font-weight: 700; margin-right: 8px;
+  font-family: var(--mono);
 }
 
 .figure { margin: 40px 0 52px; }
@@ -231,6 +278,29 @@ table.stats th {
 table.stats tr:hover td { background: var(--bg); }
 table.stats .hl { color: var(--accent); font-weight: 600; }
 
+.vision-list {
+  list-style: none; padding: 0; margin: 24px 0 40px;
+  border-top: 1px solid var(--line);
+}
+.vision-list li {
+  padding: 22px 0 20px;
+  border-bottom: 1px solid var(--line);
+  display: grid; grid-template-columns: 60px 1fr;
+  gap: 22px; margin: 0;
+}
+.vision-list li .n {
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  letter-spacing: 0.18em; color: var(--accent);
+  padding-top: 4px;
+}
+.vision-list li h4 {
+  font-family: var(--sans); font-size: 19px; font-weight: 700;
+  margin: 0 0 8px; color: var(--ink); letter-spacing: -0.01em;
+}
+body.lang-ja .vision-list li h4 { font-family: var(--jaserif); letter-spacing: 0.005em; }
+.vision-list li p { margin: 0; font-size: 15.5px; color: var(--ink); line-height: 1.6; }
+body.lang-ja .vision-list li p { line-height: 1.8; }
+
 footer {
   margin-top: 140px; padding-top: 28px;
   border-top: 1px solid var(--line);
@@ -248,37 +318,58 @@ footer {
   .subtitle { font-size: 17px; }
   .metrics  { grid-template-columns: repeat(2, 1fr); }
   .vis-grid { grid-template-columns: repeat(3, 1fr); }
+  .lang-toggle { top: 12px; right: 12px; }
+  .vision-list li { grid-template-columns: 44px 1fr; gap: 14px; }
 }
 </style>
 </head>
-<body>
+<body class="lang-en">
+
+<nav class="lang-toggle" aria-label="Language">
+  <button class="lang-btn active" data-lang="en" aria-pressed="true">EN</button>
+  <button class="lang-btn" data-lang="ja" aria-pressed="false">日本語</button>
+</nav>
+
 <article class="page">
 
 <div class="eyebrow">
-  <span>Experiment Report</span>
+  <span class="en-only">Experiment Report</span>
+  <span class="ja-only">実験レポート</span>
   <span class="dot">●</span>
   <span>2026-04-19</span>
   <span class="dot">●</span>
   <span>ps_v9_objsplit</span>
 </div>
 
-<h1 class="title">We trained a model that<br>corrects LiDAR-to-camera<br>calibration to sub-pixel.</h1>
+<h1 class="title en-only">We trained a model that<br>corrects LiDAR-to-camera<br>calibration to sub-pixel.</h1>
+<h1 class="title ja-only">LiDAR ↔ カメラの<br>キャリブずれを、<br>画素以下で補正する。</h1>
 
-<p class="subtitle">A <strong>1.62 M-parameter cross-attention network</strong> takes a 128×128 image crop plus the LiDAR points projected into it, and predicts the 2-D pixel offset that snaps each point back to where it should be — <strong>0.91 px mean object error</strong> on held-out objects, well below the native 4 px LiDAR-beam spacing.</p>
+<p class="subtitle en-only">A <strong>1.62 M-parameter cross-attention network</strong> takes a 128×128 image crop plus the LiDAR points projected into it, and predicts the 2-D pixel offset that snaps each point back to where it should be — <strong>0.91 px mean object error</strong> on held-out objects, well below the native 4 px LiDAR-beam spacing.</p>
+<p class="subtitle ja-only"><strong>1.62M パラメータの Cross-Attention ネット</strong>に、128×128 の画像クロップと投影済み LiDAR 点群を入れると、各点を本来の位置へ引き戻す 2D ピクセル補正を返す。未知物体に対して<strong>物体平均 0.91 px</strong> — LiDAR のビーム間隔 4 px を大きく下回る精度。</p>
 
 <figure class="hero">
   <img src="vis/hero.png" alt="before/after hero">
-  <div class="hero-cap"><b>What the model does</b> Four held-out val samples with shifts in distinct directions. Per-point arrows (orange = object, blue = background) show how the model pulls <em>every</em> projected LiDAR point, not just the ones inside the bounding box. Red box = distorted projection; green dashed box = model-corrected position; white arrow = mean object shift.</div>
+  <div class="hero-cap en-only"><b>What the model does</b> Four held-out val samples with shifts in distinct directions. Per-point arrows (orange = object, blue = background) show how the model pulls <em>every</em> projected LiDAR point, not just the ones inside the bounding box. Red box = distorted projection; green dashed box = model-corrected position; white arrow = mean object shift.</div>
+  <div class="hero-cap ja-only"><b>モデルの仕事</b>　検証セットから選んだ4サンプル、ずれの向きは全て異なる。点ごとの矢印（橙 = 物体、青 = 背景）は、モデルがバウンディングボックス内だけでなく<em>全ての</em>投影 LiDAR 点を引き戻している様子。赤枠 = 歪んだ投影、緑破線 = モデル補正後、白矢印 = 物体点群の平均シフト。</div>
 </figure>
 
 <div class="meta">
-  <span>Run&nbsp; <b>ps_v9_objsplit</b></span>
-  <span>Data&nbsp; <b>PandaSet · 103 scenes · 33,458 obj crops</b></span>
-  <span>Training&nbsp; <b>200 ep · 87 min · 1 × GPU</b></span>
-  <span>Best&nbsp;val&nbsp;NLL&nbsp; <b>1.9491</b></span>
+  <span class="en-only">Run&nbsp; <b>ps_v9_objsplit</b></span>
+  <span class="ja-only">実験&nbsp; <b>ps_v9_objsplit</b></span>
+  <span class="en-only">Data&nbsp; <b>PandaSet · 103 scenes · 33,458 obj crops</b></span>
+  <span class="ja-only">データ&nbsp; <b>PandaSet · 103 シーン · 物体クロップ 33,458</b></span>
+  <span class="en-only">Training&nbsp; <b>200 ep · 87 min · 1 × GPU</b></span>
+  <span class="ja-only">学習&nbsp; <b>200 ep · 87 min · GPU × 1</b></span>
+  <span class="en-only">Best&nbsp;val&nbsp;NLL&nbsp; <b>1.9491</b></span>
+  <span class="ja-only">最小&nbsp;val&nbsp;NLL&nbsp; <b>1.9491</b></span>
 </div>
 
-<h2><span class="num">§ 01 &nbsp; Motivation</span>Automating the calibration engineer's eye.</h2>
+<h2>
+  <span class="num en-only">§ 01 &nbsp; Motivation</span>
+  <span class="num ja-only">§ 01 &nbsp; 動機</span>
+  <span class="en-only">Automating the calibration engineer's eye.</span>
+  <span class="ja-only">キャリブ技術者の目を、自動化する。</span>
+</h2>
 
 <figure class="arch-fig">
 <svg viewBox="0 0 820 410" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Calibration drift: true points sit on object surfaces; observed points are shifted">
@@ -287,107 +378,49 @@ footer {
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#8d8a80"/>
     </marker>
   </defs>
-
-  <!-- paper background -->
   <rect x="0" y="0" width="820" height="410" fill="#f5f2ea"/>
-
-  <!-- HEADER legend strip (y = 20 – 50, safely above scene) -->
   <circle cx="50"  cy="30" r="4.5" fill="#c13c14"/>
   <text   x="62"  y="34" font-family="JetBrains Mono,monospace" font-size="12" fill="#0f0f0e">true projection   (on object surface)</text>
   <circle cx="340" cy="30" r="4.5" fill="#2f6fbf"/>
   <text   x="352" y="34" font-family="JetBrains Mono,monospace" font-size="12" fill="#0f0f0e">observed projection   (drifted)</text>
   <text   x="620" y="34" font-family="-apple-system,Segoe UI,sans-serif" font-size="14" font-style="italic" fill="#c13c14">~ 15 px drift</text>
-
-  <!-- ground line (scene starts at y = 80) -->
   <line x1="30" y1="370" x2="790" y2="370" stroke="#c1bcae" stroke-width="1.2"/>
-
-  <!-- POLE (stick) -->
   <rect x="180" y="85" width="10" height="285" fill="#5e5b52"/>
   <text x="170" y="395" font-family="JetBrains Mono,monospace" font-size="11" fill="#6b6a63">pole</text>
-
-  <!-- CAR (box + wheels) -->
   <rect x="470" y="270" width="200" height="95" fill="#5e5b52"/>
   <circle cx="500" cy="370" r="10" fill="#2a2a28"/>
   <circle cx="640" cy="370" r="10" fill="#2a2a28"/>
   <text x="559" y="395" font-family="JetBrains Mono,monospace" font-size="11" fill="#6b6a63">car</text>
-
-  <!-- TRUE points (red) — ON pole surface -->
   <g fill="#c13c14">
-    <circle cx="185" cy="100" r="3.5"/>
-    <circle cx="185" cy="120" r="3.5"/>
-    <circle cx="185" cy="140" r="3.5"/>
-    <circle cx="185" cy="160" r="3.5"/>
-    <circle cx="185" cy="180" r="3.5"/>
-    <circle cx="185" cy="200" r="3.5"/>
-    <circle cx="185" cy="220" r="3.5"/>
-    <circle cx="185" cy="240" r="3.5"/>
-    <circle cx="185" cy="260" r="3.5"/>
-    <circle cx="185" cy="280" r="3.5"/>
-    <circle cx="185" cy="300" r="3.5"/>
-    <circle cx="185" cy="320" r="3.5"/>
+    <circle cx="185" cy="100" r="3.5"/><circle cx="185" cy="120" r="3.5"/><circle cx="185" cy="140" r="3.5"/>
+    <circle cx="185" cy="160" r="3.5"/><circle cx="185" cy="180" r="3.5"/><circle cx="185" cy="200" r="3.5"/>
+    <circle cx="185" cy="220" r="3.5"/><circle cx="185" cy="240" r="3.5"/><circle cx="185" cy="260" r="3.5"/>
+    <circle cx="185" cy="280" r="3.5"/><circle cx="185" cy="300" r="3.5"/><circle cx="185" cy="320" r="3.5"/>
     <circle cx="185" cy="340" r="3.5"/>
   </g>
-
-  <!-- TRUE points (red) — ON CAR SURFACE: 6 × 3 grid covering the body panel -->
   <g fill="#c13c14">
-    <circle cx="490" cy="290" r="3.5"/>
-    <circle cx="525" cy="290" r="3.5"/>
-    <circle cx="560" cy="290" r="3.5"/>
-    <circle cx="595" cy="290" r="3.5"/>
-    <circle cx="625" cy="290" r="3.5"/>
-    <circle cx="655" cy="290" r="3.5"/>
-    <circle cx="490" cy="320" r="3.5"/>
-    <circle cx="525" cy="320" r="3.5"/>
-    <circle cx="560" cy="320" r="3.5"/>
-    <circle cx="595" cy="320" r="3.5"/>
-    <circle cx="625" cy="320" r="3.5"/>
-    <circle cx="655" cy="320" r="3.5"/>
-    <circle cx="490" cy="350" r="3.5"/>
-    <circle cx="525" cy="350" r="3.5"/>
-    <circle cx="560" cy="350" r="3.5"/>
-    <circle cx="595" cy="350" r="3.5"/>
-    <circle cx="625" cy="350" r="3.5"/>
-    <circle cx="655" cy="350" r="3.5"/>
+    <circle cx="490" cy="290" r="3.5"/><circle cx="525" cy="290" r="3.5"/><circle cx="560" cy="290" r="3.5"/>
+    <circle cx="595" cy="290" r="3.5"/><circle cx="625" cy="290" r="3.5"/><circle cx="655" cy="290" r="3.5"/>
+    <circle cx="490" cy="320" r="3.5"/><circle cx="525" cy="320" r="3.5"/><circle cx="560" cy="320" r="3.5"/>
+    <circle cx="595" cy="320" r="3.5"/><circle cx="625" cy="320" r="3.5"/><circle cx="655" cy="320" r="3.5"/>
+    <circle cx="490" cy="350" r="3.5"/><circle cx="525" cy="350" r="3.5"/><circle cx="560" cy="350" r="3.5"/>
+    <circle cx="595" cy="350" r="3.5"/><circle cx="625" cy="350" r="3.5"/><circle cx="655" cy="350" r="3.5"/>
   </g>
-
-  <!-- OBSERVED points (blue) — same set, each shifted ~30 px right -->
   <g fill="#2f6fbf">
-    <circle cx="215" cy="100" r="3.5"/>
-    <circle cx="215" cy="120" r="3.5"/>
-    <circle cx="215" cy="140" r="3.5"/>
-    <circle cx="215" cy="160" r="3.5"/>
-    <circle cx="215" cy="180" r="3.5"/>
-    <circle cx="215" cy="200" r="3.5"/>
-    <circle cx="215" cy="220" r="3.5"/>
-    <circle cx="215" cy="240" r="3.5"/>
-    <circle cx="215" cy="260" r="3.5"/>
-    <circle cx="215" cy="280" r="3.5"/>
-    <circle cx="215" cy="300" r="3.5"/>
-    <circle cx="215" cy="320" r="3.5"/>
+    <circle cx="215" cy="100" r="3.5"/><circle cx="215" cy="120" r="3.5"/><circle cx="215" cy="140" r="3.5"/>
+    <circle cx="215" cy="160" r="3.5"/><circle cx="215" cy="180" r="3.5"/><circle cx="215" cy="200" r="3.5"/>
+    <circle cx="215" cy="220" r="3.5"/><circle cx="215" cy="240" r="3.5"/><circle cx="215" cy="260" r="3.5"/>
+    <circle cx="215" cy="280" r="3.5"/><circle cx="215" cy="300" r="3.5"/><circle cx="215" cy="320" r="3.5"/>
     <circle cx="215" cy="340" r="3.5"/>
   </g>
   <g fill="#2f6fbf">
-    <circle cx="520" cy="290" r="3.5"/>
-    <circle cx="555" cy="290" r="3.5"/>
-    <circle cx="590" cy="290" r="3.5"/>
-    <circle cx="625" cy="290" r="3.5"/>
-    <circle cx="655" cy="290" r="3.5"/>
-    <circle cx="685" cy="290" r="3.5"/>
-    <circle cx="520" cy="320" r="3.5"/>
-    <circle cx="555" cy="320" r="3.5"/>
-    <circle cx="590" cy="320" r="3.5"/>
-    <circle cx="625" cy="320" r="3.5"/>
-    <circle cx="655" cy="320" r="3.5"/>
-    <circle cx="685" cy="320" r="3.5"/>
-    <circle cx="520" cy="350" r="3.5"/>
-    <circle cx="555" cy="350" r="3.5"/>
-    <circle cx="590" cy="350" r="3.5"/>
-    <circle cx="625" cy="350" r="3.5"/>
-    <circle cx="655" cy="350" r="3.5"/>
-    <circle cx="685" cy="350" r="3.5"/>
+    <circle cx="520" cy="290" r="3.5"/><circle cx="555" cy="290" r="3.5"/><circle cx="590" cy="290" r="3.5"/>
+    <circle cx="625" cy="290" r="3.5"/><circle cx="655" cy="290" r="3.5"/><circle cx="685" cy="290" r="3.5"/>
+    <circle cx="520" cy="320" r="3.5"/><circle cx="555" cy="320" r="3.5"/><circle cx="590" cy="320" r="3.5"/>
+    <circle cx="625" cy="320" r="3.5"/><circle cx="655" cy="320" r="3.5"/><circle cx="685" cy="320" r="3.5"/>
+    <circle cx="520" cy="350" r="3.5"/><circle cx="555" cy="350" r="3.5"/><circle cx="590" cy="350" r="3.5"/>
+    <circle cx="625" cy="350" r="3.5"/><circle cx="655" cy="350" r="3.5"/><circle cx="685" cy="350" r="3.5"/>
   </g>
-
-  <!-- a few sample displacement arrows (red → blue) -->
   <g stroke="#8d8a80" stroke-width="1" fill="none">
     <line x1="189" y1="140" x2="211" y2="140" marker-end="url(#dr)"/>
     <line x1="189" y1="220" x2="211" y2="220" marker-end="url(#dr)"/>
@@ -397,10 +430,11 @@ footer {
     <line x1="659" y1="320" x2="681" y2="320" marker-end="url(#dr)"/>
   </g>
 </svg>
-<figcaption class="arch-cap"><b>Figure 1</b> What a calibration engineer has always looked at. Red dots are where projected LiDAR points <em>should</em> land — on the surface of real objects in the image, a pole and a car. Blue dots are where the sensor rig <em>actually</em> places them after a small calibration drift: the same set of points, uniformly offset. Engineers have recalibrated rigs for decades by eyeballing patterns like this. This report is about automating that step: for every such projected point, the network emits a 2-D Gaussian saying where it should really land, and how confidently. Accumulate enough of those and bundle adjustment solves for the rig.</figcaption>
+<figcaption class="arch-cap en-only"><b>Figure 1</b> What a calibration engineer has always looked at. Red dots are where projected LiDAR points <em>should</em> land — on the surface of real objects in the image, a pole and a car. Blue dots are where the sensor rig <em>actually</em> places them after a small calibration drift: the same set of points, uniformly offset. Engineers have recalibrated rigs for decades by eyeballing patterns like this. This report is about automating that step: for every such projected point, the network emits a 2-D Gaussian saying where it should really land, and how confidently. Accumulate enough of those and bundle adjustment solves for the rig.</figcaption>
+<figcaption class="arch-cap ja-only"><b>Figure 1</b> キャリブ技術者がずっと見てきた絵。赤点は投影 LiDAR 点が<em>本来</em>落ちるべき場所 — 画像内の実物体（ポールと車）の表面。青点はリグが<em>実際に</em>置いている場所で、小さなキャリブずれが入ると同じ点集合が一様にオフセットされる。技術者はこの類いのパターンを目視で読んで、何十年もリグを再キャリブしてきた。本レポートの目的は、このステップを自動化すること — 投影点ごとにネットワークが 2D ガウスで「本当の位置」と「その確信度」を出し、それを十分に集めれば Bundle Adjustment がリグを解く。</figcaption>
 </figure>
 
-<div class="text">
+<div class="en-only">
 <p>Classical calibration — chessboards, targets, SfM — produces a set of rigid transforms (SE(3), i.e. rotation plus translation) between each sensor pair; they are accurate at the moment of capture and stale the moment a sensor moves. Factory calibration on a large vehicle fleet drifts out of spec within months, and running a full re-calibration pipeline in production is operationally unrealistic.</p>
 
 <p>The tempting response is to throw a single large end-to-end model at the whole rig — a CalibFormer-style system that takes all sensor streams and regresses the full set of extrinsics at once. <strong>That is the wrong factoring.</strong> A unified model is expensive to train, brittle to per-vehicle sensor layout changes, and couples every sensor's error modes into every other sensor's prediction. It also bakes in a rig topology that fleet teams routinely change — adding a telephoto, moving a side LiDAR, swapping a bumper camera.</p>
@@ -421,25 +455,73 @@ footer {
   <li><strong>Camera → camera, side overlap.</strong> Adjacent surround cameras with 10–20° shared FOV.</li>
   <li><strong>RADAR → camera.</strong> Coarse radar points projected onto image, corrected to nearest RCS-consistent visual structure.</li>
 </ul>
+<p><strong>Where this work sits in the roadmap.</strong> The report ahead trains and validates the residual detector on public data — PandaSet here, NuScenes + Waymo in the upcoming joint run — with synthetic calibration drift applied at load time. The end-goal, covered in §08, is to move the same primitive onto our internal rigs (<code>TMPOPC</code>, <code>TSS4</code>), close the loop with an actual BA solver, and compose it with motion-distortion correction and LIVO mapping into the simulation substrate autonomy will need for the next decade.</p>
 <p>The dataset used for this report is <strong>PandaSet</strong> — 103 outdoor driving scenes with synchronised Hesai Pandar64 LiDAR and six RGB cameras — perturbed with small synthetic calibration drift at load time, so the model sees a consistent training signal. The narrow research question here: <strong>how well does the residual generalise across object instances the model has not seen</strong>? Earlier runs held out whole scenes; here we hold out <em>objects</em>, isolating appearance-level generalisation from the larger scene-domain shift.</p>
 
 <h3>1.1&nbsp; Prehistory: the toy-data lineage</h3>
 <p>Before real LiDAR ever touched the model, the whole stack was shaken out on a fully synthetic 2-D toy: coloured rectangles on a flat background, points sampled on each shape at a fixed depth, and a uniform (tx, ty) shift applied to simulate calibration drift. We iterated through a dozen small variants (<code>v7</code>…<code>v20</code>) to lock down the architecture before committing to the expensive real-data pipeline. The last of these — <code>v20_3layer_randdepth</code> — was a three-layer coarse-to-fine cross-attention decoder on 64×64 crops with two objects per scene at randomised depths and a ±16 px offset budget; it reached <strong>obj NLL&nbsp;1.61</strong> on held-out synthetic scenes (100 ep, 5.5&nbsp;min, 1.16 M params). The PandaSet model below is the same architecture, widened to four layers with a ConvNeXt stem and a frustum-pooling head; everything that carried over from the toy stage is unchanged.</p>
-<figure style="margin:1rem auto;max-width:420px">
-  <img src="vis/synthetic_toy.png" alt="v20 synthetic toy validation sample" style="width:100%;display:block;border:1px solid var(--rule)">
-  <figcaption style="color:var(--muted);font-size:.85rem;margin-top:.4rem;text-align:center">Synthetic predecessor (<code>v20_3layer_randdepth</code>). Green ×&nbsp;= GT projection, coloured dots&nbsp;= distorted input, arrows&nbsp;= predicted correction. Two objects with independent depths; background points on the flat plane. Per-crop obj error 13.27 px → 1.15 px after the model's pull-back.</figcaption>
-</figure>
 </div>
 
-<h2><span class="num">§ 02 &nbsp; Problem Setup</span>One crop, one evidence packet.</h2>
-<div class="text">
+<div class="ja-only">
+<p>古典的なキャリブレーション — チェッカーボード、ターゲット、SfM — はセンサーペア間の剛体変換 SE(3)（回転＋平行移動）を推定する。収録の瞬間は正確だが、センサーが少しでも動いた瞬間に陳腐化する。大規模フリートの工場キャリブは数ヶ月でスペックを外れ、本格的な再キャリブ工程を量産運用で回すのは現実的ではない。</p>
+
+<p>その反動で、リグ全体に巨大なエンドツーエンドモデル（CalibFormer 系）を 1 本ぶつけて全センサーの外部パラメータを一気に回帰したくなる。<strong>問題の切り分けとしてはそれは間違っている。</strong>統一モデルは学習コストが高く、車種ごとの配置変更に脆く、あるセンサーの誤差モードが他センサーの推定を汚染する。また、フリート運用で日常的に起きるリグ構成変更（テレカメラを追加、サイド LiDAR を移設、バンパーカメラを交換）をその都度学習し直すのは合わない。</p>
+
+<p><strong>キャリブ「モデル」自体は小さい。</strong>センサーペアあたり 6 自由度、内部パラメータ数個 — たかだか十数パラメータ。Bundle Adjustment はこの種のモデルを 2D 観測から推定する問題を何十年も解いてきた。そこにニューラルネットは要らない。必要なのは<em>観測</em>だ — 各投影点が本来どこに落ちるべきか、そしてそれをどれほど確信しているかを示す、点ごとの大量の測定値。SfM がもともと採る切り分けをそのまま踏襲する:</p>
+
+<ul style="margin: 0 0 1.2em 0; padding-left: 1.2em; color: var(--ink);">
+  <li><strong>ネットワーク = 局所的な証拠検出器。</strong>小さな RGB クロップごとに、中に見える投影 LiDAR 点それぞれについて、フル共分散の 2D ガウス <code>(Δu, Δv)</code> を出す — 平均は「本当の位置」、共分散は「その確信度」。</li>
+  <li><strong>BA = 大域ソルバー。</strong>点ごとの観測をフレーム・クロップ横断で蓄積し、標準的な Bundle Adjustment に流してペアごとの剛体変換を同時最適化する。SfM や SLAM がすでに使っている工程そのもの。クロップごとに順伝播 1 回、リグごとに非線形求解 1 回。</li>
+</ul>
+
+<p><strong>なぜ小さいパッチで十分か、そしてそれが計算量にどう効くか。</strong>キャリブずれは<em>局所的</em>な不一致として現れる — ポールの LiDAR ヒットがシルエットから数ピクセルずれる、車の輪郭と点群の縁が噛み合わない。元の外部パラメータ誤差が何であれ、単一クロップ上での視覚シグネチャは有界である。ネットは 1920×1080 の全画面にわたる長距離 attention を要らない。64×64 か 128×128 のクロップ上の小さな Transformer で足りる。Attention コストは<em>パッチ</em>の面積に比例し、画像面積には比例しない。ドライブログは 1 台あたり 1 日で数百万クロップを吐くから、パッチごとの低コストが運用上の成立条件になる。</p>
+
+<p>同じプリミティブは、どのセンサーペアにも効く。視野が重なり、共通の幾何プリミティブ（エッジ・点・物体境界）を持つ 2 センサーは、「センサー A のプリミティブを画像 B に投影し、画像 B の特徴に対する 2D プルバックを不確かさつきで予測する」という同じ形にまとまる。具体的には:</p>
+<ul style="margin: 0 0 1.2em 0; padding-left: 1.2em; color: var(--ink);">
+  <li><strong>LiDAR → カメラ。</strong>本レポートで学習する、RGB への点群投影。</li>
+  <li><strong>カメラ → カメラ（前方 × 前方）。</strong>テレフォトと前方主カメラ（<code>TELE</code> + <code>FCM</code>）は狭い重なり帯を共有する。片方で三角測量した特徴をもう片方へ投影し、残差推定器が正しいピクセルへ引き戻す。温度サイクルでテレとワイドが互いにドリフトしがちな、現代の多焦点前方リグで頻出のケース。</li>
+  <li><strong>カメラ → カメラ（サイド重なり）。</strong>隣接サラウンドカメラの 10〜20° 共有視野。</li>
+  <li><strong>RADAR → カメラ。</strong>粗い RADAR 点を画像に投影し、RCS と整合する視覚構造へ寄せる。</li>
+</ul>
+<p><strong>本研究の位置づけ。</strong>以降のレポートでは残差検出器を公開データで学習・検証する — 本編の PandaSet と、後続のジョイントランでは NuScenes + Waymo — どちらもロード時に合成キャリブずれを加えている。最終ゴールは §08 で述べる通り、同プリミティブを自社リグ（<code>TMPOPC</code>、<code>TSS4</code>）に載せ、実際の BA ソルバーまでループを閉じ、さらに運動歪み補正と LIVO マッピングと組み合わせ、次の 10 年の自動運転が必要とするシミュレーション基盤に仕立てることにある。</p>
+<p>本レポートで用いるデータセットは <strong>PandaSet</strong> — Hesai Pandar64 LiDAR と RGB カメラ 6 台が同期した 103 シーンの屋外ドライブ — に、ロード時に小さな合成ずれを加えて一貫した学習信号を作った。狭く絞った問いは:<strong>学習時に見ていない物体インスタンスに対して、残差推定はどこまで汎化するか?</strong>以前のランは丸ごとシーンを hold-out していたが、ここでは<em>物体</em>単位で分割し、外観レベルの汎化をシーンドメインのシフトから切り分ける。</p>
+
+<h3>1.1&nbsp; 前史: 人工データ系譜</h3>
+<p>実 LiDAR がモデルに触れる前に、全スタックを純合成の 2D トイで振るい落とした。平坦な背景に色付きの矩形、各形状上に一定深度でサンプルされた点、そして一様な (tx, ty) シフトでキャリブずれを模した設定。十数個の小バリアント（<code>v7</code>…<code>v20</code>）を回して、実データパイプラインという高コスト工程に入る前にアーキテクチャを固めた。最後の <code>v20_3layer_randdepth</code> は 64×64 クロップ上の 3 層 coarse-to-fine Cross-Attention デコーダで、1 シーン 2 物体・深度ランダム化・±16 px のオフセット予算 — 未知合成シーンで <strong>obj NLL 1.61</strong>（100 ep、5.5 分、1.16M params）。以降の PandaSet モデルは同アーキテクチャを 4 層に拡張して ConvNeXt ステムと錐台プーリングヘッドを足したもの。トイ段階から引き継いだ要素は変わっていない。</p>
+</div>
+
+<figure style="margin:1rem auto;max-width:420px">
+  <img src="vis/synthetic_toy.png" alt="v20 synthetic toy validation sample" style="width:100%;display:block;border:1px solid var(--line)">
+  <figcaption class="en-only" style="color:var(--ink-dim);font-size:.85rem;margin-top:.4rem;text-align:center">Synthetic predecessor (<code>v20_3layer_randdepth</code>). Green ×&nbsp;= GT projection, coloured dots&nbsp;= distorted input, arrows&nbsp;= predicted correction. Two objects with independent depths; background points on the flat plane. Per-crop obj error 13.27 px → 1.15 px after the model's pull-back.</figcaption>
+  <figcaption class="ja-only" style="color:var(--ink-dim);font-size:.85rem;margin-top:.4rem;text-align:center;font-family:var(--jasans)">合成版の前身（<code>v20_3layer_randdepth</code>）。緑× = GT 投影、色付き点 = 歪んだ入力、矢印 = 予測補正。独立深度の 2 物体、平面上の背景点。クロップごとの物体誤差は 13.27 px → モデル補正後 1.15 px。</figcaption>
+</figure>
+
+<h2>
+  <span class="num en-only">§ 02 &nbsp; Problem Setup</span>
+  <span class="num ja-only">§ 02 &nbsp; 問題設定</span>
+  <span class="en-only">One crop, one evidence packet.</span>
+  <span class="ja-only">1 クロップ = 1 つの証拠パケット。</span>
+</h2>
+<div class="en-only">
 <p>Each training example is a 128×128 RGB crop centred on a single 3-D object, together with the LiDAR points visible in the crop projected as <code>(u, v, d)</code> — image coordinates plus depth. A synthetic calibration perturbation (≤&nbsp;0.2&nbsp;m translation, ≤&nbsp;0.5° rotation) is applied before projection, producing a distorted copy of each point; the regression target is the 2-D offset from the distorted projection back to the true projection. After a single forward pass, each crop yields a batch of per-point <code>(μ, Σ)</code> observations — one "evidence packet" that the downstream bundle-adjustment stage consumes.</p>
 <p>Points are tagged <code>obj</code> or <code>bg</code>. Object points live inside the 3-D bounding box — sparse (≈&nbsp;20–40 per crop) but visually anchored. Background points are whatever else the LiDAR returns inside the crop — road, buildings, distant cars — dense but often weakly constrained by the image.</p>
 </div>
+<div class="ja-only">
+<p>学習サンプルは 1 つの 3D 物体を中心にした 128×128 RGB クロップと、クロップ内に見える LiDAR 点を <code>(u, v, d)</code>（画像座標＋深度）で投影したもの。投影前に合成キャリブ擾乱（≤ 0.2 m の平行移動、≤ 0.5° の回転）を加え、各点の歪んだコピーを作る。回帰ターゲットは「歪んだ投影 → 真の投影」への 2D オフセット。順伝播 1 回で、クロップごとに点ごとの <code>(μ, Σ)</code> 観測がひと塊で得られる — これが下流の Bundle Adjustment に渡す「証拠パケット」。</p>
+<p>各点には <code>obj</code> か <code>bg</code> のラベルが付く。物体点は 3D バウンディングボックス内 — 疎（クロップあたり 20〜40 点）だが画像的に錨づけされている。背景点はクロップ内のそれ以外の LiDAR 反射 — 道路、建物、遠方の車 — 密だが画像からの拘束が弱いことが多い。</p>
+</div>
 
-<h2><span class="num">§ 03 &nbsp; Method</span>CalibNetDepth, cross-first.</h2>
+<h2>
+  <span class="num en-only">§ 03 &nbsp; Method</span>
+  <span class="num ja-only">§ 03 &nbsp; 手法</span>
+  <span class="en-only">CalibNetDepth, cross-first.</span>
+  <span class="ja-only">CalibNetDepth、cross-first。</span>
+</h2>
 
-<h3>3.1&nbsp; Architecture</h3>
+<h3>
+  <span class="en-only">3.1&nbsp; Architecture</span>
+  <span class="ja-only">3.1&nbsp; アーキテクチャ</span>
+</h3>
 <figure class="arch-fig">
 <svg viewBox="0 0 820 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="CalibNetDepth architecture diagram">
   <defs>
@@ -450,31 +532,23 @@ footer {
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#c13c14"/>
     </marker>
   </defs>
-
-  <!-- Row 1: Inputs -->
   <rect x="40"  y="20" width="360" height="74" fill="#fff" stroke="#d9d6cd"/>
   <text x="60"  y="48" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-weight="700" fill="#0f0f0e">Image crop</text>
   <text x="60"  y="74" font-family="JetBrains Mono,monospace" font-size="12" fill="#6b6a63">B × 3 × 64 × 64  ·  RGB</text>
   <rect x="440" y="20" width="340" height="74" fill="#fff" stroke="#d9d6cd"/>
   <text x="460" y="48" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-weight="700" fill="#0f0f0e">Projected LiDAR points</text>
   <text x="460" y="74" font-family="JetBrains Mono,monospace" font-size="12" fill="#6b6a63">B × N × 3  ·  (u, v, d)</text>
-
   <line x1="220" y1="94"  x2="220" y2="128" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#a)"/>
   <line x1="610" y1="94"  x2="610" y2="128" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#a)"/>
-
-  <!-- Row 2: Encoders -->
   <rect x="40"  y="130" width="360" height="74" fill="#fff" stroke="#d9d6cd"/>
   <text x="60"  y="158" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-weight="700" fill="#0f0f0e">ConvNeXt-mini</text>
   <text x="60"  y="184" font-family="JetBrains Mono,monospace" font-size="12" fill="#6b6a63">image → multi-scale feature maps</text>
   <rect x="440" y="130" width="340" height="74" fill="#fff" stroke="#d9d6cd"/>
   <text x="460" y="158" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-weight="700" fill="#0f0f0e">PointMLP  +  frustum enc.</text>
   <text x="460" y="184" font-family="JetBrains Mono,monospace" font-size="12" fill="#6b6a63">(u, v, d) → D-dim token per point</text>
-
   <line x1="140" y1="204" x2="140" y2="238" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#a)"/>
   <line x1="300" y1="204" x2="300" y2="238" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#a)"/>
   <line x1="610" y1="204" x2="610" y2="238" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#a)"/>
-
-  <!-- Row 3: Features -->
   <rect x="40"  y="240" width="170" height="74" fill="#fff" stroke="#d9d6cd"/>
   <text x="60"  y="268" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-weight="700" fill="#0f0f0e">coarse feat</text>
   <text x="60"  y="294" font-family="JetBrains Mono,monospace" font-size="12" fill="#6b6a63">D × 8 × 8</text>
@@ -484,17 +558,12 @@ footer {
   <rect x="440" y="240" width="340" height="74" fill="#fff" stroke="#d9d6cd"/>
   <text x="460" y="268" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-weight="700" fill="#0f0f0e">query tokens  Q</text>
   <text x="460" y="294" font-family="JetBrains Mono,monospace" font-size="12" fill="#6b6a63">B × N × D  (one token per LiDAR point)</text>
-
-  <!-- Arrows: features feed cross-attn KV (red), Q feeds decoder (black) -->
   <line x1="125" y1="314" x2="125" y2="355" stroke="#c13c14" stroke-width="1.6" marker-end="url(#ar)"/>
   <line x1="315" y1="314" x2="315" y2="355" stroke="#c13c14" stroke-width="1.6" marker-end="url(#ar)"/>
   <line x1="610" y1="314" x2="610" y2="355" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#a)"/>
-
-  <!-- Row 4: Decoder -->
   <rect x="40"  y="360" width="740" height="170" fill="#fdf9f4" stroke="#c13c14" stroke-width="1.3"/>
   <text x="60"  y="390" font-family="-apple-system,Segoe UI,sans-serif" font-size="15" font-weight="700" fill="#c13c14">Decoder · 4 × CrossAttnBlock</text>
   <text x="60"  y="412" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#6b6a63">each block:   cross-attn(Q ⟵ image feat)  →  self-attn(Q ⟷ Q)  →  FFN</text>
-
   <rect x="60"  y="428" width="345" height="36" fill="#fff" stroke="#d9d6cd"/>
   <text x="78"  y="451" font-family="JetBrains Mono,monospace" font-size="13" font-weight="600" fill="#0f0f0e">L1   Q  ⟵  coarse</text>
   <rect x="60"  y="478" width="345" height="36" fill="#fff" stroke="#d9d6cd"/>
@@ -503,20 +572,21 @@ footer {
   <text x="433" y="451" font-family="JetBrains Mono,monospace" font-size="13" font-weight="600" fill="#0f0f0e">L3   Q  ⟵  fine</text>
   <rect x="415" y="478" width="345" height="36" fill="#fff" stroke="#d9d6cd"/>
   <text x="433" y="501" font-family="JetBrains Mono,monospace" font-size="13" font-weight="600" fill="#0f0f0e">L4   Q  ⟵  fine</text>
-
   <line x1="410" y1="530" x2="410" y2="560" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#a)"/>
-
-  <!-- Row 5: Head -->
   <rect x="160" y="562" width="500" height="50" fill="#f4f8f4" stroke="#174734" stroke-width="1.3"/>
   <text x="410" y="594" font-family="JetBrains Mono,monospace" font-size="14" font-weight="600" fill="#0f0f0e" text-anchor="middle">Linear  →  (Δu, Δv, log σᵤ, log σᵥ, ρ)</text>
-
   <text x="410" y="634" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#6b6a63" text-anchor="middle">2-D Gaussian NLL  ·  masked mean over valid points  ·  1.62 M params  ·  bf16 autocast</text>
 </svg>
-<figcaption class="arch-cap"><b>Figure 3</b> Two-branch encoder — ConvNeXt-mini on the image crop (splits into a coarse 8×8 and a fine 4×4 map), PointMLP on the LiDAR points — feeds a 4-layer cross-attention decoder. Red arrows indicate keys/values drawn from image features; the black arrow carries the per-point query tokens. Layers 1–2 attend to the coarse map for global context; 3–4 refine against the fine map.</figcaption>
+<figcaption class="arch-cap en-only"><b>Figure 3</b> Two-branch encoder — ConvNeXt-mini on the image crop (splits into a coarse 8×8 and a fine 4×4 map), PointMLP on the LiDAR points — feeds a 4-layer cross-attention decoder. Red arrows indicate keys/values drawn from image features; the black arrow carries the per-point query tokens. Layers 1–2 attend to the coarse map for global context; 3–4 refine against the fine map.</figcaption>
+<figcaption class="arch-cap ja-only"><b>Figure 3</b> 2 系統のエンコーダ — 画像クロップは ConvNeXt-mini（粗い 8×8 と細かい 4×4 の 2 スケールに分解）、LiDAR 点は PointMLP — を 4 層 Cross-Attention デコーダに流す。赤矢印が画像特徴由来の key/value、黒矢印が点ごとのクエリトークン。L1〜L2 は粗いマップで大域文脈、L3〜L4 は細かいマップで精緻化。</figcaption>
 </figure>
 
-<h3>3.2&nbsp; Frustum encoding</h3>
-<p>A plain PointMLP treats each LiDAR point in isolation — it sees <code>(u, v, d)</code> and nothing about its neighbours. But calibration residuals are a local-geometry problem: a point sliding sideways is only meaningful relative to points at similar depth. The <strong>frustum encoder</strong> adds that local context. For each query point <em>i</em> we form a 3-D box in <code>(u, v, d)</code> space, take the <code>k</code> UV-nearest points inside it, and summarise their relative offsets with a shared MLP followed by max-pool. The resulting per-point descriptor is added to the PointMLP token before the cross-attention decoder sees it.</p>
+<h3>
+  <span class="en-only">3.2&nbsp; Frustum encoding</span>
+  <span class="ja-only">3.2&nbsp; 錐台エンコーディング</span>
+</h3>
+<p class="en-only">A plain PointMLP treats each LiDAR point in isolation — it sees <code>(u, v, d)</code> and nothing about its neighbours. But calibration residuals are a local-geometry problem: a point sliding sideways is only meaningful relative to points at similar depth. The <strong>frustum encoder</strong> adds that local context. For each query point <em>i</em> we form a 3-D box in <code>(u, v, d)</code> space, take the <code>k</code> UV-nearest points inside it, and summarise their relative offsets with a shared MLP followed by max-pool. The resulting per-point descriptor is added to the PointMLP token before the cross-attention decoder sees it.</p>
+<p class="ja-only">素の PointMLP は各 LiDAR 点を単独で扱う — <code>(u, v, d)</code> だけを見て、近傍のことは何も知らない。一方でキャリブ残差は局所幾何の問題だ: 点が横にずれる意味は、同じ深度帯の点との相対関係でしか定まらない。<strong>錐台エンコーダ</strong>がその局所文脈を足す。クエリ点 <em>i</em> ごとに <code>(u, v, d)</code> 空間で 3D ボックスを作り、その中で UV 近傍上位 <code>k</code> 点を取り、相対オフセットを共有 MLP → max-pool で要約する。出てきた点ごとの記述子は、Cross-Attention デコーダが見る前に PointMLP トークンへ加算される。</p>
 
 <figure class="arch-fig">
 <svg viewBox="0 0 820 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Frustum encoding diagram">
@@ -525,11 +595,7 @@ footer {
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f0f0e"/>
     </marker>
   </defs>
-
-  <!-- ===== LEFT PANEL: 3-D frustum neighbourhood ===== -->
   <text x="20" y="28" font-family="-apple-system,Segoe UI,sans-serif" font-size="12.5" font-weight="700" fill="#0f0f0e" letter-spacing="0.12em">(A)  NEIGHBOURHOOD  IN  (u, v, d)</text>
-
-  <!-- axis legend, top-right of left panel -->
   <g transform="translate(360, 58)" stroke="#0f0f0e" stroke-width="1.4" fill="none">
     <line x1="0" y1="0" x2="34" y2="0" marker-end="url(#fa)"/>
     <line x1="0" y1="0" x2="0"  y2="34" marker-end="url(#fa)"/>
@@ -540,71 +606,39 @@ footer {
     <text x="354" y="104">v</text>
     <text x="384" y="24">d  (depth)</text>
   </g>
-
-  <!-- Visible faces of the frustum box (very light mint fill).
-       Box corners: u,v half-axis = 90; d-offset per unit = (+50, -60).
-       Centre of box at (200, 240). -->
   <polygon points="160,90 340,90 340,270 160,270" fill="#e9f3e9" fill-opacity="0.6"/>
   <polygon points="60,210 240,210 340,90 160,90"  fill="#e9f3e9" fill-opacity="0.55"/>
   <polygon points="240,210 240,390 340,270 340,90" fill="#e9f3e9" fill-opacity="0.38"/>
-
-  <!-- Back-face edges (dashed where occluded) -->
   <line x1="60"  y1="210" x2="240" y2="210" stroke="#6b6a63" stroke-width="1" stroke-dasharray="4 3"/>
   <line x1="240" y1="210" x2="240" y2="390" stroke="#6b6a63" stroke-width="1" stroke-dasharray="4 3"/>
   <line x1="240" y1="390" x2="60"  y2="390" stroke="#6b6a63" stroke-width="1"/>
   <line x1="60"  y1="390" x2="60"  y2="210" stroke="#6b6a63" stroke-width="1"/>
-
-  <!-- Connector edges back-face to front-face -->
   <line x1="60"  y1="210" x2="160" y2="90"  stroke="#0f0f0e" stroke-width="1.2"/>
   <line x1="240" y1="210" x2="340" y2="90"  stroke="#6b6a63" stroke-width="1" stroke-dasharray="4 3"/>
   <line x1="240" y1="390" x2="340" y2="270" stroke="#0f0f0e" stroke-width="1.2"/>
   <line x1="60"  y1="390" x2="160" y2="270" stroke="#0f0f0e" stroke-width="1.2"/>
-
-  <!-- Front-face frame (solid, darker) -->
   <line x1="160" y1="90"  x2="340" y2="90"  stroke="#0f0f0e" stroke-width="1.4"/>
   <line x1="340" y1="90"  x2="340" y2="270" stroke="#0f0f0e" stroke-width="1.4"/>
   <line x1="340" y1="270" x2="160" y2="270" stroke="#0f0f0e" stroke-width="1.4"/>
   <line x1="160" y1="270" x2="160" y2="90"  stroke="#0f0f0e" stroke-width="1.4"/>
-
-  <!-- Edge-size annotations (along front face) -->
   <text x="238" y="82"  font-family="JetBrains Mono,monospace" font-size="11" fill="#c13c14" text-anchor="middle">2·r_uv</text>
   <text x="355" y="182" font-family="JetBrains Mono,monospace" font-size="11" fill="#c13c14">2·r_uv</text>
   <text x="355" y="285" font-family="JetBrains Mono,monospace" font-size="11" fill="#c13c14">2·r_d</text>
-
-  <!-- Points OUTSIDE the box (grey) -->
   <g fill="#bcbab2">
-    <circle cx="395" cy="255" r="3"/>
-    <circle cx="40"  cy="105" r="3"/>
-    <circle cx="245" cy="420" r="3"/>
-    <circle cx="290" cy="58"  r="3"/>
-    <circle cx="415" cy="360" r="3"/>
-    <circle cx="18"  cy="345" r="3"/>
-    <circle cx="380" cy="420" r="3"/>
-    <circle cx="120" cy="40"  r="3"/>
+    <circle cx="395" cy="255" r="3"/><circle cx="40"  cy="105" r="3"/><circle cx="245" cy="420" r="3"/>
+    <circle cx="290" cy="58"  r="3"/><circle cx="415" cy="360" r="3"/><circle cx="18"  cy="345" r="3"/>
+    <circle cx="380" cy="420" r="3"/><circle cx="120" cy="40"  r="3"/>
   </g>
-
-  <!-- Inside box but NOT top-k (outlined green) -->
   <circle cx="306" cy="291" r="4" fill="#fff" stroke="#5a9568" stroke-width="1.3"/>
   <circle cx="99"  cy="342" r="4" fill="#fff" stroke="#5a9568" stroke-width="1.3"/>
   <circle cx="322" cy="112" r="4" fill="#fff" stroke="#5a9568" stroke-width="1.3"/>
-
-  <!-- Inside box AND top-k (filled green, with thicker ring) -->
   <g fill="#5a9568" stroke="#174734" stroke-width="1.2">
-    <circle cx="242" cy="240" r="4.2"/>
-    <circle cx="169" cy="207" r="4.2"/>
-    <circle cx="189" cy="219" r="4.2"/>
-    <circle cx="192" cy="273" r="4.2"/>
-    <circle cx="235" cy="261" r="4.2"/>
-    <circle cx="171" cy="201" r="4.2"/>
-    <circle cx="161" cy="240" r="4.2"/>
-    <circle cx="221" cy="231" r="4.2"/>
+    <circle cx="242" cy="240" r="4.2"/><circle cx="169" cy="207" r="4.2"/><circle cx="189" cy="219" r="4.2"/>
+    <circle cx="192" cy="273" r="4.2"/><circle cx="235" cy="261" r="4.2"/><circle cx="171" cy="201" r="4.2"/>
+    <circle cx="161" cy="240" r="4.2"/><circle cx="221" cy="231" r="4.2"/>
   </g>
-
-  <!-- Query point i at centre -->
   <circle cx="200" cy="240" r="6.2" fill="#c13c14" stroke="#0f0f0e" stroke-width="1.4"/>
   <text x="210" y="246" font-family="JetBrains Mono,monospace" font-size="13" font-weight="700" fill="#c13c14">i</text>
-
-  <!-- Legend -->
   <g font-family="JetBrains Mono,monospace" font-size="11" fill="#0f0f0e">
     <circle cx="30"  cy="425" r="5" fill="#c13c14" stroke="#0f0f0e" stroke-width="1.2"/>
     <text   x="42"  y="429">query i</text>
@@ -616,31 +650,18 @@ footer {
     <text   x="410" y="429">outside box</text>
   </g>
   <text x="30" y="460" font-family="JetBrains Mono,monospace" font-size="11" fill="#6b6a63">|Δu| &lt; r_uv   ∧   |Δv| &lt; r_uv   ∧   |Δd| &lt; r_d          defaults:  r_uv = 8 px,   r_d = 0.004,   k = 8</text>
-
-  <!-- divider between panels -->
   <line x1="440" y1="50" x2="440" y2="460" stroke="#e0ddd3" stroke-width="1"/>
-
-  <!-- ===== RIGHT PANEL: aggregation pipeline ===== -->
   <text x="460" y="28" font-family="-apple-system,Segoe UI,sans-serif" font-size="12.5" font-weight="700" fill="#0f0f0e" letter-spacing="0.12em">(B)  AGGREGATION</text>
-
   <text x="460" y="60" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#6b6a63">for each of k = 8 neighbours  j ∈ N(i):</text>
-
-  <!-- Step 1: relative offset tuple -->
   <rect x="460" y="72" width="320" height="30" fill="#fff" stroke="#d9d6cd"/>
   <text x="476" y="92" font-family="JetBrains Mono,monospace" font-size="12.5" fill="#0f0f0e">(Δu_j,   Δv_j,   Δd_j)            ∈   ℝ³</text>
-
   <line x1="620" y1="102" x2="620" y2="128" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#fa)"/>
-
-  <!-- Step 2: shared MLP -->
   <rect x="460" y="130" width="320" height="82" fill="#fdf9f4" stroke="#c13c14" stroke-width="1.3"/>
   <text x="476" y="152" font-family="-apple-system,Segoe UI,sans-serif" font-size="13" font-weight="700" fill="#c13c14">shared MLP  (per neighbour)</text>
   <text x="476" y="174" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#0f0f0e">Linear(3 → 32)   →   GELU</text>
   <text x="476" y="190" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#0f0f0e">Linear(32 → D)   →   GELU   →   Linear(D → D)</text>
   <text x="476" y="206" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#6b6a63">weights shared across every neighbour of every query point</text>
-
   <line x1="620" y1="212" x2="620" y2="238" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#fa)"/>
-
-  <!-- Step 3: k feature vectors -->
   <rect x="500" y="242" width="260" height="22" fill="#fff" stroke="#d9d6cd"/>
   <text x="510" y="258" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#0f0f0e">h_i,1   ∈   ℝ^D</text>
   <rect x="500" y="264" width="260" height="22" fill="#fff" stroke="#d9d6cd"/>
@@ -649,29 +670,32 @@ footer {
   <text x="510" y="302" font-family="JetBrains Mono,monospace" font-size="13" fill="#0f0f0e">⋮</text>
   <rect x="500" y="308" width="260" height="22" fill="#fff" stroke="#d9d6cd"/>
   <text x="510" y="324" font-family="JetBrains Mono,monospace" font-size="11.5" fill="#0f0f0e">h_i,k   ∈   ℝ^D</text>
-
   <line x1="620" y1="332" x2="620" y2="358" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#fa)"/>
   <text x="630" y="350" font-family="JetBrains Mono,monospace" font-size="11" font-weight="700" fill="#c13c14">max over k</text>
-
-  <!-- Step 4: frustum feature -->
   <rect x="500" y="360" width="260" height="32" fill="#f4f8f4" stroke="#174734" stroke-width="1.3"/>
   <text x="514" y="381" font-family="JetBrains Mono,monospace" font-size="12.5" font-weight="700" fill="#0f0f0e">f_frustum(i)   ∈   ℝ^D</text>
-
   <line x1="620" y1="392" x2="620" y2="418" stroke="#0f0f0e" stroke-width="1.4" marker-end="url(#fa)"/>
   <text x="630" y="410" font-family="JetBrains Mono,monospace" font-size="11" fill="#0f0f0e">+  PointMLP(u, v, d)</text>
-
-  <!-- Step 5: final query token -->
   <rect x="500" y="420" width="260" height="30" fill="#fff" stroke="#0f0f0e" stroke-width="1.4"/>
   <text x="514" y="440" font-family="JetBrains Mono,monospace" font-size="12" font-weight="700" fill="#0f0f0e">q_i    (query token,  D-dim)</text>
 </svg>
-<figcaption class="arch-cap"><b>Figure 4</b> <strong>Frustum encoding.</strong> (A) For each LiDAR point i we form a 3-D box in <code>(u, v, d)</code> space — radius r_uv in the image plane, r_d along depth — and take the k UV-nearest points inside it (green filled). A point that is close in UV but at a different depth layer (grey, above/below the box) is <em>not</em> a neighbour: depth is what separates the query object from the road behind it. (B) A shared MLP lifts each relative offset <code>(Δu, Δv, Δd)</code> into ℝ^D, and a max-pool over the k neighbours produces a per-point geometric descriptor that is added to the plain PointMLP token before the decoder sees it.</figcaption>
+<figcaption class="arch-cap en-only"><b>Figure 4</b> <strong>Frustum encoding.</strong> (A) For each LiDAR point i we form a 3-D box in <code>(u, v, d)</code> space — radius r_uv in the image plane, r_d along depth — and take the k UV-nearest points inside it (green filled). A point that is close in UV but at a different depth layer (grey, above/below the box) is <em>not</em> a neighbour: depth is what separates the query object from the road behind it. (B) A shared MLP lifts each relative offset <code>(Δu, Δv, Δd)</code> into ℝ^D, and a max-pool over the k neighbours produces a per-point geometric descriptor that is added to the plain PointMLP token before the decoder sees it.</figcaption>
+<figcaption class="arch-cap ja-only"><b>Figure 4</b> <strong>錐台エンコーディング。</strong>(A) 各 LiDAR 点 i について <code>(u, v, d)</code> 空間で 3D ボックス（画像面で半径 r_uv、深度で r_d）を作り、その中で UV 最近傍 k 点を取る（緑塗り）。UV は近いが別の深度層にある点（ボックスの上下に位置する灰色点）は近傍では<em>ない</em>: 深度こそがクエリ物体とその背後の道路を分ける軸だから。(B) 共有 MLP が相対オフセット <code>(Δu, Δv, Δd)</code> を ℝ^D へ持ち上げ、k 近傍の max-pool で点ごとの幾何記述子を作る。これが PointMLP トークンに加算された状態でデコーダが見る。</figcaption>
 </figure>
 
-<h3>3.3&nbsp; Loss</h3>
-<p>Per-point 2-D Gaussian negative log-likelihood with full 2×2 covariance parametrised by <code>log σᵤ, log σᵥ, ρ</code>. The loss is averaged over valid (non-padded) points, not summed, so the gradient scale is independent of how many points fall in a crop — important when mixing datasets with different point densities.</p>
+<h3>
+  <span class="en-only">3.3&nbsp; Loss</span>
+  <span class="ja-only">3.3&nbsp; 損失関数</span>
+</h3>
+<p class="en-only">Per-point 2-D Gaussian negative log-likelihood with full 2×2 covariance parametrised by <code>log σᵤ, log σᵥ, ρ</code>. The loss is averaged over valid (non-padded) points, not summed, so the gradient scale is independent of how many points fall in a crop — important when mixing datasets with different point densities.</p>
+<p class="ja-only">点ごとの 2D ガウス負対数尤度、フル 2×2 共分散を <code>log σᵤ, log σᵥ, ρ</code> でパラメータ化。損失は有効（非パディング）点の和ではなく<em>平均</em>を取る。これで勾配スケールはクロップに含まれる点数に依存しなくなる — 点密度の異なるデータセットを混ぜて学習する時に重要。</p>
 
-<h3>3.4&nbsp; Object-level split</h3>
-<p>PandaSet's 103 scenes yield 33,458 object crops. Earlier runs held out whole <em>scenes</em> (10 % val), which conflates two failure modes: new instances and new environments. Here the concatenated crop pool is shuffled and split 90 / 10 at the <strong>instance</strong> level (seed&nbsp;42), so every scene is represented in both splits but no crop appears in both.</p>
+<h3>
+  <span class="en-only">3.4&nbsp; Object-level split</span>
+  <span class="ja-only">3.4&nbsp; 物体単位スプリット</span>
+</h3>
+<p class="en-only">PandaSet's 103 scenes yield 33,458 object crops. Earlier runs held out whole <em>scenes</em> (10 % val), which conflates two failure modes: new instances and new environments. Here the concatenated crop pool is shuffled and split 90 / 10 at the <strong>instance</strong> level (seed&nbsp;42), so every scene is represented in both splits but no crop appears in both.</p>
+<p class="ja-only">PandaSet の 103 シーンから 33,458 個の物体クロップが得られる。以前のランは丸ごと<em>シーン</em>を hold-out（val 10%）していたが、これだと「未知インスタンス」と「未知環境」という 2 つの失敗モードが混ざる。ここでは全クロップを一塊にしてシャッフルし、<strong>インスタンス</strong>単位で 90 / 10 に分ける（seed 42）。全シーンが両スプリットに現れるが、1 つのクロップが両方に現れることはない。</p>
 
 <div class="cfg"><b>CFG</b> = dict(
     name         = 'ps_v9_objsplit',
@@ -688,11 +712,17 @@ footer {
     split_seed   = 42,
 )</div>
 
-<h2><span class="num">§ 04 &nbsp; Results</span>Headline numbers.</h2>
+<h2>
+  <span class="num en-only">§ 04 &nbsp; Results</span>
+  <span class="num ja-only">§ 04 &nbsp; 結果</span>
+  <span class="en-only">Headline numbers.</span>
+  <span class="ja-only">主要指標。</span>
+</h2>
 
 <div class="metrics">
   <div class="metric accent">
-    <div class="label">best&nbsp;val&nbsp;NLL</div>
+    <div class="label en-only">best&nbsp;val&nbsp;NLL</div>
+    <div class="label ja-only">最小&nbsp;val&nbsp;NLL</div>
     <div class="value">1.9491</div>
   </div>
   <div class="metric">
@@ -704,14 +734,16 @@ footer {
     <div class="value">2.82<small>px</small></div>
   </div>
   <div class="metric">
-    <div class="label">vs&nbsp;scene-split</div>
+    <div class="label en-only">vs&nbsp;scene-split</div>
+    <div class="label ja-only">vs&nbsp;シーン分割</div>
     <div class="value">−32<small>%</small></div>
   </div>
 </div>
 
 <figure class="figure">
   <img src="vis/curves.png" alt="training curves">
-  <figcaption><b>Figure 2</b> Learning curves over 200 epochs. Validation in red, training in forest green. Val NLL plateaus near epoch 130 while val MSE keeps descending — the model keeps improving its mean prediction after its covariance prediction stops generalising.</figcaption>
+  <figcaption class="en-only"><b>Figure 2</b> Learning curves over 200 epochs. Validation in red, training in forest green. Val NLL plateaus near epoch 130 while val MSE keeps descending — the model keeps improving its mean prediction after its covariance prediction stops generalising.</figcaption>
+  <figcaption class="ja-only"><b>Figure 2</b> 200 エポック分の学習曲線。赤が検証、深緑が学習。val NLL は ep 130 付近で頭打ちになるが、val MSE は下がり続ける — 共分散の汎化は止まっても、平均予測の方は改善し続けている。</figcaption>
 </figure>
 
 <table class="stats">
@@ -729,12 +761,24 @@ footer {
 </tbody>
 </table>
 
-<h2><span class="num">§ 05 &nbsp; Ablations</span>What actually carries the performance.</h2>
-<div class="text">
+<h2>
+  <span class="num en-only">§ 05 &nbsp; Ablations</span>
+  <span class="num ja-only">§ 05 &nbsp; アブレーション</span>
+  <span class="en-only">What actually carries the performance.</span>
+  <span class="ja-only">性能を担っているのはどこか。</span>
+</h2>
+<div class="en-only">
 <p>Two design choices from §03 were isolated by re-training with a single change each — same object-level split, same 200-epoch schedule, same seed — so the comparison is apples-to-apples. The question each answers:</p>
 <ul style="margin: 0 0 1.2em 0; padding-left: 1.2em; color: var(--ink);">
   <li><strong>Block ordering: self-first vs. cross-first.</strong> Should the query token talk to its peers <em>before</em> reaching for image features, or the other way around?</li>
   <li><strong>Frustum encoding on / off.</strong> Is the per-point local neighbourhood descriptor (Figure 4) paying its keep, or does a plain PointMLP on <code>(u, v, d)</code> already give the decoder enough positional information?</li>
+</ul>
+</div>
+<div class="ja-only">
+<p>§03 の設計選択 2 つを、それぞれ 1 箇所だけ変えて再学習して切り出した — 物体単位分割・200 エポック・同 seed で揃えているので比較はフェアだ。各アブレーションが答える問い:</p>
+<ul style="margin: 0 0 1.2em 0; padding-left: 1.2em; color: var(--ink);">
+  <li><strong>ブロック順序: self-first vs. cross-first。</strong>クエリトークンは<em>まず</em>仲間同士で喋るべきか、先に画像特徴へ手を伸ばすべきか?</li>
+  <li><strong>錐台エンコーディング on / off。</strong>点ごとの局所近傍記述子（Figure 4）は働きに見合う価値を出しているのか、それとも素の <code>(u, v, d)</code> PointMLP だけでデコーダには十分な位置情報が渡っているのか?</li>
 </ul>
 </div>
 
@@ -747,14 +791,24 @@ footer {
 </tbody>
 </table>
 
-<div class="text">
+<div class="en-only">
 <p><strong>Self-first is a wash</strong> (+0.10 NLL). The two block orderings give essentially the same final model — obj NLL and bg NLL at the last epoch are within measurement noise of the baseline. This sharpens the earlier v10 finding, where <code>self_first=True</code> hurt a smaller 3-layer toy-dataset decoder: on the 4-layer ConvNeXt-plus-frustum setup the choice no longer matters much.</p>
 
 <p><strong>Frustum encoding is load-bearing.</strong> Removing it costs <strong>+0.81 NLL</strong> overall, and the damage is concentrated exactly where the design was supposed to help — <strong>obj NLL jumps from +0.19 to +1.52</strong>, an 8× increase. Background is less sensitive (+0.99). The plain PointMLP can position a token globally on <code>(u, v, d)</code>, but it cannot see that <em>this</em> point sits alongside six other points forming a vertical line (a pole), or a dense cluster on a metal surface (a car roof). Those are exactly the cues object-point calibration hinges on. Figure 4's box-and-maxpool is doing real work, not decoration.</p>
 </div>
+<div class="ja-only">
+<p><strong>self-first は誤差の範囲内</strong>（+0.10 NLL）。2 種のブロック順序は実質同じモデルに収束する — 最終エポックの obj NLL・bg NLL もベースラインと測定ノイズの範囲内。以前の v10 で <code>self_first=True</code> が小規模 3 層トイデータのデコーダを悪化させた結果をシャープ化した格好: 4 層 ConvNeXt + 錐台の組み合わせになると、この選択はもうほとんど効かない。</p>
 
-<h2><span class="num">§ 06 &nbsp; Analysis</span>Where the generalisation gap lives.</h2>
-<div class="text">
+<p><strong>錐台エンコーディングは効いている。</strong>外すと全体で <strong>+0.81 NLL</strong> のコストで、しかも被害は設計が効くはずの場所に集中している — <strong>obj NLL は +0.19 から +1.52 へ跳ね</strong>、8 倍に悪化する。背景は鈍感（+0.99）。素の PointMLP はトークンを <code>(u, v, d)</code> 上で大域的に置けるが、「<em>この</em>点が縦一列を成す 6 点と並ぶ（ポールだ）」とか、「金属表面上の密クラスターに属する（車のルーフだ）」といった情報は見えない。物体点のキャリブが頼るのはまさにそうした手がかり。Figure 4 のボックス & max-pool は装飾ではなく、ちゃんと仕事をしている。</p>
+</div>
+
+<h2>
+  <span class="num en-only">§ 06 &nbsp; Analysis</span>
+  <span class="num ja-only">§ 06 &nbsp; 分析</span>
+  <span class="en-only">Where the generalisation gap lives.</span>
+  <span class="ja-only">汎化ギャップはどこに住んでいるか。</span>
+</h2>
+<div class="en-only">
 <p>The sub-pixel headline obscures a more nuanced story. Training NLL continues to fall through epoch 200 (<code>obj</code>&nbsp;-0.55, <code>bg</code>&nbsp;+1.04) while <strong>val NLL flattens around epoch 130</strong>. This is not uniform overfitting: val <em>MSE</em> continues to decrease even while val NLL stalls.</p>
 
 <p>The most likely mechanism is <strong>σ overfitting</strong>. The mean prediction <code>(Δu, Δv)</code> generalises — the geometric relationship between image edges and LiDAR points transfers to unseen instances. The predicted covariance, however, is being calibrated against training-set residual statistics; at validation time the Mahalanobis term <code>(err / σ)²</code> pays the price whenever σ is too tight for the actual observed error distribution.</p>
@@ -763,11 +817,24 @@ footer {
 
 <p>Two directions follow naturally. <strong>(i) Multi-dataset training.</strong> Adding NuScenes and Waymo gives the covariance head a more diverse residual distribution to calibrate against. <strong>(ii) σ regularisation.</strong> Penalising <code>log|Σ|</code> shrinkage, or swapping to a Student-t likelihood, prevents the covariance from chasing training-set minutiae.</p>
 </div>
+<div class="ja-only">
+<p>サブピクセルという見出しの裏には、もう少し細かい話が隠れている。train NLL はエポック 200 まで下がり続ける（<code>obj</code> −0.55、<code>bg</code> +1.04）のに対し、<strong>val NLL はエポック 130 付近で頭打ち</strong>。しかし一様な過学習ではない: val NLL が停滞しても、val <em>MSE</em> はまだ下がっている。</p>
 
-<h2><span class="num">§ 07 &nbsp; Samples</span>48 held-out val crops.</h2>
-<div class="text">
-<p>Each tile shows per-point correction arrows (orange for object, blue for background), the raw object bounding box (red solid), the predicted-shifted box (cyan dashed), and a white centre-shift arrow. Titles read <code>obj_err&nbsp;before → after, bg_err&nbsp;before → after, mean&nbsp;obj&nbsp;shift (dx, dy)</code> in pixels.</p>
+<p>最も有力な機序は<strong>σ（共分散）の過学習</strong>。平均予測 <code>(Δu, Δv)</code> は汎化する — 画像エッジと LiDAR 点の幾何関係は未知インスタンスへ移る。しかし予測共分散は学習セットの残差統計に合わせて校正されるため、検証時には σ が実観測の誤差分布に対してきつすぎると、マハラノビス項 <code>(err / σ)²</code> がペナルティを払う。</p>
+
+<p>ギャップは<strong>点の種類によっても不均一</strong>。物体点はタイトに汎化する — val obj NLL +0.19 に対し train −0.55、差 0.7。汎化コストの大半は背景点が背負う — val bg +2.26 に対し train +1.04、差 1.2。背景点はまさに画像からの手がかりが弱い点 — 空、道路、遠方建物 — なので、ここの σ 校正が難所になる。最も安い対策は、学習プールを増やすことだろう。</p>
+
+<p>自然に 2 つの方向が見える。<strong>(i) マルチデータセット学習。</strong>NuScenes と Waymo を加え、共分散ヘッドがキャリブレーションする残差分布を多様化する。<strong>(ii) σ 正則化。</strong><code>log|Σ|</code> の縮み込みにペナルティを入れるか、Student-t 尤度に差し替えて、共分散が学習セットの細部を追いかけるのを防ぐ。</p>
 </div>
+
+<h2>
+  <span class="num en-only">§ 07 &nbsp; Samples</span>
+  <span class="num ja-only">§ 07 &nbsp; サンプル</span>
+  <span class="en-only">48 held-out val crops.</span>
+  <span class="ja-only">検証セットから 48 クロップ。</span>
+</h2>
+<p class="en-only">Each tile shows per-point correction arrows (orange for object, blue for background), the raw object bounding box (red solid), the predicted-shifted box (cyan dashed), and a white centre-shift arrow. Titles read <code>obj_err&nbsp;before → after, bg_err&nbsp;before → after, mean&nbsp;obj&nbsp;shift (dx, dy)</code> in pixels.</p>
+<p class="ja-only">各タイルは、点ごとの補正矢印（橙 = 物体、青 = 背景）、元の物体バウンディングボックス（赤実線）、予測シフト後のボックス（シアン破線）、白い中心シフト矢印を示す。タイトルは <code>obj_err 前 → 後, bg_err 前 → 後, 物体平均シフト (dx, dy)</code>、単位はピクセル。</p>
 
 <div class="vis-grid">
   <img src="vis/val_00.png" loading="lazy" alt="val sample 0">
@@ -820,11 +887,94 @@ footer {
   <img src="vis/val_47.png" loading="lazy" alt="val sample 47">
 </div>
 
+<h2>
+  <span class="num en-only">§ 08 &nbsp; Next work</span>
+  <span class="num ja-only">§ 08 &nbsp; これから</span>
+  <span class="en-only">From the bench to a production foundation.</span>
+  <span class="ja-only">ベンチから、量産の土台へ。</span>
+</h2>
+
+<p class="en-only">The report above is one vertex of a larger programme: the residual-detector piece, trained on public data, validated under one generalisation regime. The pieces below compose the same local primitive — per-point 2-D Gaussian evidence plus a global BA solver — into a stack that autonomy teams can actually ship.</p>
+<p class="ja-only">これまでの章はもっと大きな計画の中の 1 つの頂点 — 公開データで学習した残差検出器の断片、1 つの汎化体制の下での検証。以下のピースは、同じ局所プリミティブ（点ごとの 2D ガウス証拠＋大域 BA ソルバー）を組み合わせて、自動運転チームが実際に出荷できるスタックに仕立てていく。</p>
+
+<ol class="vision-list">
+  <li>
+    <span class="n">01</span>
+    <div>
+      <h4 class="en-only">Adapt to in-house rigs (TMPOPC, TSS4) and close the BA loop.</h4>
+      <h4 class="ja-only">自社リグ（TMPOPC, TSS4）への適応と、BA ループの閉包。</h4>
+      <p class="en-only">The immediate next step is retraining the same detector on captures from our in-house platforms — <code>TMPOPC</code> and <code>TSS4</code> — where calibration drift is real rather than synthesised at load time. The acceptance test is not NLL in isolation: per-point observations flow straight into a standard bundle-adjustment stage that jointly re-solves the sensor-pair extrinsics on live logs, and the output pose set must be consistent with the sensor manifests. This is the end-to-end check that separates "interesting research" from "we can retire the calibration cell on the line."</p>
+      <p class="ja-only">直近の次の一歩は、同じ検出器を自社計測プラットフォーム <code>TMPOPC</code> と <code>TSS4</code> のデータで再学習すること。ここではキャリブずれはロード時の合成ではなく<em>実在する</em>ものになる。合否判定は NLL 単独ではなく、点ごとの観測を標準的な Bundle Adjustment にそのまま流して、実走行ログ上でセンサーペアの外部パラメータをまとめて解き直し、出てきた姿勢集合がセンサー仕様書と整合することで行う。これが「研究として面白い」と「ラインからキャリブ工程を外せる」を分ける、エンドツーエンドの試験になる。</p>
+    </div>
+  </li>
+  <li>
+    <span class="n">02</span>
+    <div>
+      <h4 class="en-only">Same primitive → LiDAR motion-distortion correction.</h4>
+      <h4 class="ja-only">同じプリミティブ →  LiDAR の運動歪み補正。</h4>
+      <p class="en-only">A rotating LiDAR sweeps its beams over roughly 100 ms; during that window the vehicle translates and the platform oscillates, so a single returned scan is body-frame inconsistent with itself. Treat each beam's timestamp as its own miniature extrinsic and ask the network, "where should this point really be?" — motion distortion becomes the same per-point 2-D Gaussian observation language, consumed by the same BA backend. One detector, two seemingly unrelated problem classes.</p>
+      <p class="ja-only">回転 LiDAR は約 100 ms かけてビームを掃引する。その間に車両は動き、プラットフォームは揺れるので、1 スキャン自体が車体座標系の中で自己整合しなくなる。各ビームのタイムスタンプを「ミニ外部パラメータ」と見なし、ネットワークに「この点は本当はどこにあるべきか?」と問えば、運動歪みは点ごとの 2D ガウス観測という同じ言語に落ち、同じ BA バックエンドで消費できる。1 つの検出器で、一見無関係な 2 つの問題クラスを解く。</p>
+    </div>
+  </li>
+  <li>
+    <span class="n">03</span>
+    <div>
+      <h4 class="en-only">LIVO + Gaussian Splatting — a 3-D map you can actually render.</h4>
+      <h4 class="ja-only">LIVO ＋ Gaussian Splatting — レンダリング可能な 3D 地図。</h4>
+      <p class="en-only">Compose pixel-accurate calibration with motion-distortion correction inside a LIVO (LiDAR-Inertial-Visual Odometry) pipeline, and the natural output is no longer a discrete point cloud but a Gaussian Splat field. Calibration accuracy at capture time is what lets splats fit tight; motion correction is what keeps them crisp along fast edges. Without both, a splat map of a driving scene falls apart around moving vehicles and low scenery. With both, the splats stay coherent frame-to-frame — a photorealistic, pose-consistent 3-D reconstruction of the real road.</p>
+      <p class="ja-only">ピクセル精度のキャリブと運動歪み補正を LIVO（LiDAR-慣性-視覚オドメトリ）に組み込めば、自然な出力はもはや離散点群ではなく Gaussian Splat 場になる。収録時のキャリブ精度が splat をタイトにフィットさせ、運動補正が速いエッジ沿いの splat を鮮明に保つ。両方欠けると、走行シーンの splat 地図は動く車両や低い景物の周囲で破綻する。両方そろえば、splat はフレーム間で一貫性を保つ — フォトリアリスティックで姿勢整合のとれた、実道路の 3D 再構成になる。</p>
+    </div>
+  </li>
+  <li>
+    <span class="n">04</span>
+    <div>
+      <h4 class="en-only">Virtual cameras &amp; object-only simulation.</h4>
+      <h4 class="ja-only">バーチャルカメラ、そして「物体だけ」のシミュレーション。</h4>
+      <p class="en-only">A splat-level map is the substrate for two capabilities that redefine what simulation can be. <strong>Virtual camera:</strong> render the scene from any viewpoint, including cameras that did not physically exist on the rig — new focal lengths, new mounting positions, fleet-wide re-rendering from a smaller number of captured vehicles. Training data multiplies. <strong>Object-only simulation:</strong> because the static environment is modelled separately from moving agents, we can move vehicles and pedestrians through an <em>otherwise unchanged</em> world, stress-testing planners against edge cases that never appeared in the raw log. This is not frame interpolation. This is counterfactual driving — the scenario never happened, but it could have, and we can replay it pixel-accurate.</p>
+      <p class="ja-only">splat 精度の地図は、「シミュレーション」の意味を書き換える 2 つの能力の土台になる。<strong>バーチャルカメラ</strong>: 任意の視点からシーンを再描画する。リグに物理的に存在しなかったカメラ — 別焦点距離、別取付位置も含む — からでも描ける。少数の収録車両から、フリート全体の再描画が成立する。学習データは何倍にもなる。<strong>物体だけのシミュレーション</strong>: 静的環境と移動エージェントを分離してモデル化するので、<em>背景は一切変えずに</em>車両と歩行者だけをシーン内で動かせる。プランナーを、生ログには現れなかったエッジケースに対して圧力試験できる。これはフレーム補間ではない — <em>反実仮想的な運転</em>だ。起きなかったが起き得たシナリオを、ピクセル精度で再生できる。</p>
+    </div>
+  </li>
+  <li>
+    <span class="n">05</span>
+    <div>
+      <h4 class="en-only">A foundation for the next decade of autonomy.</h4>
+      <h4 class="ja-only">これから 10 年の自動運転を支える基盤技術。</h4>
+      <p class="en-only">Calibration, pose correction, splat mapping, virtual sensors, synthetic agents — each one is, in isolation, a known technique. What makes the composition interesting is that they share a single local evidence primitive and a single global solver. The next decade of production autonomy rests on getting that primitive stable across sensors, rigs, and motion regimes, and on stacking it with mapping and rendering until the output is a world you can both measure and simulate. The PandaSet result above is one step on that path. Everything upstream of §08 is the foundation stone; everything downstream will be built on it.</p>
+      <p class="ja-only">キャリブレーション、姿勢補正、splat マッピング、バーチャルセンサー、合成エージェント — それぞれ単独では既知の技術。<em>合わさった時に</em>面白いのは、全てが 1 つの局所的証拠プリミティブと 1 つの大域ソルバーを共有していること。これから 10 年の量産自動運転は、そのプリミティブをセンサー・リグ・動体レジームにわたって安定化できるかに、そしてそれをマッピングとレンダリングに積み重ねて「計測もシミュレーションもできる世界」にまで持っていけるかにかかっている。上記の PandaSet の結果は、その道筋の 1 歩。§08 までの全内容がその礎石であり、ここから下流のすべてがその上に積まれていく。</p>
+    </div>
+  </li>
+</ol>
+
 <footer>
   <span>ps_v9_objsplit · generated 2026-04-19 23:10</span>
   <span>matoge@yokohama1 · PandaSet val 10 % @ seed 42</span>
 </footer>
 
 </article>
+
+<script>
+(function () {
+  var KEY = 'report-lang';
+  var saved = localStorage.getItem(KEY) || 'en';
+  if (saved !== 'en' && saved !== 'ja') saved = 'en';
+  document.body.className = 'lang-' + saved;
+  document.documentElement.setAttribute('lang', saved);
+  var btns = document.querySelectorAll('.lang-btn');
+  btns.forEach(function (b) {
+    b.classList.toggle('active', b.dataset.lang === saved);
+    b.setAttribute('aria-pressed', b.dataset.lang === saved ? 'true' : 'false');
+    b.addEventListener('click', function () {
+      var l = b.dataset.lang;
+      document.body.className = 'lang-' + l;
+      document.documentElement.setAttribute('lang', l);
+      localStorage.setItem(KEY, l);
+      btns.forEach(function (x) {
+        x.classList.toggle('active', x.dataset.lang === l);
+        x.setAttribute('aria-pressed', x.dataset.lang === l ? 'true' : 'false');
+      });
+    });
+  });
+})();
+</script>
 </body>
 </html>
