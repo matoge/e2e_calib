@@ -349,8 +349,8 @@ footer {
 
 <figure class="hero">
   <img src="vis/hero.png" alt="before/after hero">
-  <div class="hero-cap en-only"><b>What the model does</b> Four held-out val samples with shifts in distinct directions. Per-point arrows (orange = object, blue = background) show how the model pulls <em>every</em> projected LiDAR point, not just the ones inside the bounding box. Red box = distorted projection; green dashed box = model-corrected position; white arrow = mean object shift.</div>
-  <div class="hero-cap ja-only"><b>モデルの仕事</b>　検証セットから選んだ4サンプル、ずれの向きは全て異なる。点ごとの矢印（橙 = 物体、青 = 背景）は、モデルがバウンディングボックス内だけでなく<em>全ての</em>投影 LiDAR 点を引き戻している様子。赤枠 = 歪んだ投影、緑破線 = モデル補正後、白矢印 = 物体点群の平均シフト。</div>
+  <div class="hero-cap en-only"><b>What the model does</b> Four held-out val samples, each under a different realistic 6-DOF calibration drift from the training distribution (ypr ≤ 0.5°, t ≤ 0.20 m — shown top-right of each panel). The critical thing is that arrows are <em>not</em> a single global (dx, dy) applied to every point — they are a <strong>per-point regression</strong>. Because the underlying drift is 3-D, the shift at each pixel depends on depth and angular position, so arrow length and direction vary across the image (notice how the blue background arrows fan out or swirl within a single panel). Orange = object points, blue = background. Red box = distorted object projection; green dashed box = ground-truth projection; both are shown at the same scale so the residual is visible. Titles read <code>obj err before → after</code>.</div>
+  <div class="hero-cap ja-only"><b>モデルの仕事</b>　検証セットから選んだ 4 サンプル、それぞれ学習分布内の異なる 6-DOF キャリブずれを与えている（ypr ≤ 0.5°、t ≤ 0.20 m — 各パネル右上に表示）。肝心なのは、矢印が全点に同じ (dx, dy) を掛けた一様シフトでは<em>ない</em>こと — <strong>点ごとに独立に回帰された補正</strong>になっている。元のずれは 3D なので、各画素でのシフトは深度と画面上の角度位置によって変わる。1 パネル内でも背景の青矢印が放射状に広がったり、旋回するように向きを変えたりしているのが見える。橙 = 物体点、青 = 背景点。赤枠 = 歪んだ物体投影、緑破線 = 真の投影位置（同スケールで残差が見えるように）。見出しは <code>物体誤差 補正前 → 補正後</code>。</div>
 </figure>
 
 <div class="meta">
