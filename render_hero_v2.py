@@ -231,7 +231,13 @@ def main():
         dist_uv = out['uv_dist']; true_uv = out['uv_gt']
         synth = np.concatenate([dist_uv, out['dist_m'][:, None],
                                 out['is_obj'][:, None]], axis=1).astype(np.float32)
-        img = inst['img_64'].float() / 255.0
+        img_cache = inst.get('img_cache', inst.get('img_64'))
+        if img_cache.shape[-1] != S:
+            img = torch.nn.functional.interpolate(
+                img_cache.float().unsqueeze(0), size=(S, S),
+                mode='bilinear', align_corners=False).squeeze(0) / 255.0
+        else:
+            img = img_cache.float() / 255.0
         with torch.no_grad():
             pad = torch.zeros(1, synth.shape[0], dtype=torch.bool, device=dev)
             params = model(img.unsqueeze(0).to(dev),

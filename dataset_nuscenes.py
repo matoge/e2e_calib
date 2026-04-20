@@ -3,14 +3,20 @@
 Uses CAM_FRONT + LIDAR_TOP.
 Target classes: vehicle.car, human.pedestrian.adult,
                 movable_object.trafficcone, movable_object.barrier
+
+Cache phase: img at CACHE_IMG×CACHE_IMG with bbox_scale=3.0 (bbox in center 1/3).
+__getitem__: random sub-window in cache-image pixels, then bilinear-resize to img_size.
 """
 import json, random
 import numpy as np
 from pathlib import Path
 from PIL import Image
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
+
+CACHE_IMG = 192  # cache image resolution (square)
 
 _NS_CTX = {}  # shared context for multiprocessing workers
 
@@ -51,7 +57,8 @@ def _ns_process_scene(args):
         pts_world_h = np.hstack([pts_lidar, np.ones((len(pts_lidar),1), dtype=np.float32)])
         pts_world   = (T_lidar2w @ pts_world_h.T).T[:, :3].astype(np.float32)
 
-        IW, IH = ctx['IW'], ctx['IH']
+        IW, IH   = ctx['IW'], ctx['IH']
+        cache_img = ctx['cache_img']
         uv_gt, z_gt = _project(pts_world, T_w2cam, K)
         vis = (z_gt > 0.5) & (uv_gt[:,0]>=0) & (uv_gt[:,0]<IW) & \
               (uv_gt[:,1]>=0) & (uv_gt[:,1]<IH)
@@ -83,34 +90,18 @@ def _ns_process_scene(args):
             v0 = float(np.clip(vc-half, 0, IH-crop_size))
             crop_size = float(crop_size)
 
-            box    = (int(u0), int(v0), int(u0+crop_size), int(v0+crop_size))
-            img_64 = np.array(img_full.crop(box).resize((64,64), Image.BILINEAR), dtype=np.uint8)
+            box       = (int(u0), int(v0), int(u0+crop_size), int(v0+crop_size))
+            img_cache = np.array(img_full.crop(box).resize((cache_img, cache_img),
+                                                            Image.BILINEAR), dtype=np.uint8)
             obj_yaw = Rotation.from_quat([quat[1],quat[2],quat[3],quat[0]]).as_euler('zyx')[0]
 
-            # 2× crop ROI; 2px grid in 64×64-view → 64×64 cells over ROI
-            uv_vis = uv_gt[vis]
-            GS = 64; margin = crop_size * 0.5; roi_w = crop_size + 2*margin
-            in_roi = ((uv_vis[:,0] >= u0-margin) & (uv_vis[:,0] < u0+crop_size+margin) &
-                      (uv_vis[:,1] >= v0-margin) & (uv_vis[:,1] < v0+crop_size+margin))
-            pts_roi = pts_vis[in_roi]; uv_roi = uv_vis[in_roi]
-            if len(pts_roi) >= ctx['min_pts']:
-                gu = u0-margin + (np.arange(GS)+0.5)*(roi_w/GS)
-                gv = v0-margin + (np.arange(GS)+0.5)*(roi_w/GS)
-                ggu, ggv = np.meshgrid(gu, gv)
-                ggu = ggu.ravel()[:,None]; ggv = ggv.ravel()[:,None]
-                d2 = (uv_roi[:,0][None]-ggu)**2 + (uv_roi[:,1][None]-ggv)**2
-                g_sel = sorted(set(d2.argmin(axis=1).tolist()))
-                pts_samp = pts_roi[g_sel]
-            else:
-                pts_samp = pts_roi
-
             result.append({
-                'img_64':   torch.from_numpy(img_64).permute(2,0,1),
-                'pts':      torch.from_numpy(pts_samp),
-                'cam_pos':  torch.from_numpy(cam_pos),
-                'R_gt':     torch.from_numpy(T_cam2w[:3,:3].copy()),
-                'T_gt':     torch.from_numpy(T_w2cam),
-                'K_full':   torch.from_numpy(K.astype(np.float32)),
+                'img_cache': torch.from_numpy(img_cache).permute(2,0,1),  # (3, C, C)
+                'pts':       torch.from_numpy(pts_vis),
+                'cam_pos':   torch.from_numpy(cam_pos),
+                'R_gt':      torch.from_numpy(T_cam2w[:3,:3].copy()),
+                'T_gt':      torch.from_numpy(T_w2cam),
+                'K_full':    torch.from_numpy(K.astype(np.float32)),
                 'u0': u0, 'v0': v0, 'crop_size': crop_size,
                 'obj_pos':  torch.from_numpy(pos),
                 'obj_dims': torch.from_numpy(size_wlh),
@@ -120,7 +111,7 @@ def _ns_process_scene(args):
 
         if ctx['random_crops']:
             n_obj = len(result) - n_before_frame
-            rand_crop_size = int(IW * 0.10)
+            rand_crop_size = int(IW * 0.15)     # bigger so sub-window still has resolution
             for _ in range(max(1, int(n_obj * 0.5))):
                 ru0 = rng_s.randint(0, IW-rand_crop_size)
                 rv0 = rng_s.randint(0, IH-rand_crop_size)
@@ -128,14 +119,15 @@ def _ns_process_scene(args):
                         (uv_gt[vis,1]>=rv0) & (uv_gt[vis,1]<rv0+rand_crop_size))
                 if in_c.sum() < ctx['min_pts']: continue
                 box_r = (ru0, rv0, ru0+rand_crop_size, rv0+rand_crop_size)
-                img_r = np.array(img_full.crop(box_r).resize((64,64), Image.BILINEAR), dtype=np.uint8)
+                img_r = np.array(img_full.crop(box_r).resize((cache_img, cache_img),
+                                                              Image.BILINEAR), dtype=np.uint8)
                 result.append({
-                    'img_64':  torch.from_numpy(img_r).permute(2,0,1),
-                    'pts':     torch.from_numpy(pts_vis),
-                    'cam_pos': torch.from_numpy(cam_pos),
-                    'R_gt':    torch.from_numpy(T_cam2w[:3,:3].copy()),
-                    'T_gt':    torch.from_numpy(T_w2cam),
-                    'K_full':  torch.from_numpy(K.astype(np.float32)),
+                    'img_cache': torch.from_numpy(img_r).permute(2,0,1),
+                    'pts':       torch.from_numpy(pts_vis),
+                    'cam_pos':   torch.from_numpy(cam_pos),
+                    'R_gt':      torch.from_numpy(T_cam2w[:3,:3].copy()),
+                    'T_gt':      torch.from_numpy(T_w2cam),
+                    'K_full':    torch.from_numpy(K.astype(np.float32)),
                     'u0': float(ru0), 'v0': float(rv0), 'crop_size': float(rand_crop_size),
                     'obj_pos': torch.zeros(3), 'obj_dims': torch.zeros(3), 'obj_yaw': 0.0,
                     'is_val':  is_val,
@@ -203,12 +195,13 @@ def build_cache(nuscenes_root: str,
                 seed: int = 42,
                 max_per_scene: int = None,
                 random_crops: bool = False,
-                bbox_scale: float = 1.5,
+                bbox_scale: float = 3.0,
                 min_pts: int = 8,
                 target_cats: set = None,
                 frame_sample: float = 1.0,
                 num_workers: int = 16,
-                max_scenes: int = None):
+                max_scenes: int = None,
+                cache_img: int = CACHE_IMG):
 
     root    = Path(nuscenes_root)
     meta    = root / version
@@ -251,7 +244,7 @@ def build_cache(nuscenes_root: str,
                 ann_by_sample=ann_by_sample, instances=instances, cats=cats,
                 cal_sensors=cal_sensors, ego_poses=ego_poses,
                 IW=IW, IH=IH, use_cats=use_cats, bbox_scale=bbox_scale,
-                min_pts=min_pts, random_crops=random_crops,
+                min_pts=min_pts, random_crops=random_crops, cache_img=cache_img,
                 frame_sample=frame_sample, max_per_scene=max_per_scene, seed=seed)
 
     from multiprocessing import Pool
@@ -285,6 +278,22 @@ class NuScenesCalibDataset(Dataset):
 
     def __len__(self): return len(self.instances)
 
+    def _sample_sub(self, inst, C):
+        """Random sub-window (u, v, s) in cache-image pixel coords.
+        For obj crops, constrain sub to still contain the bbox (center 1/3)."""
+        s = int(np.random.randint(self.img_size, C + 1))
+        is_obj = inst['obj_dims'].norm() > 0
+        if is_obj:
+            lo = max(0, 2 * C // 3 - s)
+            hi = min(C - s, C // 3)
+            if hi < lo: hi = lo
+            u = int(np.random.randint(lo, hi + 1))
+            v = int(np.random.randint(lo, hi + 1))
+        else:
+            u = int(np.random.randint(0, C - s + 1))
+            v = int(np.random.randint(0, C - s + 1))
+        return (u, v, s)
+
     def __getitem__(self, idx):
         inst      = self.instances[idx % len(self.instances)]
         pts       = inst['pts'].numpy()
@@ -292,39 +301,46 @@ class NuScenesCalibDataset(Dataset):
         R_gt      = inst['R_gt'].numpy()
         T_gt      = inst['T_gt'].numpy()
         K         = inst['K_full'].numpy()
-        u0        = inst['u0']
-        v0        = inst['v0']
-        crop_size = inst['crop_size']
+        # Support both new (img_cache, C×C) and legacy (img_64, 64×64).
+        img_cache = inst.get('img_cache', inst.get('img_64'))
+        C         = int(img_cache.shape[-1])
         S         = self.img_size
 
-        # random perturbation
-        t_delta = (np.random.rand(3)*2-1) * self.max_offset_m
-        ypr     = (np.random.rand(3)*2-1) * self.max_rot_deg
-        R_off   = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
-        cp_off  = cp + t_delta
-        T_off   = np.eye(4, dtype=np.float32)
-        T_off[:3,:3] = R_off.T
-        T_off[:3, 3] = -(R_off.T @ cp_off)
+        for _ in range(self.max_tries):
+            # random perturbation
+            t_delta = (np.random.rand(3)*2-1) * self.max_offset_m
+            ypr     = (np.random.rand(3)*2-1) * self.max_rot_deg
+            R_off   = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
+            cp_off  = cp + t_delta
+            T_off   = np.eye(4, dtype=np.float32)
+            T_off[:3,:3] = R_off.T
+            T_off[:3, 3] = -(R_off.T @ cp_off)
 
-        # project with distorted pose
-        pts_cam_off = T_off[:3,:3] @ pts.T + T_off[:3,3:]
-        z_off = pts_cam_off[2]
-        uv_off = ((K @ pts_cam_off)[:2] / z_off).T
+            # sub-window → derive effective (u0, v0, crop_size) in full-res px
+            u_sub, v_sub, s_sub = self._sample_sub(inst, C)
+            cs_per_px = float(inst['crop_size']) / C
+            cu0 = float(inst['u0']) + u_sub * cs_per_px
+            cv0 = float(inst['v0']) + v_sub * cs_per_px
+            crop_size = s_sub * cs_per_px
 
-        # crop window is fixed at the cached (u0, v0) — img_64 was cropped there
-        cu0, cv0 = u0, v0
-        in_crop = ((uv_off[:,0]>=cu0) & (uv_off[:,0]<cu0+crop_size) &
-                   (uv_off[:,1]>=cv0) & (uv_off[:,1]<cv0+crop_size) &
-                   (z_off > 0.5))
-        if in_crop.sum() < self.min_pts:
+            # project with distorted pose
+            pts_cam_off = T_off[:3,:3] @ pts.T + T_off[:3,3:]
+            z_off  = pts_cam_off[2]
+            uv_off = ((K @ pts_cam_off)[:2] / z_off).T
+
+            in_crop = ((uv_off[:,0]>=cu0) & (uv_off[:,0]<cu0+crop_size) &
+                       (uv_off[:,1]>=cv0) & (uv_off[:,1]<cv0+crop_size) &
+                       (z_off > 0.5))
+            if in_crop.sum() >= self.min_pts:
+                break
+        else:
             return self[random.randint(0, len(self)-1)]
 
         scale = S / crop_size
         uv_d_crop = np.stack([(uv_off[in_crop,0]-cu0)*scale,
                                (uv_off[in_crop,1]-cv0)*scale], axis=1)
 
-        # 16×16 grid: bin each pt to its 4px cell, keep nearest-to-center per cell.
-        # Empty cells stay empty (no argmin fallback → no over-densification of edges).
+        # 16×16 grid: bin each pt to its cell, keep nearest-to-center per cell.
         grid, cell = 16, float(S)/16
         ci = np.clip((uv_d_crop[:,1] / cell).astype(np.int64), 0, grid-1)
         cj = np.clip((uv_d_crop[:,0] / cell).astype(np.int64), 0, grid-1)
@@ -368,7 +384,10 @@ class NuScenesCalibDataset(Dataset):
 
         true_uvd = np.concatenate([uv_gt_c.astype(np.float32),  dist_m[:,None], is_obj[:,None]], axis=1)
         dist_uvd = np.concatenate([uv_off_c.astype(np.float32), dist_m[:,None], is_obj[:,None]], axis=1)
-        img_crop = inst['img_64'].float() / 255.0
+
+        sub_img  = img_cache[:, v_sub:v_sub+s_sub, u_sub:u_sub+s_sub].float().unsqueeze(0)
+        img_crop = F.interpolate(sub_img, size=(S, S), mode='bilinear',
+                                  align_corners=False).squeeze(0) / 255.0
 
         return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd)
 

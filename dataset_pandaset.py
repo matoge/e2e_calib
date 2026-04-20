@@ -2,27 +2,36 @@
 
 Cache phase (once):
     For each frame × each visible cuboid object (car, person, etc.):
-        img_64    : (3, 64, 64) uint8  — GT image crop around object, resized
-        pts_world : (N, 3) float32     — all LiDAR visible in front camera
-        cam_pos   : (3,) float32
-        heading   : dict
-        K_full    : (3,3) float32      — full-res intrinsics (1920×1080)
-        u0,v0     : float              — crop top-left in full-res pixels
-        crop_size : float              — square crop side in full-res pixels
+        img_cache  : (3, CACHE_IMG, CACHE_IMG) uint8  — GT image crop, large-ish
+        pts_world  : (N, 3) float32                   — LiDAR visible in front cam
+        cam_pos    : (3,) float32
+        K_full     : (3,3) float32                    — intrinsics (1920×1080)
+        u0, v0     : float                            — cached crop TL in full-res px
+        crop_size  : float                            — cached crop side in full-res px
+    Objects are cached at bbox_scale=3.0 (bbox occupies center 1/3 of cache).
+    Random crops (bg) cached at ~192 full-res px, saved at CACHE_IMG×CACHE_IMG.
 
 __getitem__ (fresh random each call):
-    1. Random YPR+translation perturbation on camera pose
-    2. Project all pts_world with DISTORTED pose → find points in crop window
-    3. 16×16 grid sample → dist_uvd (crop-local coords, [0,64])
-    4. GT project same points → true_uvd (crop-local, may be outside [0,64])
+    1. Random sub-window in cache-image pixels: s ∈ [img_size, CACHE_IMG]
+       - for obj crops, sub-window is constrained to still contain bbox
+       - for random crops, sub-window is fully free
+    2. Derive new (u0, v0, crop_size) in full-res coords from the sub-window
+    3. Random YPR+translation perturbation on camera pose
+    4. Project all pts_world with DISTORTED pose → find points in crop window
+    5. 16×16 grid sample → dist_uvd (crop-local coords, [0, img_size])
+    6. GT project same points → true_uvd
+    7. Sub-crop cache image and bilinear-resize to img_size×img_size
 """
 import json, pickle, random
 import numpy as np
 from pathlib import Path
 from PIL import Image
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
+
+CACHE_IMG = 192  # cache image resolution (square)
 
 USEFUL_LABELS = {
     'Car', 'Pickup Truck', 'Semi-truck', 'Motorcycle',
@@ -73,9 +82,10 @@ def build_cache(pandaset_root: str,
                 max_scenes: int = None,
                 max_per_scene: int = None,
                 random_crops: bool = False,
-                bbox_scale: float = 1.5,
+                bbox_scale: float = 3.0,
                 min_pts: int = 8,
-                frame_sample: float = 1.0):
+                frame_sample: float = 1.0,
+                cache_img: int = CACHE_IMG):
     root   = Path(pandaset_root)
     scenes = sorted(p.name for p in root.iterdir() if p.is_dir())
     rng    = random.Random(seed); rng.shuffle(scenes)
@@ -163,10 +173,10 @@ def build_cache(pandaset_root: str,
                 v0 = float(np.clip(vc - half, 0, IH - crop_size))
                 crop_size = float(crop_size)
 
-                # crop and resize image to 64×64
+                # crop and resize image to CACHE_IMG
                 box = (int(u0), int(v0), int(u0+crop_size), int(v0+crop_size))
-                img_64 = np.array(img_full.crop(box).resize((64, 64), Image.BILINEAR),
-                                  dtype=np.uint8)
+                img_cache = np.array(img_full.crop(box).resize((cache_img, cache_img), Image.BILINEAR),
+                                     dtype=np.uint8)
 
                 R_gt = Rotation.from_quat([cam_pose['heading']['x'],
                                            cam_pose['heading']['y'],
@@ -176,7 +186,7 @@ def build_cache(pandaset_root: str,
                                      cam_pose['position'])).astype(np.float32)
 
                 split_list.append({
-                    'img_64':    torch.from_numpy(img_64).permute(2,0,1),  # (3,64,64)
+                    'img_cache': torch.from_numpy(img_cache).permute(2,0,1),  # (3,CACHE_IMG,CACHE_IMG)
                     'pts':       torch.from_numpy(pts_vis),
                     'cam_pos':   torch.from_numpy(cam_pos),
                     'R_gt':      torch.from_numpy(R_gt),    # (3,3)
@@ -207,9 +217,9 @@ def build_cache(pandaset_root: str,
                             (z_gt_all > 0.5))
                     if in_c.sum() < min_pts: continue
                     box_r = (ru0, rv0, ru0+rand_crop_size, rv0+rand_crop_size)
-                    img_r = np.array(img_full.crop(box_r).resize((64,64), Image.BILINEAR), dtype=np.uint8)
+                    img_r = np.array(img_full.crop(box_r).resize((cache_img, cache_img), Image.BILINEAR), dtype=np.uint8)
                     split_list.append({
-                        'img_64':   torch.from_numpy(img_r).permute(2,0,1),
+                        'img_cache': torch.from_numpy(img_r).permute(2,0,1),
                         'pts':      torch.from_numpy(pts_vis),
                         'cam_pos':  torch.from_numpy(cam_pos),
                         'R_gt':     torch.from_numpy(_R_gt),
@@ -235,6 +245,114 @@ def build_cache(pandaset_root: str,
           f"train={len(train_instances)} val={len(val_instances)}")
 
 
+# ── sample builder (shared with BA / eval / training) ───────────────────────
+
+def build_sample(inst, ypr, t_delta, img_size: int = 64, min_pts: int = 8,
+                 sub=None):
+    """Apply a given perturbation (ypr deg, t_delta m) to a cached instance and
+    produce (img_crop, true_uvd, dist_uvd, idx_in).
+
+    ``sub`` (u_sub, v_sub, s) is a sub-window inside the cached image (in
+    cache-image pixel coords, 0..CACHE_IMG). When ``None`` (default) the full
+    cached crop is used — useful for reproducing a deterministic crop (BA,
+    eval, hero rendering). Training __getitem__ passes a random sub.
+
+    Returns None if the distorted crop has fewer than ``min_pts`` LiDAR points.
+    """
+    pts       = inst['pts'].numpy()
+    cp        = inst['cam_pos'].numpy()
+    R_gt      = inst['R_gt'].numpy()
+    T_gt      = inst['T_gt'].numpy()
+    K         = inst['K_full'].numpy()
+    # Support both new (img_cache, CACHE_IMG×CACHE_IMG) and legacy (img_64, 64×64)
+    img_cache = inst.get('img_cache', inst.get('img_64'))    # (3, C, C)
+    C         = int(img_cache.shape[-1])
+
+    if sub is None:
+        u_sub, v_sub, s_sub = 0, 0, C
+    else:
+        u_sub, v_sub, s_sub = int(sub[0]), int(sub[1]), int(sub[2])
+
+    # derive the effective full-res crop from the sub-window
+    cs_per_px = float(inst['crop_size']) / C
+    u0        = float(inst['u0']) + u_sub * cs_per_px
+    v0        = float(inst['v0']) + v_sub * cs_per_px
+    crop_size = s_sub * cs_per_px
+    S         = img_size
+
+    R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
+    cp_off = cp + t_delta
+    T_off = np.eye(4, dtype=np.float32)
+    T_off[:3, :3] = R_off.T
+    T_off[:3,  3] = -(R_off.T @ cp_off)
+
+    pts_cam_off = T_off[:3, :3] @ pts.T + T_off[:3, 3:]
+    z_off       = pts_cam_off[2]
+    uv_off      = ((K @ pts_cam_off)[:2] / z_off).T
+
+    cu0, cv0 = u0, v0
+    in_crop = ((uv_off[:,0] >= cu0) & (uv_off[:,0] < cu0+crop_size) &
+               (uv_off[:,1] >= cv0) & (uv_off[:,1] < cv0+crop_size) &
+               (z_off > 0.5))
+    if in_crop.sum() < min_pts:
+        return None
+
+    scale = S / crop_size
+    uv_d_crop = np.stack([(uv_off[in_crop,0]-cu0) * scale,
+                          (uv_off[in_crop,1]-cv0) * scale], axis=1)
+    grid, cell = 16, float(S) / 16
+    sel = []
+    for gi in range(grid):
+        for gj in range(grid):
+            d2 = ((uv_d_crop[:,0]-(gj+.5)*cell)**2 +
+                  (uv_d_crop[:,1]-(gi+.5)*cell)**2)
+            sel.append(int(d2.argmin()))
+    sel = sorted(set(sel))
+
+    idx_in  = np.where(in_crop)[0][sel]
+    pts_sel = pts[idx_in]
+
+    pts_cam_gt = T_gt[:3, :3] @ pts_sel.T + T_gt[:3, 3:]
+    uv_gt      = ((K @ pts_cam_gt)[:2] / pts_cam_gt[2]).T
+    uv_gt_c  = np.stack([(uv_gt[:,0]-cu0) * scale,
+                          (uv_gt[:,1]-cv0) * scale], axis=1)
+    uv_off_c = uv_d_crop[sel]
+
+    dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
+
+    if 'obj_pos' in inst:
+        obj_pos  = inst['obj_pos'].numpy()
+        obj_dims = inst['obj_dims'].numpy()
+        obj_yaw  = inst['obj_yaw']
+        c_y, s_y = np.cos(obj_yaw), np.sin(obj_yaw)
+        R_obj = np.array([[c_y, s_y, 0],
+                          [-s_y, c_y, 0],
+                          [0,    0,   1]], dtype=np.float32)
+        pts_local = (R_obj @ (pts_sel - obj_pos).T).T
+        half = obj_dims / 2.0
+        is_obj = ((np.abs(pts_local[:,0]) <= half[0]) &
+                  (np.abs(pts_local[:,1]) <= half[1]) &
+                  (np.abs(pts_local[:,2]) <= half[2])).astype(np.float32)
+    else:
+        obj_bbox = inst['obj_bbox'].numpy()
+        obj_u0c  = (obj_bbox[0] - cu0) * scale
+        obj_v0c  = (obj_bbox[1] - cv0) * scale
+        obj_u1c  = (obj_bbox[2] - cu0) * scale
+        obj_v1c  = (obj_bbox[3] - cv0) * scale
+        is_obj   = ((uv_gt_c[:,0] >= obj_u0c) & (uv_gt_c[:,0] < obj_u1c) &
+                    (uv_gt_c[:,1] >= obj_v0c) & (uv_gt_c[:,1] < obj_v1c)
+                    ).astype(np.float32)
+
+    true_uvd = np.concatenate([uv_gt_c.astype(np.float32),  dist_m[:,None], is_obj[:,None]], axis=1)
+    dist_uvd = np.concatenate([uv_off_c.astype(np.float32), dist_m[:,None], is_obj[:,None]], axis=1)
+
+    sub_img  = img_cache[:, v_sub:v_sub+s_sub, u_sub:u_sub+s_sub].float().unsqueeze(0)
+    img_crop = F.interpolate(sub_img, size=(S, S), mode='bilinear',
+                             align_corners=False).squeeze(0) / 255.0
+
+    return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd), idx_in
+
+
 # ── dataset ──────────────────────────────────────────────────────────────────
 
 class PandaSetCalibDataset(Dataset):
@@ -256,97 +374,35 @@ class PandaSetCalibDataset(Dataset):
 
     def __len__(self): return len(self.instances)
 
+    def _sample_sub(self, inst):
+        """Random sub-window (u, v, s) in cache-image pixel coords.
+        For obj crops, constrain sub to still contain the bbox (center 1/3)."""
+        C = CACHE_IMG
+        s = int(np.random.randint(self.img_size, C + 1))
+        if 'obj_pos' in inst:
+            lo = max(0, 2 * C // 3 - s)
+            hi = min(C - s, C // 3)
+            if hi < lo: hi = lo
+            u = int(np.random.randint(lo, hi + 1))
+            v = int(np.random.randint(lo, hi + 1))
+        else:
+            u = int(np.random.randint(0, C - s + 1))
+            v = int(np.random.randint(0, C - s + 1))
+        return (u, v, s)
+
     def __getitem__(self, idx):
         inst = self.instances[idx % len(self.instances)]
-        pts       = inst['pts'].numpy()               # (N,3) float32, world coords
-        cp        = inst['cam_pos'].numpy()           # (3,)
-        R_gt      = inst['R_gt'].numpy()              # (3,3)
-        T_gt      = inst['T_gt'].numpy()              # (4,4) world→cam (pre-inverted)
-        K         = inst['K_full'].numpy()            # (3,3) full-res
-        u0        = inst['u0']
-        v0        = inst['v0']
-        crop_size = inst['crop_size']
-        S         = self.img_size                     # 64
-
-        # random perturbation
-        t_delta = (np.random.rand(3)*2-1) * self.max_offset_m
-        ypr     = (np.random.rand(3)*2-1) * self.max_rot_deg
-        R_off   = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
-        cp_off  = cp + t_delta
-        T_off   = np.eye(4, dtype=np.float32)
-        T_off[:3, :3] = R_off.T
-        T_off[:3,  3] = -(R_off.T @ cp_off)
-
-        # project ALL visible LiDAR with DISTORTED pose
-        pts_cam_off = T_off[:3, :3] @ pts.T + T_off[:3, 3:]
-        z_off       = pts_cam_off[2]
-        uv_off      = ((K @ pts_cam_off)[:2] / z_off).T   # (N,2)
-
-        # crop window is fixed at the cached (u0, v0) — img_64 was cropped there
-        cu0, cv0 = u0, v0
-        in_crop = ((uv_off[:,0] >= cu0) & (uv_off[:,0] < cu0+crop_size) &
-                   (uv_off[:,1] >= cv0) & (uv_off[:,1] < cv0+crop_size) &
-                   (z_off > 0.5))
-        if in_crop.sum() < self.min_pts:
-            return self[random.randint(0, len(self)-1)]
-
-        # 16×16 grid sample on distorted crop-local coords
-        scale      = S / crop_size                    # full-res → 64px
-        uv_d_crop  = np.stack([(uv_off[in_crop,0]-cu0) * scale,
-                                (uv_off[in_crop,1]-cv0) * scale], axis=1)
-        grid, cell = 16, float(S) / 16
-        sel = []
-        for gi in range(grid):
-            for gj in range(grid):
-                d2 = ((uv_d_crop[:,0]-(gj+.5)*cell)**2 +
-                      (uv_d_crop[:,1]-(gi+.5)*cell)**2)
-                sel.append(int(d2.argmin()))
-        sel = sorted(set(sel))
-
-        idx_in  = np.where(in_crop)[0][sel]
-        pts_sel = pts[idx_in]
-
-        # GT projection of same points → crop-local coords (may be outside [0,S])
-        pts_cam_gt = T_gt[:3, :3] @ pts_sel.T + T_gt[:3, 3:]
-        uv_gt      = ((K @ pts_cam_gt)[:2] / pts_cam_gt[2]).T
-        uv_gt_c  = np.stack([(uv_gt[:,0]-cu0) * scale,
-                              (uv_gt[:,1]-cv0) * scale], axis=1)
-        uv_off_c = uv_d_crop[sel]
-
-        # depth: Euclidean distance / 100
-        dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
-
-        # obj/bg flag: 1 if world point is inside the 3D cuboid
-        if 'obj_pos' in inst:
-            obj_pos  = inst['obj_pos'].numpy()    # (3,) world coords
-            obj_dims = inst['obj_dims'].numpy()   # (3,) full extents
-            obj_yaw  = inst['obj_yaw']
-            c_y, s_y = np.cos(obj_yaw), np.sin(obj_yaw)
-            R_obj = np.array([[c_y, s_y, 0],
-                               [-s_y, c_y, 0],
-                               [0,    0,   1]], dtype=np.float32)
-            pts_local = (R_obj @ (pts_sel - obj_pos).T).T   # (N,3) in cuboid frame
-            half = obj_dims / 2.0
-            is_obj = ((np.abs(pts_local[:,0]) <= half[0]) &
-                      (np.abs(pts_local[:,1]) <= half[1]) &
-                      (np.abs(pts_local[:,2]) <= half[2])).astype(np.float32)
-        else:
-            # legacy: 2D bbox fallback for old caches
-            obj_bbox = inst['obj_bbox'].numpy()
-            obj_u0c  = (obj_bbox[0] - cu0) * scale
-            obj_v0c  = (obj_bbox[1] - cv0) * scale
-            obj_u1c  = (obj_bbox[2] - cu0) * scale
-            obj_v1c  = (obj_bbox[3] - cv0) * scale
-            is_obj   = ((uv_gt_c[:,0] >= obj_u0c) & (uv_gt_c[:,0] < obj_u1c) &
-                        (uv_gt_c[:,1] >= obj_v0c) & (uv_gt_c[:,1] < obj_v1c)
-                        ).astype(np.float32)
-
-        true_uvd = np.concatenate([uv_gt_c.astype(np.float32),  dist_m[:,None], is_obj[:,None]], axis=1)
-        dist_uvd = np.concatenate([uv_off_c.astype(np.float32), dist_m[:,None], is_obj[:,None]], axis=1)
-
-        img_crop = inst['img_64'].float() / 255.0    # already 64×64
-
-        return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd)
+        for _ in range(self.max_tries):
+            t_delta = (np.random.rand(3)*2-1) * self.max_offset_m
+            ypr     = (np.random.rand(3)*2-1) * self.max_rot_deg
+            sub     = self._sample_sub(inst)
+            out = build_sample(inst, ypr, t_delta,
+                               img_size=self.img_size, min_pts=self.min_pts,
+                               sub=sub)
+            if out is not None:
+                img_crop, true_uvd, dist_uvd, _ = out
+                return img_crop, true_uvd, dist_uvd
+        return self[random.randint(0, len(self)-1)]
 
 
 # ── collate ───────────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ import pandas as pd
 from pathlib import Path
 from PIL import Image
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
 
@@ -23,8 +24,9 @@ TARGET_TYPES = {1, 2}      # Vehicle, Pedestrian
 FRONT_CAM    = 1
 TOP_LIDAR    = 1
 IMG_SIZE     = 64
-BBOX_SCALE   = 2.0
+BBOX_SCALE   = 3.0
 MIN_PTS      = 4
+CACHE_IMG    = 192          # cache image resolution (square)
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -188,44 +190,16 @@ def _process_seg(args):
                 u0 = float(np.clip(uc - half, 0, IW - crop_size))
                 v0 = float(np.clip(vc - half, 0, IH - crop_size))
                 box_px = (int(u0), int(v0), int(u0 + crop_size), int(v0 + crop_size))
-                img_64 = np.array(img_full.crop(box_px).resize((IMG_SIZE, IMG_SIZE),
-                                                                 Image.BILINEAR), dtype=np.uint8)
-                ch, sh = math.cos(heading), math.sin(heading)
-                R_obj = np.array([[ch, sh, 0], [-sh, ch, 0], [0, 0, 1]], dtype=np.float32)
-
-                # 2× crop ROI; 2px grid in the 64×64-view → 64×64 cells over ROI
-                margin = crop_size * 0.5
-                roi_w  = crop_size + 2 * margin
-                in_roi = ((uv_gt_vis[:, 0] >= u0 - margin) & (uv_gt_vis[:, 0] < u0 + crop_size + margin) &
-                          (uv_gt_vis[:, 1] >= v0 - margin) & (uv_gt_vis[:, 1] < v0 + crop_size + margin))
-                pts_roi = pts_vis[in_roi]
-                uv_roi  = uv_gt_vis[in_roi]
-                if len(pts_roi) >= MIN_PTS:
-                    GS = 64
-                    gu = u0 - margin + (np.arange(GS) + 0.5) * (roi_w / GS)
-                    gv = v0 - margin + (np.arange(GS) + 0.5) * (roi_w / GS)
-                    ggu, ggv = np.meshgrid(gu, gv)
-                    ggu = ggu.ravel()[:, None]; ggv = ggv.ravel()[:, None]
-                    d2 = (uv_roi[:, 0][None] - ggu) ** 2 + (uv_roi[:, 1][None] - ggv) ** 2
-                    g_sel = sorted(set(d2.argmin(axis=1).tolist()))
-                    pts_samp = pts_roi[g_sel]
-                else:
-                    pts_samp = pts_roi
-
-                pts_local = (R_obj @ (pts_samp - np.array([bx, by, bz], dtype=np.float32)).T).T
-                half3 = np.array([sx, sy, sz], dtype=np.float32) / 2
-                is_obj_full = ((np.abs(pts_local[:, 0]) <= half3[0]) &
-                               (np.abs(pts_local[:, 1]) <= half3[1]) &
-                               (np.abs(pts_local[:, 2]) <= half3[2]))
+                img_cache = np.array(img_full.crop(box_px).resize((CACHE_IMG, CACHE_IMG),
+                                                                    Image.BILINEAR), dtype=np.uint8)
                 instances.append(dict(
                     seg=seg,
-                    img_64=torch.from_numpy(img_64).permute(2, 0, 1),
+                    img_cache=torch.from_numpy(img_cache).permute(2, 0, 1),
                     u0=u0, v0=v0, crop_size=float(crop_size),
                     obj_pos=np.array([bx, by, bz], dtype=np.float32),
                     obj_dims=np.array([sx, sy, sz], dtype=np.float32),
                     obj_heading=heading,
-                    is_obj_full=is_obj_full,
-                    pts_vis=pts_samp,
+                    pts_vis=pts_vis,
                     T_cam_gt=T_cam_from_veh_gt,
                     T_veh_from_cam=T_veh_from_cam.astype(np.float32),
                     fu=fu, fv=fv, cu=cu, cv=cv, IW=IW, IH=IH,
@@ -238,36 +212,19 @@ def _process_seg(args):
                 for _ in range(n_rand * 3):
                     ru0 = random.randint(0, IW - rand_crop_size)
                     rv0 = random.randint(0, IH - rand_crop_size)
-                    r_margin = rand_crop_size * 0.5
-                    in_roi_r = ((uv_gt_vis[:, 0] >= ru0 - r_margin) & (uv_gt_vis[:, 0] < ru0 + rand_crop_size + r_margin) &
-                                (uv_gt_vis[:, 1] >= rv0 - r_margin) & (uv_gt_vis[:, 1] < rv0 + rand_crop_size + r_margin))
-                    if in_roi_r.sum() < MIN_PTS:
-                        continue
-                    in_c = ((uv_gt_vis[in_roi_r, 0] >= ru0) & (uv_gt_vis[in_roi_r, 0] < ru0 + rand_crop_size) &
-                            (uv_gt_vis[in_roi_r, 1] >= rv0) & (uv_gt_vis[in_roi_r, 1] < rv0 + rand_crop_size))
+                    in_c = ((uv_gt_vis[:, 0] >= ru0) & (uv_gt_vis[:, 0] < ru0 + rand_crop_size) &
+                            (uv_gt_vis[:, 1] >= rv0) & (uv_gt_vis[:, 1] < rv0 + rand_crop_size))
                     if in_c.sum() < MIN_PTS:
                         continue
-                    pts_roi_r = pts_vis[in_roi_r]; uv_roi_r = uv_gt_vis[in_roi_r]
-                    roi_w_r = rand_crop_size + 2 * r_margin
-                    GS = 64
-                    gu_r = ru0 - r_margin + (np.arange(GS) + 0.5) * (roi_w_r / GS)
-                    gv_r = rv0 - r_margin + (np.arange(GS) + 0.5) * (roi_w_r / GS)
-                    ggu_r, ggv_r = np.meshgrid(gu_r, gv_r)
-                    ggu_r = ggu_r.ravel()[:, None]; ggv_r = ggv_r.ravel()[:, None]
-                    d2_r = (uv_roi_r[:, 0][None] - ggu_r) ** 2 + (uv_roi_r[:, 1][None] - ggv_r) ** 2
-                    g_sel_r = sorted(set(d2_r.argmin(axis=1).tolist()))
-                    pts_samp_r = pts_roi_r[g_sel_r]
-                    is_obj_r   = np.zeros(len(pts_samp_r), dtype=bool)
                     box_r = (ru0, rv0, ru0 + rand_crop_size, rv0 + rand_crop_size)
-                    img_r = np.array(img_full.crop(box_r).resize((IMG_SIZE, IMG_SIZE),
+                    img_r = np.array(img_full.crop(box_r).resize((CACHE_IMG, CACHE_IMG),
                                                                    Image.BILINEAR), dtype=np.uint8)
                     instances.append(dict(
                         seg=seg,
-                        img_64=torch.from_numpy(img_r).permute(2, 0, 1),
+                        img_cache=torch.from_numpy(img_r).permute(2, 0, 1),
                         u0=float(ru0), v0=float(rv0), crop_size=float(rand_crop_size),
                         obj_pos=None, obj_dims=None, obj_heading=None,
-                        is_obj_full=is_obj_r,
-                        pts_vis=pts_samp_r,
+                        pts_vis=pts_vis,
                         T_cam_gt=T_cam_from_veh_gt,
                         T_veh_from_cam=T_veh_from_cam.astype(np.float32),
                         fu=fu, fv=fv, cu=cu, cv=cv, IW=IW, IH=IH,
@@ -323,10 +280,9 @@ class WaymoCalibDataset(Dataset):
     def __init__(self, cache_path: str, split: str = 'train',
                  img_size: int = IMG_SIZE, max_offset_m: float = 0.20,
                  max_rot_deg: float = 0.5, min_pts: int = MIN_PTS,
-                 max_dist_m: float = None):
+                 max_dist_m: float = None, max_tries: int = 20):
         instances = torch.load(cache_path, weights_only=False)
         if max_dist_m is not None:
-            import numpy as np
             instances = [inst for inst in instances
                          if inst['obj_pos'] is None or
                          np.linalg.norm(inst['obj_pos']) <= max_dist_m]
@@ -339,35 +295,58 @@ class WaymoCalibDataset(Dataset):
         self.max_offset  = max_offset_m
         self.max_rot     = max_rot_deg
         self.min_pts     = min_pts
+        self.max_tries   = max_tries
 
     def __len__(self): return len(self.instances)
+
+    def _sample_sub(self, inst, C):
+        """Random sub-window (u, v, s) in cache-image pixel coords.
+        For obj crops, constrain sub to still contain the bbox (center 1/3)."""
+        s = int(np.random.randint(self.img_size, C + 1))
+        is_obj = inst.get('obj_pos') is not None
+        if is_obj:
+            lo = max(0, 2 * C // 3 - s)
+            hi = min(C - s, C // 3)
+            if hi < lo: hi = lo
+            u = int(np.random.randint(lo, hi + 1))
+            v = int(np.random.randint(lo, hi + 1))
+        else:
+            u = int(np.random.randint(0, C - s + 1))
+            v = int(np.random.randint(0, C - s + 1))
+        return (u, v, s)
 
     def __getitem__(self, idx):
         inst = self.instances[idx]
         S         = self.img_size
-        crop_size = inst['crop_size']
-        u0, v0    = inst['u0'], inst['v0']
         fu, fv    = inst['fu'], inst['fv']
         cu, cv    = inst['cu'], inst['cv']
-        scale     = S / crop_size
+        # Support both new (img_cache, C×C) and legacy (img_64, 64×64).
+        img_cache = inst.get('img_cache', inst.get('img_64'))
+        C         = int(img_cache.shape[-1])
 
         pts_vis    = inst['pts_vis']          # (N, 3) vehicle frame
         T_cam_gt   = inst['T_cam_gt']         # (4,4)
         T_veh_from_cam = inst['T_veh_from_cam']
-        is_obj_full = inst['is_obj_full']     # (N,) bool
 
-        # Random perturbation of camera pose
-        for _ in range(10):
+        for _ in range(self.max_tries):
+            # Random perturbation of camera pose
             t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset
             ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot
             R_gt    = T_veh_from_cam[:3, :3].T   # cam_from_veh rotation
             R_off   = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
             t_gt    = T_veh_from_cam[:3, 3]
             t_off   = t_gt + t_delta
-            # Build perturbed T_cam_from_veh
             T_off   = np.eye(4, dtype=np.float32)
             T_off[:3, :3] = R_off.T
             T_off[:3,  3] = -(R_off.T @ t_off)
+
+            # sub-window → effective (u0, v0, crop_size) in full-res px
+            u_sub, v_sub, s_sub = self._sample_sub(inst, C)
+            cs_per_px = float(inst['crop_size']) / C
+            u0 = float(inst['u0']) + u_sub * cs_per_px
+            v0 = float(inst['v0']) + v_sub * cs_per_px
+            crop_size = s_sub * cs_per_px
+            scale = S / crop_size
 
             # Project with perturbed pose
             h = np.hstack([pts_vis, np.ones((len(pts_vis), 1), dtype=np.float32)])
@@ -403,24 +382,41 @@ class WaymoCalibDataset(Dataset):
         u_off_c = u_off_c[sel]
         v_off_c = v_off_c[sel]
         idx_in  = np.where(in_crop)[0][sel]
+        pts_sel = pts_vis[idx_in]
 
         # GT projection
-        h2 = np.hstack([pts_vis[idx_in], np.ones((len(idx_in), 1), dtype=np.float32)])
+        h2 = np.hstack([pts_sel, np.ones((len(idx_in), 1), dtype=np.float32)])
         c_gt = (T_cam_gt @ h2.T).T
         d_gt = c_gt[:, 0]
         u_gt_c = (fu * (-c_gt[:, 1]) / d_gt + cu - u0) * scale
         v_gt_c = (fv * (-c_gt[:, 2]) / d_gt + cv - v0) * scale
 
         # distance from CAMERA (not vehicle origin) — match NS/PS convention
-        dist_m  = (np.linalg.norm(c_gt[:, :3], axis=1) / 100.0).astype(np.float32)
-        is_obj  = is_obj_full[idx_in].astype(np.float32)
+        dist_m = (np.linalg.norm(c_gt[:, :3], axis=1) / 100.0).astype(np.float32)
+
+        # is_obj: 3D bbox check on selected points
+        if inst.get('obj_pos') is not None:
+            obj_pos  = np.asarray(inst['obj_pos'], dtype=np.float32)
+            obj_dims = np.asarray(inst['obj_dims'], dtype=np.float32)
+            heading  = float(inst['obj_heading'])
+            ch_, sh_ = math.cos(heading), math.sin(heading)
+            R_obj = np.array([[ch_, sh_, 0], [-sh_, ch_, 0], [0, 0, 1]], dtype=np.float32)
+            pts_local = (R_obj @ (pts_sel - obj_pos).T).T
+            half3 = obj_dims / 2.0
+            is_obj = ((np.abs(pts_local[:, 0]) <= half3[0]) &
+                      (np.abs(pts_local[:, 1]) <= half3[1]) &
+                      (np.abs(pts_local[:, 2]) <= half3[2])).astype(np.float32)
+        else:
+            is_obj = np.zeros(len(idx_in), dtype=np.float32)
 
         dist_uvd = np.stack([u_off_c.astype(np.float32), v_off_c.astype(np.float32),
                               dist_m, is_obj], axis=1)
         true_uvd = np.stack([u_gt_c.astype(np.float32),  v_gt_c.astype(np.float32),
                               dist_m, is_obj], axis=1)
 
-        img_crop = inst['img_64'].float() / 255.0
+        sub_img  = img_cache[:, v_sub:v_sub+s_sub, u_sub:u_sub+s_sub].float().unsqueeze(0)
+        img_crop = F.interpolate(sub_img, size=(S, S), mode='bilinear',
+                                  align_corners=False).squeeze(0) / 255.0
         return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd)
 
 
