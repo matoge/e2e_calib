@@ -1,0 +1,23 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>ns_ps_v2 Report</title>
+<style>body{font-family:monospace;background:#111;color:#eee;padding:24px}
+h1{color:#7cf}table{border-collapse:collapse}td,th{padding:6px 14px;border:1px solid #444}
+th{background:#222}.good{color:#7f7}.bad{color:#f77}</style></head><body>
+<h1>ns_ps_v2 — Evaluation Report</h1>
+<h2>Summary</h2>
+<table>
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Best val NLL</td><td class="good">3.6688</td></tr>
+<tr><td>Mean err BEFORE</td><td class="bad">3.39 px</td></tr>
+<tr><td>Mean err AFTER</td><td class="good">3.09 px</td></tr>
+<tr><td>Improvement</td><td class="good">8.8%</td></tr>
+<tr><td>Train samples</td><td>59277</td></tr>
+<tr><td>Val samples</td><td>8365</td></tr>
+<tr><td>Params</td><td>1.62M</td></tr>
+</table>
+<h2>Training Curves</h2>
+<img src="vis/curves.png" style="max-width:800px">
+<h2>Validation Samples</h2>
+<p>green×=GT&nbsp; red●=distorted&nbsp; cyan+=predicted&nbsp; (title: before→after px)</p>
+<img src="vis/val_00.png" style="width:180px;margin:4px"><img src="vis/val_01.png" style="width:180px;margin:4px"><img src="vis/val_02.png" style="width:180px;margin:4px"><img src="vis/val_03.png" style="width:180px;margin:4px"><img src="vis/val_04.png" style="width:180px;margin:4px"><img src="vis/val_05.png" style="width:180px;margin:4px"><img src="vis/val_06.png" style="width:180px;margin:4px"><img src="vis/val_07.png" style="width:180px;margin:4px"><img src="vis/val_08.png" style="width:180px;margin:4px"><img src="vis/val_09.png" style="width:180px;margin:4px"><img src="vis/val_10.png" style="width:180px;margin:4px"><img src="vis/val_11.png" style="width:180px;margin:4px"><img src="vis/val_12.png" style="width:180px;margin:4px"><img src="vis/val_13.png" style="width:180px;margin:4px"><img src="vis/val_14.png" style="width:180px;margin:4px"><img src="vis/val_15.png" style="width:180px;margin:4px">
+</body></html>
