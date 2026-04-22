@@ -262,6 +262,99 @@ def build_cache(nuscenes_root: str,
     print(f"Saved → {cache_path}  train={len(train_instances)} val={len(val_instances)}", flush=True)
 
 
+# ── build_sample (explicit perturbation, for BA) ─────────────────────────────
+
+def build_sample(inst, ypr, t_delta, img_size: int = 64,
+                 min_pts: int = 8, sub=None):
+    """Apply explicit (ypr deg, t_delta m) perturbation to a cached NS instance.
+    Returns (img_crop, true_uvd, dist_uvd, idx_in) or None if too few points."""
+    pts = inst['pts'].numpy()
+    cp  = inst['cam_pos'].numpy()
+    R_gt = inst['R_gt'].numpy()
+    T_gt = inst['T_gt'].numpy()
+    K    = inst['K_full'].numpy()
+    img_cache = inst.get('img_cache', inst.get('img_64'))
+    C    = int(img_cache.shape[-1])
+    S    = img_size
+
+    if sub is None:
+        u_sub, v_sub, s_sub = 0, 0, C
+    else:
+        u_sub, v_sub, s_sub = int(sub[0]), int(sub[1]), int(sub[2])
+
+    R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
+    cp_off = cp + t_delta
+    T_off = np.eye(4, dtype=np.float32)
+    T_off[:3, :3] = R_off.T
+    T_off[:3,  3] = -(R_off.T @ cp_off)
+
+    cs_per_px = float(inst['crop_size']) / C
+    cu0 = float(inst['u0']) + u_sub * cs_per_px
+    cv0 = float(inst['v0']) + v_sub * cs_per_px
+    crop_size = s_sub * cs_per_px
+
+    pts_cam_off = T_off[:3, :3] @ pts.T + T_off[:3, 3:]
+    z_off  = pts_cam_off[2]
+    uv_off = ((K @ pts_cam_off)[:2] / z_off).T
+
+    in_crop = ((uv_off[:,0] >= cu0) & (uv_off[:,0] < cu0 + crop_size) &
+               (uv_off[:,1] >= cv0) & (uv_off[:,1] < cv0 + crop_size) &
+               (z_off > 0.5))
+    if in_crop.sum() < min_pts:
+        return None
+
+    scale = S / crop_size
+    uv_d_crop = np.stack([(uv_off[in_crop,0] - cu0) * scale,
+                           (uv_off[in_crop,1] - cv0) * scale], axis=1)
+
+    grid, cell = 16, float(S) / 16
+    ci = np.clip((uv_d_crop[:,1] / cell).astype(np.int64), 0, grid - 1)
+    cj = np.clip((uv_d_crop[:,0] / cell).astype(np.int64), 0, grid - 1)
+    cell_id = ci * grid + cj
+    du = uv_d_crop[:,0] - (cj + 0.5) * cell
+    dv = uv_d_crop[:,1] - (ci + 0.5) * cell
+    d2 = du*du + dv*dv
+    sel = []
+    for cid in np.unique(cell_id):
+        members = np.where(cell_id == cid)[0]
+        sel.append(int(members[d2[members].argmin()]))
+    sel = sorted(sel)
+
+    idx_in  = np.where(in_crop)[0][sel]
+    pts_sel = pts[idx_in]
+
+    pts_cam_gt = T_gt[:3,:3] @ pts_sel.T + T_gt[:3,3:]
+    uv_gt = ((K @ pts_cam_gt)[:2] / pts_cam_gt[2]).T
+    uv_gt_c  = np.stack([(uv_gt[:,0] - cu0) * scale,
+                          (uv_gt[:,1] - cv0) * scale], axis=1)
+    uv_off_c = uv_d_crop[sel]
+
+    dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
+
+    if inst['obj_dims'].norm() > 0:
+        obj_pos  = inst['obj_pos'].numpy()
+        obj_dims = inst['obj_dims'].numpy()
+        obj_yaw  = inst['obj_yaw']
+        c_y, s_y = np.cos(obj_yaw), np.sin(obj_yaw)
+        R_obj = np.array([[c_y, s_y, 0], [-s_y, c_y, 0], [0, 0, 1]], dtype=np.float32)
+        pts_local = (R_obj @ (pts_sel - obj_pos).T).T
+        half = obj_dims / 2.0
+        is_obj = ((np.abs(pts_local[:,0]) <= half[1]) &
+                  (np.abs(pts_local[:,1]) <= half[0]) &
+                  (np.abs(pts_local[:,2]) <= half[2])).astype(np.float32)
+    else:
+        is_obj = np.zeros(len(pts_sel), dtype=np.float32)
+
+    true_uvd = np.concatenate([uv_gt_c.astype(np.float32),  dist_m[:,None], is_obj[:,None]], axis=1)
+    dist_uvd = np.concatenate([uv_off_c.astype(np.float32), dist_m[:,None], is_obj[:,None]], axis=1)
+
+    sub_img  = img_cache[:, v_sub:v_sub+s_sub, u_sub:u_sub+s_sub].float().unsqueeze(0)
+    img_crop = F.interpolate(sub_img, size=(S, S), mode='bilinear',
+                              align_corners=False).squeeze(0) / 255.0
+
+    return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd), idx_in
+
+
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
 class NuScenesCalibDataset(Dataset):

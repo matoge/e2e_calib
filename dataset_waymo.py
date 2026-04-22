@@ -274,6 +274,106 @@ def build_cache(cache_path: str, max_segs: int = None, random_crops: bool = True
     return instances
 
 
+# ── build_sample (explicit perturbation, for BA) ─────────────────────────────
+
+def build_sample(inst, ypr, t_delta, img_size: int = IMG_SIZE,
+                 min_pts: int = MIN_PTS, sub=None):
+    """Apply explicit (ypr deg, t_delta m) perturbation (in VEHICLE-frame axes
+    matching yaw/pitch/roll about Z/Y/X) to a WaymoCalibDataset instance.
+    Returns (img_crop, true_uvd, dist_uvd, idx_in) or None."""
+    S          = img_size
+    fu, fv     = inst['fu'], inst['fv']
+    cu, cv     = inst['cu'], inst['cv']
+    img_cache  = inst.get('img_cache', inst.get('img_64'))
+    C          = int(img_cache.shape[-1])
+    pts_vis    = inst['pts_vis']
+    T_cam_gt   = inst['T_cam_gt']           # (4,4) gt cam_from_veh
+    T_veh_from_cam = inst['T_veh_from_cam']
+
+    if sub is None:
+        u_sub, v_sub, s_sub = 0, 0, C
+    else:
+        u_sub, v_sub, s_sub = int(sub[0]), int(sub[1]), int(sub[2])
+
+    R_gt = T_veh_from_cam[:3, :3].T
+    R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
+    t_gt = T_veh_from_cam[:3, 3]
+    t_off = t_gt + t_delta
+    T_off = np.eye(4, dtype=np.float32)
+    T_off[:3, :3] = R_off.T
+    T_off[:3,  3] = -(R_off.T @ t_off)
+
+    cs_per_px = float(inst['crop_size']) / C
+    u0 = float(inst['u0']) + u_sub * cs_per_px
+    v0 = float(inst['v0']) + v_sub * cs_per_px
+    crop_size = s_sub * cs_per_px
+    scale = S / crop_size
+
+    h = np.hstack([pts_vis, np.ones((len(pts_vis), 1), dtype=np.float32)])
+    c_off = (T_off @ h.T).T
+    depth_off = c_off[:, 0]
+    u_off = fu * (-c_off[:, 1]) / depth_off + cu
+    v_off = fv * (-c_off[:, 2]) / depth_off + cv
+
+    in_crop = ((u_off >= u0) & (u_off < u0 + crop_size) &
+               (v_off >= v0) & (v_off < v0 + crop_size) &
+               (depth_off > 0.5))
+    if in_crop.sum() < min_pts:
+        return None
+
+    u_off_c = (u_off[in_crop] - u0) * scale
+    v_off_c = (v_off[in_crop] - v0) * scale
+
+    grid, cell = 16, float(S) / 16
+    ci = np.clip((v_off_c / cell).astype(np.int64), 0, grid - 1)
+    cj = np.clip((u_off_c / cell).astype(np.int64), 0, grid - 1)
+    cell_id = ci * grid + cj
+    du = u_off_c - (cj + 0.5) * cell
+    dv = v_off_c - (ci + 0.5) * cell
+    d2 = du*du + dv*dv
+    sel = []
+    for cid in np.unique(cell_id):
+        members = np.where(cell_id == cid)[0]
+        sel.append(int(members[d2[members].argmin()]))
+    sel = np.array(sorted(sel), dtype=np.int64)
+    u_off_c = u_off_c[sel]
+    v_off_c = v_off_c[sel]
+    idx_in  = np.where(in_crop)[0][sel]
+    pts_sel = pts_vis[idx_in]
+
+    h2 = np.hstack([pts_sel, np.ones((len(idx_in), 1), dtype=np.float32)])
+    c_gt = (T_cam_gt @ h2.T).T
+    d_gt = c_gt[:, 0]
+    u_gt_c = (fu * (-c_gt[:, 1]) / d_gt + cu - u0) * scale
+    v_gt_c = (fv * (-c_gt[:, 2]) / d_gt + cv - v0) * scale
+
+    dist_m = (np.linalg.norm(c_gt[:, :3], axis=1) / 100.0).astype(np.float32)
+
+    if inst.get('obj_pos') is not None:
+        obj_pos  = np.asarray(inst['obj_pos'], dtype=np.float32)
+        obj_dims = np.asarray(inst['obj_dims'], dtype=np.float32)
+        heading  = float(inst['obj_heading'])
+        ch_, sh_ = math.cos(heading), math.sin(heading)
+        R_obj = np.array([[ch_, sh_, 0], [-sh_, ch_, 0], [0, 0, 1]], dtype=np.float32)
+        pts_local = (R_obj @ (pts_sel - obj_pos).T).T
+        half3 = obj_dims / 2.0
+        is_obj = ((np.abs(pts_local[:,0]) <= half3[0]) &
+                  (np.abs(pts_local[:,1]) <= half3[1]) &
+                  (np.abs(pts_local[:,2]) <= half3[2])).astype(np.float32)
+    else:
+        is_obj = np.zeros(len(idx_in), dtype=np.float32)
+
+    dist_uvd = np.stack([u_off_c.astype(np.float32), v_off_c.astype(np.float32),
+                          dist_m, is_obj], axis=1)
+    true_uvd = np.stack([u_gt_c.astype(np.float32),  v_gt_c.astype(np.float32),
+                          dist_m, is_obj], axis=1)
+
+    sub_img  = img_cache[:, v_sub:v_sub+s_sub, u_sub:u_sub+s_sub].float().unsqueeze(0)
+    img_crop = F.interpolate(sub_img, size=(S, S), mode='bilinear',
+                              align_corners=False).squeeze(0) / 255.0
+    return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd), idx_in
+
+
 # ── Dataset ──────────────────────────────────────────────────────────────────
 
 class WaymoCalibDataset(Dataset):

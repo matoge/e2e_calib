@@ -1,0 +1,17 @@
+CFG = dict(
+    name         = 'ns_v9_overfit500',
+    n_layers     = 4,
+    img_size     = 64,
+    in_channels  = 3,
+    use_convnext = True,
+    use_frustum  = True,
+    epochs       = 1000,
+    batch_size   = 32,
+    lr           = 0.001,
+    lr_min       = 1e-06,
+    val_fraction = 0.1,
+    split_seed   = 42,
+    min_pts      = 80,
+    subset_size  = 500,
+    overfit      = True,
+)
