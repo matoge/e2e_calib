@@ -150,7 +150,9 @@ def main(cfg=None):
     model = CalibNetDepth(img_size=c["img_size"], in_channels=c["in_channels"],
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
                           use_convnext=c.get("use_convnext", False),
-                          use_frustum=c.get("use_frustum", False)).to(DEVICE)
+                          use_frustum=c.get("use_frustum", False),
+                          deform_mode=c.get("deform_mode", "none"),
+                          deform_n_points=c.get("deform_n_points", 4)).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=c["lr"], weight_decay=1e-3)

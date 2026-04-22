@@ -91,8 +91,14 @@ class CalibNetDepth(nn.Module):
     def __init__(self, d: int = D_DIM, img_size: int = 128, in_channels: int = 1,
                  n_layers: int = 3, self_first: bool = False, kv_self_attn: bool = False,
                  cross_temp: float = 1.0, use_convnext: bool = False,
-                 use_frustum: bool = False, r_uv: float = 8.0, r_d: float = 0.004, k_nb: int = 8):
+                 use_frustum: bool = False, r_uv: float = 8.0, r_d: float = 0.004, k_nb: int = 8,
+                 deform_mode: str = 'none', deform_n_points: int = 4):
+        """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
+                       'sl'  (single-level deformable, same cascade),
+                       'ml'  (multi-level deformable — each block sees both
+                              coarse and fine with learnable level embedding)."""
         super().__init__()
+        assert deform_mode in ('none', 'sl', 'ml'), f'bad deform_mode: {deform_mode}'
         self.img_size    = img_size
         self.n_layers    = n_layers
         self.cnn         = (ConvNeXtBackbone(d, in_channels=in_channels)
@@ -100,8 +106,27 @@ class CalibNetDepth(nn.Module):
         self.point_mlp   = PointMLP3(d)
         self.frustum_enc = FrustumLocalEncoder(d, r_uv=r_uv, r_d=r_d, k=k_nb) if use_frustum else None
 
-        kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp) if not self_first else {}
-        Block = TransformerDecoderBlock if self_first else CrossAttentionBlockCov
+        if deform_mode != 'none':
+            assert not self_first, "deform_mode is incompatible with self_first=True"
+            from model_deform import CrossAttentionBlockDeform, CrossAttentionBlockDeformML
+            if deform_mode == 'sl':
+                Block = CrossAttentionBlockDeform
+                kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp,
+                          n_points=deform_n_points)
+            else:  # 'ml' — multi-level deformable
+                Block = CrossAttentionBlockDeformML
+                kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp,
+                          n_levels=2, n_points=deform_n_points)
+                # learnable resolution (level) embedding shared across blocks
+                self.level_embed = nn.Parameter(torch.zeros(2, d))
+                nn.init.normal_(self.level_embed, std=0.02)
+        elif self_first:
+            Block = TransformerDecoderBlock
+            kw = {}
+        else:
+            Block = CrossAttentionBlockCov
+            kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp)
+
         self.cross_coarse  = Block(d, **kw)
         self.cross_fine    = Block(d, **kw)
         if n_layers >= 3:
@@ -109,6 +134,7 @@ class CalibNetDepth(nn.Module):
         if n_layers >= 4:
             self.cross_fine2   = Block(d, **kw)
         self._self_first = self_first
+        self._deform_mode = deform_mode
 
     def set_cross_temp(self, t: float):
         for m in self.modules():
@@ -116,6 +142,10 @@ class CalibNetDepth(nn.Module):
                 m._cross_temp = t
 
     def _block(self, block, q, feat, uv_01, mask):
+        if self._deform_mode == 'ml':
+            # feat here is (coarse_feat, fine_feat) tuple — ML block wants the list
+            return block(q, list(feat), uv_01, self.level_embed,
+                          key_padding_mask=mask, self_first=False)
         if self._self_first:
             return block(q, feat, uv_01, key_padding_mask=mask)
         return block(q, feat, uv_01, key_padding_mask=mask, self_first=False)
@@ -137,37 +167,41 @@ class CalibNetDepth(nn.Module):
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
             q = q + self.frustum_enc(distorted_uvd, pad_mask=key_padding_mask)
-        q, raw_c = self._block(self.cross_coarse, q, coarse_feat, uv_01, key_padding_mask)
-        raw = raw_c
 
-        if self.n_layers == 2:
-            uv_w = (uv_01 + raw_c[..., :2]).clamp(0, 1)
-            q_w  = self.point_mlp(torch.cat([uv_w, d3], dim=-1)) + q
-            _, raw_f = self._block(self.cross_fine, q_w, fine_feat, uv_w, key_padding_mask)
-            raw = raw_c + raw_f
+        # ML mode: every block sees both levels; SL / none: alternate coarse→fine
+        if self._deform_mode == 'ml':
+            feat_all = (coarse_feat, fine_feat)
+            # same feat tuple at every layer; each block refines uv
+            feats_by_layer = [feat_all] * max(self.n_layers, 2)
+        else:
+            feats_seq = [coarse_feat]
+            if self.n_layers == 2:
+                feats_seq += [fine_feat]
+            elif self.n_layers == 3:
+                feats_seq += [coarse_feat, fine_feat]
+            else:  # 4
+                feats_seq += [coarse_feat, fine_feat, fine_feat]
+            feats_by_layer = feats_seq
 
-        elif self.n_layers == 3:  # coarse → coarse → fine
-            uv_w = (uv_01 + raw_c[..., :2]).clamp(0, 1)
-            q_w  = self.point_mlp(torch.cat([uv_w, d3], dim=-1)) + q
-            q_w, raw_c2 = self._block(self.cross_refine, q_w, coarse_feat, uv_w, key_padding_mask)
+        blocks = [self.cross_coarse, self.cross_fine]
+        if self.n_layers >= 3: blocks.append(self.cross_refine)
+        if self.n_layers >= 4: blocks.append(self.cross_fine2)
+        # ML mode with n_layers=4 still uses 4 stacked blocks; reorder to natural
+        if self._deform_mode == 'ml':
+            # already created 2/3/4 blocks as cross_coarse/fine/refine/fine2 per n_layers
+            ordered = [self.cross_coarse, self.cross_fine]
+            if self.n_layers >= 3: ordered.append(self.cross_refine)
+            if self.n_layers >= 4: ordered.append(self.cross_fine2)
+            blocks = ordered
 
-            uv_w2 = (uv_01 + (raw_c + raw_c2)[..., :2]).clamp(0, 1)
-            q_w2  = self.point_mlp(torch.cat([uv_w2, d3], dim=-1)) + q_w
-            _, raw_f = self._block(self.cross_fine, q_w2, fine_feat, uv_w2, key_padding_mask)
-            raw = raw_c + raw_c2 + raw_f
-
-        else:  # n_layers == 4: coarse → coarse → fine → fine
-            uv_w = (uv_01 + raw_c[..., :2]).clamp(0, 1)
-            q_w  = self.point_mlp(torch.cat([uv_w, d3], dim=-1)) + q
-            q_w, raw_c2 = self._block(self.cross_refine, q_w, coarse_feat, uv_w, key_padding_mask)
-
-            uv_w2 = (uv_01 + (raw_c + raw_c2)[..., :2]).clamp(0, 1)
-            q_w2  = self.point_mlp(torch.cat([uv_w2, d3], dim=-1)) + q_w
-            q_w2, raw_f = self._block(self.cross_fine, q_w2, fine_feat, uv_w2, key_padding_mask)
-
-            uv_w3 = (uv_01 + (raw_c + raw_c2 + raw_f)[..., :2]).clamp(0, 1)
-            q_w3  = self.point_mlp(torch.cat([uv_w3, d3], dim=-1)) + q_w2
-            _, raw_f2 = self._block(self.cross_fine2, q_w3, fine_feat, uv_w3, key_padding_mask)
-            raw = raw_c + raw_c2 + raw_f + raw_f2
+        # first layer (uv_01)
+        q, raw_cum = self._block(blocks[0], q, feats_by_layer[0], uv_01, key_padding_mask)
+        # refinement layers
+        for i in range(1, min(self.n_layers, len(blocks))):
+            uv_i = (uv_01 + raw_cum[..., :2]).clamp(0, 1)
+            q    = self.point_mlp(torch.cat([uv_i, d3], dim=-1)) + q
+            q, raw_i = self._block(blocks[i], q, feats_by_layer[i], uv_i, key_padding_mask)
+            raw_cum = raw_cum + raw_i
+        raw = raw_cum
 
         return clamp_params(raw, self.img_size)   # (B,N,5)
