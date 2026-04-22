@@ -2,6 +2,8 @@ sim3d_train.pt
 sim3d_val.pt
 *.onnx
 *.png
+*.ply
+web_viewer/data/*.bin
 __pycache__/
 *.pyc
 .pytest_cache/

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PandaSet point-cloud viewer</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1a1a;color:#ddd;font-family:system-ui,sans-serif}
+  #canvas{position:absolute;inset:0;outline:none;touch-action:none}
+  #panel{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.7);
+         padding:10px 14px;border-radius:6px;font-size:12px;min-width:280px;backdrop-filter:blur(6px)}
+  #panel h3{margin:0 0 8px 0;font-size:13px}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  label{flex:0 0 90px}
+  input[type=range]{flex:1}
+  select,button{background:#333;color:#ddd;border:1px solid #555;padding:4px 6px;border-radius:3px}
+  #stats{margin-top:8px;font-size:11px;color:#aaa}
+  .kbd{background:#333;padding:1px 5px;border-radius:3px;font-family:monospace;font-size:10px}
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="panel">
+  <h3>PandaSet viewer</h3>
+  <div class="row">
+    <label>scene</label>
+    <select id="scene"></select>
+    <button id="reload">reload</button>
+  </div>
+  <div class="row">
+    <label>color by</label>
+    <select id="colormode">
+      <option value="height">height (z)</option>
+      <option value="frame">frame (time)</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>point size</label>
+    <input type="range" id="psize" min="1" max="8" step="1" value="2">
+    <span id="psize_v">2</span>
+  </div>
+  <div class="row">
+    <label>frame range</label>
+    <input type="range" id="fmin" min="0" max="79" step="1" value="0">
+    <input type="range" id="fmax" min="0" max="79" step="1" value="79">
+  </div>
+  <div class="row"><span id="frange">0 – 79</span></div>
+  <div id="stats"></div>
+  <div style="margin-top:10px;font-size:10px;color:#888">
+    <span class="kbd">LMB</span> orbit · <span class="kbd">MMB</span> pan · <span class="kbd">wheel</span> zoom · <span class="kbd">R</span> reset
+  </div>
+</div>
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script>
+const canvas = document.getElementById('canvas');
+const engine = new BABYLON.Engine(canvas, true, {preserveDrawingBuffer: true, stencil: true});
+let scene, pointsMesh, mat, camera;
+let data = null;  // {positions:Float32Array, frames:Uint16Array, meta:Object}
+
+function turboColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  // 5-point approx of matplotlib "turbo"
+  const stops = [[48,18,59],[66,98,218],[31,188,197],[191,231,70],[251,149,37],[122,4,2]];
+  const s = t * (stops.length - 1); const i = Math.floor(s); const f = s - i;
+  const a = stops[i], b = stops[Math.min(i+1, stops.length-1)];
+  return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
+}
+function plasmaColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  const stops = [[13,8,135],[84,2,163],[156,23,158],[205,55,135],[236,97,94],[253,152,39],[240,249,33]];
+  const s = t * (stops.length - 1); const i = Math.floor(s); const f = s - i;
+  const a = stops[i], b = stops[Math.min(i+1, stops.length-1)];
+  return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
+}
+
+function buildScene() {
+  scene = new BABYLON.Scene(engine);
+  scene.clearColor = new BABYLON.Color4(0.08, 0.08, 0.1, 1);
+  camera = new BABYLON.ArcRotateCamera('cam', Math.PI/3, Math.PI/3, 100,
+                                         BABYLON.Vector3.Zero(), scene);
+  camera.attachControl(canvas, true);
+  camera.wheelPrecision = 0.5; camera.minZ = 0.01; camera.maxZ = 5000;
+  camera.panningSensibility = 30;
+  new BABYLON.HemisphericLight('l', new BABYLON.Vector3(0,1,0), scene);
+  return scene;
+}
+
+async function loadScene(sceneName) {
+  const meta = await (await fetch(`data/${sceneName}.json`)).json();
+  const buf = await (await fetch(`data/${sceneName}.bin`)).arrayBuffer();
+  const positions = new Float32Array(buf, 0, meta.n_points * 3);
+  const frames = new Uint16Array(buf, meta.n_points * 12, meta.n_points);
+  data = {positions, frames, meta};
+
+  if (pointsMesh) pointsMesh.dispose();
+
+  // center camera on pointcloud
+  const bmin = meta.bbox_min, bmax = meta.bbox_max;
+  const cx = (bmin[0]+bmax[0])/2, cy = (bmin[1]+bmax[1])/2, cz = (bmin[2]+bmax[2])/2;
+  const sz = Math.max(bmax[0]-bmin[0], bmax[1]-bmin[1]);
+  camera.setTarget(new BABYLON.Vector3(cx, cz, cy));  // note: y<->z swap (Babylon Y-up)
+  camera.radius = sz * 1.2;
+
+  // convert to Babylon Y-up: swap y and z, negate y to match right-handed viewing
+  const N = meta.n_points;
+  const posBab = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    posBab[3*i] = positions[3*i];
+    posBab[3*i+1] = positions[3*i+2];     // z → y (up)
+    posBab[3*i+2] = positions[3*i+1];     // y → z
+  }
+
+  const mesh = new BABYLON.Mesh('points', scene);
+  const vd = new BABYLON.VertexData();
+  vd.positions = posBab;
+  vd.colors = new Float32Array(N * 4);     // rgba
+  // build indices: for POINTLIST, one index per vertex
+  vd.indices = new Uint32Array(N);
+  for (let i = 0; i < N; i++) vd.indices[i] = i;
+  vd.applyToMesh(mesh, true);
+  mesh.subMeshes[0].getMaterial = () => mat;
+
+  mat = new BABYLON.StandardMaterial('mat', scene);
+  mat.emissiveColor = new BABYLON.Color3(1,1,1);
+  mat.disableLighting = true;
+  mat.pointsCloud = true;
+  mat.pointSize = parseInt(document.getElementById('psize').value);
+  mat.useAlphaFromDiffuseTexture = false;
+  mesh.hasVertexAlpha = true;
+  mesh.material = mat;
+  pointsMesh = mesh;
+
+  // ego trajectory
+  if (scene.__traj) scene.__traj.dispose();
+  const pts = meta.trajectory.map(p => new BABYLON.Vector3(p[0], p[2], p[1]));
+  scene.__traj = BABYLON.MeshBuilder.CreateLines('traj', {points: pts}, scene);
+  scene.__traj.color = new BABYLON.Color3(1, 1, 0);
+
+  // start/end markers
+  if (scene.__s) scene.__s.dispose();
+  if (scene.__e) scene.__e.dispose();
+  scene.__s = BABYLON.MeshBuilder.CreateSphere('s', {diameter:1.5}, scene);
+  scene.__s.position = pts[0];
+  scene.__s.material = new BABYLON.StandardMaterial('sm', scene);
+  scene.__s.material.emissiveColor = new BABYLON.Color3(0.2, 1, 0.2);
+  scene.__e = BABYLON.MeshBuilder.CreateSphere('e', {diameter:1.5}, scene);
+  scene.__e.position = pts[pts.length-1];
+  scene.__e.material = new BABYLON.StandardMaterial('em', scene);
+  scene.__e.material.emissiveColor = new BABYLON.Color3(1, 0.2, 0.2);
+
+  // set frame slider range
+  document.getElementById('fmin').max = meta.n_frames - 1;
+  document.getElementById('fmax').max = meta.n_frames - 1;
+  document.getElementById('fmin').value = 0;
+  document.getElementById('fmax').value = meta.n_frames - 1;
+
+  document.getElementById('stats').textContent =
+    `${(N/1000).toFixed(0)}k pts · ${meta.n_frames} frames · voxel ${meta.voxel} m`;
+
+  updateColors();
+}
+
+function updateColors() {
+  if (!pointsMesh || !data) return;
+  const {positions, frames, meta} = data;
+  const N = meta.n_points;
+  const mode = document.getElementById('colormode').value;
+  const fmin = parseInt(document.getElementById('fmin').value);
+  const fmax = parseInt(document.getElementById('fmax').value);
+  document.getElementById('frange').textContent = `${fmin} – ${fmax}`;
+
+  // z range from bbox
+  const zmin = meta.bbox_min[2], zmax = meta.bbox_max[2];
+  const colors = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    const fi = frames[i];
+    const visible = (fi >= fmin && fi <= fmax);
+    let c;
+    if (mode === 'height') {
+      const t = (positions[3*i+2] - zmin) / (zmax - zmin + 1e-9);
+      c = turboColor(t);
+    } else {
+      const t = fi / Math.max(meta.n_frames - 1, 1);
+      c = plasmaColor(t);
+    }
+    colors[4*i] = c[0]/255; colors[4*i+1] = c[1]/255; colors[4*i+2] = c[2]/255;
+    colors[4*i+3] = visible ? 1.0 : 0.0;
+  }
+  pointsMesh.setVerticesData(BABYLON.VertexBuffer.ColorKind, colors, true);
+}
+
+// UI
+document.getElementById('psize').addEventListener('input', e => {
+  if (mat) mat.pointSize = parseInt(e.target.value);
+  document.getElementById('psize_v').textContent = e.target.value;
+});
+document.getElementById('colormode').addEventListener('change', updateColors);
+document.getElementById('fmin').addEventListener('input', updateColors);
+document.getElementById('fmax').addEventListener('input', updateColors);
+
+document.getElementById('scene').addEventListener('change', e => loadScene(e.target.value));
+document.getElementById('reload').addEventListener('click', () => loadScene(document.getElementById('scene').value));
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'r' || e.key === 'R') {
+    if (!data) return;
+    const bmin = data.meta.bbox_min, bmax = data.meta.bbox_max;
+    const sz = Math.max(bmax[0]-bmin[0], bmax[1]-bmin[1]);
+    camera.setTarget(new BABYLON.Vector3((bmin[0]+bmax[0])/2, (bmin[2]+bmax[2])/2, (bmin[1]+bmax[1])/2));
+    camera.radius = sz * 1.2;
+    camera.alpha = Math.PI/3; camera.beta = Math.PI/3;
+  }
+});
+
+// populate scene list from manifest
+(async () => {
+  buildScene();
+  engine.runRenderLoop(() => scene && scene.render());
+  window.addEventListener('resize', () => engine.resize());
+
+  const manifest = await (await fetch('data/manifest.json')).json();
+  const sel = document.getElementById('scene');
+  for (const s of manifest.scenes) {
+    const opt = document.createElement('option');
+    opt.value = s.scene;
+    opt.textContent = `${s.scene}  (${(s.n_points/1000).toFixed(0)}k pts, ${s.n_frames}f)`;
+    sel.appendChild(opt);
+  }
+  if (manifest.scenes.length > 0) loadScene(manifest.scenes[0].scene);
+})();
+</script>
+</body>
+</html>

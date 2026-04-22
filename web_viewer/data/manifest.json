@@ -1,0 +1,19 @@
+{
+  "scenes": [
+    {
+      "scene": "015",
+      "n_points": 572334,
+      "n_frames": 80
+    },
+    {
+      "scene": "006",
+      "n_points": 673376,
+      "n_frames": 80
+    },
+    {
+      "scene": "021",
+      "n_points": 743647,
+      "n_frames": 80
+    }
+  ]
+}
