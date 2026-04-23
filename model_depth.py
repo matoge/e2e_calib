@@ -183,16 +183,12 @@ class CalibNetDepth(nn.Module):
                 feats_seq += [coarse_feat, fine_feat, fine_feat]
             feats_by_layer = feats_seq
 
-        blocks = [self.cross_coarse, self.cross_fine]
+        # Block order matches training convention: cross_refine sits in the
+        # coarse half, cross_fine / cross_fine2 in the fine half.
+        blocks = [self.cross_coarse]
         if self.n_layers >= 3: blocks.append(self.cross_refine)
+        blocks.append(self.cross_fine)
         if self.n_layers >= 4: blocks.append(self.cross_fine2)
-        # ML mode with n_layers=4 still uses 4 stacked blocks; reorder to natural
-        if self._deform_mode == 'ml':
-            # already created 2/3/4 blocks as cross_coarse/fine/refine/fine2 per n_layers
-            ordered = [self.cross_coarse, self.cross_fine]
-            if self.n_layers >= 3: ordered.append(self.cross_refine)
-            if self.n_layers >= 4: ordered.append(self.cross_fine2)
-            blocks = ordered
 
         # first layer (uv_01)
         q, raw_cum = self._block(blocks[0], q, feats_by_layer[0], uv_01, key_padding_mask)
