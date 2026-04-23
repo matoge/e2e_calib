@@ -6,14 +6,14 @@
 <title>Deformable Cross-Attention — CalibNetDepth</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
   --bg: #f6f4ed; --card: #fff; --ink: #0f0f0e; --ink-dim: #6b6a63;
   --accent: #c13c14; --accent2: #174734; --line: #d9d6cd;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-  --jasans: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
-  --jaserif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --jasans: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  --jaserif: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
   --mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
   --col: 900px;
 }
@@ -87,121 +87,396 @@ a:hover { color: var(--accent); }
   <span>CalibNetDepth</span>
 </div>
 
-<h1 class="title">Deformable Cross-Attention<br/>で CalibNetDepth を強化する</h1>
+<h1 class="title">Deformable Cross-Attention<br/>でさらに NLL を改善する</h1>
 <p class="subtitle">
-  画像側の K/V に対する attention を全画素 softmax ではなく学習された N 個の
-  サンプリング点に絞る multi-scale deformable attention (DINO 由来) を、
-  CalibNetDepth の cross-attn ブロックに移植。bf16-native CUDA カーネルで
-  ベースラインと同速を維持しつつ <strong>val NLL 2.074 → 1.57</strong> の
-  改善を確認。
+  Extrinsic calibration は要するに「3D 点が画像のどの画素に対応するか」の
+  <strong>オフセットを見る</strong>タスク。その形に素直に合う
+  <strong>multi-scale deformable attention</strong> を cross-attn に入れ替え、
+  <a href="report.html">前報</a> で止まっていた
+  <strong>val NLL 2.074 → 1.568</strong>（−24.4%）を達成。
+  計算量はリアルタイム推論を見越してひたすら小さく保つ
+  — dense の O(HW) を O(N=4) に削ぎ、DINO 由来の kernel (fp32 のみ) に
+  bf16 dispatch を追加実装して RTX 5080 の bf16-native 実行に載せ、
+  ベースラインと同速 (19.3 vs 19.5 ms/iter) を維持した。
 </p>
 
-<h2>動機</h2>
+<h2>動機: データ側は頭打ち</h2>
 <p>
-  元の <code>CrossAttentionBlockCov</code> はクエリ (point query) と
-  K/V (画像特徴 H×W) 全画素で dense softmax を取る。画像サイズ
-  64×64 から ConvNeXt で降りた coarse (16×16=256) / fine (32×32=1024)
-  でも十分軽いが、"どこを見るか" を attention score に全委任しているため
-  学習の肝になる。
+  前報で <code>all_v2 → all_v3_mc</code>（マルチクロップ + NS/PS/WM 合同）の
+  データ改善が val NLL を 21.7% 削ったが、この 2.074 あたりで
+  どう訓練データを足しても下がらなくなった。学習の律速が
+  <strong>"どこを見るか" の探索</strong>に移っている、という読みで
+  cross-attn ブロックに手を入れる。
 </p>
+
+<h2>deformable attention ってなに？（初心者向け）</h2>
+
+<h3>元の cross-attention は何をしている？</h3>
 <p>
-  deformable attention は hard-coded に "各 head × 各レベル × N=4 点" を
-  サンプリングしてから加重和するので、<strong>attention 計算量 O(Q·K) が
-  O(Q·N) に落ち</strong>、かつ "どこを見るか" が explicit にオフセット予測として
-  出てくる。このオフセットが結果的に <strong>局所的な幾何補正の吸収器</strong>
-  として機能するという仮説を立てた。
+  クエリ 1 個（= 点群の 1 点）に対して、画像特徴を H×W 個のトークンに
+  並べて、<strong>全トークンと内積</strong>を取り、softmax で重み
+  <code>α ∈ [0,1]<sup>HW</sup></code> を作り、重み付き和で 1 本の出力を出す。
+  これが普通の dense cross-attn。画像の「どの画素が重要か」を
+  α として学習する余地が大きい反面、問題が 2 つある:
 </p>
+<ul>
+  <li>
+    <strong>① 計算量が H·W に比例する</strong> — 高解像度で爆発する。
+    DETR (<a href="https://arxiv.org/abs/2005.12872">Carion 2020</a>) が
+    multi-scale feature map を使えなかった原因のひとつ。
+  </li>
+  <li>
+    <strong>② 収束が遅い</strong> — 学習初期は α がほぼ一様分布に近く、
+    「どこを見るか」を softmax の分布として削り出していく必要がある。
+    DETR が 500 epoch 要した一番の原因はこれ。
+  </li>
+</ul>
+
+<h3>deformable attention のアイディア</h3>
+<p>
+  Deformable DETR (<a href="https://arxiv.org/abs/2010.04159">Zhu 2021</a>)
+  はこの 2 問題を一発で解く:
+</p>
+<ol>
+  <li>
+    クエリ自身から<strong> "見に行くべき位置" のオフセット Δᵢ を
+    N=4 個</strong>、MLP で直接回帰させる。
+  </li>
+  <li>
+    reference point (= クエリの自分の <code>(u₀, v₀)</code>) に Δᵢ を足した
+    <strong>たった 4 箇所</strong>で画像特徴をバイリニアサンプル。
+  </li>
+  <li>
+    4 個のサンプル値を、別 MLP で出した重み <code>aᵢ (Σaᵢ=1)</code> で
+    加重和して出力。
+  </li>
+</ol>
+<p>
+  つまり <strong>「どこを見るか」を attention score の確率分布 α ではなく、
+  直接 2D 座標 Δᵢ として回帰</strong>する。これで:
+</p>
+<ul>
+  <li><strong>① 計算量 O(HW) → O(N)</strong>。HW=256 / 1024 → N=4 なので 2 桁減。</li>
+  <li>
+    <strong>② 収束が速い</strong>。初期化で Δᵢ は放射状 4 点に置かれ
+    （<a href="https://github.com/fundamentalvision/Deformable-DETR/blob/main/models/ops/modules/ms_deform_attn.py">参考実装</a>
+    の <code>_reset_parameters</code>）、学習初期から
+    「どこを見るか」の座標空間で最適化が進む。
+    softmax を尖らせる epoch が要らない。
+  </li>
+</ul>
+
+<h3>"視野が狭い" と "広すぎる" を両立</h3>
+<p>
+  "N=4 しか見ない" と聞くと CNN のような局所窓と同じに見えるが、Δᵢ は
+  normalized coord <code>[0,1]²</code> の任意の位置を取れるので、
+  画像のどこでもサンプルできる。つまり <strong>CNN の局所性に縛られない
+  大域的な受容野を、attention の二次コストなしで持てる</strong>のが肝。
+  先祖の Deformable Convolution
+  (<a href="https://arxiv.org/abs/1703.06211">Dai 2017</a>) が conv に
+  学習可能オフセットを足してスケール変化・変形に適応させたのと同じ発想を、
+  attention に持ち込んだのが deformable attention。
+</p>
+
+<h3>本タスクとの相性</h3>
+<p>
+  Extrinsic calibration は結局
+  <strong>「3D 点が画像のどの画素に対応すべきか」を当てる問題</strong>。
+  正解の画素は一箇所なので、全画素で softmax する dense cross-attn は
+  無駄が多い。一方 deformable attention の Δᵢ は
+  <strong>「見るべき画素へのオフセット」そのもの</strong>で、タスクの定義と
+  inductive bias が直接重なる。これが後半の ablation で 2.07 の壁を
+  抜ける土台になっている。
+</p>
+
+<h2>機構</h2>
+
+<figure>
+<svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg"
+     style="background:#fff; width:100%; height:auto"
+     font-family="'Zen Kaku Gothic New', sans-serif" font-size="13">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#0f0f0e"/>
+    </marker>
+    <marker id="ar-red" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#c13c14"/>
+    </marker>
+    <marker id="ar-green" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#174734"/>
+    </marker>
+  </defs>
+
+  <!-- ── stage 1: query + 2 Linears ─────────────────────────────── -->
+  <rect x="30" y="50" width="180" height="46" fill="#fff"
+        stroke="#174734" stroke-width="2" rx="3"/>
+  <text x="120" y="72" text-anchor="middle" font-size="13" font-weight="600">
+    point query <tspan font-family="monospace" font-style="italic">q</tspan>
+  </text>
+  <text x="120" y="88" text-anchor="middle" font-size="11" fill="#6b6a63"
+        font-family="monospace">(u₀, v₀, d) encoded</text>
+
+  <!-- branch -->
+  <path d="M70 96 L70 120 L70 150" stroke="#0f0f0e" fill="none" marker-end="url(#ar)"/>
+  <path d="M170 96 L170 120 L170 150" stroke="#0f0f0e" fill="none" marker-end="url(#ar)"/>
+
+  <!-- offsets Linear -->
+  <rect x="20" y="152" width="100" height="56" fill="#fff"
+        stroke="#d9d6cd" rx="3"/>
+  <text x="70" y="170" text-anchor="middle" font-size="11" font-family="monospace">Linear</text>
+  <text x="70" y="186" text-anchor="middle" font-size="11" fill="#c13c14"
+        font-family="monospace">Δᵢ = (Δu,Δv)</text>
+  <text x="70" y="200" text-anchor="middle" font-size="10" fill="#6b6a63">i = 1…N</text>
+
+  <!-- attn weights Linear -->
+  <rect x="120" y="152" width="100" height="56" fill="#fff"
+        stroke="#d9d6cd" rx="3"/>
+  <text x="170" y="170" text-anchor="middle" font-size="11" font-family="monospace">Linear + softmax</text>
+  <text x="170" y="186" text-anchor="middle" font-size="11" fill="#c13c14"
+        font-family="monospace">aᵢ</text>
+  <text x="170" y="200" text-anchor="middle" font-size="10" fill="#6b6a63">Σ aᵢ = 1</text>
+
+  <!-- flow into feature map -->
+  <path d="M70 208 L70 248 L290 248" stroke="#c13c14" fill="none"
+        stroke-width="1.8" marker-end="url(#ar-red)"/>
+  <text x="80" y="240" font-size="10" fill="#c13c14"
+        font-family="monospace">Δ₁…Δ₄ + ref</text>
+
+  <path d="M170 208 L170 280 L590 280" stroke="#c13c14" fill="none"
+        stroke-width="1.8" marker-end="url(#ar-red)" stroke-dasharray="4 3"/>
+  <text x="180" y="273" font-size="10" fill="#c13c14"
+        font-family="monospace">a₁…a₄ (weights)</text>
+
+  <!-- ── stage 2: feature map with ref pt + offsets ────────────── -->
+  <g transform="translate(300, 50)">
+    <text x="145" y="-6" text-anchor="middle" font-size="11" fill="#6b6a63"
+          font-family="monospace">image feature H×W (per level)</text>
+
+    <!-- 8x7 grid of cells 32px each → 256 wide, 224 tall -->
+    <g fill="#f6f4ed" stroke="#d9d6cd" stroke-width="1">
+      <rect x="0"   y="0"   width="32" height="32"/>
+      <rect x="32"  y="0"   width="32" height="32"/>
+      <rect x="64"  y="0"   width="32" height="32"/>
+      <rect x="96"  y="0"   width="32" height="32"/>
+      <rect x="128" y="0"   width="32" height="32"/>
+      <rect x="160" y="0"   width="32" height="32"/>
+      <rect x="192" y="0"   width="32" height="32"/>
+      <rect x="224" y="0"   width="32" height="32"/>
+      <rect x="0"   y="32"  width="32" height="32"/>
+      <rect x="32"  y="32"  width="32" height="32"/>
+      <rect x="64"  y="32"  width="32" height="32"/>
+      <rect x="96"  y="32"  width="32" height="32"/>
+      <rect x="128" y="32"  width="32" height="32"/>
+      <rect x="160" y="32"  width="32" height="32"/>
+      <rect x="192" y="32"  width="32" height="32"/>
+      <rect x="224" y="32"  width="32" height="32"/>
+      <rect x="0"   y="64"  width="32" height="32"/>
+      <rect x="32"  y="64"  width="32" height="32"/>
+      <rect x="64"  y="64"  width="32" height="32"/>
+      <rect x="96"  y="64"  width="32" height="32"/>
+      <rect x="128" y="64"  width="32" height="32"/>
+      <rect x="160" y="64"  width="32" height="32"/>
+      <rect x="192" y="64"  width="32" height="32"/>
+      <rect x="224" y="64"  width="32" height="32"/>
+      <rect x="0"   y="96"  width="32" height="32"/>
+      <rect x="32"  y="96"  width="32" height="32"/>
+      <rect x="64"  y="96"  width="32" height="32"/>
+      <rect x="96"  y="96"  width="32" height="32"/>
+      <rect x="128" y="96"  width="32" height="32"/>
+      <rect x="160" y="96"  width="32" height="32"/>
+      <rect x="192" y="96"  width="32" height="32"/>
+      <rect x="224" y="96"  width="32" height="32"/>
+      <rect x="0"   y="128" width="32" height="32"/>
+      <rect x="32"  y="128" width="32" height="32"/>
+      <rect x="64"  y="128" width="32" height="32"/>
+      <rect x="96"  y="128" width="32" height="32"/>
+      <rect x="128" y="128" width="32" height="32"/>
+      <rect x="160" y="128" width="32" height="32"/>
+      <rect x="192" y="128" width="32" height="32"/>
+      <rect x="224" y="128" width="32" height="32"/>
+      <rect x="0"   y="160" width="32" height="32"/>
+      <rect x="32"  y="160" width="32" height="32"/>
+      <rect x="64"  y="160" width="32" height="32"/>
+      <rect x="96"  y="160" width="32" height="32"/>
+      <rect x="128" y="160" width="32" height="32"/>
+      <rect x="160" y="160" width="32" height="32"/>
+      <rect x="192" y="160" width="32" height="32"/>
+      <rect x="224" y="160" width="32" height="32"/>
+    </g>
+
+    <!-- reference point (u₀, v₀) -->
+    <circle cx="144" cy="112" r="4.5" fill="#174734"/>
+    <text x="152" y="108" font-size="10" fill="#174734"
+          font-family="monospace">ref (u₀,v₀)</text>
+
+    <!-- 4 sample points, arrows from ref, circle size ∝ weight -->
+    <!-- sample 1: upper-left, mid weight -->
+    <path d="M144 112 L70 46" stroke="#c13c14" stroke-width="1.5"
+          marker-end="url(#ar-red)" fill="none"/>
+    <circle cx="70" cy="46" r="7" fill="#c13c14" opacity="0.85"/>
+    <text x="42" y="38" font-size="10" fill="#c13c14"
+          font-family="monospace">a=.30</text>
+
+    <!-- sample 2: upper-right, low weight -->
+    <path d="M144 112 L210 58" stroke="#c13c14" stroke-width="1.5"
+          marker-end="url(#ar-red)" fill="none"/>
+    <circle cx="210" cy="58" r="4" fill="#c13c14" opacity="0.65"/>
+    <text x="220" y="54" font-size="10" fill="#c13c14"
+          font-family="monospace">a=.12</text>
+
+    <!-- sample 3: lower-right, highest weight -->
+    <path d="M144 112 L220 160" stroke="#c13c14" stroke-width="1.5"
+          marker-end="url(#ar-red)" fill="none"/>
+    <circle cx="220" cy="160" r="9" fill="#c13c14" opacity="0.95"/>
+    <text x="232" y="164" font-size="10" fill="#c13c14"
+          font-family="monospace">a=.48</text>
+
+    <!-- sample 4: lower-left, small weight -->
+    <path d="M144 112 L82 172" stroke="#c13c14" stroke-width="1.5"
+          marker-end="url(#ar-red)" fill="none"/>
+    <circle cx="82" cy="172" r="3" fill="#c13c14" opacity="0.55"/>
+    <text x="32" y="175" font-size="10" fill="#c13c14"
+          font-family="monospace">a=.10</text>
+
+    <!-- caption -->
+    <text x="145" y="214" text-anchor="middle" font-size="11" fill="#0f0f0e"
+          font-family="monospace">vᵢ = bilinear(feat, ref + Δᵢ)</text>
+  </g>
+
+  <!-- ── stage 3: weighted sum → output ────────────────────────── -->
+  <path d="M600 160 L660 160" stroke="#0f0f0e" fill="none" marker-end="url(#ar)"/>
+  <text x="630" y="152" text-anchor="middle" font-size="10" fill="#6b6a63"
+        font-family="monospace">Σ aᵢ vᵢ</text>
+
+  <rect x="670" y="134" width="200" height="52" fill="#fff"
+        stroke="#174734" stroke-width="2" rx="3"/>
+  <text x="770" y="156" text-anchor="middle" font-size="13" font-weight="600">
+    output ∈ R<tspan font-size="10" dy="-4">D</tspan>
+  </text>
+  <text x="770" y="176" text-anchor="middle" font-size="10" fill="#6b6a63"
+        font-family="monospace">→ proj head → (μ, Σ)</text>
+
+  <!-- complexity banner -->
+  <g>
+    <rect x="30" y="360" width="840" height="48" fill="#f6f4ed"
+          stroke="#d9d6cd"/>
+    <text x="450" y="380" text-anchor="middle" font-size="12" fill="#0f0f0e"
+          font-family="monospace">
+      complexity per query: <tspan fill="#c13c14" font-weight="600">O(N)</tspan>
+      with N = 4  —  vs dense cross-attn
+      <tspan fill="#6b6a63">O(HW)</tspan> with HW = 256 (coarse) / 1024 (fine)
+    </text>
+    <text x="450" y="398" text-anchor="middle" font-size="11" fill="#6b6a63">
+      かつ "どこを見るか" は attention score の暗黙探索ではなく Δᵢ として explicit に学習
+    </text>
+  </g>
+</svg>
+<figcaption>
+  Fig 1 · MS-Deformable Attention. query がサンプリング位置 Δᵢ と重み aᵢ を
+  直接出力し、ref=(u₀,v₀) からのオフセット上で bilinear サンプルして加重和。
+  weights は円サイズで示した（softmax 済）。
+</figcaption>
+</figure>
 
 <h2>実装</h2>
 <p>
-  DINO の <code>ops/</code> (MSDeformAttn CUDA kernel) をそのまま持ち込み、
-  bf16 autocast の内側でも動くよう <code>AT_DISPATCH_FLOATING_TYPES_AND2</code>
-  と <code>gpuAtomicAdd</code> ベースに書き換え。これで<strong> fp32 キャストなしで
-  そのまま kernel 実行</strong> できる。
+  <a href="https://github.com/fundamentalvision/Deformable-DETR">Deformable-DETR</a>
+  (DINO 系) 公式の <code>MSDeformAttn</code> CUDA kernel は
+  <strong>fp32 専用</strong>で、bf16 autocast の中に置くと autocast が
+  fp32 キャストを差し込み、そこだけで前後のバッファ転送が走って遅くなる。
+</p>
+<p>
+  <code>ops/src/*.cu</code> を <code>AT_DISPATCH_FLOATING_TYPES_AND2</code>
+  (fp32 / fp16 / <strong>bf16</strong>) に書き換え、atomic 演算も
+  <code>gpuAtomicAdd</code> 版に差し替えた。RTX 5080 は bf16 の
+  tensor-core path を持っているので、
+  <strong>autocast 内でも fp32 キャストなしで kernel 直叩き</strong>できる。
+  結果ベースラインと同速 (19.3 vs 19.5 ms/iter)。
 </p>
 
 <h3>3 モード</h3>
 <pre><code>deform_mode = 'none'  # 旧 CrossAttentionBlockCov（ベースライン）
-deform_mode = 'sl'    # 単一レベル版: 各ブロックが 1 レベル (coarse or fine)
+deform_mode = 'sl'    # 単一レベル: 各ブロックが 1 レベル (coarse or fine)
                       #   を N=4 点でサンプル
-deform_mode = 'ml'    # 多レベル版: 各ブロックが coarse+fine の両方を
+deform_mode = 'ml'    # 多レベル: 各ブロックが coarse+fine 両方を
                       #   N=4 点ずつ + 学習可能な level embedding
 </code></pre>
 
 <p>
-  <code>CalibNetDepth(deform_mode=…)</code> で切替。ML mode は
-  <code>self.level_embed = nn.Parameter(zeros(2, d))</code> の追加パラメータ (≈512 params) のみ。
+  ML モード追加パラメータは <code>level_embed = nn.Parameter(zeros(2, D))</code>
+  の ≈512 個のみ。
 </p>
 
-<h2>訓練条件</h2>
-<table>
-<thead><tr><th>項目</th><th>値</th></tr></thead>
-<tbody>
-<tr><td>データ</td><td>NuScenes + PandaSet + Waymo 共同 (60k / 1.5k split)</td></tr>
-<tr><td>Epoch</td><td>200 (早期停止: val NLL で選択)</td></tr>
-<tr><td>Batch size</td><td>48</td></tr>
-<tr><td>LR</td><td>1e-3 → 1e-7 (cosine)</td></tr>
-<tr><td>n_layers</td><td>4 (coarse → refine → fine → fine2)</td></tr>
-<tr><td>画像入力</td><td>RGB 64×64</td></tr>
-<tr><td>ConvNeXt backbone</td><td>有効</td></tr>
-<tr><td>Frustum encoder</td><td>有効 (r_uv=8.0, r_d=0.004, k=8)</td></tr>
-<tr><td>deform N points</td><td>4</td></tr>
-</tbody>
-</table>
+<h2>ablation: 学習曲線</h2>
 
-<h2>結果</h2>
+<figure>
+  <img src="assets/vdef_sweep.png" alt="val NLL vs epoch for baseline / SL / ML">
+  <figcaption>
+    Fig 2 · 同一データ・同一スケジュール (NS+PS+WM 60k / 200 epoch / cosine lr)
+    での val NLL。ベースライン (none, グレー) は 2.07 付近で頭打ち。
+    deform-SL (青) / deform-ML (赤) は終盤で 1.57 まで下降。
+  </figcaption>
+</figure>
 
 <table>
 <thead><tr>
   <th>Model</th>
-  <th class="num">val NLL (best)</th>
-  <th class="num">相対 Δ</th>
-  <th class="num">iter 速度 (ms, B=48, N=256)</th>
+  <th class="num">val NLL (total)</th>
+  <th class="num">val NLL (obj)</th>
+  <th class="num">val NLL (bg)</th>
+  <th class="num">相対 Δ (total)</th>
+  <th class="num">iter (ms)</th>
 </tr></thead>
 <tbody>
-<tr><td>baseline (none)</td><td class="num">2.074</td><td class="num">—</td><td class="num">19.5</td></tr>
-<tr class="best"><td>deform-SL</td><td class="num">1.568</td><td class="num">−0.506</td><td class="num">19.3</td></tr>
-<tr><td>deform-ML</td><td class="num">1.573</td><td class="num">−0.501</td><td class="num">19.3</td></tr>
+<tr><td>baseline (none)</td>
+    <td class="num">2.074</td>
+    <td class="num">1.064</td>
+    <td class="num">2.127</td>
+    <td class="num">—</td>
+    <td class="num">19.5</td></tr>
+<tr class="best"><td>deform-SL</td>
+    <td class="num">1.568</td>
+    <td class="num">0.610</td>
+    <td class="num">1.616</td>
+    <td class="num">−24.4%</td>
+    <td class="num">19.3</td></tr>
+<tr><td>deform-ML</td>
+    <td class="num">1.573</td>
+    <td class="num">0.571</td>
+    <td class="num">1.625</td>
+    <td class="num">−24.2%</td>
+    <td class="num">19.3</td></tr>
 </tbody>
 </table>
 
 <div class="callout">
-  <strong>主要所見</strong>:
+  <strong>所見</strong>:
   <ul>
-    <li>SL / ML どちらも ~0.5 NLL の明確な改善。ML の複雑化は追加の勝ちを生まず、<strong>SL で十分</strong>。</li>
-    <li>bf16 カーネルのおかげでベースラインと <strong>ほぼ同速</strong> (19.3 vs 19.5 ms/iter)。</li>
-    <li>BA 下流でも優位: pinhole の <code>t_err</code> が all_v3_mc の 2.10 cm から <strong>1.60 cm</strong> に改善 (ML) — 詳細は <a href="ba_report.html">BA report</a> 参照。</li>
+    <li>SL/ML どちらも約 <strong>−0.5 NLL</strong>。データ側では動かなかった
+        2.07 の壁を一発で抜けた。</li>
+    <li>obj NLL の改善幅 (<strong>1.064 → 0.57/0.61</strong>) が bg (2.13 → 1.62)
+        より大きい — 前景物体の位置推定こそ
+        「オフセット探索」が素直に効く場所、という機構 (Fig 1) の読みと整合。</li>
+    <li><strong>SL と ML はほぼ同点</strong>。ML の複雑化はこの設定では元が取れない。
+        N=4×2 level の表現力は <em>N=4×1 level を 2 ブロックかける</em> 構成
+        (SL) とほぼ等価。</li>
+    <li>bf16 カーネルのおかげで速度はベースラインと同等 (19.3 vs 19.5 ms/iter)。</li>
   </ul>
 </div>
-
-<h2>Downstream: 暗黙の歪み吸収</h2>
-
-<p>
-  <a href="ba_report.html">BA 感度スイープ</a> で面白いパターンが出た。
-  all_v3_mc (pinhole 訓練) では <code>k₂ = +0.01</code> を BA に注入すると
-  <code>t_err</code> が 2.10 → 1.56 cm に改善 (= PandaSet に微小 pincushion があることを示唆)。
-  一方、deformable 2 モデルは <strong>pinhole 単体で既に最良</strong>で
-  k₂ を入れても改善しない。
-</p>
-<p>
-  これは deformable attention が学習中にサンプリングオフセットを自動調整する過程で、
-  各点が画像のどこを見るかを空間的に歪めて学んでいることを意味する。
-  <strong>微小 radial 歪みが implicit に吸収され</strong>、
-  明示的な distortion モデルを下流で足す必要がなくなる。
-  extrinsic BA にとっては "正しい <code>(u,v)</code> を見る" 事ができれば十分で、
-  歪み補正は network の表現空間に閉じ込められて良い。
-</p>
 
 <h2>躓いた箇所</h2>
 
 <div class="callout warn">
-  <strong>Block 順の silent refactor バグ (<a href="https://github.com/matoge/e2e_calib/commit/85b6ccc">85b6ccc</a>)</strong>:
+  <strong>Block 順の silent refactor バグ
+    (<a href="https://github.com/matoge/e2e_calib/commit/85b6ccc">85b6ccc</a>)</strong>:
   deformable を足す refactor で <code>n_layers≥3</code> の時のブロック実行順が
   崩れ、<code>cross_fine</code> と <code>cross_refine</code> が feature レベルを
   取り違えるバグを混入。pre-refactor の <code>all_v3_mc</code> ckpt を
-  load_state_dict で読み込むと silently mis-wired になり、BA で
-  <strong>t が GT drift のまま動かなくなる</strong>。
-  <br/>→ 修正コミット <code>4517107</code>/<code>45b9fcb</code> で元の
+  <code>load_state_dict</code> で読み込むと silently mis-wired になる。
+  → <code>4517107</code>/<code>45b9fcb</code> で
   <code>coarse → refine → fine → fine2</code> 順を復元。deform 訓練済み重みも
   壊さないよう <code>deform_mode</code> で条件化して共存。
 </div>
@@ -211,20 +486,22 @@ deform_mode = 'ml'    # 多レベル版: 各ブロックが coarse+fine の両�
 <pre><code># sweep (SL + ML を並列で)
 python scripts/training/train_deform_sweep.py
 
-# 個別
-python scripts/training/train_all_v2_mc.py  # baseline (deform_mode='none')
-
-# 評価 (BA 下流)
-BA_CKPT=experiments/vdef_sl/best_model.pt \
-BA_DEFORM_MODE=sl \
-BA_OUT=experiments/vdef_sl/ba_kb \
-  python ba_kb_multiframe.py</code></pre>
+# ベースライン (deform_mode='none')
+python scripts/training/train_all_v2_mc.py</code></pre>
 
 <h2>次のステップ</h2>
 <ul>
-  <li><strong>N_points スイープ</strong> — N=4 固定だが、N=8 / 2 での差を見たい。attention の粒度 vs. overfitting のトレードオフ。</li>
-  <li><strong>DN / query denoising 導入</strong> — DINO-style の訓練安定化技法と組み合わせて学習時間短縮できるか。</li>
-  <li><strong>deformable kernel を GS query net に流用</strong> — <a href="report.html">patch-warp 案</a> と接続。3D primitive (surfel / gaussian) から (Δu, Δv, Σ) を予測する一般化した残差ヘッドに移植。</li>
+  <li><strong>BA 下流の再評価</strong> — deform ckpt を通した
+      <code>ba_kb_multiframe</code> が未収束（モデル側の軸合わせ issue）。
+      原因特定して再計測。本レポートでは訓練指標のみを報告。</li>
+  <li><strong>N_points スイープ</strong> — N=4 固定。N=2 / 8 で粒度 vs overfitting
+      のトレードオフを見る。obj NLL がさらに下がる可能性あり。</li>
+  <li><strong>Sampling offset の可視化</strong> — 学習後に
+      Δᵢ(q, image) が実際どこを指しているかを出す。
+      Fig 1 で描いた模式図が実測で何に対応しているか確認。</li>
+  <li><strong>Gaussian-query 残差ネットへ流用</strong> —
+      <a href="report.html">patch-warp 案</a>に接続し、3D primitive
+      (surfel / gaussian) から (Δu, Δv, Σ) を出す一般化残差ヘッドに移植。</li>
 </ul>
 
 <div class="callout">
