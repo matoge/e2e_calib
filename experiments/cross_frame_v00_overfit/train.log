@@ -1,0 +1,21 @@
+[01:24:16] device = cuda
+[01:24:16] args = {'name': 'v00_overfit', 'full': False, 'scene': '/mnt/mininas/datasets/pandaset/015', 'img_size': 64, 'max_points': 64, 'batch_size': 16, 'lr': 0.001, 'n_overfit': 16, 'epochs': 5, 'log_every': 1}
+[01:24:16] caching 16 fixed overfit samples…
+[01:29:36] device = cuda
+[01:29:36] args = {'name': 'v00_overfit', 'full': False, 'scene': '/mnt/mininas/datasets/pandaset/015', 'img_size': 64, 'max_points': 64, 'batch_size': 8, 'lr': 0.001, 'n_overfit': 16, 'epochs': 50, 'log_every': 5}
+[01:29:36] caching 16 fixed overfit samples…
+[01:29:40]   done. sample[0] residual stats: target_AB |Δ| mean = 7.04 px
+[01:29:40] model params: 1.313 M
+[01:29:41] ep   0  loss=12.507  err_AB=8.30px  err_BA=8.12px  (base_AB=8.15px)  lr=9.99e-04  t=1s
+[01:29:41] ep   5  loss=4.486  err_AB=6.68px  err_BA=6.35px  (base_AB=8.15px)  lr=9.65e-04  t=1s
+[01:29:41] ep  10  loss=3.719  err_AB=6.13px  err_BA=5.29px  (base_AB=8.15px)  lr=8.86e-04  t=1s
+[01:29:42] ep  15  loss=2.600  err_AB=2.72px  err_BA=3.50px  (base_AB=8.15px)  lr=7.70e-04  t=1s
+[01:29:42] ep  20  loss=1.544  err_AB=1.38px  err_BA=1.67px  (base_AB=8.15px)  lr=6.28e-04  t=1s
+[01:29:42] ep  25  loss=1.131  err_AB=1.27px  err_BA=1.42px  (base_AB=8.15px)  lr=4.74e-04  t=2s
+[01:29:42] ep  30  loss=0.951  err_AB=1.18px  err_BA=1.31px  (base_AB=8.15px)  lr=3.23e-04  t=2s
+[01:29:42] ep  35  loss=0.708  err_AB=1.16px  err_BA=1.10px  (base_AB=8.15px)  lr=1.89e-04  t=2s
+[01:29:43] ep  40  loss=0.395  err_AB=0.90px  err_BA=0.93px  (base_AB=8.15px)  lr=8.71e-05  t=2s
+[01:29:43] ep  45  loss=0.281  err_AB=0.90px  err_BA=0.92px  (base_AB=8.15px)  lr=2.56e-05  t=2s
+[01:29:43] ep  49  loss=0.234  err_AB=0.89px  err_BA=0.89px  (base_AB=8.15px)  lr=1.00e-05  t=2s
+[01:29:43] saved curve → experiments/cross_frame_v00_overfit/curve.png
+[01:29:43] best mean err = 0.89 px

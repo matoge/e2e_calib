@@ -1,0 +1,12 @@
+{
+  "name": "v00_overfit",
+  "full": false,
+  "scene": "/mnt/mininas/datasets/pandaset/015",
+  "img_size": 64,
+  "max_points": 64,
+  "batch_size": 8,
+  "lr": 0.001,
+  "n_overfit": 16,
+  "epochs": 50,
+  "log_every": 5
+}

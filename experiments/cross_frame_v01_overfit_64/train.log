@@ -1,0 +1,23 @@
+[01:30:03] device = cuda
+[01:30:03] args = {'name': 'v01_overfit_64', 'full': False, 'scene': '/mnt/mininas/datasets/pandaset/015', 'img_size': 64, 'max_points': 64, 'batch_size': 16, 'lr': 0.001, 'n_overfit': 64, 'epochs': 150, 'log_every': 10}
+[01:30:03] caching 64 fixed overfit samples…
+[01:30:10]   done. sample[0] residual stats: target_AB |Δ| mean = 7.04 px
+[01:30:11] model params: 1.313 M
+[01:30:12] ep   0  loss=15.430  err_AB=9.31px  err_BA=9.83px  (base_AB=8.43px)  lr=1.00e-03  t=1s
+[01:30:12] ep  10  loss=4.340  err_AB=7.64px  err_BA=8.01px  (base_AB=8.43px)  lr=9.87e-04  t=1s
+[01:30:13] ep  20  loss=3.217  err_AB=4.05px  err_BA=3.65px  (base_AB=8.43px)  lr=9.53e-04  t=2s
+[01:30:14] ep  30  loss=2.125  err_AB=2.57px  err_BA=2.58px  (base_AB=8.43px)  lr=8.99e-04  t=3s
+[01:30:14] ep  40  loss=1.739  err_AB=1.93px  err_BA=2.05px  (base_AB=8.43px)  lr=8.28e-04  t=3s
+[01:30:15] ep  50  loss=1.610  err_AB=1.84px  err_BA=2.01px  (base_AB=8.43px)  lr=7.43e-04  t=4s
+[01:30:15] ep  60  loss=1.276  err_AB=1.60px  err_BA=1.60px  (base_AB=8.43px)  lr=6.48e-04  t=4s
+[01:30:16] ep  70  loss=0.627  err_AB=1.07px  err_BA=1.10px  (base_AB=8.43px)  lr=5.46e-04  t=5s
+[01:30:17] ep  80  loss=0.482  err_AB=1.05px  err_BA=1.09px  (base_AB=8.43px)  lr=4.43e-04  t=5s
+[01:30:17] ep  90  loss=0.439  err_AB=0.98px  err_BA=1.04px  (base_AB=8.43px)  lr=3.42e-04  t=6s
+[01:30:18] ep 100  loss=-0.012  err_AB=0.77px  err_BA=0.82px  (base_AB=8.43px)  lr=2.49e-04  t=7s
+[01:30:18] ep 110  loss=-0.300  err_AB=0.71px  err_BA=0.74px  (base_AB=8.43px)  lr=1.66e-04  t=7s
+[01:30:19] ep 120  loss=-0.357  err_AB=0.68px  err_BA=0.71px  (base_AB=8.43px)  lr=9.85e-05  t=8s
+[01:30:19] ep 130  loss=-0.541  err_AB=0.63px  err_BA=0.65px  (base_AB=8.43px)  lr=4.87e-05  t=8s
+[01:30:20] ep 140  loss=-0.612  err_AB=0.62px  err_BA=0.63px  (base_AB=8.43px)  lr=1.88e-05  t=9s
+[01:30:20] ep 149  loss=-0.652  err_AB=0.60px  err_BA=0.62px  (base_AB=8.43px)  lr=1.00e-05  t=9s
+[01:30:20] saved curve → experiments/cross_frame_v01_overfit_64/curve.png
+[01:30:20] best mean err = 0.60 px

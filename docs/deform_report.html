@@ -89,15 +89,27 @@ a:hover { color: var(--accent); }
 
 <h1 class="title">Deformable Cross-Attention<br/>でさらに NLL を改善する</h1>
 <p class="subtitle">
-  Extrinsic calibration は要するに「3D 点が画像のどの画素に対応するか」の
-  <strong>オフセットを見る</strong>タスク。その形に素直に合う
-  <strong>multi-scale deformable attention</strong> を cross-attn に入れ替え、
-  <a href="report.html">前報</a> で止まっていた
-  <strong>val NLL 2.074 → 1.568</strong>（−24.4%）を達成。
-  計算量はリアルタイム推論を見越してひたすら小さく保つ
-  — dense の O(HW) を O(N=4) に削ぎ、DINO 由来の kernel (fp32 のみ) に
-  bf16 dispatch を追加実装して RTX 5080 の bf16-native 実行に載せ、
-  ベースラインと同速 (19.3 vs 19.5 ms/iter) を維持した。
+  <strong>ここまでの話</strong> —
+  <a href="report.html">前報</a>では LiDAR/カメラの extrinsic calibration を、
+  点ごとの <em>ガウス分布付きピクセルオフセット</em>を出す
+  CalibNetDepth で解く枠組みを組み、NuScenes + PandaSet + Waymo の
+  合同学習（<code>all_v3_mc</code>）まで進めて val NLL を
+  <strong>2.647 → 2.074</strong> まで削った。
+  そこから先はデータをどう足しても動かず、
+  学習の律速は<strong>「画像のどこを見るか」</strong>の探索側に
+  移っていた。
+</p>
+<p class="subtitle">
+  <strong>この報告</strong> —
+  キャリブレーションは結局「3D 点が画像のどの画素に動くべきか」の
+  <strong>オフセット予測</strong>そのもの。その形が
+  attention score ではなく <em>2D 座標</em>として直接出てくる構造
+  —— <strong>multi-scale deformable attention</strong> を cross-attention に
+  入れ替えた結果、<strong>val NLL 2.074 → 1.568（−24.4%）</strong> を
+  追加取得。計算量はオンボード推論を見越して
+  dense の <code>O(HW)</code> から <code>O(N=4)</code> に削ぎ、
+  DINO 由来の kernel (fp32 のみ) に bf16 dispatch を足して
+  RTX 5080 上でベースラインと同速 (<strong>19.3 vs 19.5 ms/iter</strong>) を維持。
 </p>
 
 <h2>動機: データ側は頭打ち</h2>
