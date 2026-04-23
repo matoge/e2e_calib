@@ -7,6 +7,8 @@ web_viewer/data/*.bin
 __pycache__/
 *.pyc
 .pytest_cache/
+.claude/
+logs/
 *.egg-info/
 dist/
 build/

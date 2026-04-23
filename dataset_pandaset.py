@@ -167,7 +167,7 @@ def build_cache(pandaset_root: str,
                 # square crop at bbox_scale × bbox
                 bw, bh   = u_max - u_min, v_max - v_min
                 crop_size = max(bw, bh) * bbox_scale
-                crop_size = max(crop_size, 32)   # at least 32px in full res
+                crop_size = max(crop_size, 64)   # at least 64px in full res
                 half      = crop_size / 2
                 u0 = float(np.clip(uc - half, 0, IW - crop_size))
                 v0 = float(np.clip(vc - half, 0, IH - crop_size))

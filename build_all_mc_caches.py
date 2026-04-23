@@ -11,9 +11,9 @@ from pathlib import Path
 CACHE_DIR = Path('/mnt/nvme6t/e2e_calib_cache')
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-PS_CACHE = CACHE_DIR / 'pandaset_mc_cache.pt'
-NS_CACHE = CACHE_DIR / 'nuscenes_mc_cache.pt'
-WM_CACHE = CACHE_DIR / 'waymo_mc_cache.pt'
+PS_CACHE = CACHE_DIR / 'pandaset_mc_s64_cache.pt'
+NS_CACHE = CACHE_DIR / 'nuscenes_mc_s64_cache.pt'
+WM_CACHE = CACHE_DIR / 'waymo_mc_s64_cache.pt'
 
 
 def build_ps():

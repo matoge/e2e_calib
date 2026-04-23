@@ -84,7 +84,7 @@ def _ns_process_scene(args):
             if not (0 <= uc < IW and 0 <= vc < IH): continue
 
             bw, bh    = u_max-u_min, v_max-v_min
-            crop_size = max(max(bw,bh)*ctx['bbox_scale'], 32)
+            crop_size = max(max(bw,bh)*ctx['bbox_scale'], 64)
             half      = crop_size/2
             u0 = float(np.clip(uc-half, 0, IW-crop_size))
             v0 = float(np.clip(vc-half, 0, IH-crop_size))

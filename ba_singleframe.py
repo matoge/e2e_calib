@@ -348,45 +348,40 @@ def main(frame_choice='mid'):
         history=history,
     ), indent=2))
 
-    # A/B viz: LEFT = distorted, RIGHT = BA-corrected. color by depth.
+    # A/B viz: TOP = distorted, BOTTOM = BA-corrected. color by depth.
     scene, fi, img_full = find_frame_image(cp)
     print(f'  frame: scene={scene} fi={fi}')
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(22, 7), dpi=110)
-    for ax in (axL, axR):
+    fig, (axT, axB) = plt.subplots(2, 1, figsize=(13, 15), dpi=120)
+    for ax in (axT, axB):
         if img_full is not None: ax.imshow(img_full)
         else:                     ax.set_facecolor('#111')
         ax.set_xlim(0, K[0,2]*2); ax.set_ylim(K[1,2]*2, 0)
         ax.set_aspect('equal'); ax.axis('off')
 
     z_ok = z_dist > 0.5
-    # depth normalization: nearer = hot, farther = cool; log for dynamic range
     depths = np.log10(np.clip(z_dist[z_ok], 1, 80))
     vmin, vmax = depths.min(), depths.max()
 
-    ss = slice(None, None, 1)
+    axT.scatter(uv_dist[z_ok, 0], uv_dist[z_ok, 1],
+                c=depths, cmap='turbo_r', vmin=vmin, vmax=vmax,
+                s=6, alpha=0.8, linewidths=0, zorder=3)
+    axT.set_title(f'BEFORE — mis-calibrated   reproj = {err_before:.2f} px',
+                  fontsize=16, pad=8, loc='left')
 
-    # LEFT: distorted LiDAR, colored by depth
-    axL.scatter(uv_dist[z_ok][ss, 0], uv_dist[z_ok][ss, 1],
-                c=depths[ss], cmap='turbo_r', vmin=vmin, vmax=vmax,
-                s=4, alpha=0.75, linewidths=0, zorder=3)
-    axL.set_title(f'BEFORE — mis-calibrated   reproj = {err_before:.2f} px',
-                  fontsize=12, pad=6)
+    axB.scatter(uv_ba[z_ok, 0], uv_ba[z_ok, 1],
+                c=depths, cmap='turbo_r', vmin=vmin, vmax=vmax,
+                s=6, alpha=0.8, linewidths=0, zorder=3)
+    axB.set_title(f'AFTER — BA corrected   reproj = {err_after:.2f} px',
+                  fontsize=16, pad=8, loc='left')
 
-    # RIGHT: BA-corrected LiDAR, same coloring
-    axR.scatter(uv_ba[z_ok][ss, 0], uv_ba[z_ok][ss, 1],
-                c=depths[ss], cmap='turbo_r', vmin=vmin, vmax=vmax,
-                s=4, alpha=0.75, linewidths=0, zorder=3)
-    axR.set_title(f'AFTER — BA corrected   reproj = {err_after:.2f} px',
-                  fontsize=12, pad=6)
-
-    plt.suptitle(f'scene {scene} fi={fi}  |  '
+    plt.suptitle(f'scene {scene} fi={fi}   |   '
                  f'GT pert: ypr={ypr_gt.round(2)}° t={(t_gt_world*100).round(1)}cm  →  '
-                 f'recovered: ypr_err={rot_err_deg:.3f}° t_err={np.linalg.norm(t_err_world)*100:.2f}cm  |  '
-                 f'{len(inst_idxs)} obj crops  |  reproj {err_before:.2f}→{err_after:.2f} px '
-                 f'({100*(1-err_after/err_before):.0f}% reduction)',
-                 fontsize=12, y=0.995)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(out_dir / 'ba_ab.png', dpi=110, bbox_inches='tight')
+                 f'recovered: ypr_err={rot_err_deg:.3f}° t_err={np.linalg.norm(t_err_world)*100:.2f}cm   |   '
+                 f'{len(inst_idxs)} obj crops   |   '
+                 f'{err_before:.2f}→{err_after:.2f} px ({100*(1-err_after/err_before):.0f}% reduction)',
+                 fontsize=11, y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.975])
+    plt.savefig(out_dir / 'ba_ab.png', dpi=120, bbox_inches='tight')
     plt.close(fig)
     print(f'  saved -> {out_dir}/metrics.json, ba_ab.png')
 

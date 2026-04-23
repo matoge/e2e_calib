@@ -142,7 +142,7 @@ code {
 <p class="subtitle en-only">A <strong>1.62 M-parameter cross-attention network</strong> takes a 128×128 image crop plus the LiDAR points projected into it, and predicts the 2-D pixel offset that snaps each point back to where it should be — <strong>0.91 px mean object error</strong> on held-out objects, well below the native 4 px LiDAR-beam spacing.</p>
 
 <figure class="hero">
-<img alt="before/after hero" src="hero.png"/>
+<img alt="before/after hero" src="images/hero.png"/>
 <div class="hero-cap en-only"><b>What the model does</b> Four held-out val samples, each under a different realistic 6-DOF calibration drift from the training distribution (ypr ≤ 0.5°, t ≤ 0.20 m — shown top-right of each panel). The critical thing is that arrows are <em>not</em> a single global (dx, dy) applied to every point — they are a <strong>per-point regression</strong>. Because the underlying drift is 3-D, the shift at each pixel depends on depth and angular position, so arrow length and direction vary across the image (notice how the blue background arrows fan out or swirl within a single panel). Orange = object points, blue = background. Red box = distorted object projection; green dashed box = ground-truth projection; both are shown at the same scale so the residual is visible. Titles read <code>obj err before → after</code>.</div>
 
 </figure>
@@ -247,7 +247,7 @@ code {
 </div>
 
 <figure style="margin:1rem auto;max-width:420px">
-<img alt="v20 synthetic toy validation sample" src="synthetic_toy.png" style="width:100%;display:block;border:1px solid var(--line)"/>
+<img alt="v20 synthetic toy validation sample" src="images/synthetic_toy.png" style="width:100%;display:block;border:1px solid var(--line)"/>
 <figcaption class="en-only" style="color:var(--ink-dim);font-size:.85rem;margin-top:.4rem;text-align:center">Synthetic predecessor (<code>v20_3layer_randdepth</code>). Green × = GT projection, coloured dots = distorted input, arrows = predicted correction. Two objects with independent depths; background points on the flat plane. Per-crop obj error 13.27 px → 1.15 px after the model's pull-back.</figcaption>
 
 </figure>
@@ -483,7 +483,7 @@ code {
 </div>
 </div>
 <figure class="figure">
-<img alt="training curves" src="curves.png"/>
+<img alt="training curves" src="images/curves.png"/>
 <figcaption class="en-only"><b>Figure 2</b> Learning curves over 200 epochs. Validation in red, training in forest green. Val NLL plateaus near epoch 130 while val MSE keeps descending — the model keeps improving its mean prediction after its covariance prediction stops generalising.</figcaption>
 
 </figure>
@@ -550,54 +550,54 @@ code {
 <p class="en-only">Each tile shows per-point correction arrows (orange for object, blue for background), the raw object bounding box (red solid), the predicted-shifted box (cyan dashed), and a white centre-shift arrow. Titles read <code>obj_err before → after, bg_err before → after, mean obj shift (dx, dy)</code> in pixels.</p>
 
 <div class="vis-grid">
-<img alt="val sample 0" loading="lazy" src="val_00.png"/>
-<img alt="val sample 1" loading="lazy" src="val_01.png"/>
-<img alt="val sample 2" loading="lazy" src="val_02.png"/>
-<img alt="val sample 3" loading="lazy" src="val_03.png"/>
-<img alt="val sample 4" loading="lazy" src="val_04.png"/>
-<img alt="val sample 5" loading="lazy" src="val_05.png"/>
-<img alt="val sample 6" loading="lazy" src="val_06.png"/>
-<img alt="val sample 7" loading="lazy" src="val_07.png"/>
-<img alt="val sample 8" loading="lazy" src="val_08.png"/>
-<img alt="val sample 9" loading="lazy" src="val_09.png"/>
-<img alt="val sample 10" loading="lazy" src="val_10.png"/>
-<img alt="val sample 11" loading="lazy" src="val_11.png"/>
-<img alt="val sample 12" loading="lazy" src="val_12.png"/>
-<img alt="val sample 13" loading="lazy" src="val_13.png"/>
-<img alt="val sample 14" loading="lazy" src="val_14.png"/>
-<img alt="val sample 15" loading="lazy" src="val_15.png"/>
-<img alt="val sample 16" loading="lazy" src="val_16.png"/>
-<img alt="val sample 17" loading="lazy" src="val_17.png"/>
-<img alt="val sample 18" loading="lazy" src="val_18.png"/>
-<img alt="val sample 19" loading="lazy" src="val_19.png"/>
-<img alt="val sample 20" loading="lazy" src="val_20.png"/>
-<img alt="val sample 21" loading="lazy" src="val_21.png"/>
-<img alt="val sample 22" loading="lazy" src="val_22.png"/>
-<img alt="val sample 23" loading="lazy" src="val_23.png"/>
-<img alt="val sample 24" loading="lazy" src="val_24.png"/>
-<img alt="val sample 25" loading="lazy" src="val_25.png"/>
-<img alt="val sample 26" loading="lazy" src="val_26.png"/>
-<img alt="val sample 27" loading="lazy" src="val_27.png"/>
-<img alt="val sample 28" loading="lazy" src="val_28.png"/>
-<img alt="val sample 29" loading="lazy" src="val_29.png"/>
-<img alt="val sample 30" loading="lazy" src="val_30.png"/>
-<img alt="val sample 31" loading="lazy" src="val_31.png"/>
-<img alt="val sample 32" loading="lazy" src="val_32.png"/>
-<img alt="val sample 33" loading="lazy" src="val_33.png"/>
-<img alt="val sample 34" loading="lazy" src="val_34.png"/>
-<img alt="val sample 35" loading="lazy" src="val_35.png"/>
-<img alt="val sample 36" loading="lazy" src="val_36.png"/>
-<img alt="val sample 37" loading="lazy" src="val_37.png"/>
-<img alt="val sample 38" loading="lazy" src="val_38.png"/>
-<img alt="val sample 39" loading="lazy" src="val_39.png"/>
-<img alt="val sample 40" loading="lazy" src="val_40.png"/>
-<img alt="val sample 41" loading="lazy" src="val_41.png"/>
-<img alt="val sample 42" loading="lazy" src="val_42.png"/>
-<img alt="val sample 43" loading="lazy" src="val_43.png"/>
-<img alt="val sample 44" loading="lazy" src="val_44.png"/>
-<img alt="val sample 45" loading="lazy" src="val_45.png"/>
-<img alt="val sample 46" loading="lazy" src="val_46.png"/>
-<img alt="val sample 47" loading="lazy" src="val_47.png"/>
+<img alt="val sample 0" loading="lazy" src="images/val_00.png"/>
+<img alt="val sample 1" loading="lazy" src="images/val_01.png"/>
+<img alt="val sample 2" loading="lazy" src="images/val_02.png"/>
+<img alt="val sample 3" loading="lazy" src="images/val_03.png"/>
+<img alt="val sample 4" loading="lazy" src="images/val_04.png"/>
+<img alt="val sample 5" loading="lazy" src="images/val_05.png"/>
+<img alt="val sample 6" loading="lazy" src="images/val_06.png"/>
+<img alt="val sample 7" loading="lazy" src="images/val_07.png"/>
+<img alt="val sample 8" loading="lazy" src="images/val_08.png"/>
+<img alt="val sample 9" loading="lazy" src="images/val_09.png"/>
+<img alt="val sample 10" loading="lazy" src="images/val_10.png"/>
+<img alt="val sample 11" loading="lazy" src="images/val_11.png"/>
+<img alt="val sample 12" loading="lazy" src="images/val_12.png"/>
+<img alt="val sample 13" loading="lazy" src="images/val_13.png"/>
+<img alt="val sample 14" loading="lazy" src="images/val_14.png"/>
+<img alt="val sample 15" loading="lazy" src="images/val_15.png"/>
+<img alt="val sample 16" loading="lazy" src="images/val_16.png"/>
+<img alt="val sample 17" loading="lazy" src="images/val_17.png"/>
+<img alt="val sample 18" loading="lazy" src="images/val_18.png"/>
+<img alt="val sample 19" loading="lazy" src="images/val_19.png"/>
+<img alt="val sample 20" loading="lazy" src="images/val_20.png"/>
+<img alt="val sample 21" loading="lazy" src="images/val_21.png"/>
+<img alt="val sample 22" loading="lazy" src="images/val_22.png"/>
+<img alt="val sample 23" loading="lazy" src="images/val_23.png"/>
+<img alt="val sample 24" loading="lazy" src="images/val_24.png"/>
+<img alt="val sample 25" loading="lazy" src="images/val_25.png"/>
+<img alt="val sample 26" loading="lazy" src="images/val_26.png"/>
+<img alt="val sample 27" loading="lazy" src="images/val_27.png"/>
+<img alt="val sample 28" loading="lazy" src="images/val_28.png"/>
+<img alt="val sample 29" loading="lazy" src="images/val_29.png"/>
+<img alt="val sample 30" loading="lazy" src="images/val_30.png"/>
+<img alt="val sample 31" loading="lazy" src="images/val_31.png"/>
+<img alt="val sample 32" loading="lazy" src="images/val_32.png"/>
+<img alt="val sample 33" loading="lazy" src="images/val_33.png"/>
+<img alt="val sample 34" loading="lazy" src="images/val_34.png"/>
+<img alt="val sample 35" loading="lazy" src="images/val_35.png"/>
+<img alt="val sample 36" loading="lazy" src="images/val_36.png"/>
+<img alt="val sample 37" loading="lazy" src="images/val_37.png"/>
+<img alt="val sample 38" loading="lazy" src="images/val_38.png"/>
+<img alt="val sample 39" loading="lazy" src="images/val_39.png"/>
+<img alt="val sample 40" loading="lazy" src="images/val_40.png"/>
+<img alt="val sample 41" loading="lazy" src="images/val_41.png"/>
+<img alt="val sample 42" loading="lazy" src="images/val_42.png"/>
+<img alt="val sample 43" loading="lazy" src="images/val_43.png"/>
+<img alt="val sample 44" loading="lazy" src="images/val_44.png"/>
+<img alt="val sample 45" loading="lazy" src="images/val_45.png"/>
+<img alt="val sample 46" loading="lazy" src="images/val_46.png"/>
+<img alt="val sample 47" loading="lazy" src="images/val_47.png"/>
 </div>
 <h2>
 <span class="num en-only">§ 08   Cross-dataset joint training</span>
@@ -631,32 +631,32 @@ code {
 <h3 class="en-only">Sample tiles — NuScenes</h3>
 
 <div class="vis-grid xsix">
-<img alt="NS val 0" loading="lazy" src="ns_00.png"/>
-<img alt="NS val 1" loading="lazy" src="ns_01.png"/>
-<img alt="NS val 2" loading="lazy" src="ns_02.png"/>
-<img alt="NS val 3" loading="lazy" src="ns_03.png"/>
-<img alt="NS val 4" loading="lazy" src="ns_04.png"/>
-<img alt="NS val 5" loading="lazy" src="ns_05.png"/>
+<img alt="NS val 0" loading="lazy" src="images/ns_00.png"/>
+<img alt="NS val 1" loading="lazy" src="images/ns_01.png"/>
+<img alt="NS val 2" loading="lazy" src="images/ns_02.png"/>
+<img alt="NS val 3" loading="lazy" src="images/ns_03.png"/>
+<img alt="NS val 4" loading="lazy" src="images/ns_04.png"/>
+<img alt="NS val 5" loading="lazy" src="images/ns_05.png"/>
 </div>
 <h3 class="en-only">Sample tiles — PandaSet</h3>
 
 <div class="vis-grid xsix">
-<img alt="PS val 0" loading="lazy" src="ps_00.png"/>
-<img alt="PS val 1" loading="lazy" src="ps_01.png"/>
-<img alt="PS val 2" loading="lazy" src="ps_02.png"/>
-<img alt="PS val 3" loading="lazy" src="ps_03.png"/>
-<img alt="PS val 4" loading="lazy" src="ps_04.png"/>
-<img alt="PS val 5" loading="lazy" src="ps_05.png"/>
+<img alt="PS val 0" loading="lazy" src="images/ps_00.png"/>
+<img alt="PS val 1" loading="lazy" src="images/ps_01.png"/>
+<img alt="PS val 2" loading="lazy" src="images/ps_02.png"/>
+<img alt="PS val 3" loading="lazy" src="images/ps_03.png"/>
+<img alt="PS val 4" loading="lazy" src="images/ps_04.png"/>
+<img alt="PS val 5" loading="lazy" src="images/ps_05.png"/>
 </div>
 <h3 class="en-only">Sample tiles — Waymo</h3>
 
 <div class="vis-grid xsix">
-<img alt="WM val 0" loading="lazy" src="wm_00.png"/>
-<img alt="WM val 1" loading="lazy" src="wm_01.png"/>
-<img alt="WM val 2" loading="lazy" src="wm_02.png"/>
-<img alt="WM val 3" loading="lazy" src="wm_03.png"/>
-<img alt="WM val 4" loading="lazy" src="wm_04.png"/>
-<img alt="WM val 5" loading="lazy" src="wm_05.png"/>
+<img alt="WM val 0" loading="lazy" src="images/wm_00.png"/>
+<img alt="WM val 1" loading="lazy" src="images/wm_01.png"/>
+<img alt="WM val 2" loading="lazy" src="images/wm_02.png"/>
+<img alt="WM val 3" loading="lazy" src="images/wm_03.png"/>
+<img alt="WM val 4" loading="lazy" src="images/wm_04.png"/>
+<img alt="WM val 5" loading="lazy" src="images/wm_05.png"/>
 </div>
 <p class="en-only">Each tile shows the same legend as §07: orange per-point arrows over the object, blue over background, red solid = distorted obj bbox, green dashed = model-corrected bbox. Titles read <code>dataset   obj err before→after   bg err before→after</code>. The Waymo row is the clearest illustration of magnitude: several tiles have input drifts in the 20–30 px range, and every one of them lands within ~2–3 px of ground truth. This is what "generalises across rigs" looks like in practice — one network, three cameras, three LiDARs, one loss.</p>
 
