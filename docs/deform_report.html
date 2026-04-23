@@ -413,11 +413,22 @@ deform_mode = 'ml'    # 多レベル: 各ブロックが coarse+fine 両方を
 <h2>ablation: 学習曲線</h2>
 
 <figure>
-  <img src="assets/vdef_sweep.png" alt="val NLL vs epoch for baseline / SL / ML">
+  <img src="assets/vdef_sweep.png" alt="val NLL vs epoch — baseline vs deform SL vs deform ML (full 0–200 epoch)">
   <figcaption>
     Fig 2 · 同一データ・同一スケジュール (NS+PS+WM 60k / 200 epoch / cosine lr)
-    での val NLL。ベースライン (none, グレー) は 2.07 付近で頭打ち。
-    deform-SL (青) / deform-ML (赤) は終盤で 1.57 まで下降。
+    での val NLL 推移。ベースライン (none, グレー) は 2.07 付近で頭打ち。
+    deform-SL (青) / deform-ML (赤) は <strong>ep ~80 で既に baseline 最終値に到達</strong>
+    し、そこから更に下降して 1.57 で収束。収束速度・最終性能とも deform が優位。
+  </figcaption>
+</figure>
+
+<figure>
+  <img src="assets/vdef_learning_curves.png" alt="val NLL decomposition: total / obj / bg across 100-200 epochs">
+  <figcaption>
+    Fig 3 · val NLL を total / obj / bg に分解 (ep 100-200 ズーム)。
+    deform は obj / bg 両方を同時に下げるが、<strong>obj の改善幅が顕著</strong>
+    (1.06 → 0.57/0.61) — 前景物体の位置推定で「オフセット探索」が素直に効く、
+    という機構と整合。各線の終端に best-epoch 値。
   </figcaption>
 </figure>
 
