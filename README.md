@@ -200,6 +200,7 @@ import は `from models.model_depth import CalibNetDepth` のように
 | 02 | [docs/report.html](docs/report.html) | バイリンガル実験まとめ (合成→実データ) |
 | 03 | [docs/ba_report.html](docs/ba_report.html) | Multi-frame BA + fx/KB 感度スイープ |
 | 04 | [docs/deform_report.html](docs/deform_report.html) | Deformable cross-attn (val_nll −0.5) |
+| 05 | [docs/cross_frame_report.html](docs/cross_frame_report.html) | Cross-frame residual (dual projection, PoC 0.60 px) |
 
 ---
 

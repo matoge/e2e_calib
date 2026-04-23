@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cross-frame Residual Net — Dual Projection Learner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f4ed; --card: #fff; --ink: #0f0f0e; --ink-dim: #6b6a63;
+  --accent: #c13c14; --accent2: #174734; --line: #d9d6cd;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  --jasans: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  --mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+  --col: 900px;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); margin: 0; }
+body {
+  color: var(--ink); font-family: var(--jasans);
+  font-size: 16px; line-height: 1.85; letter-spacing: 0.01em;
+  font-feature-settings: "palt" 1;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: var(--col); margin: 0 auto; padding: 64px 36px 96px; }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--ink-dim); margin-bottom: 22px;
+  display: flex; flex-wrap: wrap; gap: 14px; }
+.eyebrow .dot { color: var(--accent); }
+h1.title { font-family: var(--jasans); font-weight: 700;
+  font-size: 42px; line-height: 1.22; margin: 0 0 14px; letter-spacing: -0.01em; }
+.subtitle { font-size: 17px; line-height: 1.65; color: var(--ink-dim);
+  margin: 0 0 36px; max-width: 780px; }
+.lede { font-size: 17px; line-height: 1.75; color: var(--ink);
+  margin: 0 0 36px; max-width: 820px; padding: 20px 24px;
+  background: var(--card); border-left: 4px solid var(--accent);
+  border-radius: 2px; }
+h2 { font-family: var(--jasans); font-weight: 700; font-size: 26px;
+  line-height: 1.35; margin: 58px 0 14px; border-bottom: 1px solid var(--line);
+  padding-bottom: 6px; }
+h3 { font-family: var(--jasans); font-weight: 700; font-size: 19px;
+  margin: 32px 0 10px; }
+p { margin: 0 0 14px; }
+code, pre { font-family: var(--mono); font-size: 13.5px; }
+code { background: var(--card); padding: 1px 6px; border: 1px solid var(--line);
+  border-radius: 3px; }
+pre { background: var(--card); border: 1px solid var(--line); padding: 14px 18px;
+  border-radius: 4px; overflow-x: auto; line-height: 1.55; }
+pre code { background: none; border: 0; padding: 0; }
+.callout { background: var(--card); border-left: 4px solid var(--accent2);
+  padding: 14px 20px; margin: 20px 0; font-size: 15.5px; line-height: 1.75; }
+.callout.warn { border-left-color: var(--accent); }
+.callout strong { color: var(--ink); }
+figure { margin: 26px 0; }
+figure img { width: 100%; border: 1px solid var(--line); background: var(--card); }
+figcaption { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin-top: 8px; letter-spacing: 0.04em; }
+table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14.5px;
+  font-family: var(--mono); }
+th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left;
+  vertical-align: top; }
+th { font-weight: 600; color: var(--ink-dim); background: var(--card); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.best td { background: #fff7e8; font-weight: 600; }
+a { color: var(--accent2); }
+a:hover { color: var(--accent); }
+.badge { display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 2px 8px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 2px; letter-spacing: 0.05em; }
+.nav { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin: 0 0 40px; padding: 12px 16px; border: 1px solid var(--line);
+  background: var(--card); letter-spacing: 0.04em; }
+.nav a { color: var(--ink-dim); text-decoration: none; }
+.nav a.active { color: var(--accent); }
+.nav a:hover { color: var(--accent); }
+.ascii { background: var(--card); border: 1px solid var(--line);
+  padding: 18px 20px; border-radius: 4px; font-family: var(--mono);
+  font-size: 12.5px; line-height: 1.55; white-space: pre; overflow-x: auto; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 720px) { .two-col { grid-template-columns: 1fr; } }
+.eq { font-family: var(--mono); font-size: 14px;
+  background: var(--card); border: 1px solid var(--line);
+  padding: 12px 18px; border-radius: 4px; margin: 14px 0;
+  white-space: pre; overflow-x: auto; }
+.eqtag { color: var(--ink-dim); }
+</style>
+</head>
+<body>
+<main class="page">
+
+<div class="nav">
+  <strong style="color: var(--ink);">docs / reports</strong> &nbsp;·&nbsp;
+  <a href="index.html">01. technical overview</a> &nbsp;·&nbsp;
+  <a href="report.html">02. bilingual writeup</a> &nbsp;·&nbsp;
+  <a href="ba_report.html">03. multi-frame BA sweep</a> &nbsp;·&nbsp;
+  <a href="deform_report.html">04. deformable cross-attn</a> &nbsp;·&nbsp;
+  <a class="active" href="cross_frame_report.html">05. cross-frame residual</a>
+</div>
+
+<div class="eyebrow">
+  <span>report 05</span><span class="dot">●</span>
+  <span>cross-frame residual net</span><span class="dot">●</span>
+  <span>dual projection learner</span>
+</div>
+
+<h1 class="title">一つのヘッドで<br/>calibration から loop closure まで。</h1>
+<p class="subtitle">
+  CalibNetDepth が「同一フレーム内のモダリティ間ズレ」を学んでいたのを、
+  「任意フレーム間・任意モダリティ間のズレ」に一般化する。dual projection
+  loss で対称的に訓練し、バウンディングボックス無し・事前地図無しで
+  super long-baseline の pose 推定に到達するための基盤ネット。
+</p>
+
+<p class="lede">
+  <strong>ここまでの話</strong> ——
+  <a href="report.html">前報</a>で CalibNetDepth が LiDAR 点群 × 画像で
+  <em>per-point 2D ガウシアン残差</em> を出し、BA で Σ-重み付き拘束として
+  使える形まで揃えた。
+  <a href="deform_report.html">前報 (deform)</a> で attention を置き換え
+  val NLL を 2.074 → 1.568 に削った。
+  <br/><br/>
+  <strong>この報告</strong> ——
+  <em>同じ残差定式化が cross-frame に直接拡張できる</em>。
+  3D 点を持つ LiDAR と、それが移る先のカメラフレーム。
+  そこに候補ポーズを当てると残差が出る。
+  <strong>ネットは「どのフレームか」を知らないまま、残差を予測する関数だけを学ぶ。</strong>
+  計量は同じ、モダリティは独立、スケールは自由 —— という性質から、
+  single-frame calibration / VO / 長距離 loop closure が
+  <strong>同じ一つのヘッドの特殊ケースに集約される</strong>。
+</p>
+
+<h2>Formulation</h2>
+
+<p>
+  学習タスクは、cross-modal calibration / cross-frame matching / VO / loop closure の
+  いずれも、以下の同じ関数 f を学ぶことと等価:
+</p>
+
+<div class="eq">f : (image_B patch, 3D point P_A in frame_A, pose hypothesis T̂_AB) → (Δu, Δv, Σ)
+                     s.t.  π_B(T_AB^gt · P_A) = π_B(T̂_AB · P_A) + (Δu, Δv)</div>
+
+<p>
+  入力は <em>どのフレームか</em> に依存しない:
+</p>
+<ul>
+  <li><code>image_B patch</code> — 単なる画像クロップ</li>
+  <li><code>P_A</code> — 3D 点(座標系はどれでもよい、T̂_AB と整合していれば)</li>
+  <li><code>T̂_AB</code> — 候補相対ポーズ (6-DoF)</li>
+</ul>
+
+<p>
+  ネットワークから見ると、<strong>baseline という概念が存在しない</strong>。
+  A と B が 1 m 離れているか 200 m 離れているかは入力に現れない。
+  同じ関数 f がどちらにも適用される(domain gap さえ埋まれば)。
+</p>
+
+<h3>特殊ケースとしての既存タスク</h3>
+
+<table>
+<thead><tr><th>タスク</th><th>T_AB の意味</th><th>GT 教師</th></tr></thead>
+<tbody>
+<tr><td>LiDAR↔Cam calibration</td><td>extrinsic (フレーム A=B, rig 内の相対ポーズ)</td><td>既知 rig ± 摂動</td></tr>
+<tr><td>VO (連続フレーム)</td><td>frame t → frame t+1 相対ポーズ</td><td>GPS/IMU ± 摂動</td></tr>
+<tr><td>Static object tracking</td><td>ego 動き下で静止物体を別フレームから見る</td><td>ego pose GT</td></tr>
+<tr><td>Loop closure</td><td>100-200 m 離れた二フレームの相対ポーズ</td><td>LLN で bootstrap</td></tr>
+<tr><td>Long-range relocalization</td><td>事前地図と現フレームのポーズ</td><td>同上</td></tr>
+</tbody>
+</table>
+
+<h2>アーキテクチャ</h2>
+
+<div class="ascii">  frame A                                  frame B
+     │                                        │
+  [CNN → img_coarse 8×8]                 [CNN → img_coarse 8×8]
+  [PointMLP + Frustum on uvd_A]          [PointMLP + Frustum on uvd_B]
+     │                                        │
+     ▼                                        ▼
+  concat(pt_A, img_A_coarse)             concat(pt_B, img_B_coarse)
+     │                                        │
+  [self-attn stack]  × N layers          [self-attn stack]  (shared weights)
+     │                                        │
+  split back                             split back
+     │                                        │
+     ▼                                        ▼
+  pt_A_tok ,  img_A_tok                  pt_B_tok ,  img_B_tok
+   (A-frame)                              (B-frame)
+
+                    PoseMLP(T̂_AB) = pose_emb_AB   [D-dim]
+
+     │                                        │
+  pt_A + pose_emb_AB (→ B-frame)        pt_B + pose_emb_BA (→ A-frame)
+     │                                        │
+     └──────── cross-attn ─────────────────────┘
+      Q_A              KV_B = concat(pt_B, img_B)
+      Q_B              KV_A = concat(pt_A, img_A)
+                              │
+                              ▼
+           Δ_AtoB  (per-point in B frame)
+           Δ_BtoA  (per-point in A frame)
+           &lt;-- DUAL PROJECTION LOSS --&gt;</div>
+
+<h3>Intra-frame: concat + self-attn</h3>
+
+<p>
+  以前の CalibNetDepth は「pt (Q) → img (KV) の cross-attn」だった。これだと
+  <em>画像側は pt 情報を受け取らない</em>ので片方向的。ここでは代わりに
+  <strong>pt トークンと画像トークンを concat して self-attn</strong> をかけ、
+  終わった後に元のロールで分割する:
+</p>
+
+<div class="eq">tokens  = concat(pt_tok, img_tok)               # (N_pt + H·W, D)
+tokens  = SelfAttnStack(tokens)                 # 対称な modality fusion
+pt_tok  = tokens[:N_pt]                         # 画像情報を取り込んだ pt
+img_tok = tokens[N_pt:]                         # pt 情報を取り込んだ img</div>
+
+<p>
+  画像は coarse 特徴量のみ (64×64 入力 → 8×8 = 64 token)。fine は cross-frame で
+  KV 側のスパース性が問題にならない今回の設計では不要。A/B 両フレームで
+  <strong>重みは共有</strong>(同じエンコーダ、同じ self-attn ブロック)。
+</p>
+
+<h3>Pose bridge: "座標系の違い" を 1 枚の token に閉じ込める</h3>
+
+<div class="callout warn">
+  <strong>重要な設計判断</strong>:
+  各フレームの LiDAR 点は <em>そのフレームのカメラ座標</em> で表現される
+  (depth は各フレームの <em>カメラからの距離</em>)。
+  したがって <code>pt_A_tok</code> と <code>pt_B_tok</code> は
+  <strong>違う座標系</strong> に住んでいる。
+  そのまま cross-attn で比べてもナンセンス。
+  <br/><br/>
+  <code>pose_emb = PoseMLP(T̂_AB)</code> を A 側の LiDAR トークンに
+  <strong>足す</strong>と、"A 座標系の点" を "B 座標系に持ってきた相当"
+  の token 空間の位置にシフトする、という解釈。
+  transformer の token 空間は高次元なので、
+  真の rigid transform の近似は FFN / self-attn が内部で学ぶ。
+</div>
+
+<p>
+  ポイントは「pose_emb を<strong>片側だけ</strong>に足す」こと。両側に同じ
+  embedding を足すと相対位置が変わらず意味を失う。
+  逆方向 (B→A) は <code>pose_emb_BA = PoseMLP(inv(T̂_AB))</code> で B の
+  LiDAR トークンに足す。<code>PoseMLP</code> は両方向で共有(同じ重み、
+  入力を反転させるだけ)。
+</p>
+
+<h3>Cross-frame attention: Q はいつも LiDAR、KV は両モダリティ混合</h3>
+
+<div class="callout">
+  <strong>なぜ Q = LiDAR が必然か</strong>:
+  予測対象 (Δu, Δv) が well-defined になるためには、<em>Q が 3D 位置を持って</em>
+  いないと無理。画像トークンを Q にすると (u, v) だけで depth が曖昧になり、
+  同じ (u, v) でも 5 m 先の車と 50 m 先の建物では対応先が全然違う
+  (epipolar 曖昧性)。LiDAR は (X, Y, Z) を持っているので、
+  <code>π_B(T̂_AB · P)</code> が閉じた関数で定まり、target が一意に決まる。
+  <br/><br/>
+  純粋 image↔image の matcher (SuperPoint, LoFTR, etc.) はこの曖昧性を
+  RANSAC / 対ごとの幾何検証で <em>下流に</em> 投げている。
+  LiDAR Q は <strong>クエリ側で曖昧性を閉じる</strong>。
+</div>
+
+<p>
+  KV 側には両モダリティを入れる:
+</p>
+
+<div class="eq">KV_B = concat(pt_B_tok, img_B_tok)     # pt だけだとスパース過ぎる</div>
+
+<p>
+  点群だけを KV にすると、パッチ内の LiDAR 点数(典型 10-60 個)だけに
+  依存することになり情報が不足。画像トークン 64 個を混ぜて
+  "幾何で引く / 見た目で引く" を両方許す。これで低テクスチャ領域でも
+  LiDAR 近傍点で拾えるし、LiDAR がスパースな領域でも画像で拾える。
+</p>
+
+<h3>Output head</h3>
+
+<div class="eq">raw = proj([ token  ‖  uv_hat_01 ])        # (B, N, 5)
+(Δu, Δv, log σu, log σv, ρ)               # gaussian 2D</div>
+
+<p>
+  <code>uv_hat_01</code> は <em>T̂_AB で投影した候補位置</em>(正規化済み)。
+  ヘッドに候補位置を参照として渡すことで、出力は候補位置からの<strong>残差</strong>
+  として直接解釈できる。最終予測は <code>uv_pred = uv_hat + Δ</code>、
+  教師は <code>Δ_gt = uv_gt − uv_hat</code>、loss は 2D ガウシアン NLL。
+</p>
+
+<h2>Dual projection loss</h2>
+
+<p>
+  A→B と B→A を 1 forward で同時に出し、両方の loss を平均する:
+</p>
+
+<div class="eq">loss = 0.5 * ( gaussian2d_nll(Δ_AtoB, target_AB)
+              + gaussian2d_nll(Δ_BtoA, target_BA) )</div>
+
+<p>
+  これは単に訓練データを 2 倍にする以上の意味がある:
+</p>
+<ul>
+  <li>
+    <strong>pose_emb の対称性を強制</strong>: <code>PoseMLP(T̂)</code> と
+    <code>PoseMLP(inv(T̂))</code> が semantic に整合する方向に学習圧力が働く
+  </li>
+  <li>
+    <strong>片側 overfit を防ぐ</strong>: A→B だけ学習すると pose_emb が
+    片方向のバイアスを覚える可能性がある
+  </li>
+  <li>
+    <strong>下流 BA で使える</strong>: 実運用では両方向の残差を
+    共有 pose block に対する拘束として入れられる
+  </li>
+</ul>
+
+<h2>なぜ短距離だけで長距離を解けるはずか</h2>
+
+<div class="callout">
+  <strong>核心的観察</strong>:
+  f は入力に baseline を取らない。したがって
+  <em>f は baseline を知らない</em>。
+  <br/><br/>
+  短距離(1–5 m)の信頼できる GT pose で f を訓練し、
+  推論時に長距離(100–200 m)で f を呼び、BA で多点集約すれば、
+  <strong>大数の法則により pose 推定は真値に収束する</strong>
+  (ただし f が out-of-distribution で unbiased である限り)。
+</div>
+
+<p>
+  これが成り立つための条件:
+</p>
+<ol>
+  <li>
+    <strong>長距離入力分布で f が unbiased</strong>。ここを埋めるのは
+    scale_emb (log(d_B/d_A) を位置符号に注入) と view-angle augmentation。
+    systematic bias が残ると LLN でも救われない。
+  </li>
+  <li>
+    <strong>点ごとの誤差が i.i.d. 近似</strong>。空間的に離れたパッチから
+    採ると相関は小さい。
+  </li>
+  <li>
+    <strong>信頼性フィルタ</strong>。σ が小さい(確信度高い)予測だけ BA に
+    入れる。低信頼を混ぜると BA が振られる。
+  </li>
+</ol>
+
+<h3>Bootstrap ループ</h3>
+
+<p>
+  真に強力なのは、上記が "GT pose の必要性" を<strong>消す</strong>こと。
+  以下の自己教師ループが回る:
+</p>
+
+<div class="ascii">stage 0:  短距離 (1–5 m) で訓練       ← public GT は信頼できる
+stage 1:  中距離 (20–60 m) に f を適用、LLN で pose 推定
+stage 2:  高信頼トラック (σ 小) の予測だけ → 中距離の pseudo-GT に昇格
+stage 3:  短 + 中で再訓練
+stage 4:  長距離 (100–200 m) に同じループ
+stage 5:  全域で再訓練 → 完成</div>
+
+<p>
+  Noisy Student / DROID-SLAM 系の progressive self-training と構造は
+  類似。per-point に Σ 付き残差を出すネットで bootstrap するのは
+  おそらく先行例がない。
+</p>
+
+<h2>PoC: scene 015 で overfit</h2>
+
+<p>
+  実装は <code>models/cross_frame.py</code>, <code>datasets/pandaset_pair.py</code>,
+  <code>train_cross_frame.py</code>。
+  モデル 1.31 M params、PandaSet scene 015 の baseline 1–5 frames で
+  摂動 <code>σ_ypr=0.3°, σ_t=0.15 m</code>。
+</p>
+
+<table>
+<thead><tr>
+  <th>Run</th><th class="num">N pairs</th><th class="num">Epochs</th>
+  <th class="num">base err</th><th class="num">final err</th><th class="num">削減</th>
+</tr></thead>
+<tbody>
+<tr><td>v00_overfit</td><td class="num">16</td><td class="num">50</td>
+  <td class="num">8.15 px</td><td class="num">0.89 px</td><td class="num">89%</td></tr>
+<tr class="best"><td>v01_overfit_64</td><td class="num">64</td><td class="num">150</td>
+  <td class="num">8.43 px</td><td class="num">0.60 px</td><td class="num">93%</td></tr>
+</tbody>
+</table>
+
+<ul>
+  <li>
+    <strong>サブピクセル到達</strong>: v01 で 0.60 px。
+    GT pose 誤差自体が数 cm のオーダーなので、
+    原理的限界に近い。
+  </li>
+  <li>
+    <strong>対称性</strong>: err_AB = 0.60 px, err_BA = 0.62 px —
+    dual projection loss が両方向に平等な信号を供給していることを示す。
+  </li>
+  <li>
+    <strong>NLL が負まで落ちる</strong> (−0.65): Σ が tight に
+    (typical 0.5 px 程度) 学習されている。
+  </li>
+  <li>
+    <strong>9 秒 / 150 ep on RTX 5080</strong>: 軽い。
+    full train (scene 015 全フレーム + augmentation) は数分で終わる見込み。
+  </li>
+</ul>
+
+<h2>次のステップ</h2>
+
+<ul>
+  <li>
+    <strong>Full train on scene 015</strong> — validation split で
+    in-scene 汎化を測る。
+    <code>python train_cross_frame.py --full</code> で起動する。
+  </li>
+  <li>
+    <strong>マルチシーン化</strong> — PandaSet 全 scene + NuScenes +
+    Waymo(短距離のみ)。これで "scene-independent な f" を得る。
+  </li>
+  <li>
+    <strong>LLN 実験</strong> — 短距離で学習したモデルを 20 / 50 / 100 / 200 m
+    pair に適用し、per-pair の median(Δ) が真のポーズ誤差に収束するか検証。
+    <strong>これが本命の仮説検証</strong>。
+  </li>
+  <li>
+    <strong>scale_emb 導入</strong> — 長距離で必要になった時点で
+    <code>log(d_B / d_A)</code> を positional encoding に足す。
+  </li>
+  <li>
+    <strong>deformable attention 移植</strong> —
+    <a href="deform_report.html">deform report</a> の成果をこのネットにも
+    (cross-frame block の内部を deformable 版に置換)。
+    attention コストが O(HW) → O(N) に落ちるので、KV 側に coarse+fine
+    両方入れられるようになる。
+  </li>
+</ul>
+
+<h2>関連</h2>
+
+<div class="callout">
+  <strong>コード</strong>:
+  <code>models/cross_frame.py</code> —
+  <code>CalibNetCrossFrame</code>, <code>CrossFrameBlock</code>, <code>PoseMLP</code>,
+  <code>SelfAttnFusionBlock</code>
+  <br/>
+  <code>datasets/pandaset_pair.py</code> —
+  <code>PandaSetCrossFrameDataset</code> (single-scene short-baseline pair)
+  <br/>
+  <code>train_cross_frame.py</code> — overfit + full 両対応トレーナ
+  <br/>
+  <strong>実験</strong>:
+  <code>experiments/cross_frame_v00_overfit/</code>,
+  <code>experiments/cross_frame_v01_overfit_64/</code>
+</div>
+
+<div class="callout">
+  <strong>関連レポート</strong>:
+  <a href="ba_report.html">03. Multi-frame BA sweep</a> — 本ネットの
+  downstream になる BA の感度解析。
+  <a href="deform_report.html">04. Deformable cross-attn</a> — intra-frame
+  に転用できる効率化手法。
+</div>
+
+</main>
+</body>
+</html>
