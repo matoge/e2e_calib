@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-frame BA — KB / fx sensitivity sweep</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f4ed; --card: #fff; --ink: #0f0f0e; --ink-dim: #6b6a63;
+  --accent: #c13c14; --accent2: #174734; --line: #d9d6cd;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  --jasans: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  --jaserif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+  --col: 900px;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); margin: 0; }
+body {
+  color: var(--ink); font-family: var(--jasans);
+  font-size: 16px; line-height: 1.85; letter-spacing: 0.01em;
+  font-feature-settings: "palt" 1;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: var(--col); margin: 0 auto; padding: 64px 36px 96px; }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--ink-dim); margin-bottom: 22px;
+  display: flex; flex-wrap: wrap; gap: 14px; }
+.eyebrow .dot { color: var(--accent); }
+h1.title { font-family: var(--jaserif); font-weight: 700;
+  font-size: 40px; line-height: 1.25; margin: 0 0 14px; letter-spacing: -0.01em; }
+.subtitle { font-size: 17px; line-height: 1.65; color: var(--ink-dim);
+  margin: 0 0 36px; max-width: 780px; }
+h2 { font-family: var(--jaserif); font-weight: 700; font-size: 26px;
+  line-height: 1.35; margin: 58px 0 14px; border-bottom: 1px solid var(--line);
+  padding-bottom: 6px; }
+h3 { font-family: var(--jaserif); font-weight: 700; font-size: 18px;
+  margin: 30px 0 8px; }
+p { margin: 0 0 14px; }
+p + p { margin-top: 14px; }
+code, pre { font-family: var(--mono); font-size: 13.5px; }
+code { background: var(--card); padding: 1px 6px; border: 1px solid var(--line);
+  border-radius: 3px; }
+pre { background: var(--card); border: 1px solid var(--line); padding: 14px 18px;
+  border-radius: 4px; overflow-x: auto; line-height: 1.5; }
+pre code { background: none; border: 0; padding: 0; }
+.callout { background: var(--card); border-left: 4px solid var(--accent2);
+  padding: 14px 20px; margin: 20px 0; font-size: 15.5px; line-height: 1.75; }
+.callout.warn { border-left-color: var(--accent); }
+figure { margin: 26px 0; }
+figure img { width: 100%; border: 1px solid var(--line); background: var(--card); }
+figcaption { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin-top: 8px; letter-spacing: 0.04em; }
+table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14.5px;
+  font-family: var(--mono); }
+th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+th { font-weight: 600; color: var(--ink-dim); background: var(--card); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.best td { background: #fff7e8; font-weight: 600; }
+a { color: var(--accent2); }
+a:hover { color: var(--accent); }
+.badge { display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 2px 8px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 2px; letter-spacing: 0.05em; }
+.nav { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin: 0 0 40px; }
+.nav a { color: var(--ink-dim); text-decoration: none; }
+.nav a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+<main class="page">
+
+<div class="nav">
+  <a href="index.html">← docs/index.html</a> &nbsp;·&nbsp;
+  <a href="report.html">original report</a> &nbsp;·&nbsp;
+  <a href="deform_report.html">deformable report →</a>
+</div>
+
+<div class="eyebrow">
+  <span>report 02</span><span class="dot">●</span>
+  <span>multi-frame bundle adjustment</span><span class="dot">●</span>
+  <span>PandaSet scene 015</span>
+</div>
+
+<h1 class="title">Multi-frame BA と<br/>KB/fx 感度スイープ</h1>
+<p class="subtitle">
+  複数フレームで共有された 6DoF リグドリフトを Σ重み付き BA で解く。
+  カメラモデル (fx, KB k<sub>2</sub>) を意図的に摂動させ、校正残差が
+  どこまで extrinsic に漏れるかを定量化した結果。
+</p>
+
+<h2>Setup</h2>
+<p>
+  PandaSet scene 015 から 10 個の val frame (fi=[1, 6, 8, 9, 11, 16, 18, 26, 31, 32]) を選択。
+  カメラ座標系の rig ドリフト <code>(ypr, t)</code> を1組だけサンプルし、全フレームに共通で適用:
+</p>
+<pre><code>ypr_cam = [ 0.274°, -0.061°,  0.359° ]   ||·|| = 0.455°
+t_cam   = [ 7.89,   -16.23,   19.02  ] cm  ||·|| = 26.23 cm</code></pre>
+<p>
+  各フレームで <code>CalibNetDepth</code> を回し、オブジェクト点ごとの 2D ガウシアン
+  <code>(Δu, Δv, σ<sub>u</sub>, σ<sub>v</sub>, ρ)</code> を得る。これを
+  Ceres (<code>pyceres</code>) に residual block として積み上げ、共有 <code>θ = (ypr, t)</code>
+  だけを最適化。BA 側のカメラモデルを歪ませたとき最適解がどうズレるかを
+  12 条件で測った。
+</p>
+
+<div class="callout warn">
+  <strong>重要な落とし穴 (2026-04-23 修正)</strong>:
+  <code>85b6ccc</code> の refactor で <code>CalibNetDepth</code> の
+  n_layers≥3 におけるブロック実行順が崩れ
+  (<code>cross_coarse → cross_fine → cross_refine</code>)、
+  pre-refactor の <code>all_v3_mc</code> チェックポイントが silently mis-wired に。
+  症状: 回転は粗く復元するが <strong>t が GT drift のまま動かない</strong>。
+  修正コミット <code>4517107</code> + 条件化コミット <code>45b9fcb</code>
+  で pre/post refactor の両者の checkpoint を同居可能にした。以下の結果は全て修正後。
+</div>
+
+<h2>結果 ① <span class="badge">all_v3_mc</span> (pre-refactor ckpt)</h2>
+
+<figure>
+  <img src="images/ba_all_v3_mc_sweep.png" alt="fx and KB k2 sweep, all_v3_mc checkpoint">
+  <figcaption>all_v3_mc (pinhole 訓練) の fx / k₂ 感度。赤 = t_err (cm)、緑 = rot_err (°)。</figcaption>
+</figure>
+
+<table>
+<thead><tr>
+  <th>設定</th><th class="num">fx scale</th><th class="num">k₂</th>
+  <th class="num">rot_err (°)</th><th class="num">t_err (cm)</th><th class="num">reproj med (px)</th>
+</tr></thead>
+<tbody>
+  <tr><td>pinhole_ref</td><td class="num">1.000</td><td class="num">—</td><td class="num">0.035</td><td class="num">2.10</td><td class="num">0.75</td></tr>
+  <tr class="best"><td>kb_k2=+0.01</td><td class="num">1.000</td><td class="num">+0.01</td><td class="num">0.029</td><td class="num">1.56</td><td class="num">0.72</td></tr>
+  <tr><td>kb_k2=+0.05</td><td class="num">1.000</td><td class="num">+0.05</td><td class="num">0.033</td><td class="num">13.16</td><td class="num">3.10</td></tr>
+  <tr><td>kb_k2=−0.05</td><td class="num">1.000</td><td class="num">−0.05</td><td class="num">0.029</td><td class="num">16.37</td><td class="num">3.75</td></tr>
+  <tr><td>fx_−0.5 %</td><td class="num">0.995</td><td class="num">—</td><td class="num">0.018</td><td class="num">17.72</td><td class="num">4.17</td></tr>
+  <tr><td>fx_−1.0 %</td><td class="num">0.990</td><td class="num">—</td><td class="num">0.031</td><td class="num">33.47</td><td class="num">7.96</td></tr>
+  <tr><td>fx_+1.0 %</td><td class="num">1.010</td><td class="num">—</td><td class="num">0.062</td><td class="num">34.25</td><td class="num">7.91</td></tr>
+  <tr><td>fx_−5.0 %</td><td class="num">0.950</td><td class="num">—</td><td class="num">0.143</td><td class="num">178.6</td><td class="num">46.8</td></tr>
+</tbody>
+</table>
+
+<p>
+  <strong>読み</strong>: pinhole_ref が <code>t = 2.10 cm</code> まで復元
+  (GT drift 26.2 cm)。そこから <code>k₂ = +0.01</code> で
+  <strong>t = 1.56 cm</strong> に改善 — PandaSet の公称 pinhole モデルに
+  わずかに pincushion が残っていることを示唆。fx を ±0.5 % ずらすだけで
+  t は 13 cm 以上悪化するので、"画像整合は維持したまま t が系統的にズレる"
+  という古典的 miscalibration パターンと整合する。
+</p>
+
+<h2>結果 ② <span class="badge">vdef_sl / vdef_ml</span> (deformable)</h2>
+
+<figure>
+  <img src="images/ba_vdef_sl_sweep.png" alt="fx and k2 sweep, deformable SL">
+  <figcaption>vdef_sl (single-level deformable) 同条件の sweep。</figcaption>
+</figure>
+<figure>
+  <img src="images/ba_vdef_ml_sweep.png" alt="fx and k2 sweep, deformable ML">
+  <figcaption>vdef_ml (multi-level deformable) 同条件の sweep。</figcaption>
+</figure>
+
+<table>
+<thead><tr>
+  <th>Model</th><th class="num">pinhole t_err (cm)</th>
+  <th class="num">best t_err (cm)</th><th>best 設定</th><th class="num">best reproj (px)</th>
+</tr></thead>
+<tbody>
+  <tr><td>all_v3_mc</td><td class="num">2.10</td><td class="num">1.56</td><td>k₂=+0.01</td><td class="num">0.72</td></tr>
+  <tr><td>vdef_sl</td><td class="num">1.75</td><td class="num">1.75</td><td>pinhole</td><td class="num">0.55</td></tr>
+  <tr class="best"><td>vdef_ml</td><td class="num">1.60</td><td class="num">1.60</td><td>pinhole</td><td class="num">0.82</td></tr>
+</tbody>
+</table>
+
+<p>
+  <strong>所見</strong>: deformable 系は <code>pinhole</code> 単体で既に最良。
+  k₂ = +0.01 を入れても改善しない。これは deformable cross-attention が
+  空間オフセットのサンプリングを学習する過程で、
+  <strong>微小な radial 歪みを内部で暗黙に吸収</strong>しているためと解釈できる。
+  明示的な distortion 補正を BA 側に足さなくても、
+  deformable 側のヘッドがそれを肩代わりする形。
+</p>
+
+<h2>再現</h2>
+<pre><code># 標準 (all_v3_mc)
+python ba_kb_multiframe.py
+
+# deform SL で検証
+BA_CKPT=experiments/vdef_sl/best_model.pt \
+BA_DEFORM_MODE=sl \
+BA_OUT=experiments/vdef_sl/ba_kb \
+  python ba_kb_multiframe.py
+
+# deform ML で検証
+BA_CKPT=experiments/vdef_ml/best_model.pt \
+BA_DEFORM_MODE=ml \
+BA_OUT=experiments/vdef_ml/ba_kb \
+  python ba_kb_multiframe.py</code></pre>
+
+<h2>次のステップ</h2>
+<ul>
+  <li><strong>fx と k₂ を同時に BA の変数として解く</strong> — 今は固定摂動のため、"どこに best がある" しか見えない。<code>CalibBACostPerturbed</code> の parameter block に <code>[6, 2]</code> を追加すれば intrinsic を共同最適化できる。</li>
+  <li><strong>別シーンでの再現</strong> — scene 015 だけで <code>k₂ ≈ +0.01</code> を見ているが、PandaSet 全シーンにわたって再現するかは未確認。</li>
+  <li><strong>Waymo / NuScenes への展開</strong> — PandaSet のメモ(fx 0.57 % 過大)を裏付ける独立証拠になる可能性。</li>
+</ul>
+
+<div class="callout">
+  <strong>関連ファイル</strong>:
+  <code>ba_kb_multiframe.py</code> ·
+  <code>ba_multiframe.py</code> ·
+  <code>experiments/all_v3_mc/ba_kb/summary.json</code> ·
+  <code>experiments/vdef_{sl,ml}/ba_kb/summary.json</code>
+</div>
+
+</main>
+</body>
+</html>

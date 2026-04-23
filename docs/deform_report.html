@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deformable Cross-Attention — CalibNetDepth</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f4ed; --card: #fff; --ink: #0f0f0e; --ink-dim: #6b6a63;
+  --accent: #c13c14; --accent2: #174734; --line: #d9d6cd;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  --jasans: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  --jaserif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+  --col: 900px;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); margin: 0; }
+body {
+  color: var(--ink); font-family: var(--jasans);
+  font-size: 16px; line-height: 1.85; letter-spacing: 0.01em;
+  font-feature-settings: "palt" 1;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: var(--col); margin: 0 auto; padding: 64px 36px 96px; }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--ink-dim); margin-bottom: 22px;
+  display: flex; flex-wrap: wrap; gap: 14px; }
+.eyebrow .dot { color: var(--accent); }
+h1.title { font-family: var(--jaserif); font-weight: 700;
+  font-size: 40px; line-height: 1.25; margin: 0 0 14px; letter-spacing: -0.01em; }
+.subtitle { font-size: 17px; line-height: 1.65; color: var(--ink-dim);
+  margin: 0 0 36px; max-width: 780px; }
+h2 { font-family: var(--jaserif); font-weight: 700; font-size: 26px;
+  line-height: 1.35; margin: 58px 0 14px; border-bottom: 1px solid var(--line);
+  padding-bottom: 6px; }
+h3 { font-family: var(--jaserif); font-weight: 700; font-size: 18px;
+  margin: 30px 0 8px; }
+p { margin: 0 0 14px; }
+code, pre { font-family: var(--mono); font-size: 13.5px; }
+code { background: var(--card); padding: 1px 6px; border: 1px solid var(--line);
+  border-radius: 3px; }
+pre { background: var(--card); border: 1px solid var(--line); padding: 14px 18px;
+  border-radius: 4px; overflow-x: auto; line-height: 1.5; }
+pre code { background: none; border: 0; padding: 0; }
+.callout { background: var(--card); border-left: 4px solid var(--accent2);
+  padding: 14px 20px; margin: 20px 0; font-size: 15.5px; line-height: 1.75; }
+.callout.warn { border-left-color: var(--accent); }
+figure { margin: 26px 0; }
+figure img { width: 100%; border: 1px solid var(--line); background: var(--card); }
+figcaption { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin-top: 8px; letter-spacing: 0.04em; }
+table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14.5px;
+  font-family: var(--mono); }
+th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+th { font-weight: 600; color: var(--ink-dim); background: var(--card); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.best td { background: #fff7e8; font-weight: 600; }
+a { color: var(--accent2); }
+a:hover { color: var(--accent); }
+.badge { display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 2px 8px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 2px; letter-spacing: 0.05em; }
+.nav { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin: 0 0 40px; }
+.nav a { color: var(--ink-dim); text-decoration: none; }
+.nav a:hover { color: var(--accent); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+@media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main class="page">
+
+<div class="nav">
+  <a href="index.html">← docs/index.html</a> &nbsp;·&nbsp;
+  <a href="report.html">original</a> &nbsp;·&nbsp;
+  <a href="ba_report.html">BA report</a>
+</div>
+
+<div class="eyebrow">
+  <span>report 03</span><span class="dot">●</span>
+  <span>deformable cross-attention</span><span class="dot">●</span>
+  <span>CalibNetDepth</span>
+</div>
+
+<h1 class="title">Deformable Cross-Attention<br/>で CalibNetDepth を強化する</h1>
+<p class="subtitle">
+  画像側の K/V に対する attention を全画素 softmax ではなく学習された N 個の
+  サンプリング点に絞る multi-scale deformable attention (DINO 由来) を、
+  CalibNetDepth の cross-attn ブロックに移植。bf16-native CUDA カーネルで
+  ベースラインと同速を維持しつつ <strong>val NLL 2.074 → 1.57</strong> の
+  改善を確認。
+</p>
+
+<h2>動機</h2>
+<p>
+  元の <code>CrossAttentionBlockCov</code> はクエリ (point query) と
+  K/V (画像特徴 H×W) 全画素で dense softmax を取る。画像サイズ
+  64×64 から ConvNeXt で降りた coarse (16×16=256) / fine (32×32=1024)
+  でも十分軽いが、"どこを見るか" を attention score に全委任しているため
+  学習の肝になる。
+</p>
+<p>
+  deformable attention は hard-coded に "各 head × 各レベル × N=4 点" を
+  サンプリングしてから加重和するので、<strong>attention 計算量 O(Q·K) が
+  O(Q·N) に落ち</strong>、かつ "どこを見るか" が explicit にオフセット予測として
+  出てくる。このオフセットが結果的に <strong>局所的な幾何補正の吸収器</strong>
+  として機能するという仮説を立てた。
+</p>
+
+<h2>実装</h2>
+<p>
+  DINO の <code>ops/</code> (MSDeformAttn CUDA kernel) をそのまま持ち込み、
+  bf16 autocast の内側でも動くよう <code>AT_DISPATCH_FLOATING_TYPES_AND2</code>
+  と <code>gpuAtomicAdd</code> ベースに書き換え。これで<strong> fp32 キャストなしで
+  そのまま kernel 実行</strong> できる。
+</p>
+
+<h3>3 モード</h3>
+<pre><code>deform_mode = 'none'  # 旧 CrossAttentionBlockCov（ベースライン）
+deform_mode = 'sl'    # 単一レベル版: 各ブロックが 1 レベル (coarse or fine)
+                      #   を N=4 点でサンプル
+deform_mode = 'ml'    # 多レベル版: 各ブロックが coarse+fine の両方を
+                      #   N=4 点ずつ + 学習可能な level embedding
+</code></pre>
+
+<p>
+  <code>CalibNetDepth(deform_mode=…)</code> で切替。ML mode は
+  <code>self.level_embed = nn.Parameter(zeros(2, d))</code> の追加パラメータ (≈512 params) のみ。
+</p>
+
+<h2>訓練条件</h2>
+<table>
+<thead><tr><th>項目</th><th>値</th></tr></thead>
+<tbody>
+<tr><td>データ</td><td>NuScenes + PandaSet + Waymo 共同 (60k / 1.5k split)</td></tr>
+<tr><td>Epoch</td><td>200 (早期停止: val NLL で選択)</td></tr>
+<tr><td>Batch size</td><td>48</td></tr>
+<tr><td>LR</td><td>1e-3 → 1e-7 (cosine)</td></tr>
+<tr><td>n_layers</td><td>4 (coarse → refine → fine → fine2)</td></tr>
+<tr><td>画像入力</td><td>RGB 64×64</td></tr>
+<tr><td>ConvNeXt backbone</td><td>有効</td></tr>
+<tr><td>Frustum encoder</td><td>有効 (r_uv=8.0, r_d=0.004, k=8)</td></tr>
+<tr><td>deform N points</td><td>4</td></tr>
+</tbody>
+</table>
+
+<h2>結果</h2>
+
+<table>
+<thead><tr>
+  <th>Model</th>
+  <th class="num">val NLL (best)</th>
+  <th class="num">相対 Δ</th>
+  <th class="num">iter 速度 (ms, B=48, N=256)</th>
+</tr></thead>
+<tbody>
+<tr><td>baseline (none)</td><td class="num">2.074</td><td class="num">—</td><td class="num">19.5</td></tr>
+<tr class="best"><td>deform-SL</td><td class="num">1.568</td><td class="num">−0.506</td><td class="num">19.3</td></tr>
+<tr><td>deform-ML</td><td class="num">1.573</td><td class="num">−0.501</td><td class="num">19.3</td></tr>
+</tbody>
+</table>
+
+<div class="callout">
+  <strong>主要所見</strong>:
+  <ul>
+    <li>SL / ML どちらも ~0.5 NLL の明確な改善。ML の複雑化は追加の勝ちを生まず、<strong>SL で十分</strong>。</li>
+    <li>bf16 カーネルのおかげでベースラインと <strong>ほぼ同速</strong> (19.3 vs 19.5 ms/iter)。</li>
+    <li>BA 下流でも優位: pinhole の <code>t_err</code> が all_v3_mc の 2.10 cm から <strong>1.60 cm</strong> に改善 (ML) — 詳細は <a href="ba_report.html">BA report</a> 参照。</li>
+  </ul>
+</div>
+
+<h2>Downstream: 暗黙の歪み吸収</h2>
+
+<p>
+  <a href="ba_report.html">BA 感度スイープ</a> で面白いパターンが出た。
+  all_v3_mc (pinhole 訓練) では <code>k₂ = +0.01</code> を BA に注入すると
+  <code>t_err</code> が 2.10 → 1.56 cm に改善 (= PandaSet に微小 pincushion があることを示唆)。
+  一方、deformable 2 モデルは <strong>pinhole 単体で既に最良</strong>で
+  k₂ を入れても改善しない。
+</p>
+<p>
+  これは deformable attention が学習中にサンプリングオフセットを自動調整する過程で、
+  各点が画像のどこを見るかを空間的に歪めて学んでいることを意味する。
+  <strong>微小 radial 歪みが implicit に吸収され</strong>、
+  明示的な distortion モデルを下流で足す必要がなくなる。
+  extrinsic BA にとっては "正しい <code>(u,v)</code> を見る" 事ができれば十分で、
+  歪み補正は network の表現空間に閉じ込められて良い。
+</p>
+
+<h2>躓いた箇所</h2>
+
+<div class="callout warn">
+  <strong>Block 順の silent refactor バグ (<a href="https://github.com/matoge/e2e_calib/commit/85b6ccc">85b6ccc</a>)</strong>:
+  deformable を足す refactor で <code>n_layers≥3</code> の時のブロック実行順が
+  崩れ、<code>cross_fine</code> と <code>cross_refine</code> が feature レベルを
+  取り違えるバグを混入。pre-refactor の <code>all_v3_mc</code> ckpt を
+  load_state_dict で読み込むと silently mis-wired になり、BA で
+  <strong>t が GT drift のまま動かなくなる</strong>。
+  <br/>→ 修正コミット <code>4517107</code>/<code>45b9fcb</code> で元の
+  <code>coarse → refine → fine → fine2</code> 順を復元。deform 訓練済み重みも
+  壊さないよう <code>deform_mode</code> で条件化して共存。
+</div>
+
+<h2>再現</h2>
+
+<pre><code># sweep (SL + ML を並列で)
+python scripts/training/train_deform_sweep.py
+
+# 個別
+python scripts/training/train_all_v2_mc.py  # baseline (deform_mode='none')
+
+# 評価 (BA 下流)
+BA_CKPT=experiments/vdef_sl/best_model.pt \
+BA_DEFORM_MODE=sl \
+BA_OUT=experiments/vdef_sl/ba_kb \
+  python ba_kb_multiframe.py</code></pre>
+
+<h2>次のステップ</h2>
+<ul>
+  <li><strong>N_points スイープ</strong> — N=4 固定だが、N=8 / 2 での差を見たい。attention の粒度 vs. overfitting のトレードオフ。</li>
+  <li><strong>DN / query denoising 導入</strong> — DINO-style の訓練安定化技法と組み合わせて学習時間短縮できるか。</li>
+  <li><strong>deformable kernel を GS query net に流用</strong> — <a href="report.html">patch-warp 案</a> と接続。3D primitive (surfel / gaussian) から (Δu, Δv, Σ) を予測する一般化した残差ヘッドに移植。</li>
+</ul>
+
+<div class="callout">
+  <strong>関連ファイル</strong>:
+  <code>models/model_deform.py</code> ·
+  <code>models/model_depth.py</code> ·
+  <code>ops/</code> (bf16 MSDeformAttn kernel) ·
+  <code>scripts/training/train_deform_sweep.py</code> ·
+  <code>experiments/vdef_{sl,ml}/</code>
+</div>
+
+</main>
+</body>
+</html>

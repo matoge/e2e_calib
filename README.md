@@ -93,6 +93,10 @@ LiDAR Points (N × 3, [U, V, D])
 
 ## Quick start
 
+ルートにはアクティブなスクリプトだけを置いてる。残りは `scripts/` 配下。
+`models/ datasets/ configs/` はパッケージ化済みなので import は
+`from models.model_depth import CalibNetDepth` の形。
+
 ```bash
 # デモサーバー (インタラクティブ WebUI)
 python app.py                       # http://localhost:5001
@@ -100,58 +104,102 @@ python app.py                       # http://localhost:5001
 # 合成 (fast prototyping)
 python train.py                     # 単一物体
 python train_multi.py               # 複数物体
-python train_grid_depth.py          # メイン: config_grid_depth.py で実験設定
+python train_grid_depth.py          # メイン: configs/grid_depth.py で実験設定
 
-# 実データ
-python train_pandaset.py
-python train_nuscenes.py
-python train_waymo.py
-python train_all_v2_mc.py           # ジョイント NS+PS+WM
-python train_deform_sweep.py        # deformable (SL / ML sweep)
-
-# 解析
+# BA 解析 (active)
 python ba_singleframe.py            # 1 frame BA: 4px 誤差 → 0.8 px 補正
-python ba_multiframe.py             # N frame シェア 6DoF BA
-python ba_kb_multiframe.py          # fx / KB 感度スイープ
-python icp_scan_residual.py         # スキャン残差診断
-python vis_static_consistency.py    # 静止物体の一貫性チェック
+python ba_multiframe.py             # N frame シェア 6DoF BA (scene 015 で t=2.1cm)
+python ba_kb_multiframe.py          # fx / KB 感度スイープ (→ docs/ba_report.html)
+
+# 実データ学習
+python scripts/training/train_pandaset.py
+python scripts/training/train_nuscenes.py
+python scripts/training/train_waymo.py
+python scripts/training/train_all_v2_mc.py      # ジョイント NS+PS+WM
+python scripts/training/train_deform_sweep.py   # deformable (SL / ML sweep)
+
+# 他の診断
+python scripts/ba/icp_scan_residual.py              # スキャン残差
+python scripts/visualization/vis_static_consistency.py
 ```
 
 ### データ準備
 
 ```bash
 # マルチクロップキャッシュ (s64 = crop ≥ 64px)
-python build_all_mc_caches.py
+python scripts/data_preparation/build_all_mc_caches.py
 ```
 出力先: `/mnt/nvme6t/e2e_calib_cache/{pandaset,nuscenes,waymo}_mc_s64_cache.pt`。
-データセット別に `build_ps_full.py` / `build_ns_full.py` / `build_waymo_full.py` もあり。
+データセット別に `build_ps_full.py` / `build_ns_full.py` / `build_waymo_full.py` もあり
+(全部 `scripts/data_preparation/` 下)。
 
 ---
 
-## リポジトリ構成（flat layout）
+## リポジトリ構成
 
 ```
 .
 ├── app.py                           # Flask デモサーバー
-├── dataset.py                       # 合成データ生成
-├── dataset_{pandaset,nuscenes,waymo}.py
-├── model.py                         # CalibNet
-├── model_cov.py                     # CalibNetCov (共分散)
-├── model_depth.py                   # CalibNetDepth (frustum + deform)
-├── model_deform.py                  # deformable cross-attn ブロック
-├── ops/                             # MSDeformAttn CUDA kernel (bf16 native)
-├── train_*.py                       # 各種学習スクリプト
-├── ba_{singleframe,multiframe,kb_multiframe,global}.py  # BA pipeline
-├── vis_*.py                         # 可視化ユーティリティ
-├── docs/                            # GitHub Pages 用レポート
-│   ├── index.html, report.html
+├── train{,_multi,_cov,_depth,_grid_depth}.py   # SYNTH 系 (CLAUDE.md quickstart)
+├── vis{,_cov,_depth}.py                        # 対応する可視化
+├── ba_{singleframe,multiframe,kb_multiframe}.py  # active BA entries
+├── models/                          # PyTorch nn.Module 群 (package)
+│   ├── model.py                     # CalibNet
+│   ├── model_cov.py                 # CalibNetCov (共分散)
+│   ├── model_depth.py               # CalibNetDepth (frustum + deform)
+│   ├── model_deform.py              # deformable cross-attn ブロック
+│   └── model_no_sa.py               # ablation: self-attn 無し
+├── datasets/                        # データローダ (package)
+│   ├── synthetic.py, sim3d.py
+│   ├── pandaset.py, nuscenes.py, waymo.py
+├── configs/                         # 実験 config (package)
+│   └── grid_depth.py
+├── ops/                             # MSDeformAttn bf16 CUDA kernel
+├── scripts/
+│   ├── ba/                          # less-active BA entries
+│   ├── training/                    # 実データ学習スクリプト
+│   ├── visualization/               # 可視化ユーティリティ
+│   ├── data_preparation/            # キャッシュ/マップ構築
+│   └── eval/                        # eval/verify/bench
+├── docs/                            # GitHub Pages レポート群
+│   ├── index.html                   # 技術概要 (01)
+│   ├── report.html                  # バイリンガル実験まとめ (02)
+│   ├── ba_report.html               # Multi-frame BA sweep (03)
+│   ├── deform_report.html           # Deformable cross-attn (04)
 │   ├── images/                      # レポート挿絵
-│   └── assets/                      # 生成 viz
-├── static/                          # インタラクティブ UI + 技術レポート
-│   ├── index.html, ns_ps_v2_report.html, ps_v9_report.html
+│   └── assets/                      # 追加生成 viz
+├── static/                          # WebUI + 旧技術レポート
 ├── experiments/                     # 実験結果 (checkpoint + log + config)
-└── web_viewer/                      # Babylon.js 点群ビューワ
+└── legacy/                          # 参考用の旧ファイル
 ```
+
+### 旧 flat-layout から package 化した箇所
+
+| before (< 2026-04-23) | after |
+|---|---|
+| `model_*.py` (root) | `models/model_*.py` |
+| `dataset*.py` (root) | `datasets/{synthetic,sim3d,pandaset,nuscenes,waymo}.py` |
+| `config_grid_depth.py` | `configs/grid_depth.py` |
+| `train_pandaset.py` 等 (root) | `scripts/training/*.py` |
+| `vis_*.py` (root) | `scripts/visualization/*.py` |
+| `build_*.py` (root) | `scripts/data_preparation/*.py` |
+| `ba_global.py`, `icp_scan_residual.py` 等 | `scripts/ba/*.py` |
+
+import は `from models.model_depth import CalibNetDepth` のように
+パッケージパスで書く。`scripts/**/*.py` は冒頭に
+`sys.path.insert(0, repo_root)` の bootstrap を自動挿入済みなので
+どこから実行しても import は解決する。
+
+---
+
+## レポート
+
+| # | Path | 何 |
+|---|---|---|
+| 01 | [docs/index.html](docs/index.html) | 技術概要 (ps_v9_objsplit ベース) |
+| 02 | [docs/report.html](docs/report.html) | バイリンガル実験まとめ (合成→実データ) |
+| 03 | [docs/ba_report.html](docs/ba_report.html) | Multi-frame BA + fx/KB 感度スイープ |
+| 04 | [docs/deform_report.html](docs/deform_report.html) | Deformable cross-attn (val_nll −0.5) |
 
 ---
 
