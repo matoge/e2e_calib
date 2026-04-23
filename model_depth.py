@@ -183,12 +183,22 @@ class CalibNetDepth(nn.Module):
                 feats_seq += [coarse_feat, fine_feat, fine_feat]
             feats_by_layer = feats_seq
 
-        # Block order matches training convention: cross_refine sits in the
-        # coarse half, cross_fine / cross_fine2 in the fine half.
-        blocks = [self.cross_coarse]
-        if self.n_layers >= 3: blocks.append(self.cross_refine)
-        blocks.append(self.cross_fine)
-        if self.n_layers >= 4: blocks.append(self.cross_fine2)
+        # Block order.
+        # deform='none': restore the pre-refactor convention (cross_refine in
+        #   the coarse half, cross_fine/fine2 in the fine half) so that
+        #   pre-85b6ccc checkpoints load correctly.
+        # deform='sl'/'ml': keep the refactor's order, because those weights
+        #   were trained under it and swapping the list now would mis-wire
+        #   them symmetrically.
+        if self._deform_mode == 'none':
+            blocks = [self.cross_coarse]
+            if self.n_layers >= 3: blocks.append(self.cross_refine)
+            blocks.append(self.cross_fine)
+            if self.n_layers >= 4: blocks.append(self.cross_fine2)
+        else:
+            blocks = [self.cross_coarse, self.cross_fine]
+            if self.n_layers >= 3: blocks.append(self.cross_refine)
+            if self.n_layers >= 4: blocks.append(self.cross_fine2)
 
         # first layer (uv_01)
         q, raw_cum = self._block(blocks[0], q, feats_by_layer[0], uv_01, key_padding_mask)
