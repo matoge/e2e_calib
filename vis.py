@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 
-from dataset import CalibDataset
-from model import CalibNet
+from datasets.synthetic import CalibDataset
+from models.model import CalibNet
 
 CKPT_PATH  = "best_model.pt"
 OUT_PATH   = "result_128.png"

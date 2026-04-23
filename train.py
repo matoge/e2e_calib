@@ -13,8 +13,8 @@ import math
 import torch
 import torch.nn as nn
 
-from dataset import build_loaders
-from model import CalibNet
+from datasets.synthetic import build_loaders
+from models.model import CalibNet
 
 # ── RTX 5080 tuning ─────────────────────────────────────────────────────────
 torch.set_float32_matmul_precision("high")   # enable TF32

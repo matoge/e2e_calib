@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import Ellipse
 
-from dataset import make_image_and_points
-from model_cov import CalibNetCov
+from datasets.synthetic import make_image_and_points
+from models.model_cov import CalibNetCov
 
 CKPT   = "best_model_cov.pt"
 OUT    = "result_cov.png"

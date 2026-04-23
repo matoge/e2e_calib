@@ -1,8 +1,8 @@
 """Train CalibNetDepth: 2 objects + background, depth-aware, NLL loss."""
 import math, time, torch, torch.nn as nn
-from dataset import build_loaders_depth
-from model_depth import CalibNetDepth
-from model_cov import gaussian2d_nll
+from datasets.synthetic import build_loaders_depth
+from models.model_depth import CalibNetDepth
+from models.model_cov import gaussian2d_nll
 
 torch.set_float32_matmul_precision("high")
 try:

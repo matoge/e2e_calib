@@ -7,10 +7,10 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
-from config_grid_depth import CFG
-from dataset import GridDepthDataset, collate_grid_depth, make_image_and_points_grid_depth
-from model_depth import CalibNetDepth
-from model_cov import gaussian2d_nll
+from configs.grid_depth import CFG
+from datasets.synthetic import GridDepthDataset, collate_grid_depth, make_image_and_points_grid_depth
+from models.model_depth import CalibNetDepth
+from models.model_cov import gaussian2d_nll
 from torch.utils.data import DataLoader
 
 torch.set_float32_matmul_precision("high")

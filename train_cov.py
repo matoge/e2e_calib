@@ -1,7 +1,7 @@
 """Train CalibNetCov with 2D Gaussian NLL loss."""
 import math, time, torch, torch.nn as nn
-from dataset import build_loaders
-from model_cov import CalibNetCov, gaussian2d_nll
+from datasets.synthetic import build_loaders
+from models.model_cov import CalibNetCov, gaussian2d_nll
 
 torch.set_float32_matmul_precision("high")
 try:

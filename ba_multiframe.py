@@ -27,8 +27,8 @@ import pyceres
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from dataset_pandaset import PandaSetCalibDataset, build_sample
-from model_depth import CalibNetDepth
+from datasets.pandaset import PandaSetCalibDataset, build_sample
+from models.model_depth import CalibNetDepth
 import ba_singleframe as bas  # reuse ypr_to_R, project, run_inference, solve_ba, CalibBACost
 
 

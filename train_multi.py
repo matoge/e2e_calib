@@ -1,7 +1,7 @@
 """Train on multi-object dataset (2 objects, independent shifts)."""
 import math, time, torch, torch.nn as nn
-from dataset import build_loaders_multi
-from model import CalibNet
+from datasets.synthetic import build_loaders_multi
+from models.model import CalibNet
 
 torch.set_float32_matmul_precision("high")
 try:

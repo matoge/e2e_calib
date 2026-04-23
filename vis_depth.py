@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import Ellipse
 
-from dataset import make_image_and_points_depth, DEPTH_OBJ1, DEPTH_OBJ2, DEPTH_BG, DEPTH_NORM
-from model_depth import CalibNetDepth
+from datasets.synthetic import make_image_and_points_depth, DEPTH_OBJ1, DEPTH_OBJ2, DEPTH_BG, DEPTH_NORM
+from models.model_depth import CalibNetDepth
 
 CKPT      = "best_model_depth.pt"
 OUT       = "result_depth.png"

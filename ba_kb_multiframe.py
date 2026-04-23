@@ -23,8 +23,8 @@ import pyceres
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from dataset_pandaset import PandaSetCalibDataset
-from model_depth import CalibNetDepth
+from datasets.pandaset import PandaSetCalibDataset
+from models.model_depth import CalibNetDepth
 import ba_singleframe as bas
 import ba_multiframe as bam
 

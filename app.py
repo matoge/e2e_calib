@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt, matplotlib.patches as mpatches, matplotlib.path
 from flask import Flask, jsonify, request, send_from_directory, redirect
 from pathlib import Path
 
-from dataset import (make_image_and_points, make_image_and_points_multi,
+from datasets.synthetic import (make_image_and_points, make_image_and_points_multi,
                      make_image_and_points_depth, make_image_and_points_grid,
                      make_image_and_points_grid_depth)
-from sim3d import make_sample as make_sample_sim3d
-from model import CalibNet
-from model_depth import CalibNetDepth
+from datasets.sim3d import make_sample as make_sample_sim3d
+from models.model import CalibNet
+from models.model_depth import CalibNetDepth
 
 _ps_dataset = None
 def _get_ps_dataset(cache='/tmp/pandaset_full_cache.pt'):
