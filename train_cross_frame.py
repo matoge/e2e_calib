@@ -108,12 +108,20 @@ def main():
     ap.add_argument('--full', action='store_true')
     ap.add_argument('--scene', default='/mnt/mininas/datasets/pandaset/015')
     ap.add_argument('--img-size', type=int, default=64)
-    ap.add_argument('--max-points', type=int, default=64)
+    ap.add_argument('--max-points', type=int, default=256)
     ap.add_argument('--batch-size', type=int, default=16)
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--n-overfit', type=int, default=64)
     ap.add_argument('--epochs', type=int, default=150)
     ap.add_argument('--log-every', type=int, default=10)
+    ap.add_argument('--baseline-min', type=int, default=1)
+    ap.add_argument('--baseline-max', type=int, default=20)
+    ap.add_argument('--sigma-ypr', type=float, default=1.0)
+    ap.add_argument('--sigma-t',   type=float, default=0.20)
+    ap.add_argument('--crop-min', type=int, default=64)
+    ap.add_argument('--crop-max', type=int, default=192)
+    ap.add_argument('--num-workers', type=int, default=4)
+    ap.add_argument('--virtual-epoch', type=int, default=4000)
     args = ap.parse_args()
 
     out_dir = Path('experiments/cross_frame_' + args.name)
@@ -131,15 +139,21 @@ def main():
     log(f'args = {vars(args)}')
 
     # dataset
+    ds_kwargs = dict(
+        scene_root=args.scene, img_size=args.img_size, max_points=args.max_points,
+        baseline_range=(args.baseline_min, args.baseline_max),
+        sigma_ypr=args.sigma_ypr, sigma_t=args.sigma_t,
+        crop_range=(args.crop_min, args.crop_max),
+    )
     ds_train = PandaSetCrossFrameDataset(
-        scene_root=args.scene, split='train',
-        img_size=args.img_size, max_points=args.max_points,
-        virtual_epoch_len=(args.n_overfit if not args.full else 4000),
+        split='train',
+        virtual_epoch_len=(args.n_overfit if not args.full else args.virtual_epoch),
+        **ds_kwargs,
     )
     ds_val = PandaSetCrossFrameDataset(
-        scene_root=args.scene, split='val',
-        img_size=args.img_size, max_points=args.max_points,
+        split='val',
         virtual_epoch_len=200, seed=123,
+        **ds_kwargs,
     )
 
     # pre-fetch overfit buffer: fix a small set of samples
@@ -158,9 +172,11 @@ def main():
                   for i in range(0, len(fixed), args.batch_size)]
     else:
         loader = DataLoader(ds_train, batch_size=args.batch_size, shuffle=True,
-                             num_workers=4, persistent_workers=True, pin_memory=True)
+                             num_workers=args.num_workers, persistent_workers=True,
+                             pin_memory=True, prefetch_factor=4)
         val_loader = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False,
-                                 num_workers=2, persistent_workers=True, pin_memory=True)
+                                 num_workers=max(2, args.num_workers // 2),
+                                 persistent_workers=True, pin_memory=True)
 
     # model
     model = CalibNetCrossFrame(img_size=args.img_size).to(DEVICE)
@@ -171,9 +187,23 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=args.epochs, eta_min=args.lr * 1e-2)
 
-    curves = dict(epoch=[], loss=[], err_AB=[], err_BA=[], base_AB=[])
+    curves = dict(epoch=[], loss=[], err_AB=[], err_BA=[], base_AB=[],
+                  val_loss=[], val_err_AB=[], val_err_BA=[], val_base_AB=[])
     best_err = float('inf')
     t0 = time.time()
+
+    @torch.no_grad()
+    def _eval_val():
+        if overfit:
+            return None
+        model.eval()
+        vl, vA, vB, vbase = [], [], [], []
+        for batch in val_loader:
+            _, m = step(model, batch)
+            vl.append(m['loss']); vA.append(m['err_AB'])
+            vB.append(m['err_BA']); vbase.append(m['base_AB'])
+        return dict(loss=float(np.mean(vl)), err_AB=float(np.mean(vA)),
+                    err_BA=float(np.mean(vB)), base_AB=float(np.mean(vbase)))
 
     for ep in range(args.epochs):
         model.train()
@@ -195,36 +225,59 @@ def main():
         curves['err_BA'].append(float(np.mean(ep_errs_BA)))
         curves['base_AB'].append(float(np.mean(ep_base_AB)))
 
+        # periodic val pass (full mode only)
+        do_val = (not overfit) and (ep % args.log_every == 0 or ep == args.epochs - 1)
+        if do_val:
+            v = _eval_val()
+            curves['val_loss'].append(v['loss'])
+            curves['val_err_AB'].append(v['err_AB'])
+            curves['val_err_BA'].append(v['err_BA'])
+            curves['val_base_AB'].append(v['base_AB'])
+
         if ep % args.log_every == 0 or ep == args.epochs - 1:
+            val_str = (f'  val_err={0.5*(v["err_AB"]+v["err_BA"]):.2f}px '
+                       f'(base {v["base_AB"]:.2f})'
+                       if do_val else '')
             log(f'ep {ep:3d}  loss={curves["loss"][-1]:.3f}  '
                 f'err_AB={curves["err_AB"][-1]:.2f}px  '
                 f'err_BA={curves["err_BA"][-1]:.2f}px  '
-                f'(base_AB={curves["base_AB"][-1]:.2f}px)  '
+                f'(base={curves["base_AB"][-1]:.2f}px){val_str}  '
                 f'lr={opt.param_groups[0]["lr"]:.2e}  '
                 f't={time.time()-t0:.0f}s')
 
-        # save best by err_AB
-        mean_err = 0.5 * (curves['err_AB'][-1] + curves['err_BA'][-1])
-        if mean_err < best_err:
-            best_err = mean_err
+        # save best by train (overfit) or val (full) mean err
+        if overfit:
+            score = 0.5 * (curves['err_AB'][-1] + curves['err_BA'][-1])
+        else:
+            score = 0.5 * (v['err_AB'] + v['err_BA']) if do_val else best_err + 1
+        if score < best_err:
+            best_err = score
             torch.save(model.state_dict(), out_dir / 'best_model.pt')
 
     # final plot
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), dpi=120)
     fig.patch.set_facecolor('#f6f4ed')
-    ax[0].plot(curves['epoch'], curves['loss'], color='#174734', lw=2)
+    ax[0].plot(curves['epoch'], curves['loss'], color='#174734', lw=2, label='train')
+    if not overfit and curves['val_loss']:
+        val_eps = [e for e in curves['epoch'] if (e % args.log_every == 0 or e == args.epochs - 1)]
+        ax[0].plot(val_eps, curves['val_loss'], color='#c13c14', lw=2, marker='o', ms=4, label='val')
     ax[0].set_title('NLL loss', loc='left'); ax[0].set_xlabel('epoch'); ax[0].grid(alpha=0.25)
-    ax[1].plot(curves['epoch'], curves['err_AB'], color='#c13c14', lw=2, label='err A→B')
-    ax[1].plot(curves['epoch'], curves['err_BA'], color='#174734', lw=2, label='err B→A')
+    ax[0].legend(frameon=False)
+    ax[1].plot(curves['epoch'], curves['err_AB'], color='#c13c14', lw=2, label='train err A→B')
+    ax[1].plot(curves['epoch'], curves['err_BA'], color='#174734', lw=2, label='train err B→A')
     ax[1].plot(curves['epoch'], curves['base_AB'], color='#6b6a63', lw=1, ls='--', label='base (no correction)')
+    if not overfit and curves['val_err_AB']:
+        val_eps = [e for e in curves['epoch'] if (e % args.log_every == 0 or e == args.epochs - 1)]
+        ax[1].plot(val_eps, curves['val_err_AB'], color='#c13c14', lw=1.5, ls=':', marker='o', ms=4, label='val A→B')
+        ax[1].plot(val_eps, curves['val_err_BA'], color='#174734', lw=1.5, ls=':', marker='o', ms=4, label='val B→A')
     ax[1].set_title('mean reproj err (px)', loc='left'); ax[1].set_xlabel('epoch')
-    ax[1].legend(frameon=False); ax[1].grid(alpha=0.25)
+    ax[1].legend(frameon=False, fontsize=9); ax[1].grid(alpha=0.25)
     for a in ax:
         for sp in ('top','right'): a.spines[sp].set_visible(False)
     plt.tight_layout()
     plt.savefig(out_dir / 'curve.png', dpi=120, bbox_inches='tight', facecolor='#f6f4ed')
     log(f'saved curve → {out_dir}/curve.png')
-    log(f'best mean err = {best_err:.2f} px')
+    log(f'best {"val" if not overfit else "train"} err = {best_err:.2f} px')
 
 
 if __name__ == '__main__':

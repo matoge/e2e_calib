@@ -93,6 +93,7 @@ class PandaSetCrossFrameDataset(Dataset):
                  sigma_ypr: float = 0.3,   # degrees
                  sigma_t:   float = 0.15,  # meters
                  max_points: int = 96,
+                 crop_range = (64, 192),   # px in full-res, random per sample, same for A & B
                  virtual_epoch_len: int = 2000,
                  seed: int = 42):
         super().__init__()
@@ -103,6 +104,7 @@ class PandaSetCrossFrameDataset(Dataset):
         self.sigma_ypr = sigma_ypr
         self.sigma_t   = sigma_t
         self.max_points = max_points
+        self.crop_range = crop_range
         self.virtual_epoch_len = virtual_epoch_len
         self.split = split
         self.rng = np.random.default_rng(seed)
@@ -137,8 +139,17 @@ class PandaSetCrossFrameDataset(Dataset):
             self.fi_pool = all_fi
 
         # tiny memory cache (scene is small: ~80 frames × ~2MB lidar + ~500KB jpg)
-        self._img_cache = {}
-        self._lidar_cache = {}
+        self._img_cache    = {}
+        self._frame_cache  = {}    # fi → (pts_world, uv_own_cam, z_own_cam, in_view_mask)
+
+        # eagerly precompute per-frame projections: ~150k-point matmul × 80 frames
+        # → dominates sample generation cost if done per __getitem__
+        print(f'[PandaSetCrossFrameDataset/{split}] precomputing projections for '
+              f'{self.n_frames} frames…', flush=True)
+        for fi in range(self.n_frames):
+            self._frame_data(fi)
+        print(f'[PandaSetCrossFrameDataset/{split}] done. '
+              f'pool(train/val)={len(self.fi_pool)} frames', flush=True)
 
     # ------------------------------------------------------------------ helpers
 
@@ -148,11 +159,22 @@ class PandaSetCrossFrameDataset(Dataset):
                 self._img_cache[fi] = np.array(im.convert('RGB'))
         return self._img_cache[fi]
 
-    def _load_lidar(self, fi):
-        if fi not in self._lidar_cache:
+    def _frame_data(self, fi):
+        """Return (pts_world, uv_own_cam, z_own_cam, in_view_mask) for frame fi.
+
+        Projection computed once per frame and cached; matmul on ~150k LiDAR
+        points is the single most expensive operation in __getitem__, so this
+        is where all the speedup is.
+        """
+        if fi not in self._frame_cache:
             df = pd.read_pickle(self.lidar_paths[fi])
-            self._lidar_cache[fi] = df[['x', 'y', 'z']].values.astype(np.float32)
-        return self._lidar_cache[fi]
+            pts_w = df[['x', 'y', 'z']].values.astype(np.float32)
+            uv, z = _project(pts_w, self.T_w2c[fi], self.K)
+            in_view = ((z > 1.0) &
+                       (uv[:, 0] > 0) & (uv[:, 0] < self.IW) &
+                       (uv[:, 1] > 0) & (uv[:, 1] < self.IH))
+            self._frame_cache[fi] = (pts_w, uv, z, in_view)
+        return self._frame_cache[fi]
 
     def _crop_patch(self, img_full, u0, v0, s):
         """Crop img_full to [u0:u0+s, v0:v0+s] and resize to (img_size, img_size)."""
@@ -208,17 +230,9 @@ class PandaSetCrossFrameDataset(Dataset):
         T_A2w = _invert_mat(T_w2A)
         T_A_to_B_gt = T_w2B @ T_A2w                  # A-cam → B-cam
 
-        # 4. load LiDAR and project
-        pts_w_A = self._load_lidar(fi_A)             # (Na, 3) — A's sensor sweep, in world
-        pts_w_B = self._load_lidar(fi_B)
-        uv_Af, z_Af = _project(pts_w_A, T_w2A, self.K)  # A's pts in A's cam
-        uv_Bf, z_Bf = _project(pts_w_B, T_w2B, self.K)  # B's pts in B's cam
-
-        # 5. in-view points (front of camera + inside image)
-        in_A = ((z_Af > 1.0) & (uv_Af[:, 0] > 0) & (uv_Af[:, 0] < self.IW) &
-                (uv_Af[:, 1] > 0) & (uv_Af[:, 1] < self.IH))
-        in_B = ((z_Bf > 1.0) & (uv_Bf[:, 0] > 0) & (uv_Bf[:, 0] < self.IW) &
-                (uv_Bf[:, 1] > 0) & (uv_Bf[:, 1] < self.IH))
+        # 4. load LiDAR and project (cached per frame)
+        pts_w_A, uv_Af, z_Af, in_A = self._frame_data(fi_A)
+        pts_w_B, uv_Bf, z_Bf, in_B = self._frame_data(fi_B)
         if in_A.sum() < 50 or in_B.sum() < 50:
             return None
 
@@ -245,8 +259,8 @@ class PandaSetCrossFrameDataset(Dataset):
         uc_B_hat = (self.K @ P_center_Bh)[:2] / P_center_Bh[2]
         uc_B_hat = uc_B_hat.astype(np.float32)
 
-        # 9. crop patches. patch size = 128px in full-res, resized to img_size
-        CROP = 192
+        # 9. crop patches. random crop size per sample, shared by A & B, resized to img_size
+        CROP = int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
         half = CROP / 2
         u0_A = max(0, min(self.IW - CROP, uc_A - half))
         v0_A = max(0, min(self.IH - CROP, vc_A - half))
