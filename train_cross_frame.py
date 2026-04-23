@@ -106,21 +106,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--name', default='v00_overfit')
     ap.add_argument('--full', action='store_true')
-    ap.add_argument('--scene', default='/mnt/mininas/datasets/pandaset/015')
+    ap.add_argument('--scene', default='/mnt/mininas/datasets/pandaset/015',
+                    help='single-scene mode (legacy)')
+    ap.add_argument('--scenes-root', default=None,
+                    help='multi-scene mode: root directory containing all scene folders')
+    ap.add_argument('--train-frac', type=float, default=0.80,
+                    help='scene-level train fraction (only used with --scenes-root)')
     ap.add_argument('--img-size', type=int, default=64)
     ap.add_argument('--max-points', type=int, default=256)
-    ap.add_argument('--batch-size', type=int, default=16)
+    ap.add_argument('--batch-size', type=int, default=32)
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--n-overfit', type=int, default=64)
-    ap.add_argument('--epochs', type=int, default=150)
-    ap.add_argument('--log-every', type=int, default=10)
+    ap.add_argument('--epochs', type=int, default=60)
+    ap.add_argument('--log-every', type=int, default=4)
     ap.add_argument('--baseline-min', type=int, default=1)
     ap.add_argument('--baseline-max', type=int, default=20)
     ap.add_argument('--sigma-ypr', type=float, default=1.0)
     ap.add_argument('--sigma-t',   type=float, default=0.20)
     ap.add_argument('--crop-min', type=int, default=64)
     ap.add_argument('--crop-max', type=int, default=192)
-    ap.add_argument('--num-workers', type=int, default=4)
+    ap.add_argument('--num-workers', type=int, default=8)
     ap.add_argument('--virtual-epoch', type=int, default=4000)
     args = ap.parse_args()
 
@@ -140,11 +145,16 @@ def main():
 
     # dataset
     ds_kwargs = dict(
-        scene_root=args.scene, img_size=args.img_size, max_points=args.max_points,
+        img_size=args.img_size, max_points=args.max_points,
         baseline_range=(args.baseline_min, args.baseline_max),
         sigma_ypr=args.sigma_ypr, sigma_t=args.sigma_t,
         crop_range=(args.crop_min, args.crop_max),
     )
+    if args.scenes_root:
+        ds_kwargs['scenes_root'] = args.scenes_root
+        ds_kwargs['train_frac']  = args.train_frac
+    else:
+        ds_kwargs['scene_root']  = args.scene
     ds_train = PandaSetCrossFrameDataset(
         split='train',
         virtual_epoch_len=(args.n_overfit if not args.full else args.virtual_epoch),
@@ -152,7 +162,7 @@ def main():
     )
     ds_val = PandaSetCrossFrameDataset(
         split='val',
-        virtual_epoch_len=200, seed=123,
+        virtual_epoch_len=400, seed=123,
         **ds_kwargs,
     )
 
