@@ -1,21 +1,21 @@
-"""Visual check: does BA-recovered pose actually put the same 3D point on the
-same image feature? Subpixel-scale markers — no stars, no 20-px ellipses.
+"""BA reprojection check — patch_A | patch_B pair view.
 
-For each pair, panel B shows three projections of the same world point:
-  - faint × = hyp (T_AB_hat)
-  - small red + = BA-recovered (T_AB_rec)
-  - small blue ○ = GT (T_AB_gt)  [only for reference; noisy on PandaSet]
+Same layout as vis_lln_ba.py (which the report uses):
+  - patch_A on the left: query points (numbered dots) at their A-local uv
+  - patch_B on the right: for each point, three projections
+      × = hyp (T_AB_hat)
+      ○ = GT  (T_AB_gt)
+      + = BA-recovered (T_AB_rec)
+  - thin cross-panel dotted lines A●→B_gt for the same 3D point
+  - small in-panel segments:  ×──+ (BA correction), +·· ○ (residual to GT)
 
-If red + lands on the same image feature as the blue ○, BA is actually
-resolving geometry regardless of what the rot_improvement% number says.
+Markers are deliberately small (4–6 px) so subpixel differences are
+visible when zoomed in. No hero stars.
 
-Two variants side-by-side per pair:
-  Left:  perturbed  (σ_ypr=1.0°, σ_t=0.20m)  → usual eval setup
-  Right: no-perturb (σ=0)  → hyp already equals GT. Model should predict
-         Δ≈0; BA should not move the pose. Any systematic drift here is
-         the model's learned dataset-bias, NOT a real residual.
-
-Run: python scripts/visualization/vis_ba_reproject.py [--ckpt <dir>]
+Two side-by-side variants per row:
+  LEFT  σ_ypr=1°, σ_t=0.2m  (normal eval)
+  RIGHT σ=0                  (hyp == GT identity check; any + drift is
+                              the learned dataset bias)
 """
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -28,12 +28,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from matplotlib.patches import ConnectionPatch
 
-from datasets.pandaset_pair import _SceneData, _project, _ypr_t_to_mat
+from datasets.pandaset_pair import _SceneData, _ypr_t_to_mat
 from models.cross_frame import CalibNetCrossFrame
 from scripts.eval.cross_frame_lln import make_pair, infer_batch, ba_recover
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+IMG_SIZE = 64
 
 
 def load_model(ckpt_dir):
@@ -43,83 +45,21 @@ def load_model(ckpt_dir):
     n_intra = max(1, sum(1 for k in sd if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
     proj_w = [sd[k] for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight')]
     out_dim = proj_w[0].shape[0] if proj_w else 5
-    m = CalibNetCrossFrame(img_size=64, deform_mode=deform,
+    m = CalibNetCrossFrame(img_size=IMG_SIZE, deform_mode=deform,
                             n_cross_layers=n_cross, n_intra_layers=n_intra,
                             out_dim=out_dim).to(DEVICE)
     m.load_state_dict(sd); m.eval()
     return m, out_dim
 
 
-def one_panel(ax, image_B_full, pts_3D_A, scn, T_AB_hat, T_AB_rec, T_AB_gt,
-              box_B, img_size, K, title, k_show=12):
-    """Draw 3 projections of N 3D points into image B on a cropped axis."""
+def full_to_local_B(uv_full, box_B, img_size=IMG_SIZE):
     u0, v0, cw, ch = box_B
-    # show full-res patch_B at its native resolution so we can see subpixel
-    # (cropping to box_B from the full frame B image)
-    IH, IW = image_B_full.shape[:2]
-    u0c, v0c = max(int(u0), 0), max(int(v0), 0)
-    u1c, v1c = min(int(u0 + cw), IW), min(int(v0 + ch), IH)
-    ax.imshow(image_B_full[v0c:v1c, u0c:u1c])
-    ax.set_xticks([]); ax.set_yticks([])
-
-    # select k_show spatially-spread points (by 2D position in B under hyp)
-    homo = np.concatenate([pts_3D_A, np.ones((len(pts_3D_A), 1))], axis=1)
-    uv_hat_full, z_hat = _project(pts_3D_A, np.linalg.inv(T_AB_hat_inv_like_w2c(T_AB_hat, scn)), K)
-    # Actually we want: point in A-cam → B-cam via T_AB → then project via K.
-    # But we have pts_3D_A already in A-cam, and T_AB_hat (A-cam → B-cam).
-    P_Bh = (homo @ T_AB_hat.T)[:, :3]
-    P_Brec = (homo @ T_AB_rec.T)[:, :3]
-    P_Bgt = (homo @ T_AB_gt.T)[:, :3]
-    uv_hat = (K @ P_Bh.T)[:2] / np.clip(P_Bh[:, 2], 1e-6, None);  uv_hat = uv_hat.T
-    uv_rec = (K @ P_Brec.T)[:2] / np.clip(P_Brec[:, 2], 1e-6, None); uv_rec = uv_rec.T
-    uv_gt  = (K @ P_Bgt.T)[:2] / np.clip(P_Bgt[:, 2], 1e-6, None);  uv_gt  = uv_gt.T
-
-    # keep only points that land inside the cropped patch for all three
-    def in_patch(uv):
-        return ((uv[:, 0] >= u0c) & (uv[:, 0] < u1c) &
-                (uv[:, 1] >= v0c) & (uv[:, 1] < v1c))
-    m = in_patch(uv_hat) & in_patch(uv_rec) & in_patch(uv_gt)
-    idx = np.where(m)[0]
-    if len(idx) == 0:
-        ax.set_title(f'{title}\n(no co-visible pts)', fontsize=9, loc='left'); return
-    # subsample evenly across the patch
-    if len(idx) > k_show:
-        step = max(1, len(idx) // k_show)
-        idx = idx[::step][:k_show]
-
-    cmap = cm.get_cmap('tab10')
-    for k, i in enumerate(idx):
-        c = cmap(k % 10)
-        # convert full-image coord → patch-local coord by subtracting crop origin
-        h = (uv_hat[i, 0] - u0c, uv_hat[i, 1] - v0c)
-        r = (uv_rec[i, 0] - u0c, uv_rec[i, 1] - v0c)
-        g = (uv_gt[i,  0] - u0c, uv_gt[i,  1] - v0c)
-        # fine line segment hyp→rec to show direction of BA correction
-        ax.plot([h[0], r[0]], [h[1], r[1]], color=c, lw=0.8, alpha=0.5, zorder=3)
-        # fine line segment rec→gt to show residual error
-        ax.plot([r[0], g[0]], [r[1], g[1]], color=c, lw=0.6, alpha=0.35,
-                 linestyle=':', zorder=3)
-        ax.plot(*h, marker='x', color=c, markersize=4, mew=0.9,
-                 alpha=0.55, zorder=5)
-        ax.plot(*g, marker='o', color=c, markersize=3, mew=0.9,
-                 markerfacecolor='none', markeredgecolor=c, alpha=0.85, zorder=6)
-        ax.plot(*r, marker='+', color=c, markersize=5, mew=1.1,
-                 zorder=7)
-
-    # summary err
-    err_hyp = np.linalg.norm(uv_hat[idx] - uv_gt[idx], axis=-1).mean()
-    err_rec = np.linalg.norm(uv_rec[idx] - uv_gt[idx], axis=-1).mean()
-    ax.set_title(f'{title}  hyp {err_hyp:.2f} → rec {err_rec:.2f} px',
-                 fontsize=9, loc='left')
+    return np.stack([(uv_full[:, 0] - u0) * img_size / cw,
+                     (uv_full[:, 1] - v0) * img_size / ch], axis=1)
 
 
-def T_AB_hat_inv_like_w2c(T, scn):
-    # dummy helper; not used, left for docstring
-    return T
-
-
-def run_pair(model, scn, fi_A, fi_B, rng, out_dim, sigma_ypr, sigma_t, img_size=64):
-    s = make_pair(scn, rng, fi_A, fi_B, img_size, 256, sigma_ypr, sigma_t, (128, 256))
+def run_pair(model, scn, fi_A, fi_B, rng, out_dim, sigma_ypr, sigma_t):
+    s = make_pair(scn, rng, fi_A, fi_B, IMG_SIZE, 256, sigma_ypr, sigma_t, (128, 256))
     if s is None: return None
     raw = infer_batch(model, [s])[0]
     N = s['N_valid']
@@ -137,14 +77,95 @@ def run_pair(model, scn, fi_A, fi_B, rng, out_dim, sigma_ypr, sigma_t, img_size=
     Sigma[:, 0, 0] = sx * sx; Sigma[:, 1, 1] = sy * sy
     Sigma[:, 0, 1] = Sigma[:, 1, 0] = rho * sx * sy
 
-    res = ba_recover(s, mu, Sigma,
-                     delta_d_pred=delta_d, sigma_d_pred=sigma_d)
+    res = ba_recover(s, mu, Sigma, delta_d_pred=delta_d, sigma_d_pred=sigma_d)
     if res is None: return None
-    θ, _ = res
-    δT = _ypr_t_to_mat(θ[:3], θ[3:6])
-    T_rec = δT @ s['T_AB_hat']
+    theta, _ = res
+    dT = _ypr_t_to_mat(theta[:3], theta[3:6])
+    T_rec = dT @ s['T_AB_hat']
 
-    return dict(sample=s, T_rec=T_rec)
+    # Compute patch-local uv for hyp / gt / rec, using the same box_B-to-local scale
+    pts_A_cam = s['P_A_cam'][:N]
+    homo = np.concatenate([pts_A_cam, np.ones((N, 1))], axis=1)
+    K = s['K']
+
+    def proj_full(T):
+        Q = (homo @ T.T)[:, :3]
+        uv = (K @ Q.T)[:2] / np.clip(Q[:, 2], 1e-6, None)
+        return uv.T, Q[:, 2]
+
+    uv_hat_full, _ = proj_full(s['T_AB_hat'])
+    uv_rec_full, _ = proj_full(T_rec)
+    uv_gt_full,  _ = proj_full(s['T_AB_gt'])
+
+    box_B = s['box_B']
+    uv_hat_l = full_to_local_B(uv_hat_full, box_B)
+    uv_rec_l = full_to_local_B(uv_rec_full, box_B)
+    uv_gt_l  = full_to_local_B(uv_gt_full,  box_B)
+
+    uv_A_l = s['uvd_A'][:N, :2].numpy()
+
+    # keep points whose hyp & gt & rec are inside the 64×64 local patch
+    def in_patch(uv):
+        return ((uv[:, 0] >= 0) & (uv[:, 0] < IMG_SIZE) &
+                (uv[:, 1] >= 0) & (uv[:, 1] < IMG_SIZE))
+    m_in = in_patch(uv_hat_l) & in_patch(uv_rec_l) & in_patch(uv_gt_l) & in_patch(uv_A_l)
+
+    return dict(sample=s, uv_A_l=uv_A_l, uv_hat_l=uv_hat_l, uv_rec_l=uv_rec_l,
+                uv_gt_l=uv_gt_l, in_mask=m_in, N=N)
+
+
+def draw_pair_panel(fig, ax_A, ax_B, r, tag, k_show=8):
+    s = r['sample']
+    pA = (s['patch_A'].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    pB = (s['patch_B'].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    ax_A.imshow(pA); ax_A.set_xticks([]); ax_A.set_yticks([])
+    ax_B.imshow(pB); ax_B.set_xticks([]); ax_B.set_yticks([])
+
+    idx = np.where(r['in_mask'])[0]
+    if len(idx) == 0:
+        ax_A.set_title(f'{tag} (no co-visible pts)', fontsize=10, loc='left'); return
+    if len(idx) > k_show:
+        step = max(1, len(idx) // k_show)
+        idx = idx[::step][:k_show]
+
+    cmap = cm.get_cmap('tab10')
+    for k, i in enumerate(idx):
+        c = cmap(k % 10)
+        xa, ya = r['uv_A_l'][i]
+        xh, yh = r['uv_hat_l'][i]
+        xr, yr = r['uv_rec_l'][i]
+        xg, yg = r['uv_gt_l'][i]
+
+        # A: numbered filled dot
+        ax_A.plot(xa, ya, 'o', color=c, markersize=6, markeredgecolor='white',
+                   mew=0.8, zorder=5)
+        ax_A.annotate(str(k), (xa, ya), ha='center', va='center',
+                       fontsize=7, color='black', weight='bold', zorder=6)
+
+        # cross-panel dotted line A●→B○ (GT correspondence)
+        fig.add_artist(ConnectionPatch(
+            xyA=(xa, ya), xyB=(xg, yg),
+            coordsA='data', coordsB='data',
+            axesA=ax_A, axesB=ax_B,
+            color=c, lw=0.5, ls=':', alpha=0.45, zorder=3))
+
+        # B: in-panel thin lines showing BA correction direction (× → +) and
+        # residual to GT (+ → ○)
+        ax_B.plot([xh, xr], [yh, yr], color=c, lw=0.8, alpha=0.6, zorder=4)
+        ax_B.plot([xr, xg], [yr, yg], color=c, lw=0.6, alpha=0.45,
+                   linestyle=':', zorder=4)
+        # markers (small)
+        ax_B.plot(xh, yh, 'x', color=c, markersize=5, mew=1.0, alpha=0.65, zorder=5)
+        ax_B.plot(xg, yg, 'o', color=c, markersize=4, markeredgecolor=c,
+                   markerfacecolor='none', mew=0.9, alpha=0.9, zorder=6)
+        ax_B.plot(xr, yr, '+', color=c, markersize=7, mew=1.3, zorder=7)
+
+    # summary errors
+    err_hyp = np.linalg.norm(r['uv_hat_l'][idx] - r['uv_gt_l'][idx], axis=-1).mean()
+    err_rec = np.linalg.norm(r['uv_rec_l'][idx] - r['uv_gt_l'][idx], axis=-1).mean()
+    ax_A.set_title(f'A  {tag}', fontsize=9, loc='left')
+    ax_B.set_title(f'B  hyp {err_hyp:.2f} → rec {err_rec:.2f} px   '
+                   f'(× hyp, ○ GT, + BA-rec)', fontsize=9, loc='left')
 
 
 def main(args):
@@ -152,7 +173,6 @@ def main(args):
     model, out_dim = load_model(ckpt)
     print(f'loaded {ckpt.name}  out_dim={out_dim}')
 
-    # use PandaSet val scenes, same split as training (seed=42)
     import random as _r
     root = Path('/mnt/mininas/datasets/pandaset')
     names = sorted([p.name for p in root.iterdir() if p.is_dir() and p.name.isdigit()])
@@ -162,58 +182,49 @@ def main(args):
     val_roots = shuffled[cutoff:]
     scenes = []
     for sr in val_roots[:6]:
-        scn = _SceneData(Path(sr)); scn.precompute_all(preload_images=True); scenes.append(scn)
+        scn = _SceneData(Path(sr)); scn.precompute_all(preload_images=False); scenes.append(scn)
 
     rng = np.random.default_rng(args.seed)
     n_rows = args.n_pairs
 
-    fig, axes = plt.subplots(n_rows, 2, figsize=(12, 5 * n_rows), dpi=130)
+    # Grid: for each pair, 4 columns:  A_perturbed | B_perturbed | A_identity | B_identity
+    fig, axes = plt.subplots(n_rows, 4, figsize=(16, 4.2 * n_rows), dpi=140)
     fig.patch.set_facecolor('#f6f4ed')
     if n_rows == 1: axes = axes[None, :]
 
     row = 0; tries = 0
-    while row < n_rows and tries < n_rows * 5:
+    while row < n_rows and tries < n_rows * 8:
         tries += 1
         scn = scenes[int(rng.integers(len(scenes)))]
         bl = int(rng.integers(args.baseline_min, args.baseline_max + 1)) * int(rng.choice([-1, 1]))
         fi_A = int(rng.integers(5, scn.n_frames - abs(bl) - 5))
         fi_B = fi_A + bl
 
-        # LEFT: perturbed
         rng_p = np.random.default_rng(rng.integers(2**31))
         left = run_pair(model, scn, fi_A, fi_B, rng_p, out_dim,
                          sigma_ypr=1.0, sigma_t=0.20)
-        # RIGHT: no perturbation
-        rng_np = np.random.default_rng(rng.integers(2**31))
-        right = run_pair(model, scn, fi_A, fi_B, rng_np, out_dim,
+        rng_n = np.random.default_rng(rng.integers(2**31))
+        right = run_pair(model, scn, fi_A, fi_B, rng_n, out_dim,
                           sigma_ypr=0.0, sigma_t=0.0)
         if left is None or right is None: continue
+        if left['in_mask'].sum() < 4 or right['in_mask'].sum() < 4: continue
 
-        s_l, s_r = left['sample'], right['sample']
-        image_B = scn.load_image(fi_B)
-        K = s_l['K']
-        pts_A_l = s_l['P_A_cam'][:s_l['N_valid']]
-        pts_A_r = s_r['P_A_cam'][:s_r['N_valid']]
-
-        one_panel(axes[row, 0], image_B, pts_A_l, scn,
-                   s_l['T_AB_hat'], left['T_rec'], s_l['T_AB_gt'],
-                   s_l['box_B'], 64, K,
-                   title=f'scene {scn.root.name}  fi {fi_A}→{fi_B}  perturbed (σ 1°/0.2m)')
-        one_panel(axes[row, 1], image_B, pts_A_r, scn,
-                   s_r['T_AB_hat'], right['T_rec'], s_r['T_AB_gt'],
-                   s_r['box_B'], 64, K,
-                   title=f'scene {scn.root.name}  fi {fi_A}→{fi_B}  no-perturb (σ=0)')
+        draw_pair_panel(fig, axes[row, 0], axes[row, 1], left,
+                        tag=f'scn {scn.root.name} fi {fi_A}→{fi_B}  σ=1°/0.2m')
+        draw_pair_panel(fig, axes[row, 2], axes[row, 3], right,
+                        tag=f'(identity σ=0)')
         row += 1
 
     plt.suptitle(
-        f'{ckpt.name} — BA reprojection check   '
-        f'× hyp   ● = BA-recovered (+)   ○ = GT\n'
-        f'LEFT: perturbed.  RIGHT: hyp=GT identity check (any offset = learned dataset bias).',
-        fontsize=12, y=0.998)
+        f'{ckpt.name} — BA reprojection (patch A | patch B)  '
+        f'× hyp   ○ GT   + BA-rec\n'
+        f'LEFT 2 cols = perturbed eval.  RIGHT 2 cols = hyp==GT identity '
+        f'(any + offset from ○ is the learned dataset bias).',
+        fontsize=11, y=0.998)
     plt.tight_layout()
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out, dpi=130, bbox_inches='tight', facecolor='#f6f4ed')
+    plt.savefig(out, dpi=140, bbox_inches='tight', facecolor='#f6f4ed')
     print(f'saved → {out}')
 
 
