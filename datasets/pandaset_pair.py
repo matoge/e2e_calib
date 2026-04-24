@@ -194,11 +194,17 @@ class PandaSetCrossFrameDataset(Dataset):
         self.rng = np.random.default_rng(seed)
 
         # ── resolve scene list ──
+        # scenes_root can be a single path or a comma-separated list of roots
+        # (for mixing PandaSet + Waymo-converted scenes).
         if scene_roots is None and scenes_root is not None:
-            root = Path(scenes_root)
-            scene_names = sorted([p.name for p in root.iterdir()
-                                   if p.is_dir() and p.name.isdigit()])
-            scene_roots = [str(root / name) for name in scene_names]
+            roots = [Path(r) for r in str(scenes_root).split(',')]
+            scene_roots = []
+            for root in roots:
+                # A scene is any direct child dir containing the expected layout.
+                # (Relaxed from `.name.isdigit()` so Waymo segment names work.)
+                for p in sorted(root.iterdir()):
+                    if p.is_dir() and (p / 'camera/front_camera/intrinsics.json').exists():
+                        scene_roots.append(str(p))
         elif scene_roots is None and scene_root is not None:
             # legacy single scene: use whole scene for requested split
             scene_roots = [scene_root]
