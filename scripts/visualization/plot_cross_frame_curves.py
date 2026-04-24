@@ -156,6 +156,14 @@ def main(args):
     fig.write_html(frag, include_plotlyjs=False, full_html=False)
     print(f'saved fragment → {frag}')
 
+    # static PNG for Confluence / places where plotly JS can't run
+    png = out.with_suffix('.png')
+    try:
+        fig.write_image(str(png), width=1200, height=820, scale=2)
+        print(f'saved PNG → {png}')
+    except Exception as e:
+        print(f'PNG export skipped ({e}); install kaleido to enable')
+
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
