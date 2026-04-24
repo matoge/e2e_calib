@@ -1,0 +1,22 @@
+{
+  "name": "v04_multi39",
+  "full": true,
+  "scene": "/mnt/mininas/datasets/pandaset/015",
+  "scenes_root": "/mnt/mininas/datasets/pandaset",
+  "train_frac": 0.8,
+  "img_size": 64,
+  "max_points": 256,
+  "batch_size": 32,
+  "lr": 0.001,
+  "n_overfit": 64,
+  "epochs": 60,
+  "log_every": 2,
+  "baseline_min": 1,
+  "baseline_max": 20,
+  "sigma_ypr": 1.0,
+  "sigma_t": 0.2,
+  "crop_min": 64,
+  "crop_max": 192,
+  "num_workers": 8,
+  "virtual_epoch": 4000
+}

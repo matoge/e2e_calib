@@ -21,6 +21,10 @@ Architecture:
 
 Output head takes [token, uv_hat_01] so the predicted Δ is a correction on the
 hypothesis projection. Dual-direction loss: A→B + B→A.
+
+deform_mode='sl' uses MSDeformAttn for the image part of KV (4 sampled
+locations per query, anchored at uv_hat_01). The pt part of KV uses standard
+attention since it's already sparse.
 """
 import torch
 import torch.nn as nn
@@ -76,7 +80,7 @@ class PoseMLP(nn.Module):
         return self.net(torch.cat([ypr, t], dim=-1))
 
 
-# ─── cross-frame block ────────────────────────────────────────────────────────
+# ─── cross-frame block (standard) ────────────────────────────────────────────
 
 class CrossFrameBlock(nn.Module):
     """Cross-attention A-query → B-KV (or vice versa).
@@ -118,16 +122,83 @@ class CrossFrameBlock(nn.Module):
         return q, raw
 
 
+# ─── cross-frame block (deformable image side) ───────────────────────────────
+
+class CrossFrameBlockDeform(nn.Module):
+    """Cross-frame block where the IMAGE part of KV is queried via MSDeformAttn
+    (per-query 4 sampled offsets, anchored at uv_hat_01) and the POINT part of
+    KV is queried via standard cross-attn (already sparse).
+
+    The two attention outputs are residually added on top of the query, then
+    a self-attn over the queries and FFN finish the block, same as
+    CrossFrameBlock.
+    """
+
+    def __init__(self, d: int = D_DIM, n_heads: int = 4, n_points: int = 4):
+        super().__init__()
+        from models.model_deform import MSDeformAttn
+        self.deform_img = MSDeformAttn(d_model=d, n_levels=1, n_heads=n_heads,
+                                        n_points=n_points)
+        self.cross_pt   = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+        self.norm_q_img = nn.LayerNorm(d)
+        self.norm_q_pt  = nn.LayerNorm(d)
+        self.norm_kv_img = nn.LayerNorm(d)
+        self.norm_kv_pt  = nn.LayerNorm(d)
+        self.norm_sa  = nn.LayerNorm(d)
+        self.norm_ffn = nn.LayerNorm(d)
+        self.self_attn = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+        self.ffn = nn.Sequential(
+            nn.Linear(d, d * 2), nn.GELU(), nn.Dropout(0.1), nn.Linear(d * 2, d),
+        )
+        self.drop = nn.Dropout(0.1)
+        self.proj = nn.Linear(d + 2, 5)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        with torch.no_grad():
+            self.proj.bias[2] = 0.69
+            self.proj.bias[3] = 0.69
+
+    def forward(self, q, kv_pt, img_2d, uv_hat_01,
+                q_pad_mask=None, kv_pt_pad_mask=None):
+        B, D_, H, W = img_2d.shape
+        kv_img_flat = img_2d.flatten(2).permute(0, 2, 1)
+        ref = uv_hat_01.unsqueeze(2).clamp(0.0, 1.0)               # (B, N, 1, 2)
+        spatial_shapes = torch.as_tensor([[H, W]], dtype=torch.long, device=img_2d.device)
+        level_start_index = torch.as_tensor([0], dtype=torch.long, device=img_2d.device)
+
+        # Deformable on image
+        ca_img = self.deform_img(self.norm_q_img(q), ref,
+                                  self.norm_kv_img(kv_img_flat),
+                                  spatial_shapes, level_start_index,
+                                  input_padding_mask=None)
+        # Standard on points
+        ca_pt, _ = self.cross_pt(self.norm_q_pt(q),
+                                  self.norm_kv_pt(kv_pt),
+                                  self.norm_kv_pt(kv_pt),
+                                  key_padding_mask=kv_pt_pad_mask)
+        q = q + self.drop(ca_img) + self.drop(ca_pt)
+
+        sa, _ = self.self_attn(self.norm_sa(q), self.norm_sa(q), self.norm_sa(q),
+                                key_padding_mask=q_pad_mask)
+        q = q + self.drop(sa)
+        q = q + self.ffn(self.norm_ffn(q))
+        raw = self.proj(torch.cat([q, uv_hat_01], dim=-1))
+        return q, raw
+
+
 # ─── full model ───────────────────────────────────────────────────────────────
 
 class CalibNetCrossFrame(nn.Module):
     def __init__(self, d: int = D_DIM, img_size: int = 64, in_channels: int = 3,
                  use_convnext: bool = True, use_frustum: bool = True,
                  r_uv: float = 8.0, r_d: float = 0.004, k_nb: int = 8,
-                 n_intra_layers: int = 2, n_cross_layers: int = 1):
+                 n_intra_layers: int = 2, n_cross_layers: int = 1,
+                 deform_mode: str = 'none', deform_n_points: int = 4):
         super().__init__()
+        assert deform_mode in ('none', 'sl'), f'deform_mode must be none/sl, got {deform_mode}'
         self.img_size = img_size
         self.d = d
+        self._deform_mode = deform_mode
 
         # shared per-frame encoder
         self.cnn = (ConvNeXtBackbone(d, in_channels=in_channels)
@@ -144,9 +215,14 @@ class CalibNetCrossFrame(nn.Module):
         self.pose_mlp = PoseMLP(d)
 
         # cross-frame stack
-        self.cross_blocks = nn.ModuleList(
-            [CrossFrameBlock(d) for _ in range(n_cross_layers)]
-        )
+        if deform_mode == 'sl':
+            self.cross_blocks = nn.ModuleList(
+                [CrossFrameBlockDeform(d, n_points=deform_n_points) for _ in range(n_cross_layers)]
+            )
+        else:
+            self.cross_blocks = nn.ModuleList(
+                [CrossFrameBlock(d) for _ in range(n_cross_layers)]
+            )
 
     # ------------------------------------------------------------------ helpers
 
@@ -155,7 +231,8 @@ class CalibNetCrossFrame(nn.Module):
 
         Returns:
             pt_tok  : (B, N_pt, D)   — point-derived tokens after fusion
-            img_tok : (B, N_img, D)  — image-derived tokens after fusion
+            img_tok : (B, N_img, D)  — image-derived tokens after fusion (flat)
+            img_2d  : (B, D, H, W)   — same as img_tok but reshaped (for deform)
         """
         coarse, _ = self.cnn(image)                         # coarse: (B, D, H/8, W/8)
         B, D_, Hc, Wc = coarse.shape
@@ -186,12 +263,23 @@ class CalibNetCrossFrame(nn.Module):
         # Split back
         pt_tok_out  = combined[:, :N_pt]
         img_tok_out = combined[:, N_pt:]
-        return pt_tok_out, img_tok_out
+        # 2D form of fused image tokens for deformable attention
+        img_2d_out  = img_tok_out.permute(0, 2, 1).reshape(B, D_, Hc, Wc).contiguous()
+        return pt_tok_out, img_tok_out, img_2d_out
 
     def _cross_forward(self, q_in, kv, uv_hat_01, q_pad=None, kv_pad=None):
         raw_cum = None
         for blk in self.cross_blocks:
             q_in, raw = blk(q_in, kv, uv_hat_01, q_pad_mask=q_pad, kv_pad_mask=kv_pad)
+            raw_cum = raw if raw_cum is None else raw_cum + raw
+        return raw_cum
+
+    def _cross_forward_deform(self, q_in, kv_pt, img_2d, uv_hat_01,
+                                q_pad=None, kv_pt_pad=None):
+        raw_cum = None
+        for blk in self.cross_blocks:
+            q_in, raw = blk(q_in, kv_pt, img_2d, uv_hat_01,
+                             q_pad_mask=q_pad, kv_pt_pad_mask=kv_pt_pad)
             raw_cum = raw if raw_cum is None else raw_cum + raw
         return raw_cum
 
@@ -203,8 +291,8 @@ class CalibNetCrossFrame(nn.Module):
                 pad_A=None, pad_B=None):
         """Returns (raw_AtoB (B,N_A,5), raw_BtoA (B,N_B,5))."""
         # 1. intra-frame encode (shared weights)
-        pt_A, img_A = self._encode_frame(patch_A, uvd_A, pad_A)
-        pt_B, img_B = self._encode_frame(patch_B, uvd_B, pad_B)
+        pt_A, img_A_flat, img_A_2d = self._encode_frame(patch_A, uvd_A, pad_A)
+        pt_B, img_B_flat, img_B_2d = self._encode_frame(patch_B, uvd_B, pad_B)
 
         # 2. pose embeddings
         pose_emb_AB = self.pose_mlp(pose_AB_6dof).unsqueeze(1)     # (B, 1, D)
@@ -212,19 +300,29 @@ class CalibNetCrossFrame(nn.Module):
 
         # 3. A → B
         q_A = pt_A + pose_emb_AB
-        kv_AB = torch.cat([pt_B, img_B], dim=1)
-        kv_pad_AB = self._make_kv_pad(pad_B, img_B.shape[1])
-        raw_AtoB = self._cross_forward(
-            q_A, kv_AB, uv_B_hat_of_A / self.img_size,
-            q_pad=pad_A, kv_pad=kv_pad_AB)
+        if self._deform_mode == 'sl':
+            raw_AtoB = self._cross_forward_deform(
+                q_A, pt_B, img_B_2d, uv_B_hat_of_A / self.img_size,
+                q_pad=pad_A, kv_pt_pad=pad_B)
+        else:
+            kv_AB = torch.cat([pt_B, img_B_flat], dim=1)
+            kv_pad_AB = self._make_kv_pad(pad_B, img_B_flat.shape[1])
+            raw_AtoB = self._cross_forward(
+                q_A, kv_AB, uv_B_hat_of_A / self.img_size,
+                q_pad=pad_A, kv_pad=kv_pad_AB)
 
         # 4. B → A
         q_B = pt_B + pose_emb_BA
-        kv_BA = torch.cat([pt_A, img_A], dim=1)
-        kv_pad_BA = self._make_kv_pad(pad_A, img_A.shape[1])
-        raw_BtoA = self._cross_forward(
-            q_B, kv_BA, uv_A_hat_of_B / self.img_size,
-            q_pad=pad_B, kv_pad=kv_pad_BA)
+        if self._deform_mode == 'sl':
+            raw_BtoA = self._cross_forward_deform(
+                q_B, pt_A, img_A_2d, uv_A_hat_of_B / self.img_size,
+                q_pad=pad_B, kv_pt_pad=pad_A)
+        else:
+            kv_BA = torch.cat([pt_A, img_A_flat], dim=1)
+            kv_pad_BA = self._make_kv_pad(pad_A, img_A_flat.shape[1])
+            raw_BtoA = self._cross_forward(
+                q_B, kv_BA, uv_A_hat_of_B / self.img_size,
+                q_pad=pad_B, kv_pad=kv_pad_BA)
 
         return (clamp_params(raw_AtoB, self.img_size),
                 clamp_params(raw_BtoA, self.img_size))

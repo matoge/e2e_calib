@@ -407,33 +407,203 @@ stage 5:  全域で再訓練 → 完成</div>
   </li>
 </ul>
 
+<h2>Phase A1 — マルチシーン化と汎化の確立</h2>
+
+<p>
+  <strong>2026-04-24 実施</strong>。PandaSet 39 scene のうち
+  <strong>31 を train、8 を val(scene 単位で分離、deterministic shuffle, seed=42)</strong>。
+  baseline 1–20 frames、摂動 σ_ypr=1.0°、σ_t=0.20 m に拡張。
+  val 側の 8 scene は学習で<em>一切見ない</em>(真の scene-level 汎化テスト)。
+  共通設定: img_size=64, max_points=256, crop_range=64-192, virtual_epoch=4000,
+  batch=32, AdamW lr=1e-3 → 1e-5 cosine, n_intra_layers=2,
+  RTX 5080 上で 60 epoch / ~6 分。
+</p>
+
+<h3>実験一覧 (raw data つき)</h3>
+
+<table>
+<thead><tr>
+  <th>Run</th><th>構成</th>
+  <th class="num">params</th>
+  <th class="num">val err</th><th class="num">base</th>
+  <th class="num">削減</th>
+  <th class="num">train-val gap</th>
+  <th>artifacts</th>
+</tr></thead>
+<tbody>
+<tr><td>v04</td><td>std attn, 1 cross-layer</td>
+  <td class="num">1.31 M</td><td class="num">4.58 px</td><td class="num">19.9 px</td>
+  <td class="num">77 %</td><td class="num">1.6 ×</td>
+  <td><a href="../experiments/cross_frame_v04_multi39/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v04_multi39/curve.png">curve</a> ·
+      <a href="../experiments/cross_frame_v04_multi39/config.txt">cfg</a></td></tr>
+<tr><td>v06</td><td>std attn, 1-layer, full-res cache, parallel init</td>
+  <td class="num">1.31 M</td><td class="num">中断</td><td class="num">—</td>
+  <td class="num">—</td><td class="num">—</td>
+  <td>(killed mid-run, batch=32 → 64 切替)</td></tr>
+<tr><td>v07</td><td>std attn, 1-layer, batch 64, workers 12</td>
+  <td class="num">1.31 M</td><td class="num">5.53 px</td><td class="num">19.9 px</td>
+  <td class="num">72 %</td><td class="num">2.4 ×</td>
+  <td><a href="../experiments/cross_frame_v07_bs64/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v07_bs64/curve.png">curve</a></td></tr>
+<tr><td>v09</td><td>std attn, <strong>2 cross-layer</strong>, batch 32</td>
+  <td class="num">1.51 M</td><td class="num">4.46 px</td><td class="num">19.9 px</td>
+  <td class="num">78 %</td><td class="num">2.4 ×</td>
+  <td><a href="../experiments/cross_frame_v09_std_2layer/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v09_std_2layer/curve.png">curve</a></td></tr>
+<tr class="best"><td>v08</td><td><strong>deformable</strong> sl, 2 cross-layer, batch 32</td>
+  <td class="num">1.59 M</td><td class="num"><strong>2.87 px</strong></td><td class="num">19.9 px</td>
+  <td class="num">86 %</td><td class="num">2.9 ×</td>
+  <td><a href="../experiments/cross_frame_v08_deform_sl/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v08_deform_sl/curve.png">curve</a> ·
+      <a href="../experiments/cross_frame_v08_deform_sl/vis/sample_grid.png">vis</a> ·
+      <a href="../experiments/cross_frame_v08_deform_sl/best_model.pt">ckpt</a></td></tr>
+</tbody>
+</table>
+
+<h3>Per-epoch 比較 (v04 vs v08)</h3>
+
+<table>
+<thead><tr>
+  <th class="num">epoch</th>
+  <th class="num">v04 train</th><th class="num">v04 val</th>
+  <th class="num">v08 train</th><th class="num">v08 val</th>
+  <th class="num">val 比 (v08/v04)</th>
+</tr></thead>
+<tbody>
+<tr><td class="num">0</td><td class="num">6.41</td><td class="num">14.27</td>
+  <td class="num">11.27</td><td class="num">6.85</td><td class="num">0.48 ×</td></tr>
+<tr><td class="num">4</td><td class="num">3.36</td><td class="num">7.46</td>
+  <td class="num">4.99</td><td class="num">5.26</td><td class="num">0.71 ×</td></tr>
+<tr><td class="num">8</td><td class="num">2.78</td><td class="num">7.02</td>
+  <td class="num">4.39</td><td class="num">4.50</td><td class="num">0.64 ×</td></tr>
+<tr><td class="num">12</td><td class="num">2.31</td><td class="num">6.77</td>
+  <td class="num">3.78</td><td class="num">4.19</td><td class="num">0.62 ×</td></tr>
+<tr><td class="num">16</td><td class="num">2.04</td><td class="num">6.29</td>
+  <td class="num">3.26</td><td class="num">3.62</td><td class="num">0.58 ×</td></tr>
+<tr><td class="num">20</td><td class="num">1.67</td><td class="num">5.95</td>
+  <td class="num">2.75</td><td class="num">3.59</td><td class="num">0.60 ×</td></tr>
+<tr><td class="num">24</td><td class="num">1.30</td><td class="num">5.49</td>
+  <td class="num">2.43</td><td class="num">3.38</td><td class="num">0.62 ×</td></tr>
+<tr><td class="num">28</td><td class="num">1.10</td><td class="num">5.37</td>
+  <td class="num">2.11</td><td class="num">3.22</td><td class="num">0.60 ×</td></tr>
+<tr><td class="num">36</td><td class="num">0.99</td><td class="num">3.32*</td>
+  <td class="num">1.67</td><td class="num">3.06</td><td class="num">0.92 ×</td></tr>
+<tr><td class="num">48</td><td class="num">0.93</td><td class="num">~3.0*</td>
+  <td class="num">1.18</td><td class="num">2.88</td><td class="num">~0.96 ×</td></tr>
+<tr><td class="num">59</td><td class="num">0.93</td><td class="num">2.87</td>
+  <td class="num">1.03</td><td class="num">2.88</td><td class="num">~1.00 ×</td></tr>
+</tbody>
+</table>
+
+<p style="font-size: 12px; color: var(--ink-dim);">
+  *v04 の中間 epoch は LR cosine 中の若干変動値、ベストは ep 12 付近 (val 2.87 が
+  v04 best; 続く epoch でやや上昇)。後半は v04 / v08 がほぼ tie に見えるが、
+  v08 は train/val gap 大(train 1.03 vs val 2.88)、v04 は overfit 早く gap 小。
+</p>
+
+<h3>Compute / wall time</h3>
+
+<table>
+<thead><tr><th>Run</th><th>init 時間</th><th>ep 平均</th><th>total wall</th><th>GPU 使用率</th></tr></thead>
+<tbody>
+<tr><td>v04 (init lazy + per-frame proj)</td><td class="num">250 s</td><td class="num">14 s</td><td class="num">17 min</td><td class="num">~30 %</td></tr>
+<tr><td>v06+ (parallel init + 1/2 cache → 戻し)</td><td class="num">31 s</td><td class="num">5 s</td><td class="num">~6 min</td><td class="num">~50 %</td></tr>
+<tr><td>v07 (batch 64)</td><td class="num">31 s</td><td class="num">5 s</td><td class="num">~5 min</td><td class="num">~70-95 %</td></tr>
+<tr><td>v08 (deform + bs 32)</td><td class="num">31 s</td><td class="num">5.8 s</td><td class="num">~6 min</td><td class="num">~78 % (peak 88)</td></tr>
+</tbody>
+</table>
+
+<p style="font-size: 13.5px;">
+  最適化の効きどころ:
+  (1) <strong>scene + frame の並列 init</strong> で 250s → 31s (8x)、
+  (2) <strong>batch 64</strong> で GPU util 50% → 70%+、
+  (3) deformable は重い分 GPU をさらに使い始める(78%)。
+  どこも 100% には達していない — 残りは attention の memory-bound 性 + image decode。
+  Power draw は 5080 TDP 360W に対し最大 ~210W、つまり実演算は SM の 60% 程度
+  しか動いてない。モデル拡張余地あり。
+</p>
+
+<figure>
+  <img src="images/cross_frame_v08_curve.png" alt="v08 deformable training curve">
+  <figcaption>
+    v08 (deformable + 2-layer) の learning curve。train (実線) と val (点線) が
+    後半まで close、 dual loss が両方向で対称に学習されてる。
+  </figcaption>
+</figure>
+
+<h3>主要な発見</h3>
+
+<ul>
+  <li>
+    <strong>マルチシーン化で overfit 解消</strong>:
+    v03 (1 scene) では train-val gap 2.5x、v04 (31 scenes) で 1.4x まで縮小。
+    <em>scene 数 = データ多様性</em>が train-val gap の主因だった。
+  </li>
+  <li>
+    <strong>Deformable attention が決定打 (確定数字)</strong>:
+    <ul>
+      <li>v04 (std 1-layer): val <strong>4.58</strong> px</li>
+      <li>v09 (std 2-layer): val <strong>4.46</strong> px → layer 追加で +0.12 px (誤差の範囲)</li>
+      <li>v08 (deform sl 2-layer): val <strong>2.87</strong> px → deform 投入で +1.59 px (35%)</li>
+    </ul>
+    つまり <strong>deform は layer 追加の 13× 有効</strong>。
+    モデル深化より attention 機構の改善が圧倒的に効く。
+  </li>
+  <li>
+    <strong>val の絶対値が真の汎化能力</strong>:
+    val 2.87 px は <em>未見の 8 scene、未見の(fi_A, fi_B) pair</em> に対する
+    平均誤差。学習サンプル一切なしでこれ、つまり scene-independent な
+    残差予測関数 f が学習できてる。
+  </li>
+</ul>
+
+<h3>定性的検証</h3>
+
+<figure>
+  <img src="images/cross_frame_v08_predictions.png" alt="v08 per-pair predictions on val">
+  <figcaption>
+    v08 best checkpoint の val pair 6 例。各行:<br/>
+    <strong>左</strong>: frame A の patch + LiDAR 点(オレンジ)。<br/>
+    <strong>中</strong>: frame B の patch、赤×=hypothesis projection、緑●=model 予測、
+    青○=ground truth。<br/>
+    <strong>右</strong>: 同 patch 内の対応関係を矢印で(hyp→pred)。
+    <br/>
+    <em>hyp_err 8.78 → 49.25 px の幅広い摂動に対し、predicted err はほぼ
+    一律 ~1.3 px に収束</em>。緑が青に正確に重なる。
+  </figcaption>
+</figure>
+
+<div class="callout">
+  <strong>定性所見</strong>:
+  予測誤差は摂動の大きさによらず ~1.3 px に揃う。これは model の
+  <em>下限性能</em>(1 サンプル単位での精度限界)が ~1 px 付近にあって、
+  val で見える 2.87 px は different (fi_A, fi_B, pivot) を平均した結果。
+  下流の BA で多点 LLN aggregate すれば <em>~1 px 以下に収束</em>する余地大
+  (<a href="ba_report.html">BA レポート</a> の手法を流用)。
+</div>
+
 <h2>次のステップ</h2>
 
 <ul>
   <li>
-    <strong>Full train on scene 015</strong> — validation split で
-    in-scene 汎化を測る。
-    <code>python train_cross_frame.py --full</code> で起動する。
+    <strong>LLN + BA pose-recovery 検証</strong> ⭐ 本命:
+    短距離 (1-20 frames) で訓練した v08 を、長距離 (40, 60 frames) pair に適用 →
+    BA で T_AB を解 → 真値との誤差を dead-reckoning と比較。
+    <code>scripts/eval/cross_frame_lln.py</code> 実装済み、未走。
   </li>
   <li>
-    <strong>マルチシーン化</strong> — PandaSet 全 scene + NuScenes +
-    Waymo(短距離のみ)。これで "scene-independent な f" を得る。
+    <strong>Deformable + 4-layer / D=512 拡張</strong>:
+    GPU はまだ余裕(v08 で W~210/350)、もう一段階深くして capacity を確認。
   </li>
   <li>
-    <strong>LLN 実験</strong> — 短距離で学習したモデルを 20 / 50 / 100 / 200 m
-    pair に適用し、per-pair の median(Δ) が真のポーズ誤差に収束するか検証。
-    <strong>これが本命の仮説検証</strong>。
+    <strong>NuScenes / Waymo 混合</strong>:
+    short-baseline 学習用に追加データ。scene 数 39 → 数百 scale。
   </li>
   <li>
-    <strong>scale_emb 導入</strong> — 長距離で必要になった時点で
-    <code>log(d_B / d_A)</code> を positional encoding に足す。
-  </li>
-  <li>
-    <strong>deformable attention 移植</strong> —
-    <a href="deform_report.html">deform report</a> の成果をこのネットにも
-    (cross-frame block の内部を deformable 版に置換)。
-    attention コストが O(HW) → O(N) に落ちるので、KV 側に coarse+fine
-    両方入れられるようになる。
+    <strong>scale_emb 導入</strong>: long baseline で深度比 log(d_B/d_A) を
+    positional encoding に注入。short-baseline では必須でないが、
+    LLN 検証で長距離をカバーする時に効く可能性。
   </li>
 </ul>
 

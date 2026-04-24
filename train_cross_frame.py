@@ -127,6 +127,9 @@ def main():
     ap.add_argument('--crop-max', type=int, default=192)
     ap.add_argument('--num-workers', type=int, default=8)
     ap.add_argument('--virtual-epoch', type=int, default=4000)
+    ap.add_argument('--deform-mode', default='none', choices=['none', 'sl'])
+    ap.add_argument('--n-cross-layers', type=int, default=1)
+    ap.add_argument('--n-intra-layers', type=int, default=2)
     args = ap.parse_args()
 
     out_dir = Path('experiments/cross_frame_' + args.name)
@@ -189,7 +192,12 @@ def main():
                                  persistent_workers=True, pin_memory=True)
 
     # model
-    model = CalibNetCrossFrame(img_size=args.img_size).to(DEVICE)
+    model = CalibNetCrossFrame(
+        img_size=args.img_size,
+        n_intra_layers=args.n_intra_layers,
+        n_cross_layers=args.n_cross_layers,
+        deform_mode=args.deform_mode,
+    ).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f'model params: {n_params/1e6:.3f} M')
 

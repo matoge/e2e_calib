@@ -105,10 +105,22 @@ class _SceneData:
 
     # ------------------------------------------------------------------ helpers
 
+    # image cache stores FULL-resolution pre-decoded arrays (default).
+    # Set img_scale_div > 1 only when memory pressure forces it; quality is
+    # the priority for cross-frame matching.
+    img_scale_div: int = 1     # 1 = full res, 2 = 1/2, 4 = 1/4
+
     def load_image(self, fi):
         if fi not in self._img_cache:
             with Image.open(self.image_paths[fi]) as im:
-                self._img_cache[fi] = np.array(im.convert('RGB'))
+                arr = np.array(im.convert('RGB'))
+            if self.img_scale_div > 1:
+                H, W = arr.shape[:2]
+                h = H // self.img_scale_div
+                w = W // self.img_scale_div
+                # fast downsample via PIL (SIMD-optimised)
+                arr = np.array(Image.fromarray(arr).resize((w, h), Image.BILINEAR))
+            self._img_cache[fi] = arr
         return self._img_cache[fi]
 
     def frame_data(self, fi):
@@ -123,10 +135,21 @@ class _SceneData:
             self._frame_cache[fi] = (pts_w, uv, z, in_view)
         return self._frame_cache[fi]
 
-    def precompute_all(self):
-        """Eagerly compute per-frame projections for every frame."""
-        for fi in range(self.n_frames):
-            self.frame_data(fi)
+    def precompute_all(self, preload_images: bool = True, n_workers: int = 8):
+        """Eagerly compute per-frame projections (and optionally decode images),
+        in parallel via ThreadPoolExecutor (numpy + PIL release the GIL during
+        decode/projection so threads scale well).
+
+        With DataLoader workers, parent precomputes → workers fork via COW,
+        so the dataset is effectively read-only and disk I/O at training
+        time drops to zero.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        fis = list(range(self.n_frames))
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            list(ex.map(self.frame_data, fis))
+            if preload_images:
+                list(ex.map(self.load_image, fis))
 
 
 # ─── main dataset ────────────────────────────────────────────────────────────
@@ -198,12 +221,13 @@ class PandaSetCrossFrameDataset(Dataset):
         else:
             split_roots = scene_roots
 
-        print(f'[PandaSetCrossFrameDataset/{split}] loading {len(split_roots)} scenes…', flush=True)
-        self.scenes: List[_SceneData] = []
-        for sr in split_roots:
+        from concurrent.futures import ThreadPoolExecutor
+        print(f'[PandaSetCrossFrameDataset/{split}] loading {len(split_roots)} scenes (parallel)…',
+              flush=True)
+
+        def _load_scene(sr):
             scn = _SceneData(Path(sr))
-            scn.precompute_all()
-            # optional within-scene frame split (default: all frames used)
+            scn.precompute_all(n_workers=4)   # within-scene threads
             all_fi = list(range(scn.n_frames))
             if frame_train_frac < 1.0:
                 cutoff = int(scn.n_frames * frame_train_frac)
@@ -212,7 +236,13 @@ class PandaSetCrossFrameDataset(Dataset):
                                 else all_fi)
             else:
                 scn.fi_pool = all_fi
-            self.scenes.append(scn)
+            return scn
+
+        # ThreadPool over scenes; numpy + PIL release GIL during heavy work.
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            self.scenes: List[_SceneData] = list(ex.map(_load_scene, split_roots))
+
+        for scn in self.scenes:
             print(f'  · {scn.root.name}: {scn.n_frames} frames, pool={len(scn.fi_pool)}',
                   flush=True)
 
@@ -223,17 +253,29 @@ class PandaSetCrossFrameDataset(Dataset):
 
     # ------------------------------------------------------------------ helpers
 
-    def _crop_patch(self, img_full, u0, v0, s, IW, IH):
-        u0i, v0i = int(u0), int(v0)
-        u1i, v1i = u0i + int(s), v0i + int(s)
+    def _crop_patch(self, img_cached, u0_full, v0_full, s_full, IW, IH, scale_div):
+        """img_cached is at full_res / scale_div; u0/v0/s are in FULL-res px.
+        We do all coordinate bookkeeping in full-res and only convert to the
+        cache's lower resolution at the slice step.
+
+        Returns: (tensor (3, img_size, img_size), box in FULL-res px).
+        """
+        u0i, v0i = int(u0_full), int(v0_full)
+        u1i, v1i = u0i + int(s_full), v0i + int(s_full)
         u0i = max(0, u0i); v0i = max(0, v0i)
         u1i = min(IW, u1i); v1i = min(IH, v1i)
         if u1i - u0i < 2 or v1i - v0i < 2:
             return None
-        patch = img_full[v0i:v1i, u0i:u1i]
+        # Map to cache resolution. Cache is integer-scaled, so trivial division.
+        u0c, v0c = u0i // scale_div, v0i // scale_div
+        u1c, v1c = u1i // scale_div, v1i // scale_div
+        if u1c - u0c < 2 or v1c - v0c < 2:
+            return None
+        patch = img_cached[v0c:v1c, u0c:u1c]
         t = torch.from_numpy(patch).permute(2, 0, 1).float() / 255.0
         t = F.interpolate(t.unsqueeze(0), size=(self.img_size, self.img_size),
                            mode='bilinear', align_corners=False).squeeze(0)
+        # Return box in FULL-res px (so uv conversion stays consistent)
         return t, (u0i, v0i, u1i - u0i, v1i - v0i)
 
     def _uv_to_patch_local(self, uv_full, crop_box):
@@ -318,8 +360,8 @@ class PandaSetCrossFrameDataset(Dataset):
         v0_B = max(0, min(IH - CROP, uc_B_hat[1] - half))
         img_A_full = scn.load_image(fi_A)
         img_B_full = scn.load_image(fi_B)
-        pa = self._crop_patch(img_A_full, u0_A, v0_A, CROP, IW, IH)
-        pb = self._crop_patch(img_B_full, u0_B, v0_B, CROP, IW, IH)
+        pa = self._crop_patch(img_A_full, u0_A, v0_A, CROP, IW, IH, scn.img_scale_div)
+        pb = self._crop_patch(img_B_full, u0_B, v0_B, CROP, IW, IH, scn.img_scale_div)
         if pa is None or pb is None:
             return None
         patch_A, box_A = pa

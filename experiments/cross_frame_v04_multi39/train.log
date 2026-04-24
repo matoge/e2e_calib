@@ -1,0 +1,36 @@
+[08:09:41] device = cuda
+[08:09:41] args = {'name': 'v04_multi39', 'full': True, 'scene': '/mnt/mininas/datasets/pandaset/015', 'scenes_root': '/mnt/mininas/datasets/pandaset', 'train_frac': 0.8, 'img_size': 64, 'max_points': 256, 'batch_size': 32, 'lr': 0.001, 'n_overfit': 64, 'epochs': 60, 'log_every': 2, 'baseline_min': 1, 'baseline_max': 20, 'sigma_ypr': 1.0, 'sigma_t': 0.2, 'crop_min': 64, 'crop_max': 192, 'num_workers': 8, 'virtual_epoch': 4000}
+[08:12:10] model params: 1.313 M
+[08:14:21] ep   0  loss=8.605  err_AB=17.54px  err_BA=18.74px  (base=19.45px)  val_err=14.27px (base 19.90)  lr=9.99e-04  t=131s
+[08:15:59] ep   2  loss=4.868  err_AB=8.28px  err_BA=9.14px  (base=19.45px)  val_err=8.79px (base 19.90)  lr=9.94e-04  t=229s
+[08:18:28] ep   4  loss=4.519  err_AB=7.52px  err_BA=8.17px  (base=19.46px)  val_err=7.46px (base 19.90)  lr=9.83e-04  t=378s
+[08:19:52] ep   6  loss=4.425  err_AB=7.19px  err_BA=7.83px  (base=19.45px)  val_err=7.00px (base 19.90)  lr=9.67e-04  t=462s
+[08:20:49] ep   8  loss=4.217  err_AB=6.65px  err_BA=7.16px  (base=19.48px)  val_err=7.02px (base 19.90)  lr=9.46e-04  t=519s
+[08:21:27] ep  10  loss=4.193  err_AB=6.59px  err_BA=7.04px  (base=19.43px)  val_err=6.71px (base 19.90)  lr=9.20e-04  t=557s
+[08:22:02] ep  12  loss=4.048  err_AB=6.31px  err_BA=6.77px  (base=19.42px)  val_err=6.77px (base 19.90)  lr=8.90e-04  t=592s
+[08:22:19] ep  14  loss=4.013  err_AB=6.15px  err_BA=6.59px  (base=19.42px)  val_err=6.43px (base 19.90)  lr=8.55e-04  t=609s
+[08:22:36] ep  16  loss=3.943  err_AB=6.01px  err_BA=6.40px  (base=19.44px)  val_err=6.29px (base 19.90)  lr=8.17e-04  t=626s
+[08:22:56] ep  18  loss=3.831  err_AB=5.72px  err_BA=6.11px  (base=19.44px)  val_err=5.73px (base 19.90)  lr=7.75e-04  t=645s
+[08:23:12] ep  20  loss=3.679  err_AB=5.44px  err_BA=5.84px  (base=19.44px)  val_err=6.01px (base 19.90)  lr=7.30e-04  t=661s
+[08:23:21] ep  22  loss=3.657  err_AB=5.38px  err_BA=5.73px  (base=19.46px)  val_err=5.62px (base 19.90)  lr=6.82e-04  t=671s
+[08:23:33] ep  24  loss=3.499  err_AB=5.08px  err_BA=5.42px  (base=19.44px)  val_err=5.70px (base 19.90)  lr=6.33e-04  t=682s
+[08:23:43] ep  26  loss=3.424  err_AB=4.93px  err_BA=5.22px  (base=19.43px)  val_err=5.11px (base 19.91)  lr=5.82e-04  t=693s
+[08:23:54] ep  28  loss=3.352  err_AB=4.77px  err_BA=5.12px  (base=19.45px)  val_err=5.34px (base 19.90)  lr=5.31e-04  t=703s
+[08:24:05] ep  30  loss=3.219  err_AB=4.52px  err_BA=4.81px  (base=19.43px)  val_err=4.91px (base 19.90)  lr=4.79e-04  t=715s
+[08:24:15] ep  32  loss=3.110  err_AB=4.38px  err_BA=4.64px  (base=19.45px)  val_err=4.98px (base 19.90)  lr=4.28e-04  t=725s
+[08:24:26] ep  34  loss=2.990  err_AB=4.18px  err_BA=4.44px  (base=19.45px)  val_err=4.86px (base 19.90)  lr=3.77e-04  t=736s
+[08:24:37] ep  36  loss=2.888  err_AB=3.99px  err_BA=4.25px  (base=19.44px)  val_err=4.74px (base 19.90)  lr=3.28e-04  t=746s
+[08:24:47] ep  38  loss=2.798  err_AB=3.86px  err_BA=4.11px  (base=19.44px)  val_err=4.92px (base 19.90)  lr=2.80e-04  t=757s
+[08:24:58] ep  40  loss=2.690  err_AB=3.67px  err_BA=3.91px  (base=19.44px)  val_err=4.73px (base 19.90)  lr=2.35e-04  t=768s
+[08:25:09] ep  42  loss=2.594  err_AB=3.51px  err_BA=3.76px  (base=19.44px)  val_err=4.66px (base 19.90)  lr=1.93e-04  t=778s
+[08:25:19] ep  44  loss=2.483  err_AB=3.37px  err_BA=3.60px  (base=19.43px)  val_err=4.80px (base 19.90)  lr=1.55e-04  t=789s
+[08:25:29] ep  46  loss=2.404  err_AB=3.25px  err_BA=3.50px  (base=19.44px)  val_err=4.67px (base 19.90)  lr=1.20e-04  t=799s
+[08:25:40] ep  48  loss=2.312  err_AB=3.13px  err_BA=3.37px  (base=19.45px)  val_err=4.58px (base 19.90)  lr=8.99e-05  t=810s
+[08:25:50] ep  50  loss=2.253  err_AB=3.04px  err_BA=3.28px  (base=19.45px)  val_err=4.64px (base 19.90)  lr=6.40e-05  t=820s
+[08:26:01] ep  52  loss=2.180  err_AB=2.95px  err_BA=3.20px  (base=19.45px)  val_err=4.64px (base 19.90)  lr=4.29e-05  t=831s
+[08:26:12] ep  54  loss=2.140  err_AB=2.90px  err_BA=3.13px  (base=19.43px)  val_err=4.68px (base 19.91)  lr=2.69e-05  t=842s
+[08:26:22] ep  56  loss=2.102  err_AB=2.85px  err_BA=3.08px  (base=19.44px)  val_err=4.62px (base 19.90)  lr=1.61e-05  t=851s
+[08:26:32] ep  58  loss=2.084  err_AB=2.82px  err_BA=3.06px  (base=19.44px)  val_err=4.67px (base 19.90)  lr=1.07e-05  t=862s
+[08:26:37] ep  59  loss=2.083  err_AB=2.84px  err_BA=3.04px  (base=19.45px)  val_err=4.61px (base 19.90)  lr=1.00e-05  t=867s
+[08:26:38] saved curve → experiments/cross_frame_v04_multi39/curve.png
+[08:26:38] best val err = 4.58 px
