@@ -150,6 +150,11 @@ def main(args):
     fig.write_html(out, include_plotlyjs='cdn', full_html=True)
     print(f'saved → {out}')
 
+    # also emit a fragment (div + script, no <html>/<head>) for inline embedding
+    frag = out.with_suffix('.frag.html')
+    fig.write_html(frag, include_plotlyjs=False, full_html=False)
+    print(f'saved fragment → {frag}')
+
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
