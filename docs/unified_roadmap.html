@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Unified residual head — roadmap</title>
+<link rel="stylesheet" href="assets/report.css">
+<style>
+:root {
+  --bg: #f6f4ed; --panel: #fdfbf5; --card: #efeadf; --line: #ded4c0;
+  --border: #c8bea8; --ink: #0f0f0e; --ink-dim: #5a5146;
+  --accent: #c13c14; --accent2: #174734;
+  --jasans: 'Noto Sans JP','Hiragino Kaku Gothic ProN',sans-serif;
+  --mono: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+body { background: var(--bg); color: var(--ink); font-family: var(--jasans);
+  line-height: 1.65; margin: 0; }
+main.page { max-width: 980px; margin: 40px auto; padding: 0 24px 80px; }
+h1.title { font-weight: 700; font-size: 34px; line-height: 1.25; margin: 10px 0 10px; }
+p.subtitle { color: var(--ink-dim); font-size: 16px; margin: 0 0 30px; max-width: 780px; }
+h2 { margin: 36px 0 14px; font-size: 22px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+h3 { margin: 28px 0 10px; font-size: 17px; color: var(--ink-dim); }
+.eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  letter-spacing: 0.08em; text-transform: uppercase; margin: 10px 0 16px; }
+.eyebrow .dot { margin: 0 10px; color: var(--accent); }
+.nav { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin: 0 0 36px; padding: 12px 16px; border: 1px solid var(--line);
+  background: var(--card); letter-spacing: 0.04em; }
+.nav a { color: var(--ink-dim); text-decoration: none; }
+.nav a:hover { color: var(--accent); }
+.nav a.active { color: var(--accent); }
+.callout { background: var(--card); border-left: 3px solid var(--accent2);
+  padding: 12px 18px; margin: 18px 0; font-size: 14.5px; }
+.eq { font-family: var(--mono); font-size: 14px;
+  background: var(--card); border: 1px solid var(--line);
+  padding: 12px 18px; border-radius: 4px; margin: 14px 0;
+  white-space: pre; overflow-x: auto; }
+.ascii { background: var(--card); border: 1px solid var(--line);
+  padding: 18px 20px; border-radius: 4px; font-family: var(--mono);
+  font-size: 12.5px; line-height: 1.55; white-space: pre; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px;
+  font-family: var(--mono); }
+th, td { border-bottom: 1px solid var(--line); padding: 7px 10px; text-align: left;
+  vertical-align: top; }
+th { font-weight: 600; color: var(--ink-dim); background: var(--card); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.best td { background: #fff7e8; font-weight: 600; }
+figure { margin: 20px 0; text-align: center; }
+figure img { max-width: 100%; border: 1px solid var(--border); background: var(--panel); }
+figcaption { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+  margin-top: 6px; letter-spacing: 0.03em; }
+ul li { margin: 6px 0; }
+code { font-family: var(--mono); font-size: 13.5px; background: var(--card);
+  padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<main class="page">
+
+<div class="nav">
+  <strong style="color: var(--ink);">docs / roadmap</strong> &nbsp;·&nbsp;
+  <a href="index.html">hub</a> &nbsp;·&nbsp;
+  <a href="technical_overview.html">technical overview</a> &nbsp;·&nbsp;
+  <a href="cross_frame_report.html">cross-frame report</a> &nbsp;·&nbsp;
+  <a class="active" href="unified_roadmap.html">unified roadmap</a>
+</div>
+
+<div class="eyebrow">
+  <span>roadmap</span><span class="dot">●</span>
+  <span>one residual head, four applications</span>
+</div>
+
+<h1 class="title">
+  一つの残差ヘッドで、<br/>
+  キャリブ / SLAM / ステレオ / ループクロージャを解く
+</h1>
+<p class="subtitle">
+  LiDAR と Camera、任意の2つの観測を ― <em>何の観測か</em>をモデルに
+  教えずに ― 「3D 点が別観測のどこに映るか」を per-point (Δu, Δv, Σ)
+  として返す単一のヘッドで統一する計画。同じ関数、同じ forward、
+  4 つのプロダクト応用。
+</p>
+
+<h2>共通ヘッド</h2>
+
+<div class="eq">f : (image_B patch, 3D point P_A, hypothesis pose T̂_AB) → (Δu, Δv, Σ)</div>
+
+<p>
+  Σ は 2×2 共分散(uv のみ)、または 3×3(uvd、v12 以降)。
+  f は「A と B が何か」を知らない。
+  データローダーが <em>A と B を物理的に何と対応させるか</em>だけで
+  タスクを切り替える。ネットワークのコードは同じ。
+</p>
+
+<h2>4 つのタスクと応用</h2>
+
+<figure>
+  <img src="images/unified_plan_status.png"
+       alt="Unified head status — 4 tasks A/B/C/D with current best per task">
+  <figcaption>
+    4 タスク × 現状ベスト × 製品応用。B(cross-frame)が唯一
+    active に学習継続中。A は旧ヘッドでの baseline。
+  </figcaption>
+</figure>
+
+<table>
+<thead><tr>
+  <th>Task</th><th>A における入力</th><th>B における入力</th><th>T の意味</th>
+</tr></thead>
+<tbody>
+<tr>
+  <td><strong>A</strong> intra-frame calibration</td>
+  <td>LiDAR(t)</td>
+  <td>Camera(t)  ※ patch_A と patch_B は同じ画像</td>
+  <td>LiDAR → Camera 外部パラメータ</td>
+</tr>
+<tr class="best">
+  <td><strong>B</strong> cross-frame residual</td>
+  <td>Cam(t₁) or LiDAR(t₁)</td>
+  <td>Cam(t₂)</td>
+  <td>ego-motion × 外部 = 2 フレーム間の相対 pose</td>
+</tr>
+<tr>
+  <td><strong>C</strong> cross-camera stereo</td>
+  <td>Cam_L(t) + LiDAR 深度</td>
+  <td>Cam_R(t)</td>
+  <td>ステレオ baseline</td>
+</tr>
+<tr>
+  <td><strong>D</strong> long baseline / loop closure</td>
+  <td>Cam(t₁)</td>
+  <td>Cam(t₁ + Δt), Δt 大</td>
+  <td>長距離 ego-motion、scene 変化あり</td>
+</tr>
+</tbody>
+</table>
+
+<h3>応用の割り当て</h3>
+
+<ul>
+  <li><strong>A → LiDAR↔Camera calibration 製品</strong>:
+    現場で一度キャリブを取る/更新するときに。
+    新しいセンサ組合せでも zero-shot で動くことが本件の勝ち筋。</li>
+  <li><strong>B → 汎用 SLAM フロントエンド</strong>:
+    VO / 短距離 pose tracking の残差源。
+    σ 重みがそのまま BA のマハラノビスとして下流 solver に流れる。</li>
+  <li><strong>C → FCM / TPCM 製品 カメラ間整合</strong>:
+    同時刻の 2 カメラ一貫性チェック。
+    LiDAR を介さずカメラ同士を直接照合する構成も可。</li>
+  <li><strong>D → 超高精度地図の loop closure</strong>:
+    数分〜数時間離れた pass を照合。
+    大きな σ を許容して BA へ流し、地図ドリフトを抑える。</li>
+</ul>
+
+<h2>アーキテクチャ: forward は同一、データだけが変わる</h2>
+
+<div class="ascii">forward (CalibNetCrossFrame — models/cross_frame.py):
+
+  patch_A ──CNN(shared)──► img_tok_A ┐
+  patch_B ──CNN(shared)──► img_tok_B ┤
+                                     │   cross-attn
+  uvd_A ─ PointMLP + frustum ─► Q ───┴──► Q attends to img_tok_B
+                                            │
+                                            ▼
+                                 (Δu, Δv, Σ) per query, in B-pixel
+
+  pose_emb(T̂)    → 仮説ポーズを 6-DoF で query に concat
+  intra-block SA → 点間 self-attn
+  dual training  → (A→B) と (B→A) を対称に学習、残差は symmetric</div>
+
+<p>
+  タスク分岐は <strong>Pair Dataset が何を patch_A/patch_B/uvd_A/T̂ に詰めるか</strong>
+  だけ。モデルは分岐を知らない。
+  pose_emb の仮説 pose が意味的に何か(外部パラメータ or ego-motion or ステレオ変換)
+  はネットワーク的には等価。
+</p>
+
+<div class="callout">
+  <strong>なぜ統合が成立するか</strong>:
+  幾何公式は共通。画像から特徴を引く処理も共通。
+  唯一タスク固有なのは <em>入力の組み立て方</em> と <em>σ の分布</em>。
+  前者はデータローダーで吸収、後者は必要なら task_id 埋め込みを
+  pose_emb に連結するだけ。重み共有のメリットは大きい:
+  例えば calibration のデータで学んだ「LiDAR 点と画像特徴の対応付け」の
+  能力が、そのまま cross-frame の初期動作を決める。
+</div>
+
+<h2>現状: どこまで動いている</h2>
+
+<h3>タスク別の到達点</h3>
+<ul>
+  <li><strong>A intra-frame calib</strong>: 旧ヘッド <code>CalibNetDepth</code>
+    (<code>experiments/all_v3_mc/</code>) で val NLL 2.07 (obj 1.06 / bg 2.13)。
+    <em>新ヘッドには統合されていない</em> — これが最初の統合対象。</li>
+  <li><strong>B cross-frame</strong>: <code>CalibNetCrossFrame</code>
+    (<code>experiments/cross_frame_v13_mix/</code> 〜 <code>v18_more_visits/</code>)。
+    PandaSet 39 + Waymo 80 混合、UVD 対応、現在 <strong>v18 が 1.91 px
+    (v13 比 21% 改善)</strong> を叩き出して学習中。train/val gap
+    も 1.40 → 0.74 px に半減。</li>
+  <li><strong>C cross-camera stereo</strong>: 未着手。
+    データ生成スクリプトを書くだけ。</li>
+  <li><strong>D loop closure</strong>: B の拡張で既にカバー
+    (baseline 1-60 frame まで eval 済み)。
+    真の loop closure(別 drive 間)は未テスト。</li>
+</ul>
+
+<h3>B の v18 結果が示したこと</h3>
+
+<ul>
+  <li><strong>1 フレームあたりの訪問回数を 25 → 125 に増やした</strong>
+    (virtual_epoch 4000 → 20000)だけで、val err 2.42 → 1.91 (21% 改善)。</li>
+  <li>過学習(train/val gap)は <strong>半減</strong>。
+    「scene memorization で σ が overconfident」だった状態が緩和された。</li>
+  <li>つまり v13/v15/v16/v17 の段階で overfit が主要ボトルネックで、
+    データをもっと見せれば mean も σ も揃って改善する余地があった。</li>
+  <li>σ キャリブレーション(z = err/σ)は学習完了後に再測定。
+    σ 絶対値も縮まっているかは要確認。</li>
+</ul>
+
+<h2>ロードマップ</h2>
+
+<div class="callout">
+  前提: <em>手法の独自性</em>は moat にならない。
+  Moat は自社データを流し込んで cm 級 pose と密 3D 地図を毎日更新する
+  <em>パイプライン</em>。以下はそのパイプラインを 4 タスクで回すための
+  最短工程。
+</div>
+
+<table>
+<thead><tr>
+  <th>Milestone</th><th>内容</th><th>見積</th>
+</tr></thead>
+<tbody>
+<tr>
+  <td><strong>M0</strong></td>
+  <td>v18 完走、σ-distribution 測定、BA 3D の再評価(現在進行中)</td>
+  <td>今日</td>
+</tr>
+<tr>
+  <td><strong>M1</strong></td>
+  <td><code>PandaSetCalibPair</code> 新規 — A タスクを CalibNetCrossFrame の
+      入力形式に合わせる。sample dict 共通化。</td>
+  <td>1 day</td>
+</tr>
+<tr>
+  <td><strong>M2</strong></td>
+  <td><code>MixedPairDataset</code> + <code>--mix-spec</code> — 複数タスクを
+      重み付きでサンプル。</td>
+  <td>½ day</td>
+</tr>
+<tr>
+  <td><strong>M3</strong></td>
+  <td>A + B 混合学習(<code>v19_ab_mix</code>)、per-task val err / σ 測定。
+      A の旧ヘッド結果と直接比較。</td>
+  <td>½ day</td>
+</tr>
+<tr>
+  <td><strong>M4</strong></td>
+  <td>C stereo pair の実装、3 タスク混合(<code>v20_abc_mix</code>)。
+      task_id 埋め込みの有無で ablation。</td>
+  <td>1 day</td>
+</tr>
+<tr>
+  <td><strong>M5</strong></td>
+  <td>会社データ adapter (<code>CompanyCalibPair</code>)。
+      GICP-refined pose で sub-px 評価、ここで初めて真の精度が見える。</td>
+  <td>2-3 days</td>
+</tr>
+<tr>
+  <td><strong>M6</strong></td>
+  <td>D loop closure の専用評価 — 同じ街・別 drive のペアで pose 復元。</td>
+  <td>1 day</td>
+</tr>
+</tbody>
+</table>
+
+<p style="color: var(--ink-dim); font-size: 13.5px;">
+  合計 5-6 営業日。M5 が済んだ時点で、プロダクト側(calibration 製品・
+  SLAM フロントエンド・FCM/TPCM・地図 loop closure)が
+  <em>単一の学習済みヘッド</em>を共有する体制に入る。
+</p>
+
+<h2>懸念とリスク</h2>
+
+<ul>
+  <li><strong>σ overfit</strong>: v18 で大きく緩和したが z = err/σ はまだ
+    要再測定。混合学習で再燃する可能性あり。
+    軽い対策は σ post-hoc rescale (10 行)、重い対策は σ ヘッドの
+    Dropout / weight decay。</li>
+  <li><strong>pose GT 品質</strong>: PandaSet / Waymo の公開 GT は
+    系統誤差 sub-px 〜 0.5°。サブピクセル精度の評価が pose GT で頭打ち。
+    M5 で会社 GICP データに乗り換えないと真の精度は測れない。</li>
+  <li><strong>task 間の σ 分布差</strong>: calib の σ と cross-frame の σ
+    は実運用条件が違うので分布が違う。task_id 埋め込みで吸収可能だが
+    試していない。</li>
+  <li><strong>NuScenes の再投入</strong>: 2 Hz で baseline 解像度が
+    合わないため保留中。sweep データ(20 Hz LiDAR / 12 Hz Cam)を使って
+    10 Hz 相当に再サンプルすれば統合可能。</li>
+</ul>
+
+<h2>関連レポート</h2>
+
+<div class="callout">
+  <a href="cross_frame_report.html">05. Cross-frame residual net</a> —
+  B タスクの詳報、σ 楕円可視化、BA+LLN 評価。<br/>
+  <a href="report.html">02. Bilingual writeup</a> —
+  A タスク (旧ヘッド CalibNetDepth) の初報。<br/>
+  <a href="ba_report.html">03. Multi-frame BA sweep</a> —
+  下流 BA の感度解析。<br/>
+  <a href="deform_report.html">04. Deformable cross-attn</a> —
+  attention 機構の効率化、現ヘッドの内部。
+</div>
+
+</main>
+</body>
+</html>
