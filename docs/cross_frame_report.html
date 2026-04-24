@@ -179,19 +179,24 @@ a:hover { color: var(--accent); }
   <strong>交差点 — cross-modal × cross-frame × BA-ready Σ — は空いてる</strong>。
 </div>
 
-<p>
-  構成要素はすべて 2020 年代前半に公表された既知のもの:
-  cross-attn で画像特徴を引く、2D Gaussian NLL で訓練する、
-  deformable sampling で効率化、dual direction で対称に訓練。
-  組み合わせ自体の新規性は限定的で、1–2 年で公開実装が出る類のものだろう。
+<p class="lede">
+  <strong>ただし、このギャップが "まだ誰もやっていない" からといって
+  特別な発明とは思っていない</strong>。
+  構成要素は全部公開されている: cross-attn で画像特徴を引く、
+  2D Gaussian NLL で訓練する、deformable sampling で効率化、
+  dual direction で対称に訓練する。
+  どれも並べれば誰でも組める — AI も組める。
+  1–2 年もすれば同じ形のヘッドはどこからか公開される。
   <br/><br/>
-  本プロジェクトの狙いは新規手法ではなく、
-  このヘッドを <em>自社生データ</em> に繋ぎ、
-  動体を σ で自動的に down-weight しながら Σ-weighted BA を回し、
-  3D Gaussian Splatting で都市スケールの地図を継続的に更新する
-  <strong>パイプラインを実運用で動かす</strong>こと。
-  成果物は論文ではなく pose 精度・地図品質・
-  アノテーション自動化スループットで評価する。
+  <strong>効くのは、このヘッドで作る "地図" の方</strong>。
+  同じ手法を持つ組織が複数あっても、
+  <em>自社の生データに流し込んで、動体を σ で自動 down-weight して、
+  Σ-weighted BA で pose を落として、3D Gaussian Splatting で都市スケールの
+  地図を毎日更新し続ける</em>、というパイプラインを動かし切るのは別の話。
+  本プロジェクトの成果物は論文ではなく、
+  pose 精度・地図品質・アノテーション自動化スループットで評価する。
+  手法は外から借りてこれる、
+  <strong>地図と、それを作り続ける仕組みは自分で作るしかない</strong>。
 </p>
 
 <div class="callout" style="border-left-color: #174734; background: #f0f4ec;">
