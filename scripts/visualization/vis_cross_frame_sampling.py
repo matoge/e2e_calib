@@ -33,10 +33,13 @@ from datasets.pandaset_pair import (
 )
 
 
-def draw_patches(ax, patch, title):
+def draw_patches(ax, patch, title, img_size=64):
     arr = (patch.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     ax.imshow(arr)
     ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xlim(-0.5, img_size - 0.5)
+    ax.set_ylim(img_size - 0.5, -0.5)
+    ax.set_aspect('equal', adjustable='box')
     if title:
         ax.set_title(title, fontsize=8, loc='left', pad=2)
 
@@ -229,33 +232,14 @@ def main(args):
         draw_patches(ax_l, s['patchA'], label_A)
         draw_patches(ax_r, s['patchB'], label_B)
 
-        # pivot markers (no legend to avoid overlap)
-        ax_l.plot(*s['piv_A'], marker='*', color='#c13c14', markersize=16,
-                   markeredgecolor='white', mew=1.2, zorder=10)
-        ax_r.plot(*s['piv_B_hat'], marker='*', color='#c13c14', markersize=16,
-                   markeredgecolor='white', mew=1.2, zorder=10)
-        # show GT only when perturbation > 0 (else it overlaps red)
+        # pivot marker only — no other dots to avoid visual confusion
+        ax_l.plot(*s['piv_A'], marker='*', color='#c13c14', markersize=22,
+                   markeredgecolor='white', mew=1.5, zorder=10)
+        ax_r.plot(*s['piv_B_hat'], marker='*', color='#c13c14', markersize=22,
+                   markeredgecolor='white', mew=1.5, zorder=10)
         if args.sigma_t > 0 or args.sigma_ypr > 0:
-            ax_r.plot(*s['piv_B_gt'], marker='*', color='#1e6fff', markersize=12,
-                       markeredgecolor='white', mew=1.0, zorder=10)
-
-        # numbered correspondences — dot (A) and dot with same number (B) mark
-        # the SAME 3D point under GT pose. If they don't look like they're on
-        # the same physical thing, the sampler is broken.
-        from matplotlib.colors import Normalize
-        import matplotlib
-        cmap = matplotlib.colormaps['turbo']
-        norm = Normalize(vmin=2.0, vmax=min(60, s['depths'].max() + 1e-3))
-        for i in range(len(s['arrows_A'])):
-            color = cmap(norm(s['depths'][i]))
-            uA = s['arrows_A'][i]; uB = s['arrows_B'][i]
-            ax_l.plot(*uA, 'o', color=color, markersize=10, markeredgecolor='black', mew=1.0)
-            ax_l.annotate(str(i), xy=uA, xytext=(uA[0] + 1, uA[1] - 1),
-                           fontsize=8, color='white', weight='bold',
-                           path_effects=[])
-            ax_r.plot(*uB, 'o', color=color, markersize=10, markeredgecolor='black', mew=1.0)
-            ax_r.annotate(str(i), xy=uB, xytext=(uB[0] + 1, uB[1] - 1),
-                           fontsize=8, color='white', weight='bold')
+            ax_r.plot(*s['piv_B_gt'], marker='*', color='#1e6fff', markersize=16,
+                       markeredgecolor='white', mew=1.2, zorder=10)
 
         kept += 1
 

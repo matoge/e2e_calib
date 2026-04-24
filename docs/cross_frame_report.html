@@ -170,6 +170,100 @@ a:hover { color: var(--accent); }
 </tbody>
 </table>
 
+<h2>データ: pair residual はどう作られるか</h2>
+
+<p>
+  学習データ 1 ペア = (patch_A, patch_B, uvd_A, uvd_B, pose_AB_hat,
+  target residual) の組。具体的な生成フローは:
+</p>
+
+<ol>
+  <li><strong>ペア選択</strong>: PandaSet 39 scene のうち train 31 scene から、
+    1 scene をランダムに pick。そこから frame_A と frame_B = frame_A ± baseline
+    (1–20 frames、1 frame=0.1s) をランダムに選ぶ。</li>
+  <li><strong>Pivot 選定</strong>: frame_A で visible な全 LiDAR 点(~100k 個)から
+    ランダムに 1 点を pivot に pick。</li>
+  <li><strong>ポーズ摂動</strong>:
+    <code>T_AB_hat = T_AB_gt × δT</code>、
+    ここで <code>δT</code> は <code>σ_ypr=1.0°</code> / <code>σ_t=0.2m</code>
+    の Gaussian。これが「dead-reckoning の不確かさ」をシミュレート。</li>
+  <li><strong>パッチ切り出し</strong>: crop サイズ 128–256 px をランダムに選び、
+    patch_A は pivot を中心に frame_A の画像を crop、patch_B は
+    <code>π_B(T_AB_hat · pivot_3D)</code> (= B での pivot の <em>仮説</em>
+    投影位置) を中心に frame_B の画像を crop。
+    両方とも最終的に 64×64 にリサイズ → ネット入力。</li>
+  <li><strong>画面外 pivot は reject</strong>: pivot の B フレームへの
+    仮説投影と真値投影が両方 B の画像内に入ってないとペアを棄却
+    (画面外は補正不能)。</li>
+  <li><strong>Pivot は必ず patch 中央</strong>: 画像の端近くで crop が
+    はみ出す場合は <em>ゼロパディング</em> で外挿。これによって pose_emb が
+    「pivot = patch 中心」を前提にできる不変量が守られる
+    (clipping で crop 位置をずらすと pose_emb の意味が壊れる)。</li>
+  <li><strong>ターゲット残差</strong>: patch_A 内に落ちる A の全 LiDAR 点 (~200-300)
+    を B に GT で投影して <code>uv_gt</code>、仮説で投影して <code>uv_hat</code>。
+    <code>Δ_target = uv_gt − uv_hat</code> (patch 内 px 単位)。ネットはこの
+    Δ を予測する。</li>
+</ol>
+
+<h3>サンプリングの視覚確認 (pure, σ=0)</h3>
+
+<p>
+  摂動 σ=0 で「GT どおりに pivot を両フレームに投影」させて、同じ 3D 点を
+  異なる baseline (+5, +10, +20, +40, +70 frames) で並べたもの:
+</p>
+
+<figure>
+  <img src="images/sampling/pivot_track.png"
+       alt="Same 3D pivot tracked across baselines">
+  <figcaption>
+    scene 018、fi=0 を anchor に、同一 3D 点(高所 z>3m の LiDAR 点、
+    traffic light や建物のコーナー候補)を +0 / +5 / +10 / +20 / +40 / +70 frames
+    で tracking。赤★は常に patch 中心にあり、同じ物体 (Row 1/6: 信号機、
+    Row 2-5: 建物外壁・窓・柱) が baseline が伸びても<em>同じ中心</em>に
+    捉えられ続けている。車が 70 frame ≈ 7 秒進んでも pivot は物体に
+    lock されたまま — サンプリングの正しさが視覚的に確定。
+  </figcaption>
+</figure>
+
+<h3>大量サンプリングでの正しさ(各 baseline で 100+ ペア)</h3>
+
+<p>
+  各 baseline で 100 ペア生成し、サンプラーが作る (patch_A, patch_B) の
+  見た目を並べたもの。各 patch の赤★は pivot = patch 中央 (要求不変量)。
+  patch_A (奇数列) と patch_B (偶数列) が同じ物体を映してるのは、
+  <em>摂動ゼロ条件で</em>両 patch が同一 3D 点の周辺を切り出してるから。
+</p>
+
+<table>
+<thead><tr><th>Baseline</th><th>挙動</th><th>画像</th></tr></thead>
+<tbody>
+<tr><td>+5 frame (~0.5s, ~5m)</td>
+  <td>ほぼ同一視点、content 乖離なし</td>
+  <td><a href="images/sampling/sampling_bl5.png">full</a></td></tr>
+<tr><td>+10 frame</td>
+  <td>微小な視点変化、同一物体の位置が少しずれるだけ</td>
+  <td><a href="images/sampling/sampling_bl10.png">full</a></td></tr>
+<tr><td>+20 frame (~2s)</td>
+  <td>視差大きく現れ始めるが pivot は物体に維持</td>
+  <td><a href="images/sampling/sampling_bl20.png">full</a></td></tr>
+<tr><td>+40 frame (~4s)</td>
+  <td>viewpoint 大きく変化、物体の見た目も変わるが中心対応は成立</td>
+  <td><a href="images/sampling/sampling_bl40.png">full</a></td></tr>
+<tr><td>+70 frame (~7s)</td>
+  <td>scene 終端近く、視点変化最大、同一物体の同定はぎりぎり</td>
+  <td><a href="images/sampling/sampling_bl70.png">full</a></td></tr>
+</tbody>
+</table>
+
+<div class="callout">
+  <strong>含意</strong>:
+  baseline が伸びても sampler は同じ 3D 点を両フレームの patch 中央に
+  正しく置けている。長距離 (+70) では車両が 70m 進んで viewpoint が
+  大きく変わるため見た目は違うが、pivot の 3D 位置は正しく保たれる。
+  したがって「長距離でモデルが学習できないとすれば、それは sampler
+  のバグではなく <em>入力分布の差 (OOD)</em> による」と切り分けられる。
+</div>
+
 <h2>アーキテクチャ</h2>
 
 <div class="ascii">  frame A                                  frame B
