@@ -198,6 +198,12 @@ def main(args):
         # on B: hyp (red ★, center), pred (green ★), gt (blue ★)
         ax_B.plot(*piv_B_hat, marker='*', color='#c13c14', markersize=32,
                    markeredgecolor='white', mew=2.0, zorder=8)
+        # 2σ covariance ellipse around pivot prediction (green)
+        w_p, h_p, ang_p = cov_ellipse_axes(sx[piv_idx], sy[piv_idx], rho[piv_idx])
+        ax_B.add_patch(Ellipse(xy=piv_B_pred, width=w_p, height=h_p, angle=ang_p,
+                               facecolor='#0fa550', edgecolor='none', alpha=0.28, zorder=7))
+        ax_B.add_patch(Ellipse(xy=piv_B_pred, width=w_p, height=h_p, angle=ang_p,
+                               facecolor='none', edgecolor='#0fa550', alpha=0.95, lw=2.2, zorder=8))
         ax_B.plot(*piv_B_pred, marker='*', color='#0fa550', markersize=28,
                    markeredgecolor='white', mew=2.0, zorder=9)
         ax_B.plot(*piv_B_gt, marker='*', color='#1e6fff', markersize=28,
