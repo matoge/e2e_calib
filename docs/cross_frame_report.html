@@ -598,14 +598,34 @@ stage 5:  全域で再訓練 → 完成</div>
       <a href="../experiments/cross_frame_v08_deform_sl/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v08_deform_sl/vis/sample_grid.png">vis</a> ·
       <a href="../experiments/cross_frame_v08_deform_sl/best_model.pt">ckpt</a></td></tr>
-<tr class="best"><td>v10</td><td>deform sl 2-layer + <strong>padded crop</strong> (pivot-centered invariant, crop 128-256)</td>
-  <td class="num">1.59 M</td><td class="num"><strong>2.65 px</strong></td><td class="num">15.4 px*</td>
+<tr><td>v10</td><td>deform sl 2-layer + <strong>padded crop</strong> (pivot-centered invariant, crop 128-256)</td>
+  <td class="num">1.59 M</td><td class="num">2.65 px</td><td class="num">15.4 px*</td>
   <td class="num">82 %</td><td class="num">3.0 ×</td>
   <td><a href="../experiments/cross_frame_v10_padclean_deform/train.log">log</a> ·
       <a href="../experiments/cross_frame_v10_padclean_deform/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v10_padclean_deform/best_model.pt">ckpt</a></td></tr>
+<tr><td>v11</td><td>v10 repro (sampling fix でさらにクリーンな pivot)</td>
+  <td class="num">1.59 M</td><td class="num"><strong>2.61 px</strong></td><td class="num">15.4 px</td>
+  <td class="num">82 %</td><td class="num">3.0 ×</td>
+  <td><a href="../experiments/cross_frame_v11_base/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v11_base/curve.png">curve</a> ·
+      <a href="../experiments/cross_frame_v11_base/best_model.pt">ckpt</a></td></tr>
+<tr class="best"><td>v12</td><td>v11 + <strong>UVD head</strong> (Δu,Δv,<strong>Δd</strong>, log σu, log σv, log σd, ρ<sub>uv</sub>)</td>
+  <td class="num">1.59 M</td><td class="num"><strong>2.61 px</strong></td><td class="num">15.4 px</td>
+  <td class="num">82 %</td><td class="num">3.0 ×</td>
+  <td><a href="../experiments/cross_frame_v12_uvd/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v12_uvd/curve.png">curve</a> ·
+      <a href="../experiments/cross_frame_v12_uvd/best_model.pt">ckpt</a></td></tr>
 </tbody>
 </table>
+
+<p style="font-size: 13px;">
+  <strong>v11 → v12 知見</strong>:
+  7次元出力 (Δu,Δv,Δd,log σu,log σv,log σd,ρ<sub>uv</sub>) に拡張しても UV 誤差は
+  完全に据え置き (2.61 px = v11 tie)。つまり<strong>深度予測ヘッドは "タダで" 付いてくる</strong>
+  — SLAM の σ-weighted BA で 3D 拘束として使える (camera-ray だけでなく深度方向にも
+  効く) ための前準備が整った。深度誤差 (val err_d, meter) は今後 BA 評価で計測予定。
+</p>
 
 <p style="font-size: 12px; color: var(--ink-dim);">
   *v10 の base err (15.4) が v08 (19.9) と違うのは crop_range 64-192 → 128-256
@@ -727,21 +747,31 @@ stage 5:  全域で再訓練 → 完成</div>
   </li>
 </ul>
 
-<h3>LLN + BA 定性検証 (v10)</h3>
+<h3>LLN + BA 定性検証 (v10, σ-ellipse 入り)</h3>
 
 <p>
-  各 pair で、patch_B 内に落ちる A の LiDAR 点を以下 4 通りに投影して重ねる:
+  panel A: query 点(番号付き●)と pivot(赤 ★ = patch 中心)。
+  panel B: 各点について
 </p>
 <ul>
-  <li><span style="color: #c13c14;">赤 ×</span>: <strong>hypothesis 投影</strong> (model 入力の "仮想位置")</li>
-  <li><span style="color: #0fa550;">緑 ●</span>: <strong>model 予測</strong> = hyp + per-point Δ</li>
-  <li><span style="color: #ff9f1a;">橙 ■</span>: <strong>BA-recovered 投影</strong> (模型予測を σ-重みで集約して解いた 6-DoF から再投影)</li>
-  <li><span style="color: #1e6fff;">青 ○</span>: <strong>ground-truth 投影</strong> (目標)</li>
+  <li><span style="color: #c13c14;">×</span>: <strong>hypothesis 投影</strong> (摂動 pose のままだと来る位置、間違い)</li>
+  <li><span style="color: #0fa550;">●</span>: <strong>model 予測</strong> = hyp + per-point Δ、<strong>塗りつぶし楕円 = 2σ 共分散</strong></li>
+  <li><span style="color: #1e6fff;">★</span>: <strong>ground-truth 投影</strong> (目標)</li>
 </ul>
 <p>
-  灰色の矢印 = hyp → pred の per-point 補正。
-  <strong>緑が青に乗れば model は per-point で正しく、橙が青に乗れば BA も pose-level で正しい。</strong>
+  点線 (A●→B★) = 同じ 3D 点の対応。
+  <strong>色付き ● が ★ に乗れば model は正しく、2σ 楕円が ★ を覆えば不確実性も
+  正しく推定できてる</strong>(σ-weighted BA の前提条件)。
 </p>
+
+<div class="callout">
+  <strong>σ が情報として意味を持っていることの視覚的確認</strong>:
+  静止構造 (建物、道路、標識) では楕円が小さく(≲ 1 px)、
+  <em>動いている車</em>では楕円が顕著に大きく膨らむ。モデルは MSE ではなく
+  NLL で学習しているので、"predict の自信" が分布として出てくる。
+  下流の σ-weighted BA で動体点が自動的に弱められる(= outlier rejection を
+  ハードコードせずに統計的に扱える)のがこのアーキテクチャの主要な利点。
+</div>
 
 <figure>
   <img src="images/lln_bl5.png" alt="LLN+BA vis, baseline ±5">
@@ -782,23 +812,32 @@ stage 5:  全域で再訓練 → 完成</div>
 
 <ul>
   <li>
-    <strong>LLN + BA pose-recovery 検証</strong> ⭐ 本命:
-    短距離 (1-20 frames) で訓練した v08 を、長距離 (40, 60 frames) pair に適用 →
-    BA で T_AB を解 → 真値との誤差を dead-reckoning と比較。
-    <code>scripts/eval/cross_frame_lln.py</code> 実装済み、未走。
+    <strong>LLN + BA pose-recovery 検証</strong> ✅ 実施済 (v10 / v12):
+    bl 5-40 で rot は 10-20% 改善するが t (translation) は悪化する傾向
+    — BA solver 側の問題 (σ-重み or outlier 処理) が残るので次回精査。
+    <code>experiments/cross_frame_v1*/lln/summary.json</code> 参照。
   </li>
   <li>
-    <strong>Deformable + 4-layer / D=512 拡張</strong>:
-    GPU はまだ余裕(v08 で W~210/350)、もう一段階深くして capacity を確認。
+    <strong>UVD 出力ヘッド</strong> ✅ 実施済 (v12):
+    UV 精度据え置きで深度予測ヘッド追加。次は
+    BA に 3D 拘束 (Mahalanobis w/ diag depth σ) を入れ、t の負改善が
+    depth 情報で救えるかを検証。
   </li>
   <li>
     <strong>NuScenes / Waymo 混合</strong>:
-    short-baseline 学習用に追加データ。scene 数 39 → 数百 scale。
+    short-baseline 学習用に追加データ。PandaSet 39 scene → 数百 scale。
+    pose GT 品質は Waymo 0.2° 程度の per-segment 誤差があるため、
+    まずは PandaSet メインで + Waymo は補助に。
+  </li>
+  <li>
+    <strong>動体フィルタとしての σ の活用</strong>:
+    vis で σ が動体で膨らむことは確認できた。BA 入力で σ > θ の点を
+    ハード reject する実験 vs ソフトに 1/σ² 重みで流す実験の ablation。
   </li>
   <li>
     <strong>scale_emb 導入</strong>: long baseline で深度比 log(d_B/d_A) を
-    positional encoding に注入。short-baseline では必須でないが、
-    LLN 検証で長距離をカバーする時に効く可能性。
+    positional encoding に注入。v12 で Δd 出力があるので、これを input にも
+    feed back して循環させる手もある。
   </li>
 </ul>
 
