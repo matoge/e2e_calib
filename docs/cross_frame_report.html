@@ -764,13 +764,37 @@ stage 5:  全域で再訓練 → 完成</div>
   正しく推定できてる</strong>(σ-weighted BA の前提条件)。
 </p>
 
-<div class="callout">
-  <strong>σ が情報として意味を持っていることの視覚的確認</strong>:
-  静止構造 (建物、道路、標識) では楕円が小さく(≲ 1 px)、
-  <em>動いている車</em>では楕円が顕著に大きく膨らむ。モデルは MSE ではなく
-  NLL で学習しているので、"predict の自信" が分布として出てくる。
-  下流の σ-weighted BA で動体点が自動的に弱められる(= outlier rejection を
-  ハードコードせずに統計的に扱える)のがこのアーキテクチャの主要な利点。
+<div class="callout" style="border-left-color: #c13c14; background: #fff4ee;">
+  <strong>🚗 ネットは「動いてる車は予測できない」ことを自分で学んだ</strong>
+  <br/><br/>
+  可視化で <strong>一番面白いのはここ</strong>:
+  <ul style="margin: 0.4em 0;">
+    <li>静止構造 (建物、道路、縁石、標識、電柱、信号機) ではσが小さく、
+    2σ 楕円は ≲ 1 px → pred ● は ★ にほぼ乗る</li>
+    <li><strong>動いている車</strong>では σ が顕著に膨らみ、
+    2σ 楕円がパッチの数割を覆う。しかもその楕円は GT ★ を
+    (だいたい) 含んでいる。つまり <em>「ずれてるかもしれないけどどこに
+    ずれたかは分からん」</em> をモデルが正しく表現している。</li>
+  </ul>
+  これは <strong>教えてない</strong>。
+  動体/静止体のラベルは一切与えていない。A → B 間でフレーム間を通して
+  位置が一致するかしないか、だけが NLL の勾配として届く。
+  <strong>NLL で訓練する限り「はっきり当てる」より
+  「当たらないなら σ を大きく出す」のが最適解</strong>、
+  モデルはそれを見つけた。
+  <br/><br/>
+  下流で期待される効き方:
+  <ul style="margin: 0.4em 0;">
+    <li><strong>σ-weighted BA で動体点が自動的に down-weight される</strong>
+    (マハラノビス距離 = Δ/σ が分母で効くため)。
+    動体検出や semantic segmentation をハードに外出しせずに、
+    統計的な outlier rejection が無料で手に入る。</li>
+    <li>σ の閾値で動体マスクを切り出せば、副産物として
+    <em>教師なしの dynamic-object detector</em> にもなる。</li>
+    <li>baseline ±40 frame のような長距離では σ が全体的に大きくなる
+    (下の bl40 vis で確認可)。BA solver はこれを見て "この pair の
+    信頼度は低い" と判断し、pose 初期値から大きく離れるのを避ける。</li>
+  </ul>
 </div>
 
 <figure>
