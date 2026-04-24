@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>セッション進捗 — 2026-04-24</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f4ed; --card: #fff; --ink: #0f0f0e; --ink-dim: #6b6a63;
+  --accent: #c13c14; --accent2: #174734; --line: #d9d6cd;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  --jasans: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  --mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+  --col: 920px;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); margin: 0; }
+body {
+  color: var(--ink); font-family: var(--jasans);
+  font-size: 16px; line-height: 1.85; letter-spacing: 0.01em;
+  font-feature-settings: "palt" 1;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: var(--col); margin: 0 auto; padding: 64px 36px 96px; }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--ink-dim); margin-bottom: 22px;
+  display: flex; flex-wrap: wrap; gap: 14px; }
+.eyebrow .dot { color: var(--accent); }
+h1.title { font-family: var(--jasans); font-weight: 700;
+  font-size: 40px; line-height: 1.22; margin: 0 0 14px; letter-spacing: -0.01em; }
+.subtitle { font-size: 17px; line-height: 1.65; color: var(--ink-dim);
+  margin: 0 0 36px; max-width: 820px; }
+.lede { font-size: 16px; line-height: 1.75; color: var(--ink);
+  margin: 0 0 36px; max-width: 860px; padding: 20px 24px;
+  background: var(--card); border-left: 4px solid var(--accent);
+  border-radius: 2px; }
+h2 { font-family: var(--jasans); font-weight: 700; font-size: 26px;
+  line-height: 1.35; margin: 58px 0 14px; border-bottom: 1px solid var(--line);
+  padding-bottom: 6px; }
+h3 { font-family: var(--jasans); font-weight: 700; font-size: 18px;
+  margin: 32px 0 10px; }
+h4 { font-family: var(--mono); font-weight: 600; font-size: 12px;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent2);
+  margin: 24px 0 8px; }
+p { margin: 0 0 14px; }
+code, pre { font-family: var(--mono); font-size: 13px; }
+code { background: var(--card); padding: 1px 6px; border: 1px solid var(--line);
+  border-radius: 3px; }
+pre { background: var(--card); border: 1px solid var(--line); padding: 14px 18px;
+  border-radius: 4px; overflow-x: auto; line-height: 1.55; font-size: 12.5px; }
+pre code { background: none; border: 0; padding: 0; }
+.callout { background: var(--card); border-left: 4px solid var(--accent2);
+  padding: 14px 20px; margin: 20px 0; font-size: 15px; line-height: 1.75; }
+.callout.warn { border-left-color: var(--accent); }
+.callout.ok { border-left-color: #2e7d32; }
+.callout strong { color: var(--ink); }
+table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 13.5px;
+  font-family: var(--mono); }
+th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left;
+  vertical-align: top; }
+th { font-weight: 600; color: var(--ink-dim); background: var(--card); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.done td { background: #f1f8e9; }
+tr.pending td { color: var(--ink-dim); }
+.badge { display: inline-block; font-family: var(--mono); font-size: 10.5px;
+  padding: 2px 8px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 2px; letter-spacing: 0.05em; margin-right: 4px; }
+.badge.ok { border-color: #2e7d32; color: #2e7d32; }
+.badge.warn { border-color: var(--accent); color: var(--accent); }
+.badge.info { border-color: var(--accent2); color: var(--accent2); }
+ul, ol { margin: 0 0 14px; padding-left: 22px; }
+li { margin: 0 0 6px; }
+.quote { font-family: var(--jasans); background: var(--card); border-left: 3px solid var(--ink-dim);
+  padding: 10px 16px; margin: 12px 0; font-size: 14.5px; color: var(--ink-dim);
+  font-style: italic; }
+hr { border: none; border-top: 1px solid var(--line); margin: 48px 0; }
+.timeline { border-left: 2px solid var(--line); padding-left: 20px;
+  margin: 20px 0 30px 6px; }
+.timeline .t-item { margin-bottom: 24px; position: relative; }
+.timeline .t-item::before { content: ""; position: absolute; left: -26px; top: 8px;
+  width: 10px; height: 10px; background: var(--accent); border-radius: 50%; }
+.timeline .t-time { font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim); }
+.timeline .t-title { font-weight: 700; font-size: 15px; margin: 2px 0 4px; }
+.timeline .t-desc { font-size: 14.5px; color: var(--ink); }
+.kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px;
+  background: #ebe7dd; border: 1px solid var(--line); border-radius: 3px; }
+a { color: var(--accent2); }
+a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="eyebrow">
+  <span>Session Log</span><span class="dot">●</span>
+  <span>2026-04-24</span><span class="dot">●</span>
+  <span>Confluence &middot; PoC 共有 &middot; ドキュメント整備</span>
+</div>
+
+<h1 class="title">セッション進捗レポート — Confluence整備からPoC共有へ</h1>
+<p class="subtitle">
+長いセッションの中で起きたこと、決めたこと、詰まったこと、そしてこれから手をつけることを全部まとめたもの。
+Confluence の再スタイリング、スタイル統一で踏んだ落とし穴、Attention Order と Deformable Attention の切り分け直し、
+進行中だったゼロショット可視化の再開準備、Cross-frame residual net の <strong>v12_uvd 初回学習 (深度ヘッド追加, val 2.61px)</strong>、
+そして &quot;できたPoC&quot; の正体が 3D Gaussian Splatting だった件まで。
+</p>
+
+<div class="lede">
+<strong>このレポートの狙い</strong>は、後日 / 別の人 / 自分自身が見返したときに、
+「何が完了した」「何で詰まった」「次は何から始めるか」が一目でつかめることです。
+細かなコマンドや HTTP レスポンス、誤公開の是正手順まで含めて、再発防止と再現性を最優先に書いています。
+</div>
+
+<!-- ============================================================ -->
+<h2>&sect; 1  TL;DR</h2>
+
+<ul>
+  <li><strong>Confluence 4ページを完全整備:</strong> reference <code>1613737831</code> の二重エスケープ事故復旧 <span class="badge ok">fixed v38</span>、multicrop <code>1613442154</code> 復旧 <span class="badge ok">v4</span>、旧 CERES <code>1590494119</code> 削除 <span class="badge ok">204</span>、CERES BA <code>1613442298</code> ユーザー指示で削除 <span class="badge ok">204</span>。</li>
+  <li><strong>新規ブログ2本:</strong> Attention Order <code>1613738958</code> <span class="badge ok">v3</span>、Deformable Cross-Attention <code>1613279501</code> <span class="badge ok">v2</span>。本文と画像のミスマッチ事故を経て正しい2記事に分離完了。</li>
+  <li><strong>ドキュメントハブ:</strong> <code>docs/hub.html</code> を <kbd>:5080</kbd> でサーブ開始、左ナビからぽちぽち切替、ディープリンク (<code>#&lt;file&gt;</code>) 対応。</li>
+  <li><strong>e2e_calib 最新コミット:</strong> <code>6ee9eb6</code> report に v11 / v12_uvd 行追加 + σ 楕円 LLN 可視化。v12_uvd は <strong>val 2.61 px (v11 と同点)</strong>、深度ヘッドは &quot;free&quot; (UV 精度そのまま、Δd が追加で出る)。scaffolding <code>8053cd4</code> → 初回学習 <code>623b459</code> → report 反映 <code>6ee9eb6</code> の3連。</li>
+  <li><strong>loom の &quot;できたPoC&quot;:</strong> <code>18b38873</code> と <code>fb6e90a1</code> — Woven ip654 tf_long2 シーケンス (284フレーム KB4 fisheye) に対する 3D Gaussian Splatting アダプタ一式。<code>cv2.fisheye</code> で pinhole undistort、camera-delay 付き pose 外挿、80m init-PC フィルタまで smoke 済。</li>
+  <li><strong>進行中&middot;再開待ち:</strong> ゼロショット可視化スクリプト (アノテ bbox 中心 crop → 小角 extrinsic 摂動 → UV arrow 描画)。projection 公式 <code>R_total = R_to_rdf @ inv(R.from_euler('zyx',[yaw,pitch,roll]))</code> は把握済み、実装直前で中断。</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>&sect; 2  このセッションのタイムライン</h2>
+<p>
+前セッションからの継続で、<strong>Confluence の翻訳&middot;再スタイリング</strong>が進行中のところから始まりました。
+途中でスタイル不整合や公開事故が起き、その対処で優先順位が動いています。
+</p>
+
+<div class="timeline">
+
+<div class="t-item">
+  <div class="t-time">Step 1 &middot; Confluence CERES BA ページ</div>
+  <div class="t-title">CERES BA <code>1613442298</code> を英語化&middot;再スタイル&middot;タイトル修正で v3 化</div>
+  <div class="t-desc">
+    タイトルは <em>&quot;3000x Faster Bundle Adjustment with CERES: Toward Waymo-Grade Fingerprint Maps&quot;</em>。
+    <code>publish_wiki_to_confluence.py update</code> は <code>--title</code> 非対応なので、本文公開後にタイトルだけ
+    REST <code>PUT /rest/api/content/{id}</code> で別途パッチ。その後ユーザー指示で <strong>このページ自体を削除</strong> (HTTP 204)。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 2 &middot; 旧 CERES ページ削除</div>
+  <div class="t-title">重複していた旧 CERES <code>1590494119</code> を trashed 化</div>
+  <div class="t-desc">
+    ユーザーの <em>「それは消してもいいかも」</em> を受けて DELETE。trashed 確認済。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 3 &middot; Multicrop ページ</div>
+  <div class="t-title">Multicrop <code>1613442154</code> を英語化&middot;再スタイルで v3 化</div>
+  <div class="t-desc">
+    中身: <em>val NLL 2.647 → 2.074 (−21.7%), train-val gap 0.594 → 0.129</em>。
+    <strong>途中でエラー HTTP 500</strong>:
+    <code>UnknownMacroMigrationException: The macro 'train.log, best_model.pt, eval_metrics.json' is unknown</code>。
+    原因は <code>&lt;code&gt;experiments/all_v2/&#123;train.log, best_model.pt, eval_metrics.json&#125;&lt;/code&gt;</code> の
+    波カッコ <code>&#123;...&#125;</code> が Confluence のマクロパーサに &quot;<code>&#123;macroname&#125;</code>&quot; として誤認されたこと。
+    HTML エンティティ <code>&amp;#123;</code> / <code>&amp;#125;</code> にエスケープして再公開 → OK。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 4 &middot; 新規 Deformable ブログ作成 (誤投稿)</div>
+  <div class="t-title">Deformable Cross-Attention ブログを <code>1613738958</code> として新規作成</div>
+  <div class="t-desc">
+    本文に <code>PLACEHOLDER_ATTENTION_ORDER_COMBINED</code> を置いて後から URL 差し替えする二段方式で作成。
+    添付画像として <code>attention_order_combined.png</code> と <code>attention_order_learning_curves.png</code> を upload &mdash;
+    <strong>これが後の事故の種になる</strong>。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 5 &middot; ユーザー指摘: 参照ページが壊れてる</div>
+  <div class="t-title">Reference <code>1613737831</code> の本文が全タグ丸見え</div>
+  <div class="t-desc">
+    ユーザーから <em>「これタグが丸見えだけど。。。 なんかおかしい」</em> と指摘。
+    GET したところ、本文が <code>&amp;lt;ac:structured-macro ac:name=&amp;quot;html&amp;quot;...</code> のように
+    <strong>HTML マクロラッパが丸ごと文字実体参照化</strong>されていた。
+    <code>publish_wiki_to_confluence.py update</code> 経由だと、raw storage XML を投げても
+    Confluence 側の wiki-markup 変換に通されて CDATA が round-trip で壊れるケースが発生。
+    <strong>対処:</strong> <code>curl -X PUT /rest/api/content/{id}</code> を直接叩いて
+    <code>body.storage.representation=storage</code> で生を投入 → v38 復旧。
+    同じ症状が <code>1613442154</code> にも発生していたので同方式で v4 に復旧。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 6 &middot; ユーザー指摘: 本文と画像がミスマッチ</div>
+  <div class="t-title">&quot;全然違う実験について書いてる。これATTENTION ORDERでしょ&quot;</div>
+  <div class="t-desc">
+    <code>1613738958</code> は本文が deformable の話なのに、画像は attention order の図。
+    <strong>原因:</strong> 画像 upload 時、deform 記事用なのに <code>docs/images/attention_order_*.png</code> を選んでしまった。
+    <code>docs/assets/vdef_sweep.png</code> / <code>vdef_learning_curves.png</code> の存在を見落とし。
+    <br>
+    <strong>対処:</strong>
+    <code>1613738958</code> を <em>&quot;Attention Order Matters: 80% Improvement from Cross-First Decoding&quot;</em> として
+    本文を <code>docs/order_of_attention.md</code> ベースで書き直し (v3)。
+    新規に <code>1613279501</code> を Deformable Cross-Attention 用ブログとして作り直し、vdef_* 画像を upload して公開 (v2)。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 7 &middot; データ生成の方針決め (中断)</div>
+  <div class="t-title">キレイにキャリブされた ip654 シーケンスで zero-shot 可視化</div>
+  <div class="t-desc">
+    ユーザーのリクエスト: <em>&quot;アノテーション中心でずらしたときにちゃんと補正されるか&quot;</em>。
+    摂動は 1° 前後の小角 extrinsic、全アノテ物体 + BG サンプル数枚で crop、モデルの予測 UV を矢印で描く。
+    <em>&quot;節度を与えなくても現状のキャリブにずれはある&quot;</em> なので摂動ゼロ版も見たい。
+    loom の <code>project_points_fisheye</code> を読み、<code>R_total = R_to_rdf @ inv(R.from_euler('zyx',[yaw,pitch,roll]))</code> +
+    POSLV 合成 + KB4 fisheye の投影ルートを把握。<strong>実装直前でユーザーが別話題に切り替え</strong>、中断。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 8 &middot; PoC 共有の話題</div>
+  <div class="t-title">&quot;POC &ne; キャリブ改善&quot;、&quot;POC = Proof of Concept&quot; の読み違え</div>
+  <div class="t-desc">
+    当初 <code>backend/POC_RECTIFICATION.md</code> の &quot;POC Sub-Pixel Refinement&quot; のことだと思ってしまい、ユーザーを怒らせた。
+    Phase-Only Correlation ではなく <strong>Proof of Concept</strong> のことで、
+    該当するのは <code>18b38873</code> / <code>fb6e90a1</code> の <strong>3D Gaussian Splatting アダプタ</strong>。
+  </div>
+</div>
+
+<div class="t-item">
+  <div class="t-time">Step 9 &middot; ドキュメントハブ立ち上げ</div>
+  <div class="t-title"><code>docs/hub.html</code> + <kbd>:5080</kbd> http.server でローカル配信</div>
+  <div class="t-desc">
+    <em>&quot;左側ぽちぽちするのめんどくせい&quot;</em> を受けて、左ナビ + iframe でレポートをぽちぽち切り替えできるハブを用意。
+    <code>:8090</code> は <code>loom/ai/gaussian_splatting/viewer/server.py</code> (3DGS Viewer) に先取られていたので <code>:5080</code> を使用。
+    URL: <code>http://172.18.2.49:5080/hub.html</code>。
+  </div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<h2>&sect; 3  技術的に詰まったところ (再発防止メモ)</h2>
+
+<h3>3.1  Confluence の macro-parser 誤爆パターン</h3>
+<p>
+Confluence の HTML マクロ内に入れても、&quot;外側&quot; の wiki-markup パーサが先に文字列を舐めて
+<code>&#123;name param&#125;</code> 形のトークンをマクロ呼び出しと誤認してしまう現象が2系統。
+</p>
+<table>
+<thead><tr><th>パターン</th><th>触発テキスト</th><th>エラー</th><th>対処</th></tr></thead>
+<tbody>
+<tr><td>CSS 一行ルール</td><td><code>{ display: inline; }</code></td><td>Macro <code>display</code> unknown</td><td>マルチライン展開で回避</td></tr>
+<tr><td>コードリスト</td><td><code>&#123;train.log, best_model.pt, ...&#125;</code></td><td>Macro <code>train.log, ...</code> unknown</td><td><code>&amp;#123;</code>/<code>&amp;#125;</code> エンティティで回避</td></tr>
+</tbody>
+</table>
+
+<h3>3.2  <code>publish_wiki_to_confluence.py update</code> の double-escape 事故</h3>
+<p>
+raw storage XML (<code>&lt;ac:structured-macro&gt;...&lt;ac:plain-text-body&gt;&lt;![CDATA[...]]&gt;&lt;/ac:plain-text-body&gt;&lt;/ac:structured-macro&gt;</code>)
+を <code>update</code> に渡すと、内部で wiki-markup 変換を通過することがあり、<strong>CDATA が round-trip で破壊される</strong>。
+Confluence 側では本文全体が <code>&amp;lt;ac:structured-macro...</code> のように実体参照化された状態で保存され、
+ページを開くと HTML タグが文字列としてそのまま表示される (= &quot;タグ丸見え&quot;)。
+</p>
+<div class="callout warn">
+<strong>再発防止:</strong> storage XML を直接差し替える時は
+<code>curl -X PUT /rest/api/content/{id}</code> に
+<code>body.storage.representation=&quot;storage&quot;</code> の JSON を投げる。これなら変換器を素通りする。
+<code>publish_wiki_to_confluence.py</code> には手を入れない (ユーザー指示)。
+</div>
+
+<pre><code>payload = {
+  'version': {'number': N+1},
+  'type': 'blogpost',
+  'title': '...',
+  'body': {'storage': {'value': body_raw, 'representation': 'storage'}}
+}
+# → curl -s -X PUT -H "Authorization: Bearer $TOKEN" \
+#     -H "Content-Type: application/json" \
+#     --data-binary @payload.json \
+#     https://confluence.tri-ad.tech/rest/api/content/$ID</code></pre>
+
+<h3>3.3  画像と本文のミスマッチ</h3>
+<p>
+新規ブログ作成時の二段階公開 (create with placeholder → upload attachments → PUT で URL 差替え) は正解だが、
+<strong>upload する画像自体が間違っていると placeholder 置換が成功しても中身はズレる</strong>。
+今回は <em>deform</em> 記事に <em>attention_order</em> の画像を上げてしまい、本文と完全不一致。
+</p>
+<div class="callout">
+<strong>再発防止:</strong> 記事の body HTML 書き出し直前に、<em>参照する画像パスと記事のトピックが一致するか</em>を明示的に
+チェックする段取りにする。将来的には <code>publish_report_blog</code> のような関数に、記事 ID と <em>この記事が
+許可する画像ファイル名プレフィクス</em>をセットで渡す運用。
+</div>
+
+<!-- ============================================================ -->
+<h2>&sect; 4  Confluence 最終状態</h2>
+
+<table>
+<thead><tr><th>Page ID</th><th>タイトル</th><th>状態</th><th>画像</th></tr></thead>
+<tbody>
+<tr><td><code>1613737831</code></td><td>Sub-Pixel LiDAR-Camera Calibration with Cross-Attention</td>
+    <td><span class="badge ok">v38 復旧</span></td><td>既存 hero 画像</td></tr>
+<tr><td><code>1613442298</code></td><td>(CERES BA) <em>3000x Faster ...</em></td>
+    <td><span class="badge warn">削除 204</span></td><td>&mdash;</td></tr>
+<tr><td><code>1590494119</code></td><td>旧 CERES (英語)</td>
+    <td><span class="badge warn">trashed</span></td><td>&mdash;</td></tr>
+<tr><td><code>1613442154</code></td><td>Multicrop Augmentation Improves NLL Calibration</td>
+    <td><span class="badge ok">v4 復旧</span></td><td>ref-template</td></tr>
+<tr><td><code>1613738958</code></td><td>Attention Order Matters: 80% Improvement from Cross-First Decoding</td>
+    <td><span class="badge ok">v3 新規</span></td><td><code>attention_order_*.png</code></td></tr>
+<tr><td><code>1613279501</code></td><td>Deformable Cross-Attention Breaks the 2.07 val-NLL Plateau</td>
+    <td><span class="badge ok">v2 新規</span></td><td><code>vdef_sweep.png</code>, <code>vdef_learning_curves.png</code></td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2>&sect; 5  ゼロショット可視化 (中断中、再開の準備はできてる)</h2>
+
+<h4>ゴール</h4>
+<p>
+キレイにキャリブされた Woven シーケンス (<code>ip654_...1749030654176-1749030664176</code>) で、
+アノテーション付きの物体&middot;背景を crop し、<strong>現行の学習済み CalibNetDepth が UV 補正をどう出すか</strong>
+を矢印で描画する。摂動 0° と 1° 程度の小角 extrinsic を両方見る。
+</p>
+
+<h4>摂動の意味</h4>
+<div class="callout">
+ユーザー発言: <em>&quot;節度１度とか、せつどうとかあたえなくてもずれてるゆあつあるから&quot;</em>。
+<br>
+つまり摂動ゼロでも既にずれている可能性がある、ということ。
+ゼロでも矢印が系統的に一方向を向けば <strong>現状キャリブのバイアス</strong>の証拠になり、
+1° かけたときに予測が −δ 方向を指せば <strong>モデルが正しく補正を出している</strong> 証拠になる。
+</div>
+
+<h4>投影公式 (loom backend から確認済)</h4>
+<pre><code># projection_utils.py:165-284
+R_camera_to_vehicle = Rotation.from_euler('zyx', [yaw, pitch, roll]).as_matrix()
+R_to_rdf            = [[0,-1,0],[0,0,-1],[1,0,0]]                      # axis swap
+R_total             = R_to_rdf @ inv(R_camera_to_vehicle)
+mp_total            = -R_total @ fcm.mp
+
+# POSLV adjust
+R_poslv, mp_poslv   = from_euler(poslv.rot_zyx), poslv.mp
+R_rear2cam          = R_total @ R_poslv
+t_rear2cam          = R_total @ mp_poslv + mp_total
+
+# project
+p_cam = R_rear2cam @ p + t_rear2cam    # filter z > 0
+uv    = cv2.fisheye.projectPoints(p_cam, 0, 0, K_kb4, [k1,k2,k3,k4])</code></pre>
+
+<h4>データ取得パス</h4>
+<pre><code>sequence_root = ~/git/loom/backend/assets/woven_sequence/llinking_27/tf_long2/
+                sequence=ip654_1337941440921107425_16943630305775105398_1749030654176-1749030664176
+├── setting-*.json                    # fcm.kb / fc,kc + rot / mp, poslv.rot / mp
+├── tss4_fcm/NNNN_TS.jpg              # 画像
+├── vls128_rear_axle/NNNN_TS.npz      # 点群 (rear-axle frame)
+└── bounding_box_tss4_fcm/NNNN_TS.json  # 2D + 3D アノテ</code></pre>
+
+<h4>再開時にやること</h4>
+<ol>
+  <li><code>scripts/zeroshot_uv_arrows.py</code> を書く。1 frame / 全アノテ bbox / BG サンプル数点で、crop → モデル推論 → 矢印描画。</li>
+  <li>摂動 0° で側面 PNG を1枚作り、現状キャリブのバイアスの有無を目視。</li>
+  <li>摂動 1° (roll/pitch/yaw それぞれ) で3水準、モデルの補正の素直さを確認。</li>
+  <li>TSS4 旧シーケンス <code>v0_0_0/20230616_001555/...</code> でも回して比較 (キャリブ精度の違い可視化)。</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>&sect; 6  e2e_calib 最新コミット <span class="badge">8053cd4 → 623b459 → 6ee9eb6</span></h2>
+
+<p><strong>Cross-frame Residual Net: UVD (Δu, Δv, Δd) 出力ヘッド — 配線 → 初回学習 → report 反映</strong></p>
+
+<h3>6.1  <code>8053cd4</code> scaffolding (配線のみ)</h3>
+<ul>
+  <li><code>models/model_cov.py</code>: <code>clamp_params_uvd</code> + <code>gaussian_uvd_nll</code>。
+    パラメータは 7 次元 <code>(tx, ty, td, logσu, logσv, logσd, ρ_uv)</code>。
+    <strong>depth は uv と decouple</strong> (対角ブロック)、<code>ρ</code> は u,v のみカップル &mdash; PD-valid な
+    最小拡張。</li>
+  <li><code>models/cross_frame.py</code>: <code>CrossFrameBlock{,Deform}</code> に <code>out_dim=5|7</code>。
+    <code>CalibNetCrossFrame</code> は uvd mode ON のとき <code>clamp_uvd</code> を配線。</li>
+  <li><code>datasets/pandaset_pair.py</code>: 各点に <code>d_B_hat_of_A</code> / <code>d_B_gt_of_A</code> /
+    <code>d_A_hat_of_B</code> / <code>d_A_gt_of_B</code> (target-camera-frame z, meters) を吐く。</li>
+  <li><code>train_cross_frame.py</code>: <code>--uvd</code> フラグ + <code>residual_uvd_nll_and_metrics</code>。
+    メトリクスに <code>err_d</code> / <code>base_d</code> 追加。</li>
+</ul>
+
+<h3>6.2  <code>623b459</code> v12_uvd 初回学習</h3>
+<p>
+v11_base と同じ config (<code>--full</code>, deform=sl, n_cross=2, 60 epoch) に <code>--uvd</code> を足した初回走行。
+</p>
+<table>
+<thead><tr><th>metric</th><th class="num">val err (px)</th><th>備考</th></tr></thead>
+<tbody>
+<tr><td>v10 (旧 best)</td><td class="num">2.61</td><td>baseline</td></tr>
+<tr><td>v11_base (repro)</td><td class="num">2.61</td><td>sampling/pivot fix の再現</td></tr>
+<tr class="done"><td><strong>v12_uvd</strong></td><td class="num"><strong>2.61</strong></td><td>UV 精度 v11 と完全同点、Δd ヘッドは &quot;free&quot;</td></tr>
+</tbody>
+</table>
+<div class="callout ok">
+<strong>結論:</strong> <em>&quot;depth は uv 精度を犠牲にせずに追加できる&quot;</em>。
+7 次元 (tx,ty,td,logσu,logσv,logσd,ρ_uv) でも UV 2D 精度は維持。
+train log 最終行: <code>ep 59  loss=-2.158  err_AB=0.99px  err_BA=1.06px  val_err=2.62px</code>。
+</div>
+
+<h4>LLN+BA 挙動 (v10/v11 と同傾向)</h4>
+<table>
+<thead><tr><th class="num">baseline</th><th class="num">rot hat (deg)</th><th class="num">rot BA (deg)</th><th class="num">rot improv</th><th class="num">t hat (cm)</th><th class="num">t BA (cm)</th><th class="num">t improv</th></tr></thead>
+<tbody>
+<tr><td class="num">1</td><td class="num">1.45</td><td class="num">1.15</td><td class="num">+21%</td><td class="num">32.8</td><td class="num">36.5</td><td class="num">&minus;11%</td></tr>
+<tr><td class="num">5</td><td class="num">1.59</td><td class="num">1.38</td><td class="num">+13%</td><td class="num">32.3</td><td class="num">51.7</td><td class="num">&minus;60%</td></tr>
+<tr><td class="num">10</td><td class="num">1.61</td><td class="num">1.36</td><td class="num">+15%</td><td class="num">32.0</td><td class="num">72.7</td><td class="num">&minus;127%</td></tr>
+<tr><td class="num">20</td><td class="num">1.60</td><td class="num">1.45</td><td class="num">+10%</td><td class="num">33.0</td><td class="num">101.7</td><td class="num">&minus;208%</td></tr>
+<tr><td class="num">40</td><td class="num">1.55</td><td class="num">2.36</td><td class="num">&minus;52%</td><td class="num">32.9</td><td class="num">275.6</td><td class="num">&minus;738%</td></tr>
+</tbody>
+</table>
+<div class="callout warn">
+<strong>既存課題:</strong> rotation は baseline 1&ndash;20 で +10&ndash;21% 改善するが、<strong>translation は全 baseline で悪化</strong>
+(bl=40 で 32.9cm → 275cm)。これは v10/v11 から持ち越しの pre-existing BA 問題で、UVD 固有ではない。
+Δd の情報を BA の 3D 制約として活かす方向で解決する予定 (次の §9 タスク 2)。
+</div>
+
+<h3>6.3  <code>6ee9eb6</code> report / σ 楕円可視化</h3>
+<ul>
+  <li><code>docs/cross_frame_report.html</code> に v11_base / v12_uvd 行追加、v12 を best にマーク。</li>
+  <li>LLN+BA 可視化: <code>x</code>/<code>star</code> を廃止、予測 <code>●</code> の周囲に 2σ 共分散楕円を塗りつぶし表示。</li>
+  <li><strong>定性的発見:</strong> 動いている車両の上で σ が目に見えて膨らむ &mdash; σ-weighted BA が動的物体を
+    統計的に down-weight するのに必要な信号が、学習なしで自然に出ている。</li>
+  <li><code>docs/images/lln_bl{5,10,20,40}.png</code> を v10 + 新 vis で再生成。</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>&sect; 7  loom 最新 PoC &mdash; 3D Gaussian Splatting on Woven Sequence</h2>
+
+<h4>該当コミット</h4>
+<table>
+<thead><tr><th>SHA</th><th>日時</th><th>サマリ</th></tr></thead>
+<tbody>
+<tr><td><code>18b38873</code></td><td>2026-04-23 22:15</td>
+    <td>feat(gs): Woven sequence scene reader + KB4 undistortion for 3DGS</td></tr>
+<tr><td><code>fb6e90a1</code></td><td>2026-04-23 22:22</td>
+    <td>feat(gs): rect mode in WovenGSDataset + readWovenRectSceneInfo</td></tr>
+</tbody>
+</table>
+
+<h4>構成ファイル (<code>ai/gaussian_splatting/</code>)</h4>
+<table>
+<thead><tr><th>ファイル</th><th>役割</th></tr></thead>
+<tbody>
+<tr><td><code>woven_dataset.py</code></td>
+    <td><code>WovenGSDataset</code>: metadata (<code>baed_poses_v4_absolute</code>) + setting-*.json (fcm kb + rot/mp) +
+        画像 + multiframe PC。<code>backend.pose_interpolation.interpolate_pose</code> で quaternion SLERP、
+        frame-0 は <code>t_offset = −camera_delay_ms / dt_next_ms</code> で後方外挿。
+        <code>rect=True</code> モードで <code>K_rect.json</code> + <code>tss4_fcm_rect/</code> 使用。</td></tr>
+<tr><td><code>undistort_fcm.py</code></td>
+    <td><code>cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(balance=0, fov_scale=1)</code> で
+        KB4 → pinhole。出力: <code>tss4_fcm_rect/*.jpg</code> + <code>K_rect.json</code>。</td></tr>
+<tr><td><code>woven_scene_reader.py</code></td>
+    <td><code>readWovenSceneInfo</code> / <code>readWovenRectSceneInfo</code>: 3DGS 規約
+        <code>R = world_from_cam</code>, <code>T = −R_cam_from_world @ cam_pos_world</code> で SceneInfo 構築、
+        llffhold で train/test 分割、init PC を <code>points3d_lidar[_rect80m].ply</code> にキャッシュ。</td></tr>
+<tr><td><code>verify_proj_rect_extrap.py</code></td>
+    <td>LiDAR → rect 画像の投影サニティ。<code>/tmp/woven_gs_verify/frame_*.jpg</code> 出力。</td></tr>
+</tbody>
+</table>
+
+<h4>検証結果 (コミットメッセージより)</h4>
+<ul>
+  <li><strong>K_rect (balance=0):</strong> fx=fy=1589.28, cx=1889.72, cy=1650.08, 3840×2160。downscale=2 で fx=794.6, W=1920, H=1080。</li>
+  <li><strong>Frame 0 pose:</strong> Δ translation ~0.154m backward (camera-time 補正後)。</li>
+  <li><strong>Init PC:</strong> 80m フィルタ + stride=10 + voxel=0.15 で 688,175 点、clean world-bbox。
+    rect 版は stride=3 + voxel=0.12 で最大 2M 点。</li>
+  <li><strong>投影サニティ:</strong> frames 0 / 100 / 200 で LiDAR overlay が街並み &middot; 車両 &middot; 建物に
+    クリーンに乗る。</li>
+</ul>
+
+<h4>関連サーバー</h4>
+<p>
+<code>loom/ai/gaussian_splatting/viewer/server.py</code> が
+<kbd>http://172.18.2.49:8090</kbd> で Woven 3DGS Viewer として常駐中。Init PC と学習済 Gaussian (iter 7000)
+の両方を切替表示できる模様。
+</p>
+
+<!-- ============================================================ -->
+<h2>&sect; 8  ディスカッション &mdash; このセッションで学んだこと</h2>
+
+<h3>8.1  コミュニケーションで詰まった箇所</h3>
+
+<div class="quote">
+&quot;いや、キャリ部とかじゃないどころのPOCができたんだよ みてくれ&quot;
+</div>
+<p>
+ここで最初 &quot;Phase-Only Correlation&quot; の続きを探してしまい空振り。
+<strong>教訓:</strong> 略語の候補が複数ある場合 (POC = Phase-Only Correlation / Proof of Concept) は、
+最新の <code>git log --since</code> で &quot;feat&quot; 系のコミット差分から当てにいく方が速い。
+</p>
+
+<div class="quote">
+&quot;さいきんの３つとか４つとかのれこみっとみれない？&quot;
+</div>
+<p>
+ユーザーは常に <strong>直近コミット差分</strong>から話を始めたがっている。
+これ以降、話題が変わったらまず <code>git log --oneline -N</code> を打って最新差分を先に読む習慣を定着させる。
+</p>
+
+<div class="quote">
+&quot;おまえいまどこにいるんだ？&quot;
+</div>
+<p>
+<code>pwd</code> を定期的に出す。リポジトリを跨ぐ作業 (loom ↔ e2e_calib) では <kbd>bash -c 'cd ... &amp;&amp; ...'</kbd> で
+明示的に指定し、勘違いの余地を減らす。
+</p>
+
+<h3>8.2  Confluence との付き合い方</h3>
+<p>
+Confluence の storage format + wiki-markup マクロパーサは、見た目が普通の HTML でも
+<strong>特定のトークン列で勝手にマクロ呼び出しとして解釈する</strong>という性質を持つ (<code>&#123;...&#125;</code> 等)。
+これは CDATA 内でも完全には抑制されないことがあり、コードサンプルの波カッコや CSS の一行ブロックが地雷になる。
+</p>
+<p>
+対策として以下を恒久ルール化:
+</p>
+<ul>
+  <li>storage 書き込みは必ず REST <code>PUT</code> 直叩き (converter を経由させない)。</li>
+  <li>コードリスト内の <code>&#123;...&#125;</code> は <code>&amp;#123;...&amp;#125;</code> に事前エスケープ。</li>
+  <li>CSS ルールは一行化しない (一行の <code>{...}</code> もマクロに化ける)。</li>
+  <li>本文を POST/PUT する前に、本文文字列に対して <em>禁止パターンの lint</em> を自動でかける (将来 TODO)。</li>
+</ul>
+
+<h3>8.3  新規ブログ公開の安全手順</h3>
+<ol>
+  <li>本文 HTML をローカルに保存 (<code>/tmp/page_&lt;name&gt;.new.html</code>)。</li>
+  <li>POST で新規ブログを作る (placeholder を含んだまま)。pageId が採番される。</li>
+  <li>その pageId に attachments を upload (<em>画像ファイル名と記事トピックが一致するか</em>を必ず目視確認)。</li>
+  <li>本文中の placeholder を <code>https://confluence.tri-ad.tech/download/attachments/&lt;pageId&gt;/&lt;fname&gt;</code>
+      に置換して PUT。</li>
+  <li>GET で <code>body.storage.value.startswith('&lt;ac:structured-macro')</code> と
+      <code>'&amp;lt;ac:structured-macro' not in body</code> を必ず検証。</li>
+</ol>
+
+<h3>8.4  ハブと進捗可視化</h3>
+<p>
+今回のようにレポートが増えてくると、<em>どれを見に行けばいいかわからない</em> 問題が発生する。
+<code>docs/hub.html</code> に左ナビ + iframe + ハッシュディープリンクを用意したので、今後は新しい
+<code>*_report.html</code> を書いたらナビに1行足すだけで共有できる。URL は
+<kbd>http://172.18.2.49:5080/hub.html#&lt;file&gt;</kbd>。
+</p>
+
+<!-- ============================================================ -->
+<h2>&sect; 9  次にやること (優先順位付き)</h2>
+
+<table>
+<thead><tr><th>#</th><th>タスク</th><th>状態</th><th>前提</th></tr></thead>
+<tbody>
+<tr><td>1</td>
+    <td>ゼロショット UV arrow 可視化 (摂動 0° / 1°, Woven ip654 + TSS4旧)</td>
+    <td><span class="badge warn">中断再開</span></td>
+    <td>loom の <code>project_points_fisheye</code> 把握済。実装のみ。</td></tr>
+<tr class="done"><td>2</td>
+    <td>v12_uvd 初回学習 (val 2.61px, v11 と同点, Δd ヘッド &quot;free&quot;)</td>
+    <td><span class="badge ok">完了 623b459</span></td>
+    <td>UV 精度は v11 同等。次は Δd を BA の 3D 制約に使って t_improvement 負を解消。</td></tr>
+<tr><td>2.1</td>
+    <td>BA に 3D constraint (Δd) を載せて translation improvement を正に</td>
+    <td><span class="badge warn">次の山</span></td>
+    <td>現 BA は UV 2D 残差のみ。bl=40 で t が 32.9→275cm と悪化するのを解消したい。</td></tr>
+<tr><td>3</td>
+    <td>3DGS 学習結果の共有方法整理 (viewer URL / snapshot を別ブログ化)</td>
+    <td><span class="badge info">PoC完</span></td>
+    <td><code>fb6e90a1</code> のアダプタ。8090 の viewer 常駐済。</td></tr>
+<tr><td>4</td>
+    <td>Confluence publish ヘルパの安全ラッパ (storage PUT + lint + 画像チェック)</td>
+    <td><span class="badge">TODO</span></td>
+    <td>既存 <code>publish_wiki_to_confluence.py</code> は触らない。別モジュール。</td></tr>
+<tr><td>5</td>
+    <td><code>deform_review.py</code> (tool-using agent)</td>
+    <td><span class="badge">TODO</span></td>
+    <td>前セッションからの持ち越し。</td></tr>
+<tr><td>6</td>
+    <td>MCP hub を &quot;skill&quot; としてセッション跨ぎ共有する方法</td>
+    <td><span class="badge">Q&amp;A保留</span></td>
+    <td>前セッションからの持ち越し。</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2>&sect; 10  ファイル&middot;URL 一覧</h2>
+
+<h4>作成ファイル (このセッション)</h4>
+<ul>
+  <li><code>/tmp/page_1613442154.new.html</code> (Multicrop restyle, published)</li>
+  <li><code>/tmp/page_attn_order.new.html</code> (Attention Order body)</li>
+  <li><code>/tmp/page_deform.new.html</code> (Deformable body)</li>
+  <li><code>/tmp/restore_1613737831.json</code>, <code>/tmp/restore_1613442154.json</code> (REST PUT payloads)</li>
+  <li><code>docs/hub.html</code>, <code>docs/session_progress_ja.html</code>, <code>docs/session_progress_en.html</code></li>
+</ul>
+
+<h4>Confluence URL</h4>
+<ul>
+  <li>Reference: <a href="https://confluence.tri-ad.tech/spaces/LOOM/blog/2026/04/20/1613737831/">1613737831 Sub-Pixel LiDAR-Camera Calibration</a></li>
+  <li>Multicrop: <a href="https://confluence.tri-ad.tech/spaces/LOOM/blog/2026/04/22/1613442154/">1613442154 Multicrop Augmentation Improves NLL Calibration</a></li>
+  <li>Attention Order: <a href="https://confluence.tri-ad.tech/spaces/LOOM/blog/2026/04/23/1613738958/">1613738958 Attention Order Matters</a></li>
+  <li>Deformable: <a href="https://confluence.tri-ad.tech/spaces/LOOM/blog/2026/04/23/1613279501/">1613279501 Deformable Cross-Attention Breaks 2.07</a></li>
+</ul>
+
+<h4>ローカルサーバー</h4>
+<ul>
+  <li>Docs hub: <code>http://172.18.2.49:5080/hub.html</code> (python <code>http.server</code> on <code>docs/</code>)</li>
+  <li>3DGS viewer: <code>http://172.18.2.49:8090/</code> (<code>loom/ai/gaussian_splatting/viewer/server.py</code>)</li>
+  <li>loom simple_api: <code>http://172.18.2.49:8082/</code> (gunicorn, 4 workers)</li>
+</ul>
+
+<hr>
+<p style="font-family: var(--mono); font-size: 11px; color: var(--ink-dim); text-align: center;">
+generated 2026-04-24 &middot; matoge @ yokohama1 &middot; session recap
+</p>
+
+</div>
+</body>
+</html>

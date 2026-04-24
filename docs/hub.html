@@ -47,7 +47,6 @@
     text-decoration: none;
     border-left: 3px solid transparent;
     transition: background 0.15s, border-color 0.15s;
-    cursor: pointer;
   }
   nav li a:hover {
     background: #faf8f1;
@@ -77,33 +76,36 @@
     border: 0;
     display: block;
   }
+  .empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--ink-dim);
+    font-size: 1.1rem;
+  }
 </style>
 </head>
 <body>
 <nav>
   <h1>e2e_calib reports</h1>
-
-  <div class="sec">Overview</div>
+  <div class="sec">Main</div>
   <ul>
-    <li><a data-src="technical_overview.html">Technical overview</a></li>
-    <li><a data-src="report.html">Bilingual writeup</a></li>
-    <li><a data-src="session_progress_ja.html">Session progress (JA)</a></li>
+    <li><a data-src="index.html">index.html</a></li>
+    <li><a data-src="report.html">report.html</a></li>
   </ul>
-
   <div class="sec">Experiments</div>
   <ul>
     <li><a data-src="cross_frame_report.html">Cross-frame residual net</a></li>
-    <li><a data-src="cross_frame_blog.html">Cross-frame blog</a></li>
     <li><a data-src="cross_frame_curves.html">Cross-frame curves</a></li>
     <li><a data-src="deform_report.html">Deformable attention</a></li>
     <li><a data-src="ba_report.html">Bundle adjustment</a></li>
   </ul>
-
-  <div class="sec">Raw</div>
+  <div class="sec">Other</div>
   <ul>
-    <li><a data-src="order_of_attention.md">order_of_attention.md</a></li>
-    <li><a data-src="images/">images/</a></li>
-    <li><a data-src="assets/">assets/</a></li>
+    <li><a data-src="order_of_attention.md" data-raw="1">order_of_attention.md (raw)</a></li>
+    <li><a data-src="images/" data-raw="1">images/</a></li>
+    <li><a data-src="assets/" data-raw="1">assets/</a></li>
   </ul>
 </nav>
 <main>
@@ -122,11 +124,13 @@
     e.preventDefault();
     activate(a);
   }));
+  // open from URL hash
   const hash = decodeURIComponent(location.hash.slice(1));
   if (hash) {
     const m = Array.from(links).find(a => a.dataset.src === hash);
     if (m) activate(m); else iframe.src = hash;
   } else {
+    // default highlight
     const def = Array.from(links).find(a => a.dataset.src === 'cross_frame_report.html');
     if (def) def.classList.add('active');
   }
