@@ -106,7 +106,7 @@ a:hover { color: var(--accent); }
   <span>dual projection learner</span>
 </div>
 
-<h1 class="title">一つのヘッドで<br/>calibration から loop closure まで。</h1>
+<h1 class="title">一つのヘッドで<br/>"この 3D 点は別のフレームのどこに来るか" を学ぶ。</h1>
 <p class="subtitle">
   CalibNetDepth が「同一フレーム内のモダリティ間ズレ」を学んでいたのを、
   「任意フレーム間・任意モダリティ間のズレ」に一般化する。dual projection
@@ -727,13 +727,47 @@ stage 5:  全域で再訓練 → 完成</div>
   </li>
 </ul>
 
-<h3>定性的検証(LLN + BA、後述のセクションで差し替え予定)</h3>
-<p style="font-size: 12px; color: var(--ink-dim);">
-  旧 v08 64×64 パッチの per-pair 可視化は小さすぎて読めなかったので削除。
-  v10 の LLN + BA 可視化(hyp → pred → BA → gt の per-point 矢印)は
-  <a href="../experiments/cross_frame_v10_padclean_deform/lln/">experiments/…/lln/</a>
-  に後続実験で出力中。
+<h3>LLN + BA 定性検証 (v10)</h3>
+
+<p>
+  各 pair で、patch_B 内に落ちる A の LiDAR 点を以下 4 通りに投影して重ねる:
 </p>
+<ul>
+  <li><span style="color: #c13c14;">赤 ×</span>: <strong>hypothesis 投影</strong> (model 入力の "仮想位置")</li>
+  <li><span style="color: #0fa550;">緑 ●</span>: <strong>model 予測</strong> = hyp + per-point Δ</li>
+  <li><span style="color: #ff9f1a;">橙 ■</span>: <strong>BA-recovered 投影</strong> (模型予測を σ-重みで集約して解いた 6-DoF から再投影)</li>
+  <li><span style="color: #1e6fff;">青 ○</span>: <strong>ground-truth 投影</strong> (目標)</li>
+</ul>
+<p>
+  灰色の矢印 = hyp → pred の per-point 補正。
+  <strong>緑が青に乗れば model は per-point で正しく、橙が青に乗れば BA も pose-level で正しい。</strong>
+</p>
+
+<figure>
+  <img src="images/lln_bl5.png" alt="LLN+BA vis, baseline ±5">
+  <figcaption>baseline ±5 frames (~0.5s、~5m)</figcaption>
+</figure>
+<figure>
+  <img src="images/lln_bl10.png" alt="LLN+BA vis, baseline ±10">
+  <figcaption>baseline ±10 frames (~1s、~10m)</figcaption>
+</figure>
+<figure>
+  <img src="images/lln_bl20.png" alt="LLN+BA vis, baseline ±20">
+  <figcaption>baseline ±20 frames (~2s、~20m)</figcaption>
+</figure>
+<figure>
+  <img src="images/lln_bl40.png" alt="LLN+BA vis, baseline ±40">
+  <figcaption>baseline ±40 frames (~4s、~40m、train 分布の上限超)</figcaption>
+</figure>
+
+<div class="callout">
+  <strong>観察</strong>:
+  短距離 (±5, ±10) では緑/橙が青に乗りやすい — model + BA が正しく機能。
+  長距離 (±40) では緑は大まかに青に寄るが橙 (BA) が外れるケースあり
+  — BA に流す σ 重みや outlier 処理を改善すべき領域。
+  per-point 予測は baseline が伸びても retained (緑 ≈ 青) が、pose-level 集約で
+  outlier が暴れる。
+</div>
 
 <div class="callout">
   <strong>定性所見</strong>:
