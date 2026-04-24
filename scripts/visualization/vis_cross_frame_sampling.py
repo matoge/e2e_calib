@@ -182,14 +182,19 @@ def main(args):
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # val scene set (same split as training, seed=42)
-    root = Path(args.scenes_root)
-    names = sorted([p.name for p in root.iterdir() if p.is_dir() and p.name.isdigit()])
-    shuffled = sorted([str(root / n) for n in names])
+    # val scene set (same split as training, seed=42). Accept comma-separated
+    # multi-root for mixed datasets (PandaSet + Waymo-converted).
+    roots = [Path(r) for r in str(args.scenes_root).split(',')]
+    all_scenes = []
+    for root in roots:
+        for p in sorted(root.iterdir()):
+            if p.is_dir() and (p / 'camera/front_camera/intrinsics.json').exists():
+                all_scenes.append(str(p))
+    shuffled = sorted(all_scenes)
     random.Random(42).shuffle(shuffled)
     cutoff = int(len(shuffled) * args.train_frac)
     val_roots = shuffled[cutoff:]
-    print(f'val scenes: {[Path(r).name for r in val_roots]}')
+    print(f'val scenes ({len(val_roots)}): {[Path(r).name for r in val_roots[:10]]}…')
 
     scenes = []
     for sr in val_roots:
