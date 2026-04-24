@@ -264,6 +264,51 @@ a:hover { color: var(--accent); }
   のバグではなく <em>入力分布の差 (OOD)</em> による」と切り分けられる。
 </div>
 
+<h3>摂動ありのペア: リーク検証 + 残差の意味</h3>
+
+<div class="callout warn">
+  <strong>Critical correctness check</strong>:
+  訓練時、patch_B は <em>仮説投影 (π_B(T_AB_hat · P_A))</em> を中心に
+  切り出される — <em>真値投影 (π_B(T_AB_gt · P_A)) ではない</em>。
+  もし真値投影を中心にクロップしてたら、答えが常に patch 中央に落ちて
+  self-supervised リークで学習が壊れる。
+</div>
+
+<p>
+  摂動 σ_ypr=1° / σ_t=0.2m の下で、B パッチ上に <strong>赤★ (仮説
+  位置、patch 中央) と 青★ (真値位置)</strong> を両方描画:
+</p>
+
+<figure>
+  <img src="images/sampling/sampling_perturb.png"
+       alt="Pairs with perturbation: red ★ hypothesis at center, blue ★ GT offset">
+  <figcaption>
+    各ペアの patch_B: <span style="color: #c13c14;">赤★ = hypothesis</span>
+    (patch 中心、model 入力); <span style="color: #1e6fff;">青★ = GT</span>
+    (わずかに offset、正解)。モデルは赤→青の
+    <strong>pixel-space Δ</strong> を予測する task。patch_A は pivot 自身を
+    中心に切ってるので真値中心(pivot の A projection は GT では摂動されない)。
+  </figcaption>
+</figure>
+
+<p>
+  このセットアップで <strong>model が見るもの</strong>:
+</p>
+<ul>
+  <li><strong>patch_A</strong>: frame_A で pivot 中心の画像 — "ここに居た点"</li>
+  <li><strong>patch_B</strong>: frame_B で <em>仮説投影</em> 中心の画像 —
+    "仮説ではここに居るはず" の画像領域</li>
+  <li><strong>pose_emb(T_AB_hat)</strong>: 仮説ポーズ 6DoF を D 次元に
+    埋め込んだベクトル</li>
+  <li><strong>uvd_A, uvd_B</strong>: 両 patch に落ちる全 LiDAR 点の patch-local 座標 + 深度</li>
+</ul>
+<p>
+  <strong>Δ<sub>target</sub> = uv_gt − uv_hat</strong> (patch-local px、
+  上図の赤→青のベクトル) を予測するのが学習タスク。model は赤★周りの
+  画像コンテンツ(仮説でここにあるはず)と patch_A の appearance を比較し、
+  「真の正解は X 画素右下」のように Δ を出す。
+</p>
+
 <h2>アーキテクチャ</h2>
 
 <div class="ascii">  frame A                                  frame B
