@@ -17,8 +17,9 @@ from matplotlib.patches import ConnectionPatch
 
 from datasets.pandaset_pair import _SceneData, _project
 
-SCENE  = '/mnt/nvme6t/waymo_ps/10017090168044687777_6380_000_6400_000'
-OUT    = Path('experiments/waymo_pivot_check.png')
+import sys as _sys
+SCENE = _sys.argv[1] if len(_sys.argv) > 1 else '/mnt/nvme6t/waymo_ps/10017090168044687777_6380_000_6400_000'
+OUT   = Path(_sys.argv[2]) if len(_sys.argv) > 2 else Path('experiments/waymo_pivot_check.png')
 N_PAIRS = 4
 BASELINES = [1, 5, 10, 20]
 

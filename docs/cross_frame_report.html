@@ -793,6 +793,12 @@ stage 5:  全域で再訓練 → 完成</div>
   <td><a href="../experiments/cross_frame_v13_mix/train.log">log</a> ·
       <a href="../experiments/cross_frame_v13_mix/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v13_mix/best_model.pt">ckpt</a></td></tr>
+<tr><td>v14</td><td>v13 + <strong>NuScenes 80</strong> 追加 (199 scenes, ~5× data)</td>
+  <td class="num">1.59 M</td><td class="num">2.62 px</td><td class="num">16.1 px</td>
+  <td class="num">82 %</td><td class="num">3.0 ×</td>
+  <td><a href="../experiments/cross_frame_v14_mix3/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v14_mix3/curve.png">curve</a> ·
+      <a href="../experiments/cross_frame_v14_mix3/best_model.pt">ckpt</a></td></tr>
 </tbody>
 </table>
 
@@ -817,6 +823,23 @@ stage 5:  全域で再訓練 → 完成</div>
   現状 PandaSet val のみ走る (name.isdigit フィルタ)。v13 の PandaSet-only BA は
   v12 より若干悪化しており、σ の絶対スケールが Waymo 側の分布に適応して
   PandaSet と合わない可能性。raw per-point 予測は改善、BA-level 再校正が次タスク。
+</p>
+
+<p style="font-size: 13px;">
+  <strong>v13 → v14 知見 (NuScenes 追加は効かなかった)</strong>:
+  NuScenes 850 scene から 80 scene を PandaSet 形式に変換して合流、計 199 scene。
+  val err <strong>2.42 → 2.62 px (悪化 +8.3%)</strong>。LLN+BA (PandaSet only) の rot 側は
+  v13 よりわずかに改善 (bl20 ↓-27 → ↓-17%)。
+  <br/>
+  <em>原因</em>: NuScenes keyframe は <strong>2 Hz</strong>、baseline_max=20 frame は
+  <strong>10 秒 = 100 m 近い</strong>大モーション。PandaSet/Waymo の 10 Hz × bl20
+  (2 秒 ≒ 20 m) と 5× 離れたレジームで、学習・val 双方に hard pair が混入して
+  平均誤差を押し上げた。データセット毎に独立 baseline_range を持つか、
+  NuScenes sweep (LiDAR 20 Hz / Cam 12 Hz) を使って 10 Hz 相当に再サンプル
+  するかのどちらかで解消するはず。
+  <br/>
+  <strong>現時点の best ckpt は v13_mix</strong>。NuScenes は使い方が固まってから
+  再度組み込む。
 </p>
 
 <p style="font-size: 12px; color: var(--ink-dim);">
