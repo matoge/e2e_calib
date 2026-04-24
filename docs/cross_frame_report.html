@@ -781,12 +781,18 @@ stage 5:  全域で再訓練 → 完成</div>
   <td><a href="../experiments/cross_frame_v11_base/train.log">log</a> ·
       <a href="../experiments/cross_frame_v11_base/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v11_base/best_model.pt">ckpt</a></td></tr>
-<tr class="best"><td>v12</td><td>v11 + <strong>UVD head</strong> (Δu,Δv,<strong>Δd</strong>, log σu, log σv, log σd, ρ<sub>uv</sub>)</td>
-  <td class="num">1.59 M</td><td class="num"><strong>2.61 px</strong></td><td class="num">15.4 px</td>
+<tr><td>v12</td><td>v11 + <strong>UVD head</strong> (Δu,Δv,<strong>Δd</strong>, log σu, log σv, log σd, ρ<sub>uv</sub>)</td>
+  <td class="num">1.59 M</td><td class="num">2.61 px</td><td class="num">15.4 px</td>
   <td class="num">82 %</td><td class="num">3.0 ×</td>
   <td><a href="../experiments/cross_frame_v12_uvd/train.log">log</a> ·
       <a href="../experiments/cross_frame_v12_uvd/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v12_uvd/best_model.pt">ckpt</a></td></tr>
+<tr class="best"><td>v13</td><td>v11 arch + <strong>PandaSet 39 + Waymo 80 混合</strong> (119 scenes, ~3× data)</td>
+  <td class="num">1.59 M</td><td class="num"><strong>2.42 px</strong></td><td class="num">16.2 px</td>
+  <td class="num">82 %</td><td class="num">3.0 ×</td>
+  <td><a href="../experiments/cross_frame_v13_mix/train.log">log</a> ·
+      <a href="../experiments/cross_frame_v13_mix/curve.png">curve</a> ·
+      <a href="../experiments/cross_frame_v13_mix/best_model.pt">ckpt</a></td></tr>
 </tbody>
 </table>
 
@@ -796,6 +802,21 @@ stage 5:  全域で再訓練 → 完成</div>
   完全に据え置き (2.61 px = v11 tie)。つまり<strong>深度予測ヘッドは "タダで" 付いてくる</strong>
   — SLAM の σ-weighted BA で 3D 拘束として使える (camera-ray だけでなく深度方向にも
   効く) ための前準備が整った。深度誤差 (val err_d, meter) は今後 BA 評価で計測予定。
+</p>
+
+<p style="font-size: 13px;">
+  <strong>v12 → v13 知見</strong>:
+  Waymo Open Dataset v2 から 80 segment を PandaSet 形式に変換 (先頭 80 frame を
+  truncate、OpenCV cam 系に回転) し、既存 <code>PandaSetCrossFrameDataset</code> に
+  そのまま 2 root 指定で流し込んだ。
+  val err <strong>2.61 → 2.42 px (+7.3%)</strong>。train 誤差は横ばい
+  (1.03 → 1.03 px)、train/val gap が <strong>1.59 → 1.40 px (20% 減)</strong> で、
+  データ量 3× で overfit が確かに緩和。
+  <br/>
+  <em>注意</em>: LLN+BA 評価は <code>scripts/eval/cross_frame_lln.py</code> が
+  現状 PandaSet val のみ走る (name.isdigit フィルタ)。v13 の PandaSet-only BA は
+  v12 より若干悪化しており、σ の絶対スケールが Waymo 側の分布に適応して
+  PandaSet と合わない可能性。raw per-point 予測は改善、BA-level 再校正が次タスク。
 </p>
 
 <p style="font-size: 12px; color: var(--ink-dim);">
