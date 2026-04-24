@@ -1,93 +1,24 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
+<link rel="stylesheet" href="assets/report.css">
 <meta charset="UTF-8">
 <title>e2e_calib reports</title>
-<style>
-  :root {
-    --ink: #0f0f0e;
-    --ink-dim: #6b6a63;
-    --bg: #f6f4ed;
-    --panel: #ffffff;
-    --accent: #c13c14;
-    --border: #e0ddd2;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    color: var(--ink);
-    background: var(--bg);
-    display: flex;
-    height: 100vh;
-    overflow: hidden;
-  }
-  nav {
-    width: 280px;
-    flex: 0 0 280px;
-    background: var(--panel);
-    border-right: 1px solid var(--border);
-    overflow-y: auto;
-    padding: 24px 0;
-  }
-  nav h1 {
-    font-size: 0.85rem;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--ink-dim);
-    padding: 0 24px 16px;
-    font-weight: 600;
-  }
-  nav ul { list-style: none; }
-  nav li a {
-    display: block;
-    padding: 10px 24px;
-    font-size: 0.95rem;
-    color: var(--ink);
-    text-decoration: none;
-    border-left: 3px solid transparent;
-    transition: background 0.15s, border-color 0.15s;
-    cursor: pointer;
-  }
-  nav li a:hover {
-    background: #faf8f1;
-  }
-  nav li a.active {
-    background: #fceee8;
-    border-left-color: var(--accent);
-    color: var(--accent);
-    font-weight: 600;
-  }
-  nav .sec {
-    font-size: 0.75rem;
-    color: var(--ink-dim);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    padding: 20px 24px 8px;
-    font-weight: 600;
-  }
-  main {
-    flex: 1 1 auto;
-    position: relative;
-    background: #fff;
-  }
-  iframe {
-    width: 100%;
-    height: 100%;
-    border: 0;
-    display: block;
-  }
-</style>
 </head>
-<body>
-<nav>
+<body class="r-hub">
+<nav class="r-sidebar">
+  <div class="lang-toggle">
+    <button id="btn-en" class="lang-btn active" type="button">EN</button>
+    <button id="btn-ja" class="lang-btn" type="button">JA</button>
+  </div>
+
   <h1>e2e_calib reports</h1>
 
   <div class="sec">Overview</div>
   <ul>
     <li><a data-src="technical_overview.html">Technical overview</a></li>
     <li><a data-src="report.html">Bilingual writeup</a></li>
-    <li><a data-src="session_progress_ja.html">Session progress (JA)</a></li>
+    <li><a data-src="session_progress.html">Session progress</a></li>
   </ul>
 
   <div class="sec">Experiments</div>
@@ -106,29 +37,92 @@
     <li><a data-src="assets/">assets/</a></li>
   </ul>
 </nav>
-<main>
+<main class="r-view">
   <iframe id="view" src="cross_frame_report.html"></iframe>
 </main>
 <script>
+  // HAS_JA: docs that also have a <stem>_ja.html variant on disk.
+  // ONLY_JA: docs with no EN version yet (default to JA, keep EN disabled).
+  const HAS_JA = new Set([
+    'session_progress.html',
+  ]);
+  const ONLY_JA = new Set([
+    'session_progress.html',
+  ]);
+
   const links = document.querySelectorAll('nav a');
   const iframe = document.getElementById('view');
+  const btnEN = document.getElementById('btn-en');
+  const btnJA = document.getElementById('btn-ja');
+
+  let currentLang = 'en';
+  let currentStem = 'cross_frame_report.html';
+
+  function toJA(stem) {
+    if (stem.endsWith('.html')) return stem.replace(/\.html$/, '_ja.html');
+    return stem;
+  }
+  function langUrl(stem, lang) {
+    if (lang === 'ja' && HAS_JA.has(stem)) return toJA(stem);
+    return stem;
+  }
+  function setLangButtons(stem) {
+    const jaAvail = HAS_JA.has(stem);
+    const enAvail = !ONLY_JA.has(stem);
+    btnJA.disabled = !jaAvail;
+    btnEN.disabled = !enAvail;
+    if (!jaAvail && currentLang === 'ja') currentLang = 'en';
+    if (!enAvail && currentLang === 'en') currentLang = 'ja';
+    btnEN.classList.toggle('active', currentLang === 'en' && enAvail);
+    btnJA.classList.toggle('active', currentLang === 'ja' && jaAvail);
+  }
+
   function activate(el) {
     links.forEach(a => a.classList.remove('active'));
     el.classList.add('active');
-    iframe.src = el.dataset.src;
-    try { history.replaceState(null, '', '#' + encodeURIComponent(el.dataset.src)); } catch (e) {}
+    currentStem = el.dataset.src;
+    setLangButtons(currentStem);
+    iframe.src = langUrl(currentStem, currentLang);
+    try { history.replaceState(null, '', '#' + encodeURIComponent(currentStem)); } catch (e) {}
   }
+
   links.forEach(a => a.addEventListener('click', e => {
     e.preventDefault();
     activate(a);
   }));
+
+  btnEN.addEventListener('click', () => {
+    if (btnEN.disabled) return;
+    currentLang = 'en';
+    setLangButtons(currentStem);
+    iframe.src = langUrl(currentStem, currentLang);
+  });
+  btnJA.addEventListener('click', () => {
+    if (btnJA.disabled) return;
+    currentLang = 'ja';
+    setLangButtons(currentStem);
+    iframe.src = langUrl(currentStem, currentLang);
+  });
+
   const hash = decodeURIComponent(location.hash.slice(1));
   if (hash) {
-    const m = Array.from(links).find(a => a.dataset.src === hash);
-    if (m) activate(m); else iframe.src = hash;
+    let stem = hash;
+    let lang = 'en';
+    const m = hash.match(/^(.+)_ja\.html$/);
+    if (m) { stem = m[1] + '.html'; lang = 'ja'; }
+    const link = Array.from(links).find(a => a.dataset.src === stem);
+    if (link) {
+      currentLang = lang;
+      activate(link);
+    } else {
+      iframe.src = hash;
+    }
   } else {
     const def = Array.from(links).find(a => a.dataset.src === 'cross_frame_report.html');
-    if (def) def.classList.add('active');
+    if (def) {
+      def.classList.add('active');
+      setLangButtons(currentStem);
+    }
   }
 </script>
 </body>
