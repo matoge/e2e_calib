@@ -179,25 +179,19 @@ a:hover { color: var(--accent); }
   <strong>交差点 — cross-modal × cross-frame × BA-ready Σ — は空いてる</strong>。
 </div>
 
-<p class="lede">
-  <strong>だが、空いてる理由は「難しいから」ではない</strong>。
-  ここに書いたのは 2020 年代前半に広く知られた構成要素の組み合わせでしかない。
-  Transformer で query 位置から cross-attn で画像特徴を引く、
-  出力を 2D Gaussian NLL で訓練する、deformable sampling で効率化、
-  dual direction で対称に訓練 — <em>どれも誰でも思いつくし、AI も思いつく</em>。
-  組み合わせの新規性は 1-2 年で埋まる。
+<p>
+  構成要素はすべて 2020 年代前半に公表された既知のもの:
+  cross-attn で画像特徴を引く、2D Gaussian NLL で訓練する、
+  deformable sampling で効率化、dual direction で対称に訓練。
+  組み合わせ自体の新規性は限定的で、1–2 年で公開実装が出る類のものだろう。
   <br/><br/>
-  <strong>本質的に価値があるのは、このヘッドで作る "地図" の方だ</strong>。
-  LiDAR × Camera × Transformer で per-point 残差を出す手法を持っている組織は
-  いくつもある。だが、それを <em>自社の生データを流し込んで、動体を自動的に
-  σ で排除して、Σ-weighted BA で高精度 pose を得て、3D Gaussian Splatting で
-  都市スケールの地図を更新し続ける</em> — というパイプラインを
-  <strong>動かし切っている</strong>組織は少ない。
-  本プロジェクトのゴールは論文ではなく、
-  <em>この網を現場のデータで走らせて、cm 級の pose と密な 3D 地図を
-  毎日更新できる基盤</em>を構築すること。
-  手法は誰のものでもなく、
-  <strong>地図と、それを作り続ける仕組みだけが我々のもの</strong>である。
+  本プロジェクトの狙いは新規手法ではなく、
+  このヘッドを <em>自社生データ</em> に繋ぎ、
+  動体を σ で自動的に down-weight しながら Σ-weighted BA を回し、
+  3D Gaussian Splatting で都市スケールの地図を継続的に更新する
+  <strong>パイプラインを実運用で動かす</strong>こと。
+  成果物は論文ではなく pose 精度・地図品質・
+  アノテーション自動化スループットで評価する。
 </p>
 
 <div class="callout" style="border-left-color: #174734; background: #f0f4ec;">
