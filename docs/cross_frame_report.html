@@ -114,63 +114,112 @@ a:hover { color: var(--accent); }
   super long-baseline の pose 推定に到達するための基盤ネット。
 </p>
 
-<h2 style="margin-top: 1.5em;">この問題は何なのか</h2>
+<h2 style="margin-top: 1.5em;">この問題は何なのか — 古典から現代まで</h2>
 
 <p class="lede">
   「<em>ある 3D 点が、別のカメラフレームの画像のどこに映るか</em>」
-  — これは画像処理の最古の問い。
+  — これは画像処理の最古の問い。系譜を一行で振り返る:
+</p>
+
+<ul>
+  <li>
+    <strong>古典 (1980s–2010s)</strong>:
+    Lucas–Kanade が輝度の時間勾配で局所解、
+    SIFT / ORB / KLT が手設計 descriptor で特徴点照合。
+    輝度一定・小変位・テクスチャ十分という <em>手作りの仮定</em>
+    のいずれかが現場で破綻する。
+  </li>
+  <li>
+    <strong>CNN-flow / 学習 descriptor (2018–2022)</strong>:
+    PWC-Net / RAFT が密な optical flow を回帰、
+    SuperPoint + SuperGlue が学習 descriptor + attentional matching。
+    global 文脈が効き、baseline が伸びても落ちにくくなった。
+    <em>が、画像 × 画像の関係のみ — 3D を持たない</em>。
+  </li>
+  <li>
+    <strong>Transformer 対応推定 (2021–2025)</strong>:
+    LoFTR が detector-free の coarse-to-fine self/cross-attn、
+    MatchFormer が全 Transformer。
+    LightGlue が SuperGlue を高速化。
+    DKM / ROMA が dense warp を Gaussian Process / 頑強損失で回帰し match-confidence まで出す。
+    最近の MASt3R / DUSt3R は画像ペアを直接 3D pointmap に回帰する方向に。
+    <em>すべて画像 × 画像。LiDAR も depth 事前情報も入らない</em>。
+  </li>
+  <li>
+    <strong>Deep SLAM / VO (2021–2024)</strong>:
+    DROID-SLAM が dense BA に per-pixel 学習 confidence を流し込む
+    — <em>思想的には一番我々に近い</em>。
+    DPVO が sparse patch-graph、
+    NeRF-SLAM / SplaTAM / MonoGS / Gaussian-SLAM が 3DGS を地図表現にして
+    rendering loss で pose を動かす。
+    いずれも <em>image-only</em>、LiDAR は使わない。
+  </li>
+  <li>
+    <strong>LiDAR–Camera 対応 (2021–2024)</strong>:
+    DeepI2P が "frustum 内/外" の分類、
+    CorrI2P / I2D-Loc / EFGHNet / CFNet が 3D–2D 対応を回帰。
+    <em>一番近い系譜</em>だが、すべて <strong>single-frame calibration</strong> で止まる —
+    cross-frame も出力 Σ (BA で Mahalanobis 重みとして直接使える 2×2) も提供しない。
+  </li>
+  <li>
+    <strong>不確実性付き matching (2022–2024)</strong>:
+    PixLoc / PDC-Net+ がスカラー信頼度、DROID-SLAM が per-pixel 重み、
+    keypoint 検出で aleatoric 2D Gaussian を出すものもある。
+    <em>cross-modal × cross-frame × BA-ready Σ の全部が揃ったヘッドは公開例が見つからない</em>。
+  </li>
+</ul>
+
+<div class="callout" style="border-left-color: #888;">
+  <strong>ギャップ</strong>:
+  「LiDAR 3D 点 + 別フレームの画像パッチ → per-point (Δu, Δv, Σ<sub>2×2</sub>)」
+  を直接 BA の Mahalanobis 重みに流せる形で吐く学習ヘッドは、2026 年 4 月時点で
+  公開された先行研究に無い。
+  CorrI2P が概念的に近いが single-frame calibration で終わる。
+  DROID-SLAM が思想的に近いが image-only。
+  <strong>交差点 — cross-modal × cross-frame × BA-ready Σ — は空いてる</strong>。
+</div>
+
+<p class="lede">
+  <strong>だが、空いてる理由は「難しいから」ではない</strong>。
+  ここに書いたのは 2020 年代前半に広く知られた構成要素の組み合わせでしかない。
+  Transformer で query 位置から cross-attn で画像特徴を引く、
+  出力を 2D Gaussian NLL で訓練する、deformable sampling で効率化、
+  dual direction で対称に訓練 — <em>どれも誰でも思いつくし、AI も思いつく</em>。
+  組み合わせの新規性は 1-2 年で埋まる。
   <br/><br/>
-  <strong>古典的には</strong>、Lucas–Kanade が輝度の時間勾配を仮定して
-  局所的に解き、SIFT / ORB が手設計の descriptor で特徴点を照合し、
-  KLT tracker が短い baseline で点を持ち運んだ。
-  いずれも <em>手作りの仮定</em> の組み合わせで、輝度一定・小変位・
-  テクスチャ十分という前提がどこかで破綻する。
-  <strong>CNN 時代</strong>に入ると、PWC-Net / RAFT のような密な optical flow や
-  SuperPoint / SuperGlue のような学習 descriptor が global な文脈を使えるように
-  なり、baseline が伸びてもロバストになった。が、
-  これらは <em>画像 × 画像</em> の関係しか見ない — 3D も深度も持っていない。
-  <br/><br/>
-  <strong>我々が持っているデータ</strong>は違う。
-  <em>LiDAR が 3D 点群を吐き、カメラが同期して画像を取り、車両 pose が ego-motion で繋がる</em>。
-  つまり「点 P_A が frame B でどこに映るか」は、
-  推測ではなく <em>幾何的に投影するだけ</em> の問題になる — pose が正しければ。
-  実運用では pose は完璧ではないので <strong>残差</strong> が出る。
-  <em>この残差を予測する関数</em> さえあれば、
-  calibration / VO / loop closure / BA のすべての幾何問題が同じ一つの関数呼び出しに集約される。
-  <br/><br/>
-  <strong>本報の立ち位置</strong>:
-  LK/SIFT と CNN flow の系譜を、<em>LiDAR × Camera × Transformer</em> で再構築する。
-  点ごとの対応を、ML 的に、高速に、本質的に解く単一のヘッド。
-  Transformer は query 位置が入力なので <em>必要な点だけ</em> を計算でき、
-  deformable attention は画像全体の特徴マップから局所的にサンプリングするので
-  畳み込みより効率的。
-  scene に対してではなく <strong>点 × 画像パッチ</strong> に対して学習するので、
-  汎化は scene-level でも自然に立つ。
+  <strong>本質的に価値があるのは、このヘッドで作る "地図" の方だ</strong>。
+  LiDAR × Camera × Transformer で per-point 残差を出す手法を持っている組織は
+  いくつもある。だが、それを <em>自社の生データを流し込んで、動体を自動的に
+  σ で排除して、Σ-weighted BA で高精度 pose を得て、3D Gaussian Splatting で
+  都市スケールの地図を更新し続ける</em> — というパイプラインを
+  <strong>動かし切っている</strong>組織は少ない。
+  本プロジェクトのゴールは論文ではなく、
+  <em>この網を現場のデータで走らせて、cm 級の pose と密な 3D 地図を
+  毎日更新できる基盤</em>を構築すること。
+  手法は誰のものでもなく、
+  <strong>地図と、それを作り続ける仕組みだけが我々のもの</strong>である。
 </p>
 
 <div class="callout" style="border-left-color: #174734; background: #f0f4ec;">
-  <strong>下流タスクへの影響</strong> — これは単発の論文的な成果ではなく、
-  <em>次に我々が欲しい物を全部作るための基盤ブロック</em>になる:
+  <strong>下流タスクへの効き方</strong> — このヘッドは
+  <em>次に我々が欲しい物を全部作るための基盤ブロック</em>:
   <ul style="margin: 0.4em 0;">
     <li><strong>正確なデータを作る</strong>:
-      3D bounding box / segmentation のアノテーションを
-      frame-to-frame で伝搬させるとき、対応関係の σ が要る。
-      σ が小さい点でだけ伝搬させれば、手動 review 量が激減する。</li>
+      3D bbox / segmentation を frame-to-frame で伝搬させるとき、対応の σ を
+      しきい値に使えば手動 review 量が激減する。動体では σ が自然に大きく
+      なるので誤伝搬が起こりにくい。</li>
     <li><strong>キャリブレーションを自動でやる</strong>:
       LiDAR ↔ Camera / Camera ↔ Camera / 時刻同期。
       同じ残差関数を pose に対して最適化するだけ。
-      offset もスケールも事前地図もいらない。</li>
+      事前地図もマーカーも要らない。</li>
     <li><strong>物理シミュレーションの前提</strong>:
-      OmniRe / Gaussian Splatting の学習には <em>fps 数 10 Hz 精度</em>の
-      pose と calibration が要る。手で詰めると 10 min/scene、
-      この網で落とせば秒オーダー。</li>
+      OmniRe / Gaussian Splatting の学習には 10 Hz 精度の pose + calibration が
+      要る。人手で詰めると 10 min/scene、この網で秒オーダー。</li>
     <li><strong>GS で高精度地図を持つ</strong>:
       σ-weighted BA で得た pose を束ねて mapping、
-      σ を直接 Gaussian の opacity/sharpness の事前分布に流し込む。
-      <em>動体の σ が大きい</em> という学習成果が、GS の動体除去にもそのまま効く。</li>
+      σ を直接 Gaussian の opacity / sharpness 事前分布に流し込む。
+      <em>動体の σ が大きい</em>という学習成果が、GS の動体除去にもそのまま効く。</li>
   </ul>
-  要するに: ここで作っているのは「<em>幾何の曖昧さ</em>を数値で返す関数」であり、
-  3D 世界を扱うパイプラインの下流すべてがその曖昧さを欲しがっている。
 </div>
 
 <p class="lede">
