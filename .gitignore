@@ -4,6 +4,7 @@ sim3d_val.pt
 *.png
 !docs/assets/*.png
 !docs/images/*.png
+!docs/images/**/*.png
 *.ply
 web_viewer/data/*.bin
 __pycache__/
