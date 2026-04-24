@@ -4,7 +4,7 @@
 <link rel="stylesheet" href="assets/report.css">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cross-frame Residual Net — Dual Projection Learner</title>
+<title>クロスフレーム残差ネット — 双方向投影学習器</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
@@ -109,23 +109,23 @@ a:hover { color: var(--accent); }
   <span>dual projection learner</span>
 </div>
 
-<h1 class="title">One head that learns<br/>&ldquo;where does this 3D point land in another frame?&rdquo;</h1>
+<h1 class="title">「この 3D 点は別フレームの<br/>どこに映るか」を学ぶ 1 つのヘッド</h1>
 
 <figure class="r-hero" style="margin: 24px 0 36px;">
   <img src="images/lln_bl5.png"
        alt="Cross-frame residual head visualization: predicted per-point (Δu, Δv, Σ) for 3D LiDAR points reprojected into a second camera frame"
        style="width: 100%; border: 1px solid var(--line); background: var(--card);">
   <figcaption style="font-family: var(--mono); font-size: 12px; color: var(--ink-dim); margin-top: 8px; letter-spacing: 0.04em;">
-    A single residual head maps (patch<sub>B</sub>, 3D point P<sub>A</sub>, hypothesis pose T&#770;<sub>AB</sub>)
-    to per-point (&Delta;u, &Delta;v, &Sigma;). Green &bull; = model prediction, filled ellipse = 2&sigma; covariance,
-    blue &starf; = ground truth projection. The same function covers LiDAR&harr;camera calibration, VO, and loop closure.
+    1 つの残差ヘッドが (patch<sub>B</sub>, frame A の 3D 点 P<sub>A</sub>, 仮説ポーズ T&#770;<sub>AB</sub>) を
+    点ごとの (&Delta;u, &Delta;v, &Sigma;) に写す。緑 &bull; = モデル予測、塗りつぶし楕円 = 2&sigma; 共分散、
+    青 &starf; = 真値投影。同じ関数が LiDAR&harr;カメラキャリブレーション、VO、ループクロージャを覆う。
   </figcaption>
 </figure>
 
 <p class="subtitle">
-  CalibNetDepth learned &quot;intra-frame, cross-modal misalignment&quot;; this work generalizes it to
-  &quot;arbitrary-frame, arbitrary-modality misalignment&quot;. Trained symmetrically with a dual projection
-  loss. The foundation for super-long-baseline pose estimation without bounding boxes or prior maps.
+  CalibNetDepth は「フレーム内・モダリティ間のずれ」を学んだ。本研究はこれを
+  「任意フレーム・任意モダリティ間のずれ」へ一般化する。双方向投影ロスで対称に学習。
+  bounding box も事前地図もない超長距離ポーズ推定の基盤。
 </p>
 
 <h2 style="margin-top: 1.5em;">この問題は何なのか — 古典から現代まで</h2>
@@ -305,7 +305,7 @@ a:hover { color: var(--accent); }
   <strong>同じ一つのヘッドの特殊ケースに集約される</strong>。
 </p>
 
-<h2>Formulation</h2>
+<h2>定式化</h2>
 
 <p>
   学習タスクは、cross-modal calibration / cross-frame matching / VO / loop closure の
@@ -514,7 +514,7 @@ a:hover { color: var(--accent); }
            Δ_BtoA  (per-point in A frame)
            &lt;-- DUAL PROJECTION LOSS --&gt;</div>
 
-<h3>Intra-frame: concat + self-attn</h3>
+<h3>フレーム内: concat + self-attn</h3>
 
 <p>
   以前の CalibNetDepth は「pt (Q) → img (KV) の cross-attn」だった。これだと
@@ -599,7 +599,7 @@ img_tok = tokens[N_pt:]                         # pt 情報を取り込んだ im
   教師は <code>Δ_gt = uv_gt − uv_hat</code>、loss は 2D ガウシアン NLL。
 </p>
 
-<h2>Dual projection loss</h2>
+<h2>双方向投影ロス</h2>
 
 <p>
   A→B と B→A を 1 forward で同時に出し、両方の loss を平均する:
