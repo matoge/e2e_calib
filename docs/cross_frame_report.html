@@ -110,13 +110,16 @@ a:hover { color: var(--accent); }
 <h1 class="title">One head that learns<br/>&ldquo;where does this 3D point land in another frame?&rdquo;</h1>
 
 <figure class="r-hero" style="margin: 24px 0 36px;">
-  <img src="images/lln_bl5.png"
-       alt="Cross-frame residual head visualization: predicted per-point (Δu, Δv, Σ) for 3D LiDAR points reprojected into a second camera frame"
+  <img src="images/cross_frame_hero.png"
+       alt="Cross-frame residual head: v13_mix predictions on 4 PandaSet val pairs at baseline ±5, converging from 11-16 px hypothesis error to 0.6-1.9 px prediction error"
        style="width: 100%; border: 1px solid var(--border); background: var(--panel);">
   <figcaption style="font-family: var(--f-mono); font-size: 12px; color: var(--ink-dim); margin-top: 8px; letter-spacing: 0.04em;">
-    A single residual head maps (patch<sub>B</sub>, 3D point P<sub>A</sub>, hypothesis pose T&#770;<sub>AB</sub>)
-    to per-point (&Delta;u, &Delta;v, &Sigma;). Green &bull; = model prediction, filled ellipse = 2&sigma; covariance,
-    blue &starf; = ground truth projection. The same function covers LiDAR&harr;camera calibration, VO, and loop closure.
+    Four held-out PandaSet val pairs under the v13_mix model (PandaSet + Waymo, val 2.42 px).
+    Each row shows patch<sub>A</sub> (left, numbered points selected from A's 3D LiDAR) and patch<sub>B</sub> (right)
+    with per-color: &starf; = ground-truth projection under T<sub>AB</sub><sup>gt</sup>,
+    small &bull; + filled ellipse = model prediction (&Delta;u, &Delta;v) and 2&sigma; covariance from the same head.
+    Hypothesis error (random &plusmn;1&deg; / &plusmn;0.2m perturbation) is 11&ndash;16 px; the head drives it down to <strong>&lt;1 px on two
+    pairs</strong>. Same function, no task-specific fine-tuning.
   </figcaption>
 </figure>
 
