@@ -39,10 +39,11 @@ def parse_log(path: Path):
 # ── runs to plot ─────────────────────────────────────────────────────────────
 
 RUNS = [
-    ('v04_multi39',    'v04: std attn, 1 cross-layer (baseline)',         '#888'),
-    ('v07_bs64',       'v07: std attn, 1 cross-layer, batch 64',          '#bb8866'),
-    ('v09_std_2layer', 'v09: std attn, 2 cross-layers',                    '#446688'),
-    ('v08_deform_sl',  'v08: deformable SL, 2 cross-layers ⭐',            '#c13c14'),
+    ('v04_multi39',       'v04: std attn, 1 cross-layer (baseline)',          '#888'),
+    ('v07_bs64',          'v07: std attn, 1 cross-layer, batch 64',           '#bb8866'),
+    ('v09_std_2layer',    'v09: std attn, 2 cross-layers',                     '#446688'),
+    ('v08_deform_sl',     'v08: deformable SL, 2 cross-layers',               '#cc7a22'),
+    ('v10_padclean_deform', 'v10: deform SL + padded crop (pivot centered) ⭐', '#c13c14'),
 ]
 
 
