@@ -67,9 +67,14 @@ def main(args):
     deform = 'sl' if any('deform_img' in k for k in sd.keys()) else 'none'
     n_cross = sum(1 for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight'))
     n_intra = max(1, sum(1 for k in sd if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
+    # detect 5-dim (uv) vs 7-dim (uvd) head
+    proj_w_keys = [k for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight')]
+    out_dim = sd[proj_w_keys[0]].shape[0] if proj_w_keys else 5
     model = CalibNetCrossFrame(img_size=args.img_size, deform_mode=deform,
-                                n_cross_layers=n_cross, n_intra_layers=n_intra).to(DEVICE)
+                                n_cross_layers=n_cross, n_intra_layers=n_intra,
+                                out_dim=out_dim).to(DEVICE)
     model.load_state_dict(sd); model.eval()
+    print(f'  detected: deform={deform}, n_cross={n_cross}, n_intra={n_intra}, out_dim={out_dim}')
 
     root = Path(args.scenes_root)
     names = sorted([p.name for p in root.iterdir() if p.is_dir() and p.name.isdigit()])
@@ -112,8 +117,12 @@ def main(args):
         if N < K_SHOW: continue
 
         mu = raw[:N, :2]
-        log_sx, log_sy = raw[:N, 2], raw[:N, 3]
-        rho = np.tanh(raw[:N, 4]) * 0.99
+        if out_dim == 7:  # uvd: (tx, ty, td, log σu, log σv, log σd, ρ_uv)
+            log_sx, log_sy = raw[:N, 3], raw[:N, 4]
+            rho = raw[:N, 6]  # already tanh-clamped in clamp_params_uvd
+        else:
+            log_sx, log_sy = raw[:N, 2], raw[:N, 3]
+            rho = np.tanh(raw[:N, 4]) * 0.99
         sx, sy = np.exp(log_sx), np.exp(log_sy)
 
         K_int = s['K']

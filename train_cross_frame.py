@@ -278,17 +278,25 @@ def main():
         if overfit:
             return None
         model.eval()
-        vl, vA, vB, vbase = [], [], [], []
+        vl, vA, vB, vbase, vdA, vdB, vd_base = [], [], [], [], [], [], []
         for batch in val_loader:
             _, m = step(model, batch, uvd_mode=args.uvd)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
-        return dict(loss=float(np.mean(vl)), err_AB=float(np.mean(vA)),
-                    err_BA=float(np.mean(vB)), base_AB=float(np.mean(vbase)))
+            if args.uvd:
+                vdA.append(m['err_d_AB']); vdB.append(m['err_d_BA'])
+                vd_base.append(m['base_d_AB'])
+        out = dict(loss=float(np.mean(vl)), err_AB=float(np.mean(vA)),
+                   err_BA=float(np.mean(vB)), base_AB=float(np.mean(vbase)))
+        if args.uvd:
+            out.update(err_d_AB=float(np.mean(vdA)), err_d_BA=float(np.mean(vdB)),
+                       base_d=float(np.mean(vd_base)))
+        return out
 
     for ep in range(args.epochs):
         model.train()
         ep_losses, ep_errs_AB, ep_errs_BA, ep_base_AB = [], [], [], []
+        ep_errs_d_AB, ep_errs_d_BA, ep_base_d = [], [], []
         for batch in loader:
             opt.zero_grad(set_to_none=True)
             loss, m = step(model, batch, uvd_mode=args.uvd)
@@ -298,6 +306,9 @@ def main():
             ep_losses.append(m['loss'])
             ep_errs_AB.append(m['err_AB']); ep_errs_BA.append(m['err_BA'])
             ep_base_AB.append(m['base_AB'])
+            if args.uvd:
+                ep_errs_d_AB.append(m['err_d_AB']); ep_errs_d_BA.append(m['err_d_BA'])
+                ep_base_d.append(m['base_d_AB'])
         sched.step()
 
         curves['epoch'].append(ep)
@@ -319,10 +330,18 @@ def main():
             val_str = (f'  val_err={0.5*(v["err_AB"]+v["err_BA"]):.2f}px '
                        f'(base {v["base_AB"]:.2f})'
                        if do_val else '')
+            depth_str = ''
+            if args.uvd:
+                err_d_mean = 0.5 * (float(np.mean(ep_errs_d_AB)) + float(np.mean(ep_errs_d_BA)))
+                base_d_mean = float(np.mean(ep_base_d))
+                depth_str = f'  d={err_d_mean:.2f}m(base {base_d_mean:.2f})'
+                if do_val:
+                    vd = 0.5 * (v['err_d_AB'] + v['err_d_BA'])
+                    depth_str += f'  val_d={vd:.2f}m(base {v["base_d"]:.2f})'
             log(f'ep {ep:3d}  loss={curves["loss"][-1]:.3f}  '
                 f'err_AB={curves["err_AB"][-1]:.2f}px  '
                 f'err_BA={curves["err_BA"][-1]:.2f}px  '
-                f'(base={curves["base_AB"][-1]:.2f}px){val_str}  '
+                f'(base={curves["base_AB"][-1]:.2f}px){val_str}{depth_str}  '
                 f'lr={opt.param_groups[0]["lr"]:.2e}  '
                 f't={time.time()-t0:.0f}s')
 

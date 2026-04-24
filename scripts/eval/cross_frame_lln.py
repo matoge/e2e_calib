@@ -342,10 +342,12 @@ def run(args):
                   if k.startswith('cross_blocks.') and k.endswith('.proj.weight'))
     n_intra = max(1, sum(1 for k in sd.keys()
                   if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
-    print(f'  detected: deform={deform}, n_cross={n_cross}, n_intra={n_intra}')
+    proj_w_keys = [k for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight')]
+    out_dim = sd[proj_w_keys[0]].shape[0] if proj_w_keys else 5
+    print(f'  detected: deform={deform}, n_cross={n_cross}, n_intra={n_intra}, out_dim={out_dim}')
     model = CalibNetCrossFrame(img_size=args.img_size,
                                 n_cross_layers=n_cross, n_intra_layers=n_intra,
-                                deform_mode=deform).to(DEVICE)
+                                deform_mode=deform, out_dim=out_dim).to(DEVICE)
     model.load_state_dict(sd)
     model.eval()
 
@@ -410,9 +412,13 @@ def run(args):
                 rot_ba_list.append(rot_hat); t_ba_list.append(t_hat)
                 continue
 
-            mu = raw[:N, :2]             # patch-local delta
-            log_sx = raw[:N, 2]; log_sy = raw[:N, 3]
-            rho = np.tanh(raw[:N, 4]) * 0.99
+            mu = raw[:N, :2]             # patch-local delta (uv only, ignore td if uvd)
+            if out_dim == 7:
+                log_sx = raw[:N, 3]; log_sy = raw[:N, 4]
+                rho = raw[:N, 6]  # already clamped by clamp_params_uvd
+            else:
+                log_sx = raw[:N, 2]; log_sy = raw[:N, 3]
+                rho = np.tanh(raw[:N, 4]) * 0.99
             sx = np.exp(log_sx); sy = np.exp(log_sy)
             Sigma = np.zeros((N, 2, 2), np.float32)
             Sigma[:, 0, 0] = sx * sx; Sigma[:, 1, 1] = sy * sy
