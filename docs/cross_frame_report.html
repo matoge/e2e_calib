@@ -114,6 +114,65 @@ a:hover { color: var(--accent); }
   super long-baseline の pose 推定に到達するための基盤ネット。
 </p>
 
+<h2 style="margin-top: 1.5em;">この問題は何なのか</h2>
+
+<p class="lede">
+  「<em>ある 3D 点が、別のカメラフレームの画像のどこに映るか</em>」
+  — これは画像処理の最古の問い。
+  <br/><br/>
+  <strong>古典的には</strong>、Lucas–Kanade が輝度の時間勾配を仮定して
+  局所的に解き、SIFT / ORB が手設計の descriptor で特徴点を照合し、
+  KLT tracker が短い baseline で点を持ち運んだ。
+  いずれも <em>手作りの仮定</em> の組み合わせで、輝度一定・小変位・
+  テクスチャ十分という前提がどこかで破綻する。
+  <strong>CNN 時代</strong>に入ると、PWC-Net / RAFT のような密な optical flow や
+  SuperPoint / SuperGlue のような学習 descriptor が global な文脈を使えるように
+  なり、baseline が伸びてもロバストになった。が、
+  これらは <em>画像 × 画像</em> の関係しか見ない — 3D も深度も持っていない。
+  <br/><br/>
+  <strong>我々が持っているデータ</strong>は違う。
+  <em>LiDAR が 3D 点群を吐き、カメラが同期して画像を取り、車両 pose が ego-motion で繋がる</em>。
+  つまり「点 P_A が frame B でどこに映るか」は、
+  推測ではなく <em>幾何的に投影するだけ</em> の問題になる — pose が正しければ。
+  実運用では pose は完璧ではないので <strong>残差</strong> が出る。
+  <em>この残差を予測する関数</em> さえあれば、
+  calibration / VO / loop closure / BA のすべての幾何問題が同じ一つの関数呼び出しに集約される。
+  <br/><br/>
+  <strong>本報の立ち位置</strong>:
+  LK/SIFT と CNN flow の系譜を、<em>LiDAR × Camera × Transformer</em> で再構築する。
+  点ごとの対応を、ML 的に、高速に、本質的に解く単一のヘッド。
+  Transformer は query 位置が入力なので <em>必要な点だけ</em> を計算でき、
+  deformable attention は画像全体の特徴マップから局所的にサンプリングするので
+  畳み込みより効率的。
+  scene に対してではなく <strong>点 × 画像パッチ</strong> に対して学習するので、
+  汎化は scene-level でも自然に立つ。
+</p>
+
+<div class="callout" style="border-left-color: #174734; background: #f0f4ec;">
+  <strong>下流タスクへの影響</strong> — これは単発の論文的な成果ではなく、
+  <em>次に我々が欲しい物を全部作るための基盤ブロック</em>になる:
+  <ul style="margin: 0.4em 0;">
+    <li><strong>正確なデータを作る</strong>:
+      3D bounding box / segmentation のアノテーションを
+      frame-to-frame で伝搬させるとき、対応関係の σ が要る。
+      σ が小さい点でだけ伝搬させれば、手動 review 量が激減する。</li>
+    <li><strong>キャリブレーションを自動でやる</strong>:
+      LiDAR ↔ Camera / Camera ↔ Camera / 時刻同期。
+      同じ残差関数を pose に対して最適化するだけ。
+      offset もスケールも事前地図もいらない。</li>
+    <li><strong>物理シミュレーションの前提</strong>:
+      OmniRe / Gaussian Splatting の学習には <em>fps 数 10 Hz 精度</em>の
+      pose と calibration が要る。手で詰めると 10 min/scene、
+      この網で落とせば秒オーダー。</li>
+    <li><strong>GS で高精度地図を持つ</strong>:
+      σ-weighted BA で得た pose を束ねて mapping、
+      σ を直接 Gaussian の opacity/sharpness の事前分布に流し込む。
+      <em>動体の σ が大きい</em> という学習成果が、GS の動体除去にもそのまま効く。</li>
+  </ul>
+  要するに: ここで作っているのは「<em>幾何の曖昧さ</em>を数値で返す関数」であり、
+  3D 世界を扱うパイプラインの下流すべてがその曖昧さを欲しがっている。
+</div>
+
 <p class="lede">
   <strong>ここまでの話</strong> ——
   <a href="report.html">前報</a>で CalibNetDepth が LiDAR 点群 × 画像で
