@@ -727,22 +727,13 @@ stage 5:  全域で再訓練 → 完成</div>
   </li>
 </ul>
 
-<h3>定性的検証</h3>
-
-<figure>
-  <img src="images/cross_frame_v08_predictions.png" alt="v08 per-pair predictions on val"
-       onerror="this.onerror=null;this.src='./images/cross_frame_v08_predictions.png'">
-  <figcaption>
-    v08 best checkpoint の val pair 6 例。各行:<br/>
-    <strong>左</strong>: frame A の patch + LiDAR 点(オレンジ)。<br/>
-    <strong>中</strong>: frame B の patch、赤×=hypothesis projection、緑●=model 予測、
-    青○=ground truth。<br/>
-    <strong>右</strong>: 同 patch 内の対応関係を矢印で(hyp→pred)。
-    <br/>
-    <em>hyp_err 8.78 → 49.25 px の幅広い摂動に対し、predicted err はほぼ
-    一律 ~1.3 px に収束</em>。緑が青に正確に重なる。
-  </figcaption>
-</figure>
+<h3>定性的検証(LLN + BA、後述のセクションで差し替え予定)</h3>
+<p style="font-size: 12px; color: var(--ink-dim);">
+  旧 v08 64×64 パッチの per-pair 可視化は小さすぎて読めなかったので削除。
+  v10 の LLN + BA 可視化(hyp → pred → BA → gt の per-point 矢印)は
+  <a href="../experiments/cross_frame_v10_padclean_deform/lln/">experiments/…/lln/</a>
+  に後続実験で出力中。
+</p>
 
 <div class="callout">
   <strong>定性所見</strong>:
