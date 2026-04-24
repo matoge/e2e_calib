@@ -182,8 +182,9 @@ def main():
     ap.add_argument('--deform-mode', default='none', choices=['none', 'sl'])
     ap.add_argument('--n-cross-layers', type=int, default=1)
     ap.add_argument('--n-intra-layers', type=int, default=2)
-    ap.add_argument('--uvd', action='store_true',
-                    help='predict (Δu,Δv,Δd) with 3D gaussian NLL instead of 2D')
+    ap.add_argument('--uvd', action=argparse.BooleanOptionalAction, default=True,
+                    help='predict (Δu,Δv,Δd) with 3D gaussian NLL instead of 2D (default: on; '
+                         'pass --no-uvd for legacy 5-dim)')
     ap.add_argument('--dataset', default='pandaset',
                     choices=['pandaset', 'waymo', 'pandaset+waymo'],
                     help='training dataset(s)')

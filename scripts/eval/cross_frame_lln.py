@@ -221,6 +221,13 @@ def make_pair(scn: _SceneData, rng, fi_A, fi_B, img_size, max_points,
     # Dummy A_of_B values (model needs them but we don't BA B→A side here)
     dummy_B = np.zeros_like(uv_B_local)
 
+    # depth of A-points projected into B under hyp / gt (meters, B-cam frame z)
+    d_B_hat_of_A = P_QA_in_B_hat[:, 2].astype(np.float32)
+    d_B_gt_of_A  = P_QA_in_B_gt[:, 2].astype(np.float32)
+    if N_use < max_points:
+        d_B_hat_of_A = np.concatenate([d_B_hat_of_A, np.zeros(max_points - N_use, np.float32)])
+        d_B_gt_of_A  = np.concatenate([d_B_gt_of_A,  np.zeros(max_points - N_use, np.float32)])
+
     return dict(
         patch_A=patch_A.float(), patch_B=patch_B.float(),
         uvd_A=torch.from_numpy(np.concatenate([uv_A_patch, z_A_norm[:, None]], 1)).float(),
@@ -235,6 +242,8 @@ def make_pair(scn: _SceneData, rng, fi_A, fi_B, img_size, max_points,
         P_A_cam   = P_QA_in_A,          # (N, 3) — for BA
         uv_hat_full = uv_B_hat_full,    # (N, 2) — for BA target
         uv_gt_full  = uv_B_gt_full,
+        d_hat_full  = d_B_hat_of_A,     # (N,) — hyp depth in B-cam (meters) for UVD BA
+        d_gt_full   = d_B_gt_of_A,
         T_AB_gt = T_A_to_B_gt,
         T_AB_hat = T_A_to_B_hat,
         K = K,
@@ -246,13 +255,64 @@ def make_pair(scn: _SceneData, rng, fi_A, fi_B, img_size, max_points,
 
 # ─── BA pose recovery ────────────────────────────────────────────────────────
 
-def ba_recover(sample, delta_pred, Sigma_pred):
+class CalibBACost3D(pyceres.CostFunction):
+    """3D residual variant of CalibBACost.
+
+    Residuals per point = sqrt_info_3x3 @ (π3(R(ypr)·P + t) - target_3),
+    where target_3 = (uv_target, d_target) and π3 returns (u, v, z).
+    sqrt_info_3x3 is block-diagonal: [L_uv (2×2), 1/σ_d] (depth
+    decoupled from uv by the model's clamp_params_uvd parameterisation).
+
+    Block = (6,). N points → 3N residuals.
+    """
+
+    def __init__(self, P, uv_target, d_target, L_uv, inv_sigma_d, K):
+        import pyceres
+        super().__init__()
+        self.P, self.uv_target, self.d_target = P, uv_target, d_target
+        self.L_uv, self.inv_sd = L_uv, inv_sigma_d
+        self.fx, self.fy = K[0, 0], K[1, 1]
+        self.cx, self.cy = K[0, 2], K[1, 2]
+        self.N = P.shape[0]
+        self.set_num_residuals(3 * self.N)
+        self.set_parameter_block_sizes([6])
+
+    def _residuals(self, theta):
+        from ba_singleframe import ypr_to_R
+        R = ypr_to_R(theta[:3]); t = theta[3:6]
+        Q = self.P @ R.T + t
+        proj_uv = np.stack([self.fx * Q[:, 0] / Q[:, 2] + self.cx,
+                            self.fy * Q[:, 1] / Q[:, 2] + self.cy], axis=1)
+        r_uv_raw = proj_uv - self.uv_target
+        r_uv = np.einsum('nij,nj->ni', self.L_uv, r_uv_raw)       # (N,2)
+        r_d  = (Q[:, 2] - self.d_target) * self.inv_sd             # (N,)
+        return np.concatenate([r_uv, r_d[:, None]], axis=1).ravel()
+
+    def Evaluate(self, params, residuals, jacobians):
+        theta = np.asarray(params[0]).copy()
+        residuals[:] = self._residuals(theta)
+        if jacobians is not None and jacobians[0] is not None:
+            eps = 1e-5
+            J = np.zeros((3 * self.N, 6))
+            for k in range(6):
+                tp = theta.copy(); tp[k] += eps
+                tm = theta.copy(); tm[k] -= eps
+                J[:, k] = (self._residuals(tp) - self._residuals(tm)) / (2 * eps)
+            jacobians[0][:] = J.ravel()
+        return True
+
+
+def ba_recover(sample, delta_pred, Sigma_pred, delta_d_pred=None, sigma_d_pred=None):
     """Solve 6-DoF θ that aligns hypothesis+delta with A→B transformation.
 
     We use T_A_to_B_hat as the hypothesis. BA variable θ = (ypr, t) composes
     with the hypothesis multiplicatively:
         T_recovered = δT(θ) · T_AB_hat
     At θ=0 the output matches the hypothesis.
+
+    If `delta_d_pred` and `sigma_d_pred` are provided, the BA uses 3D
+    residuals (uv + depth, block-diagonal Mahalanobis). Otherwise falls
+    back to the 2D uv-only cost.
     """
     N = sample['N_valid']
     if N < 6:
@@ -295,13 +355,25 @@ def ba_recover(sample, delta_pred, Sigma_pred):
         except np.linalg.LinAlgError:
             L[i] = np.eye(2)
 
-    # CalibBACost expects: proj(R(ypr)·P + t) - (uv_ref + d)
-    # We want proj ≈ uv_target, so uv_ref = uv_target, d = 0
     θ = np.zeros(6)
     prob = pyceres.Problem()
-    prob.add_residual_block(
-        bas.CalibBACost(P_Bh, uv_target_full, np.zeros_like(uv_target_full), L, K),
-        None, [θ])
+    if delta_d_pred is not None and sigma_d_pred is not None:
+        # UVD mode: compose 3D target (uv + depth) and use block-diagonal 3×3 sqrt_info.
+        # Floor σ_d generously: the model's σ_d is trained against training depth GT noise
+        # (≤0.05m seen) but actual operating-condition noise (pose perturbation σ_t=0.2m
+        # + segment-level pose GT drift) is an order of magnitude larger. A too-confident
+        # σ_d lets depth dominate the Mahalanobis sum and blows up the pose solve.
+        d_hat_all = sample['d_hat_full'][:N]
+        d_target  = d_hat_all + delta_d_pred[:N]
+        sd_safe   = np.clip(sigma_d_pred[:N], 1.0, 50.0)   # ≥ 1 m floor
+        inv_sd    = 1.0 / sd_safe
+        prob.add_residual_block(
+            CalibBACost3D(P_Bh, uv_target_full, d_target, L, inv_sd, K),
+            None, [θ])
+    else:
+        prob.add_residual_block(
+            bas.CalibBACost(P_Bh, uv_target_full, np.zeros_like(uv_target_full), L, K),
+            None, [θ])
     opts = pyceres.SolverOptions()
     opts.linear_solver_type = pyceres.LinearSolverType.DENSE_QR
     opts.max_num_iterations = 80
@@ -443,8 +515,16 @@ def run(args):
             # Placeholder pred err (to refine post-BA)
             point_err_pred.append(base_px * 0.5)
 
-            # BA
-            res = ba_recover(s, mu, Sigma)
+            # BA — pass depth residual + σ_d when the model is 7-dim (UVD)
+            if out_dim == 7:
+                # raw[:, 2] is td in meters (already scaled by D_SCALE=50 in clamp_params_uvd)
+                delta_d_pred = raw[:N, 2]
+                sigma_d_pred = np.exp(raw[:N, 5])
+                res = ba_recover(s, mu, Sigma,
+                                 delta_d_pred=delta_d_pred,
+                                 sigma_d_pred=sigma_d_pred)
+            else:
+                res = ba_recover(s, mu, Sigma)
             if res is None:
                 rot_ba_list.append(rot_hat); t_ba_list.append(t_hat)
                 continue

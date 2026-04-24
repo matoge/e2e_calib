@@ -99,27 +99,51 @@ def main():
         raws.append(infer_batch(model, samples[i:i + 16]))
     raws = np.concatenate(raws, axis=0)
 
-    # Score each by mean per-point pred-to-gt pixel error in local B coords
+    # Score each pair along two axes:
+    #   err  = mean per-point pred-to-gt pixel error
+    #   sig_max = largest σ among top-K points (flags pairs with inflated σ
+    #             typical of moving vehicles / occluders)
+    # Hero = 2 "tight" pairs (low err, low σ) + 2 "honest σ" pairs (low err but
+    # at least one point with visibly large σ — the dynamic-object story).
     def full_to_local_B(uv_full, box_B):
         u0, v0, cw, ch = box_B
         return np.stack([(uv_full[:, 0] - u0) * IMG_SIZE / cw,
                          (uv_full[:, 1] - v0) * IMG_SIZE / ch], axis=1)
 
-    scores = []
+    errs = []; sig_max_list = []; sig_mean_list = []
     for s, raw in zip(samples, raws):
         N = s['N_valid']
-        if N < K_SHOW: scores.append(1e9); continue
+        if N < K_SHOW:
+            errs.append(1e9); sig_max_list.append(0); sig_mean_list.append(0); continue
         mu = raw[:N, :2]
         pred_local = s['uv_B_hat_of_A'][:N].numpy() + mu
         gt_local   = full_to_local_B(s['uv_gt_full'][:N], s['box_B'])
         err = np.linalg.norm(pred_local - gt_local, axis=-1).mean()
         sx = np.exp(raw[:N, 2] if out_dim == 5 else raw[:N, 3])
         sy = np.exp(raw[:N, 3] if out_dim == 5 else raw[:N, 4])
-        sig = np.sqrt((sx * sy)).mean()
-        scores.append(err + 0.3 * sig)
-    scores = np.array(scores)
-    order = np.argsort(scores)[:N_SHOW]
-    print(f'top-{N_SHOW} scores: {scores[order]}')
+        sig = np.sqrt(sx * sy)
+        errs.append(err)
+        sig_max_list.append(float(sig.max()))
+        sig_mean_list.append(float(sig.mean()))
+    errs = np.array(errs); sig_max_arr = np.array(sig_max_list); sig_mean_arr = np.array(sig_mean_list)
+
+    # Tight bucket: err < 1.2 AND mean σ < 1.5
+    tight_mask = (errs < 1.2) & (sig_mean_arr < 1.5)
+    # Honest-σ bucket: max σ > 3.0 (at least one point has big ellipse)
+    # AND err < 3.0 (still reasonable overall — we don't want total chaos)
+    honest_mask = (sig_max_arr > 3.0) & (errs < 3.0)
+
+    tight_idx = np.where(tight_mask)[0][np.argsort(errs[tight_mask])][:2]
+    honest_idx = np.where(honest_mask)[0][np.argsort(-sig_max_arr[honest_mask])][:2]
+    order = np.concatenate([tight_idx, honest_idx])
+    if len(order) < N_SHOW:
+        # pad with best-err remaining samples
+        remaining = np.setdiff1d(np.argsort(errs), order)
+        order = np.concatenate([order, remaining[:N_SHOW - len(order)]])
+    order = order[:N_SHOW]
+    print(f'picked indices {order.tolist()}  '
+          f'err={errs[order].round(2).tolist()}  '
+          f'sig_max={sig_max_arr[order].round(2).tolist()}')
 
     fig, axes = plt.subplots(2, 4, figsize=(16, 8), dpi=120)
     fig.patch.set_facecolor('#f6f4ed')
