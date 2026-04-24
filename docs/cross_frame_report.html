@@ -46,6 +46,15 @@ h2 { font-family: var(--jasans); font-weight: 700; font-size: 26px;
 h3 { font-family: var(--jasans); font-weight: 700; font-size: 19px;
   margin: 32px 0 10px; }
 p { margin: 0 0 14px; }
+/* justify prose so the right edge aligns, not just the left */
+.page p, .page .lede, .page .subtitle, .page li, .page figcaption,
+.page .callout { text-align: justify; text-justify: inter-ideograph;
+  hanging-punctuation: allow-end; overflow-wrap: break-word;
+  word-break: normal; }
+/* keep fixed-width / tabular content left-aligned */
+.page pre, .page code, .page .ascii, .page .eq,
+.page table td, .page table th { text-align: left; }
+.page td.num, .page th.num { text-align: right; }
 code, pre { font-family: var(--mono); font-size: 13.5px; }
 code { background: var(--card); padding: 1px 6px; border: 1px solid var(--line);
   border-radius: 3px; }
