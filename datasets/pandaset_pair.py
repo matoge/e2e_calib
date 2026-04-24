@@ -455,26 +455,36 @@ class PandaSetCrossFrameDataset(Dataset):
         uv_A_gt_local_B  = uv_A_gt_local_B[inb2]
         uv_A_hat_local_B = uv_A_hat_local_B[inb2]
 
+        # depth in target camera frame (B for A-query, A for B-query)
+        d_B_hat_of_A = P_QA_in_B_hat[good_qa][inb, 2].astype(np.float32)
+        d_B_gt_of_A  = P_QA_in_B_gt [good_qa][inb, 2].astype(np.float32)
+        d_A_hat_of_B = P_QB_in_A_hat[good_qb][inb2, 2].astype(np.float32)
+        d_A_gt_of_B  = P_QB_in_A_gt [good_qb][inb2, 2].astype(np.float32)
+
         # 12. pad/truncate to max_points
-        def _pad(uv_query, z_query, uv_hat, uv_gt):
+        def _pad(uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt):
             N = len(uv_query)
             N_use = min(N, self.max_points)
             pick = self.rng.choice(N, size=N_use, replace=False) if N > N_use else np.arange(N)
             uv_query = uv_query[pick]; z_query = z_query[pick]
             uv_hat = uv_hat[pick];     uv_gt = uv_gt[pick]
+            d_hat = d_hat[pick];       d_gt  = d_gt[pick]
             pad = np.zeros((self.max_points,), dtype=bool)
             if N_use < self.max_points:
                 pad[N_use:] = True
-                uv_query = np.concatenate([uv_query, np.zeros((self.max_points - N_use, 2), np.float32)])
-                z_query  = np.concatenate([z_query,  np.zeros(self.max_points - N_use, np.float32)])
-                uv_hat   = np.concatenate([uv_hat,   np.zeros((self.max_points - N_use, 2), np.float32)])
-                uv_gt    = np.concatenate([uv_gt,    np.zeros((self.max_points - N_use, 2), np.float32)])
-            return uv_query, z_query, uv_hat, uv_gt, pad
+                pad_n = self.max_points - N_use
+                uv_query = np.concatenate([uv_query, np.zeros((pad_n, 2), np.float32)])
+                z_query  = np.concatenate([z_query,  np.zeros(pad_n, np.float32)])
+                uv_hat   = np.concatenate([uv_hat,   np.zeros((pad_n, 2), np.float32)])
+                uv_gt    = np.concatenate([uv_gt,    np.zeros((pad_n, 2), np.float32)])
+                d_hat    = np.concatenate([d_hat,    np.zeros(pad_n, np.float32)])
+                d_gt     = np.concatenate([d_gt,     np.zeros(pad_n, np.float32)])
+            return uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt, pad
 
-        uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, pad_A = _pad(
-            uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A)
-        uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, pad_B = _pad(
-            uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B)
+        uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A, pad_A = _pad(
+            uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A)
+        uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B, pad_B = _pad(
+            uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B)
 
         z_A_norm = z_A_patch / 50.0
         z_B_norm = z_B_patch / 50.0
@@ -493,6 +503,10 @@ class PandaSetCrossFrameDataset(Dataset):
             uv_B_gt_of_A  = torch.from_numpy(uv_B_gt_local_A).float(),
             uv_A_hat_of_B = torch.from_numpy(uv_A_hat_local_B).float(),
             uv_A_gt_of_B  = torch.from_numpy(uv_A_gt_local_B).float(),
+            d_B_hat_of_A  = torch.from_numpy(d_B_hat_of_A).float(),
+            d_B_gt_of_A   = torch.from_numpy(d_B_gt_of_A).float(),
+            d_A_hat_of_B  = torch.from_numpy(d_A_hat_of_B).float(),
+            d_A_gt_of_B   = torch.from_numpy(d_A_gt_of_B).float(),
             pose_AB_6dof  = torch.from_numpy(
                 np.concatenate([ypr_AB_hat, t_AB_hat]).astype(np.float32)),
             pose_BA_6dof  = torch.from_numpy(

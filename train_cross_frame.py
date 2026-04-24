@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 from datasets.pandaset_pair import PandaSetCrossFrameDataset
 from models.cross_frame import CalibNetCrossFrame
-from models.model_cov import gaussian2d_nll
+from models.model_cov import gaussian2d_nll, gaussian_uvd_nll
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -75,9 +75,48 @@ def residual_nll_and_metrics(raw, uv_hat, uv_gt, pad_mask, img_size):
     return loss, dict(err_px=err_mean, base_px=base_mean)
 
 
+def residual_uvd_nll_and_metrics(raw, uv_hat, uv_gt, d_hat, d_gt, pad_mask, img_size):
+    """raw: (B,N,7) [Δu, Δv, Δd, log σu, log σv, log σd, ρ_uv] already clamped.
+       d_hat, d_gt: (B,N,) in meters (target-camera frame z).
+       Returns (loss, dict(err_px, base_px, err_d, base_d))."""
+    target_uv = uv_gt - uv_hat                              # (B,N,2) pixel Δ target
+    target_d  = d_gt - d_hat                                # (B,N,)  meter Δ target
+    valid = ~pad_mask                                       # (B,N)
+
+    tx, ty, td = raw[..., 0], raw[..., 1], raw[..., 2]
+    log_sx, log_sy, log_sd = raw[..., 3], raw[..., 4], raw[..., 5]
+    rho = raw[..., 6]
+    sx, sy, sd = log_sx.exp(), log_sy.exp(), log_sd.exp()
+    dx = (target_uv[..., 0] - tx) / sx
+    dy = (target_uv[..., 1] - ty) / sy
+    dd = (target_d - td) / sd
+    r2 = (1.0 - rho * rho).clamp(min=1e-6)
+    maha_uv = (dx * dx - 2 * rho * dx * dy + dy * dy) / r2
+    log_det_uv = 2 * log_sx + 2 * log_sy + torch.log(r2)
+    maha_d = dd * dd
+    log_det_d = 2 * log_sd
+    nll = 0.5 * (log_det_uv + maha_uv + log_det_d + maha_d)
+
+    nll_masked = torch.where(valid, nll, torch.zeros_like(nll))
+    n_valid    = valid.sum().clamp_min(1)
+    loss = nll_masked.sum() / n_valid
+
+    with torch.no_grad():
+        pred_uv = uv_hat + raw[..., :2]
+        pred_d  = d_hat + td
+        err_px  = (pred_uv - uv_gt).pow(2).sum(-1).sqrt()
+        err_d   = (pred_d  - d_gt).abs()
+        base_px = (uv_hat - uv_gt).pow(2).sum(-1).sqrt()
+        base_d  = (d_hat  - d_gt).abs()
+        m = lambda x: (torch.where(valid, x, torch.zeros_like(x)).sum() / n_valid).item()
+        metrics = dict(err_px=m(err_px), base_px=m(base_px),
+                       err_d=m(err_d),   base_d=m(base_d))
+    return loss, metrics
+
+
 # ─── one step ─────────────────────────────────────────────────────────────────
 
-def step(model, batch):
+def step(model, batch, uvd_mode=False):
     batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
@@ -86,10 +125,18 @@ def step(model, batch):
         uv_B_hat_of_A=batch['uv_B_hat_of_A'], uv_A_hat_of_B=batch['uv_A_hat_of_B'],
         pad_A=batch['pad_A'], pad_B=batch['pad_B'],
     )
-    loss_AB, m_AB = residual_nll_and_metrics(
-        raw_AB, batch['uv_B_hat_of_A'], batch['uv_B_gt_of_A'], batch['pad_A'], 64)
-    loss_BA, m_BA = residual_nll_and_metrics(
-        raw_BA, batch['uv_A_hat_of_B'], batch['uv_A_gt_of_B'], batch['pad_B'], 64)
+    if uvd_mode:
+        loss_AB, m_AB = residual_uvd_nll_and_metrics(
+            raw_AB, batch['uv_B_hat_of_A'], batch['uv_B_gt_of_A'],
+            batch['d_B_hat_of_A'], batch['d_B_gt_of_A'], batch['pad_A'], 64)
+        loss_BA, m_BA = residual_uvd_nll_and_metrics(
+            raw_BA, batch['uv_A_hat_of_B'], batch['uv_A_gt_of_B'],
+            batch['d_A_hat_of_B'], batch['d_A_gt_of_B'], batch['pad_B'], 64)
+    else:
+        loss_AB, m_AB = residual_nll_and_metrics(
+            raw_AB, batch['uv_B_hat_of_A'], batch['uv_B_gt_of_A'], batch['pad_A'], 64)
+        loss_BA, m_BA = residual_nll_and_metrics(
+            raw_BA, batch['uv_A_hat_of_B'], batch['uv_A_gt_of_B'], batch['pad_B'], 64)
 
     loss = 0.5 * (loss_AB + loss_BA)
     metrics = dict(
@@ -97,6 +144,11 @@ def step(model, batch):
         err_AB=m_AB['err_px'], base_AB=m_AB['base_px'],
         err_BA=m_BA['err_px'], base_BA=m_BA['base_px'],
     )
+    if uvd_mode:
+        metrics.update(
+            err_d_AB=m_AB['err_d'], base_d_AB=m_AB['base_d'],
+            err_d_BA=m_BA['err_d'], base_d_BA=m_BA['base_d'],
+        )
     return loss, metrics
 
 
@@ -130,6 +182,15 @@ def main():
     ap.add_argument('--deform-mode', default='none', choices=['none', 'sl'])
     ap.add_argument('--n-cross-layers', type=int, default=1)
     ap.add_argument('--n-intra-layers', type=int, default=2)
+    ap.add_argument('--uvd', action='store_true',
+                    help='predict (Δu,Δv,Δd) with 3D gaussian NLL instead of 2D')
+    ap.add_argument('--dataset', default='pandaset',
+                    choices=['pandaset', 'waymo', 'pandaset+waymo'],
+                    help='training dataset(s)')
+    ap.add_argument('--waymo-root', default='/mnt/mininas/datasets/waymo/training',
+                    help='Waymo training data root')
+    ap.add_argument('--max-train-scenes', type=int, default=0,
+                    help='cap number of train scenes (0 = all)')
     args = ap.parse_args()
 
     out_dir = Path('experiments/cross_frame_' + args.name)
@@ -197,6 +258,7 @@ def main():
         n_intra_layers=args.n_intra_layers,
         n_cross_layers=args.n_cross_layers,
         deform_mode=args.deform_mode,
+        out_dim=(7 if args.uvd else 5),
     ).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f'model params: {n_params/1e6:.3f} M')
@@ -206,7 +268,8 @@ def main():
         opt, T_max=args.epochs, eta_min=args.lr * 1e-2)
 
     curves = dict(epoch=[], loss=[], err_AB=[], err_BA=[], base_AB=[],
-                  val_loss=[], val_err_AB=[], val_err_BA=[], val_base_AB=[])
+                  val_loss=[], val_err_AB=[], val_err_BA=[], val_base_AB=[],
+                  err_d=[], val_err_d=[], base_d=[], val_base_d=[])
     best_err = float('inf')
     t0 = time.time()
 
@@ -217,7 +280,7 @@ def main():
         model.eval()
         vl, vA, vB, vbase = [], [], [], []
         for batch in val_loader:
-            _, m = step(model, batch)
+            _, m = step(model, batch, uvd_mode=args.uvd)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
         return dict(loss=float(np.mean(vl)), err_AB=float(np.mean(vA)),
@@ -228,7 +291,7 @@ def main():
         ep_losses, ep_errs_AB, ep_errs_BA, ep_base_AB = [], [], [], []
         for batch in loader:
             opt.zero_grad(set_to_none=True)
-            loss, m = step(model, batch)
+            loss, m = step(model, batch, uvd_mode=args.uvd)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()

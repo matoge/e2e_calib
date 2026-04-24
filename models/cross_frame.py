@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 
 from models.model import CNNBackbone, ConvNeXtBackbone, D as D_DIM
-from models.model_cov import clamp_params
+from models.model_cov import clamp_params, clamp_params_uvd
 from models.model_depth import PointMLP3, FrustumLocalEncoder
 
 
@@ -90,7 +90,7 @@ class CrossFrameBlock(nn.Module):
     Output: (B, N_Q, 5) — (Δu, Δv, log σu, log σv, ρ_raw)
     """
 
-    def __init__(self, d: int = D_DIM, n_heads: int = 4):
+    def __init__(self, d: int = D_DIM, n_heads: int = 4, out_dim: int = 5):
         super().__init__()
         self.norm_q   = nn.LayerNorm(d)
         self.norm_kv  = nn.LayerNorm(d)
@@ -102,13 +102,20 @@ class CrossFrameBlock(nn.Module):
             nn.Linear(d, d * 2), nn.GELU(), nn.Dropout(0.1), nn.Linear(d * 2, d),
         )
         self.drop = nn.Dropout(0.1)
-        # output head: [token ‖ uv_hat_01] → 5
-        self.proj = nn.Linear(d + 2, 5)
+        # output head: [token ‖ uv_hat_01] → out_dim (5 = uv, 7 = uvd)
+        self.proj = nn.Linear(d + 2, out_dim)
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
         with torch.no_grad():
-            self.proj.bias[2] = 0.69   # log σu  ≈ log 2 px
-            self.proj.bias[3] = 0.69   # log σv
+            if out_dim == 5:
+                self.proj.bias[2] = 0.69   # log σu  ≈ log 2 px
+                self.proj.bias[3] = 0.69   # log σv
+            elif out_dim == 7:
+                self.proj.bias[3] = 0.69   # log σu ≈ log 2 px
+                self.proj.bias[4] = 0.69   # log σv
+                self.proj.bias[5] = 0.0    # log σd ≈ 1 m
+            else:
+                raise ValueError(f'unsupported out_dim={out_dim}')
 
     def forward(self, q, kv, uv_hat_01, q_pad_mask=None, kv_pad_mask=None):
         ca, _ = self.cross_attn(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv),
@@ -134,7 +141,7 @@ class CrossFrameBlockDeform(nn.Module):
     CrossFrameBlock.
     """
 
-    def __init__(self, d: int = D_DIM, n_heads: int = 4, n_points: int = 4):
+    def __init__(self, d: int = D_DIM, n_heads: int = 4, n_points: int = 4, out_dim: int = 5):
         super().__init__()
         from models.model_deform import MSDeformAttn
         self.deform_img = MSDeformAttn(d_model=d, n_levels=1, n_heads=n_heads,
@@ -151,12 +158,19 @@ class CrossFrameBlockDeform(nn.Module):
             nn.Linear(d, d * 2), nn.GELU(), nn.Dropout(0.1), nn.Linear(d * 2, d),
         )
         self.drop = nn.Dropout(0.1)
-        self.proj = nn.Linear(d + 2, 5)
+        self.proj = nn.Linear(d + 2, out_dim)
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
         with torch.no_grad():
-            self.proj.bias[2] = 0.69
-            self.proj.bias[3] = 0.69
+            if out_dim == 5:
+                self.proj.bias[2] = 0.69
+                self.proj.bias[3] = 0.69
+            elif out_dim == 7:
+                self.proj.bias[3] = 0.69
+                self.proj.bias[4] = 0.69
+                self.proj.bias[5] = 0.0
+            else:
+                raise ValueError(f'unsupported out_dim={out_dim}')
 
     def forward(self, q, kv_pt, img_2d, uv_hat_01,
                 q_pad_mask=None, kv_pt_pad_mask=None):
@@ -193,12 +207,15 @@ class CalibNetCrossFrame(nn.Module):
                  use_convnext: bool = True, use_frustum: bool = True,
                  r_uv: float = 8.0, r_d: float = 0.004, k_nb: int = 8,
                  n_intra_layers: int = 2, n_cross_layers: int = 1,
-                 deform_mode: str = 'none', deform_n_points: int = 4):
+                 deform_mode: str = 'none', deform_n_points: int = 4,
+                 out_dim: int = 5):
         super().__init__()
         assert deform_mode in ('none', 'sl'), f'deform_mode must be none/sl, got {deform_mode}'
+        assert out_dim in (5, 7), f'out_dim must be 5 (uv) or 7 (uvd), got {out_dim}'
         self.img_size = img_size
         self.d = d
         self._deform_mode = deform_mode
+        self._out_dim = out_dim
 
         # shared per-frame encoder
         self.cnn = (ConvNeXtBackbone(d, in_channels=in_channels)
@@ -217,11 +234,12 @@ class CalibNetCrossFrame(nn.Module):
         # cross-frame stack
         if deform_mode == 'sl':
             self.cross_blocks = nn.ModuleList(
-                [CrossFrameBlockDeform(d, n_points=deform_n_points) for _ in range(n_cross_layers)]
+                [CrossFrameBlockDeform(d, n_points=deform_n_points, out_dim=out_dim)
+                 for _ in range(n_cross_layers)]
             )
         else:
             self.cross_blocks = nn.ModuleList(
-                [CrossFrameBlock(d) for _ in range(n_cross_layers)]
+                [CrossFrameBlock(d, out_dim=out_dim) for _ in range(n_cross_layers)]
             )
 
     # ------------------------------------------------------------------ helpers
@@ -324,8 +342,9 @@ class CalibNetCrossFrame(nn.Module):
                 q_B, kv_BA, uv_A_hat_of_B / self.img_size,
                 q_pad=pad_B, kv_pad=kv_pad_BA)
 
-        return (clamp_params(raw_AtoB, self.img_size),
-                clamp_params(raw_BtoA, self.img_size))
+        clamp_fn = clamp_params if self._out_dim == 5 else clamp_params_uvd
+        return (clamp_fn(raw_AtoB, self.img_size),
+                clamp_fn(raw_BtoA, self.img_size))
 
     def _make_kv_pad(self, pt_pad, n_img_tokens):
         if pt_pad is None:

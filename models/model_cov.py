@@ -146,6 +146,61 @@ def clamp_params(raw: torch.Tensor, img_size: int = 128):
     return torch.stack([tx, ty, log_sx, log_sy, rho], dim=-1)
 
 
+# ---------------------------------------------------------------------------
+# 3-D (uvd) extension — per-point 3D gaussian (diag in depth, uv with ρ)
+# ---------------------------------------------------------------------------
+MIN_SIGMA_D = 0.05   # m — floor for depth σ
+MAX_SIGMA_D = 50.0   # m
+D_SCALE     = 50.0   # m — raw output's Δd is scaled by this (same normalization as dataset z_norm)
+
+
+def clamp_params_uvd(raw: torch.Tensor, img_size: int = 128):
+    """
+    raw: (B, N, 7)  [tx, ty, td, log_sx, log_sy, log_sd, rho_uv]
+    Returns tensor with pixel-/meter-scaled (tx, ty, td) and clamped sigmas / rho.
+    """
+    import math
+    tx = raw[..., 0] * img_size
+    ty = raw[..., 1] * img_size
+    td = raw[..., 2] * D_SCALE
+    log_sx = raw[..., 3].clamp(min=math.log(MIN_SIGMA),   max=math.log(MAX_SIGMA))
+    log_sy = raw[..., 4].clamp(min=math.log(MIN_SIGMA),   max=math.log(MAX_SIGMA))
+    log_sd = raw[..., 5].clamp(min=math.log(MIN_SIGMA_D), max=math.log(MAX_SIGMA_D))
+    rho    = torch.tanh(raw[..., 6]) * 0.99
+    return torch.stack([tx, ty, td, log_sx, log_sy, log_sd, rho], dim=-1)
+
+
+def gaussian_uvd_nll(params: torch.Tensor,
+                     target_uv: torch.Tensor, target_d: torch.Tensor) -> torch.Tensor:
+    """params: (B,N,7)  target_uv: (B,N,2)  target_d: (B,N,)  → scalar NLL.
+
+    Depth is modelled as independent of (u,v) (diagonal block); ρ only couples u and v.
+    This is the simplest statistically-valid extension: full 3x3 requires 3 ρs and
+    PD parameterisation we skip for now.
+    """
+    tx, ty, td  = params[..., 0], params[..., 1], params[..., 2]
+    log_sx, log_sy, log_sd = params[..., 3], params[..., 4], params[..., 5]
+    rho = params[..., 6]
+
+    dx = target_uv[..., 0] - tx
+    dy = target_uv[..., 1] - ty
+    dd = target_d - td
+
+    sx, sy, sd = log_sx.exp(), log_sy.exp(), log_sd.exp()
+    zx, zy, zd = dx / sx, dy / sy, dd / sd
+    r2 = (1.0 - rho * rho).clamp(min=1e-6)
+
+    # 2D uv Mahalanobis
+    maha_uv = (zx * zx - 2 * rho * zx * zy + zy * zy) / r2
+    log_det_uv = 2 * log_sx + 2 * log_sy + torch.log(r2)
+    # 1D depth
+    maha_d = zd * zd
+    log_det_d = 2 * log_sd
+
+    nll = 0.5 * (log_det_uv + maha_uv + log_det_d + maha_d)
+    return nll.mean()
+
+
 class CalibNetCov(nn.Module):
     def __init__(self, d: int = D, img_size: int = 128):
         super().__init__()
