@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
 <link rel="stylesheet" href="assets/report.css">
 <meta charset="utf-8">
@@ -88,48 +88,49 @@ a:hover { color: var(--accent); }
   <span>PandaSet scene 015</span>
 </div>
 
-<h1 class="title">Multi-frame BA and<br/>KB/fx Sensitivity Sweep</h1>
+<h1 class="title">Multi-frame BA と<br/>KB/fx 感度スイープ</h1>
 <p class="subtitle">
-  We solve for a 6DoF rigid drift shared across multiple frames using covariance-weighted BA.
-  Results from quantifying how far calibration residuals leak into extrinsics when the
-  camera model (fx, KB k<sub>2</sub>) is intentionally perturbed.
+  複数フレームで共有された 6DoF リグドリフトを Σ重み付き BA で解く。
+  カメラモデル (fx, KB k<sub>2</sub>) を意図的に摂動させ、校正残差が
+  どこまで extrinsic に漏れるかを定量化した結果。
 </p>
 
 <h2>Setup</h2>
 <p>
-  We selected 10 validation frames from PandaSet scene 015 (fi=[1, 6, 8, 9, 11, 16, 18, 26, 31, 32]).
-  A single rig drift <code>(ypr, t)</code> in the camera coordinate frame was sampled and applied uniformly to all frames:
+  PandaSet scene 015 から 10 個の val frame (fi=[1, 6, 8, 9, 11, 16, 18, 26, 31, 32]) を選択。
+  カメラ座標系の rig ドリフト <code>(ypr, t)</code> を1組だけサンプルし、全フレームに共通で適用:
 </p>
 <pre><code>ypr_cam = [ 0.274°, -0.061°,  0.359° ]   ||·|| = 0.455°
 t_cam   = [ 7.89,   -16.23,   19.02  ] cm  ||·|| = 26.23 cm</code></pre>
 <p>
-  For each frame we ran <code>CalibNetDepth</code> to obtain per-object-point 2D Gaussians
-  <code>(Δu, Δv, σ<sub>u</sub>, σ<sub>v</sub>, ρ)</code>. These are stacked as residual blocks in
-  Ceres (<code>pyceres</code>), optimizing only the shared <code>θ = (ypr, t)</code>.
-  We measured how the optimal solution shifts when the BA-side camera model is distorted across
-  12 conditions.
+  各フレームで <code>CalibNetDepth</code> を回し、オブジェクト点ごとの 2D ガウシアン
+  <code>(Δu, Δv, σ<sub>u</sub>, σ<sub>v</sub>, ρ)</code> を得る。これを
+  Ceres (<code>pyceres</code>) に residual block として積み上げ、共有 <code>θ = (ypr, t)</code>
+  だけを最適化。BA 側のカメラモデルを歪ませたとき最適解がどうズレるかを
+  12 条件で測った。
 </p>
 
 <div class="callout warn">
-  <strong>Critical Pitfall (fixed 2026-04-23)</strong>:
-  The refactor in <code>85b6ccc</code> broke the block execution order in <code>CalibNetDepth</code>
-  for n_layers≥3 (<code>cross_coarse → cross_fine → cross_refine</code>),
-  causing the pre-refactor <code>all_v3_mc</code> checkpoint to be silently mis-wired.
-  Symptom: rotation is coarsely recovered but <strong>t remains stuck at GT drift</strong>.
-  Fix commits <code>4517107</code> + <code>45b9fcb</code>
-  made pre/post refactor checkpoints coexist. All results below are post-fix.
+  <strong>重要な落とし穴 (2026-04-23 修正)</strong>:
+  <code>85b6ccc</code> の refactor で <code>CalibNetDepth</code> の
+  n_layers≥3 におけるブロック実行順が崩れ
+  (<code>cross_coarse → cross_fine → cross_refine</code>)、
+  pre-refactor の <code>all_v3_mc</code> チェックポイントが silently mis-wired に。
+  症状: 回転は粗く復元するが <strong>t が GT drift のまま動かない</strong>。
+  修正コミット <code>4517107</code> + 条件化コミット <code>45b9fcb</code>
+  で pre/post refactor の両者の checkpoint を同居可能にした。以下の結果は全て修正後。
 </div>
 
-<h2>Results ① <span class="badge">all_v3_mc</span> (pre-refactor ckpt)</h2>
+<h2>結果 ① <span class="badge">all_v3_mc</span> (pre-refactor ckpt)</h2>
 
 <figure>
   <img src="images/ba_all_v3_mc_sweep.png" alt="fx and KB k2 sweep, all_v3_mc checkpoint">
-  <figcaption>fx / k₂ sensitivity for all_v3_mc (pinhole training). Red = t_err (cm), green = rot_err (°).</figcaption>
+  <figcaption>all_v3_mc (pinhole 訓練) の fx / k₂ 感度。赤 = t_err (cm)、緑 = rot_err (°)。</figcaption>
 </figure>
 
 <table>
 <thead><tr>
-  <th>Configuration</th><th class="num">fx scale</th><th class="num">k₂</th>
+  <th>設定</th><th class="num">fx scale</th><th class="num">k₂</th>
   <th class="num">rot_err (°)</th><th class="num">t_err (cm)</th><th class="num">reproj med (px)</th>
 </tr></thead>
 <tbody>
@@ -145,29 +146,29 @@ t_cam   = [ 7.89,   -16.23,   19.02  ] cm  ||·|| = 26.23 cm</code></pre>
 </table>
 
 <p>
-  <strong>Interpretation</strong>: pinhole_ref recovers to <code>t = 2.10 cm</code>
-  (GT drift 26.2 cm). From there <code>k₂ = +0.01</code> improves to
-  <strong>t = 1.56 cm</strong> — suggesting that PandaSet's nominal pinhole model
-  retains a slight pincushion component. Shifting fx by ±0.5 % alone worsens
-  t by more than 13 cm, consistent with the classic miscalibration pattern where
-  "image alignment is maintained while t drifts systematically."
+  <strong>読み</strong>: pinhole_ref が <code>t = 2.10 cm</code> まで復元
+  (GT drift 26.2 cm)。そこから <code>k₂ = +0.01</code> で
+  <strong>t = 1.56 cm</strong> に改善 — PandaSet の公称 pinhole モデルに
+  わずかに pincushion が残っていることを示唆。fx を ±0.5 % ずらすだけで
+  t は 13 cm 以上悪化するので、"画像整合は維持したまま t が系統的にズレる"
+  という古典的 miscalibration パターンと整合する。
 </p>
 
-<h2>Results ② <span class="badge">vdef_sl / vdef_ml</span> (deformable)</h2>
+<h2>結果 ② <span class="badge">vdef_sl / vdef_ml</span> (deformable)</h2>
 
 <figure>
   <img src="images/ba_vdef_sl_sweep.png" alt="fx and k2 sweep, deformable SL">
-  <figcaption>Sweep under identical conditions for vdef_sl (single-level deformable).</figcaption>
+  <figcaption>vdef_sl (single-level deformable) 同条件の sweep。</figcaption>
 </figure>
 <figure>
   <img src="images/ba_vdef_ml_sweep.png" alt="fx and k2 sweep, deformable ML">
-  <figcaption>Sweep under identical conditions for vdef_ml (multi-level deformable).</figcaption>
+  <figcaption>vdef_ml (multi-level deformable) 同条件の sweep。</figcaption>
 </figure>
 
 <table>
 <thead><tr>
   <th>Model</th><th class="num">pinhole t_err (cm)</th>
-  <th class="num">best t_err (cm)</th><th>best config</th><th class="num">best reproj (px)</th>
+  <th class="num">best t_err (cm)</th><th>best 設定</th><th class="num">best reproj (px)</th>
 </tr></thead>
 <tbody>
   <tr><td>all_v3_mc</td><td class="num">2.10</td><td class="num">1.56</td><td>k₂=+0.01</td><td class="num">0.72</td></tr>
@@ -177,39 +178,39 @@ t_cam   = [ 7.89,   -16.23,   19.02  ] cm  ||·|| = 26.23 cm</code></pre>
 </table>
 
 <p>
-  <strong>Observation</strong>: deformable models are already best with <code>pinhole</code> alone.
-  Adding k₂ = +0.01 brings no improvement. This can be interpreted as deformable cross-attention
-  learning spatial offset sampling in such a way that it
-  <strong>implicitly absorbs small radial distortions internally</strong>.
-  Even without adding explicit distortion correction on the BA side,
-  the deformable head shoulders that burden.
+  <strong>所見</strong>: deformable 系は <code>pinhole</code> 単体で既に最良。
+  k₂ = +0.01 を入れても改善しない。これは deformable cross-attention が
+  空間オフセットのサンプリングを学習する過程で、
+  <strong>微小な radial 歪みを内部で暗黙に吸収</strong>しているためと解釈できる。
+  明示的な distortion 補正を BA 側に足さなくても、
+  deformable 側のヘッドがそれを肩代わりする形。
 </p>
 
-<h2>Reproduction</h2>
-<pre><code># Standard (all_v3_mc)
+<h2>再現</h2>
+<pre><code># 標準 (all_v3_mc)
 python ba_kb_multiframe.py
 
-# Validate with deform SL
+# deform SL で検証
 BA_CKPT=experiments/vdef_sl/best_model.pt \
 BA_DEFORM_MODE=sl \
 BA_OUT=experiments/vdef_sl/ba_kb \
   python ba_kb_multiframe.py
 
-# Validate with deform ML
+# deform ML で検証
 BA_CKPT=experiments/vdef_ml/best_model.pt \
 BA_DEFORM_MODE=ml \
 BA_OUT=experiments/vdef_ml/ba_kb \
   python ba_kb_multiframe.py</code></pre>
 
-<h2>Next Steps</h2>
+<h2>次のステップ</h2>
 <ul>
-  <li><strong>Jointly solve for fx and k₂ as BA variables</strong> — Currently we only see "where the best is" due to fixed perturbations. Adding a <code>[6, 2]</code> parameter block to <code>CalibBACostPerturbed</code> would enable joint intrinsic optimization.</li>
-  <li><strong>Reproduce on different scenes</strong> — We see <code>k₂ ≈ +0.01</code> on scene 015 alone; whether this reproduces across all PandaSet scenes is unconfirmed.</li>
-  <li><strong>Expand to Waymo / NuScenes</strong> — Could provide independent evidence supporting the PandaSet note (fx 0.57 % excessive).</li>
+  <li><strong>fx と k₂ を同時に BA の変数として解く</strong> — 今は固定摂動のため、"どこに best がある" しか見えない。<code>CalibBACostPerturbed</code> の parameter block に <code>[6, 2]</code> を追加すれば intrinsic を共同最適化できる。</li>
+  <li><strong>別シーンでの再現</strong> — scene 015 だけで <code>k₂ ≈ +0.01</code> を見ているが、PandaSet 全シーンにわたって再現するかは未確認。</li>
+  <li><strong>Waymo / NuScenes への展開</strong> — PandaSet のメモ(fx 0.57 % 過大)を裏付ける独立証拠になる可能性。</li>
 </ul>
 
 <div class="callout">
-  <strong>Related Files</strong>:
+  <strong>関連ファイル</strong>:
   <code>ba_kb_multiframe.py</code> ·
   <code>ba_multiframe.py</code> ·
   <code>experiments/all_v3_mc/ba_kb/summary.json</code> ·

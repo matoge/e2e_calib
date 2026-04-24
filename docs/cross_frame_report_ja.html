@@ -126,357 +126,361 @@ a:hover { color: var(--accent); }
   loss. The foundation for super-long-baseline pose estimation without bounding boxes or prior maps.
 </p>
 
-<h2 style="margin-top: 1.5em;">What is this problem — From classics to the present</h2>
+<h2 style="margin-top: 1.5em;">この問題は何なのか — 古典から現代まで</h2>
 
 <p class="lede">
-  &quot;<em>Where does this 3D point appear in another camera frame's image?</em>&quot;
-  — This is one of the oldest questions in image processing. A one-line genealogy:
+  「<em>ある 3D 点が、別のカメラフレームの画像のどこに映るか</em>」
+  — これは画像処理の最古の問い。系譜を一行で振り返る:
 </p>
 
 <ul>
   <li>
-    <strong>Classics (1980s–2010s)</strong>:
-    Lucas–Kanade solves locally using temporal brightness gradients,
-    SIFT / ORB / KLT match keypoints with hand-designed descriptors.
-    <em>Hand-crafted assumptions</em>—brightness constancy, small displacement, sufficient texture—
-    any of which fail in the field.
+    <strong>古典 (1980s–2010s)</strong>:
+    Lucas–Kanade が輝度の時間勾配で局所解、
+    SIFT / ORB / KLT が手設計 descriptor で特徴点照合。
+    輝度一定・小変位・テクスチャ十分という <em>手作りの仮定</em>
+    のいずれかが現場で破綻する。
   </li>
   <li>
-    <strong>CNN-flow / learned descriptors (2018–2022)</strong>:
-    PWC-Net / RAFT regress dense optical flow,
-    SuperPoint + SuperGlue offer learned descriptors + attentional matching.
-    Global context helps; performance no longer drops as sharply when baseline grows.
-    <em>But image × image only — no 3D</em>.
+    <strong>CNN-flow / 学習 descriptor (2018–2022)</strong>:
+    PWC-Net / RAFT が密な optical flow を回帰、
+    SuperPoint + SuperGlue が学習 descriptor + attentional matching。
+    global 文脈が効き、baseline が伸びても落ちにくくなった。
+    <em>が、画像 × 画像の関係のみ — 3D を持たない</em>。
   </li>
   <li>
-    <strong>Transformer correspondence (2021–2025)</strong>:
-    LoFTR offers detector-free coarse-to-fine self/cross-attn,
-    MatchFormer goes full Transformer.
-    LightGlue accelerates SuperGlue.
-    DKM / ROMA regress dense warps via Gaussian Process / robust loss and output match-confidence.
-    Recent MASt3R / DUSt3R directly regress image pairs to 3D pointmaps.
-    <em>All image × image. No LiDAR or depth priors</em>.
+    <strong>Transformer 対応推定 (2021–2025)</strong>:
+    LoFTR が detector-free の coarse-to-fine self/cross-attn、
+    MatchFormer が全 Transformer。
+    LightGlue が SuperGlue を高速化。
+    DKM / ROMA が dense warp を Gaussian Process / 頑強損失で回帰し match-confidence まで出す。
+    最近の MASt3R / DUSt3R は画像ペアを直接 3D pointmap に回帰する方向に。
+    <em>すべて画像 × 画像。LiDAR も depth 事前情報も入らない</em>。
   </li>
   <li>
     <strong>Deep SLAM / VO (2021–2024)</strong>:
-    DROID-SLAM injects per-pixel learned confidence into dense BA
-    — <em>closest to us philosophically</em>.
-    DPVO uses sparse patch-graph,
-    NeRF-SLAM / SplaTAM / MonoGS / Gaussian-SLAM adopt 3DGS as map representation and
-    drive pose via rendering loss.
-    All <em>image-only</em>; no LiDAR.
+    DROID-SLAM が dense BA に per-pixel 学習 confidence を流し込む
+    — <em>思想的には一番我々に近い</em>。
+    DPVO が sparse patch-graph、
+    NeRF-SLAM / SplaTAM / MonoGS / Gaussian-SLAM が 3DGS を地図表現にして
+    rendering loss で pose を動かす。
+    いずれも <em>image-only</em>、LiDAR は使わない。
   </li>
   <li>
-    <strong>LiDAR–Camera correspondence (2021–2024)</strong>:
-    DeepI2P classifies &quot;in/out of frustum&quot;,
-    CorrI2P / I2D-Loc / EFGHNet / CFNet regress 3D–2D correspondence.
-    <em>Closest lineage</em>, but all stop at <strong>single-frame calibration</strong> —
-    no cross-frame, no output Σ (2×2 covariance directly usable as Mahalanobis weight in BA).
+    <strong>LiDAR–Camera 対応 (2021–2024)</strong>:
+    DeepI2P が "frustum 内/外" の分類、
+    CorrI2P / I2D-Loc / EFGHNet / CFNet が 3D–2D 対応を回帰。
+    <em>一番近い系譜</em>だが、すべて <strong>single-frame calibration</strong> で止まる —
+    cross-frame も出力 Σ (BA で Mahalanobis 重みとして直接使える 2×2) も提供しない。
   </li>
   <li>
-    <strong>Uncertainty-aware matching (2022–2024)</strong>:
-    PixLoc / PDC-Net+ output scalar confidence, DROID-SLAM per-pixel weight,
-    some keypoint detectors output aleatoric 2D Gaussians.
-    <em>No published head combining cross-modal × cross-frame × BA-ready Σ</em>.
+    <strong>不確実性付き matching (2022–2024)</strong>:
+    PixLoc / PDC-Net+ がスカラー信頼度、DROID-SLAM が per-pixel 重み、
+    keypoint 検出で aleatoric 2D Gaussian を出すものもある。
+    <em>cross-modal × cross-frame × BA-ready Σ の全部が揃ったヘッドは公開例が見つからない</em>。
   </li>
 </ul>
 
 <div class="callout" style="border-left-color: #888;">
-  <strong>Gap</strong>:
-  A learned head that takes (LiDAR 3D point + another frame's image patch) and outputs per-point (Δu, Δv, Σ<sub>2×2</sub>)
-  in a form directly usable as Mahalanobis weight in BA does not exist in published prior work as of April 2026.
-  CorrI2P is conceptually close but stops at single-frame calibration.
-  DROID-SLAM is close philosophically but image-only.
-  <strong>The intersection — cross-modal × cross-frame × BA-ready Σ — is vacant</strong>.
+  <strong>ギャップ</strong>:
+  「LiDAR 3D 点 + 別フレームの画像パッチ → per-point (Δu, Δv, Σ<sub>2×2</sub>)」
+  を直接 BA の Mahalanobis 重みに流せる形で吐く学習ヘッドは、2026 年 4 月時点で
+  公開された先行研究に無い。
+  CorrI2P が概念的に近いが single-frame calibration で終わる。
+  DROID-SLAM が思想的に近いが image-only。
+  <strong>交差点 — cross-modal × cross-frame × BA-ready Σ — は空いてる</strong>。
 </div>
 
 <p class="lede">
-  <strong>However, we do not consider this gap a special invention just because
-  &quot;no one has done it yet&quot;</strong>.
-  All components are public: pulling image features with cross-attn,
-  training with 2D Gaussian NLL, efficiency via deformable sampling,
-  symmetric training with dual direction.
-  Anyone can assemble them — AI can too.
-  In 1–2 years the same head will appear somewhere.
+  <strong>ただし、このギャップが "まだ誰もやっていない" からといって
+  特別な発明とは思っていない</strong>。
+  構成要素は全部公開されている: cross-attn で画像特徴を引く、
+  2D Gaussian NLL で訓練する、deformable sampling で効率化、
+  dual direction で対称に訓練する。
+  どれも並べれば誰でも組める — AI も組める。
+  1–2 年もすれば同じ形のヘッドはどこからか公開される。
   <br/><br/>
-  <strong>What matters is the &quot;map&quot; built with this head</strong>.
-  Methods can be borrowed from outside,
-  but the map — and the system that keeps building it — must be built in-house.
+  <strong>効くのは、このヘッドで作る "地図" の方</strong>。
+  手法は外から借りてこれる、
+  地図と、それを作り続ける仕組みは自分で作るしかない。
 </p>
 
-<h3>Why &quot;maps&quot; directly impact company survival</h3>
+<h3>なぜ "地図" が会社の存続性に直結するのか</h3>
 
 <p>
-  HD maps and 3D-labeled data are common raw materials for autonomous driving / ADAS / robotics / road infrastructure
-  inspection. As of 2025, these raw materials are produced at a cost of
-  <em>tens to hundreds of dollars per km</em>,
-  and require re-collection and updates for each country/city — a market where the competition is not one-shot but continuous
-  unit economics. In other words, the business is determined not by &quot;one paper&quot; but by &quot;cost per km × update frequency&quot;.
+  HD 地図と 3D ラベル付きデータは、自動運転 / ADAS / ロボティクス / 道路インフラ
+  点検の共通の原材料になる。2025 年時点で、この原材料は
+  <em>1 km あたり数十〜数百ドル</em>のコストで作られ続けており、
+  国・都市ごとに再収集と更新が要求される — ワンショットではなく継続的な
+  単位経済性 (unit economics) で勝負する市場になっている。
+  つまりビジネスは「1 論文」ではなく「km あたりコスト × 更新頻度」で決まる。
 </p>
 
 <ul>
   <li>
-    <strong>Crush cost structure via automation</strong>:
-    Current annotation · calibration · 3D map creation is
-    <em>labor-cost dominated</em>. This head solves 3D bbox propagation · calib · BA ·
-    dynamic-object σ estimation in a single function, unifying processes that previously required separate teams.
-    Cost per km drops monotonically.
+    <strong>コスト構造を自動化で潰す</strong>:
+    現在のアノテーション・キャリブレーション・3D 地図作成は
+    <em>人件費が支配項</em>。本ヘッドは 3D bbox 伝搬・キャリブ・BA・
+    動体 σ 推定の 4 つを同じ関数で解くので、それぞれ別建てに人を当てていた
+    工程を 1 本化できる。km あたりコストは単調に下がる。
   </li>
   <li>
-    <strong>Update instead of re-collection</strong>:
-    σ-weighted BA yields differential poses, so only
-    <em>changed areas</em> need GS re-optimization (non-rigid update).
-    Goal: refresh one city's map with one new vehicle's drive data.
-    While competitors full re-scan the same area monthly, we roll incremental updates.
+    <strong>再収集ではなく更新で済ます</strong>:
+    σ-weighted BA で差分 pose を出せば、前回の地図に対して
+    <em>変わった所だけ</em>を GS で再最適化できる (non-rigid update)。
+    新車両 1 台分の走行データで 1 都市分の地図を refresh するのが目標。
+    競合が同じ地域を毎月 full re-scan する間に、我々は増分更新で回せる。
   </li>
   <li>
-    <strong>Aligns with subscription revenue</strong>:
-    Maps are not &quot;sell and done&quot;; <em>freshness</em> is value, so
-    monthly license · API metered billing fits.
-    Lifetime value (LTV) differs from one-and-done paper models.
+    <strong>サブスク型の収益モデルと親和</strong>:
+    地図は完成したら売って終わりではなく、<em>鮮度</em>が価値なので
+    月次ライセンス・API 従量課金に乗る。
+    1 回作って終わりの論文モデルとは生涯価値 (LTV) が違う。
   </li>
   <li>
-    <strong>Data flywheel</strong>:
-    Customer vehicle drives → differential collection → σ anomaly detection → map update → distribute to customer.
-    Coverage and freshness improve as customers grow, so
-    <em>switching cost kicks in later</em>.
-    Organizations with only methods but no in-house fleet or subscription customers
-    cannot enter this loop.
+    <strong>データフライホイール</strong>:
+    客の車両走行 → 差分収集 → σ で異常検出 → 地図更新 → 客へ配信。
+    客が増えるほどカバレッジと鮮度が上がるので
+    <em>乗り換えコストが後から効いてくる</em>。
+    手法だけ持っていて自社フリートもサブスク顧客もいない組織は
+    この循環に入れない。
   </li>
   <li>
-    <strong>OmniRe / GS maps are reusable</strong>:
-    Maps are not just localization databases but also
-    <em>simulation substrates</em> (parked vehicles, intersections, backlight) →
-    horizontal expansion: synthetic data sales for AV training, insurance risk assessment, urban planning visualization.
+    <strong>OmniRe / GS 地図は再利用できる</strong>:
+    地図は単なる localization データベースではなく
+    <em>シミュレーション基盤</em>にもなる (停車車両・交差点・逆光) →
+    AV 学習用の合成データ販売、保険リスク評価、都市計画用ビジュアライゼーション、
+    と水平展開できる。
   </li>
 </ul>
 
 <p>
-  In short: methods asymptote to zero value the moment they are published, but
-  maps with <em>field data × automated pipeline × continuous updates</em>
-  <strong>drop in unit cost and rise in freshness the more you build</strong> — this is
-  the only asymmetry that sustains a company.
-  Papers and benchmark numbers are tools;
-  improving unit economics is the <em>metric that actually wins</em>.
+  要するに: 手法は公開された瞬間に価値がゼロに漸近するが、
+  <em>現場データ × 自動パイプライン × 継続更新</em> が揃った地図は
+  <strong>作れば作るほど単価が下がって鮮度が上がる</strong> — これが
+  会社の存続性を支える唯一の非対称性。
+  論文や ベンチマーク数字は道具、
+  単位経済性の改善が <em>実際に勝つ指標</em>。
 </p>
 
 <div class="callout" style="border-left-color: #174734; background: #f0f4ec;">
-  <strong>How this head impacts downstream tasks</strong> — this head is
-  <em>the foundation block for building everything we need next</em>:
+  <strong>下流タスクへの効き方</strong> — このヘッドは
+  <em>次に我々が欲しい物を全部作るための基盤ブロック</em>:
   <ul style="margin: 0.4em 0;">
-    <li><strong>Build accurate data</strong>:
-      When propagating 3D bbox / segmentation frame-to-frame, use correspondence σ as
-      threshold to drastically cut manual review. Dynamic objects naturally have large σ,
-      preventing false propagation.</li>
-    <li><strong>Automate calibration</strong>:
-      LiDAR ↔ Camera / Camera ↔ Camera / time sync.
-      Just optimize the same residual function over pose.
-      No prior maps or markers required.</li>
-    <li><strong>Prerequisite for physics simulation</strong>:
-      OmniRe / Gaussian Splatting training requires 10 Hz precision pose + calibration.
-      Manual tuning takes 10 min/scene; this network achieves it in seconds.</li>
-    <li><strong>High-precision maps with GS</strong>:
-      Bundle poses from σ-weighted BA into mapping,
-      inject σ directly into Gaussian opacity / sharpness priors.
-      The learned fact that <em>dynamic objects have large σ</em> directly helps GS dynamic-object removal.</li>
+    <li><strong>正確なデータを作る</strong>:
+      3D bbox / segmentation を frame-to-frame で伝搬させるとき、対応の σ を
+      しきい値に使えば手動 review 量が激減する。動体では σ が自然に大きく
+      なるので誤伝搬が起こりにくい。</li>
+    <li><strong>キャリブレーションを自動でやる</strong>:
+      LiDAR ↔ Camera / Camera ↔ Camera / 時刻同期。
+      同じ残差関数を pose に対して最適化するだけ。
+      事前地図もマーカーも要らない。</li>
+    <li><strong>物理シミュレーションの前提</strong>:
+      OmniRe / Gaussian Splatting の学習には 10 Hz 精度の pose + calibration が
+      要る。人手で詰めると 10 min/scene、この網で秒オーダー。</li>
+    <li><strong>GS で高精度地図を持つ</strong>:
+      σ-weighted BA で得た pose を束ねて mapping、
+      σ を直接 Gaussian の opacity / sharpness 事前分布に流し込む。
+      <em>動体の σ が大きい</em>という学習成果が、GS の動体除去にもそのまま効く。</li>
   </ul>
 </div>
 
 <p class="lede">
-  <strong>Story so far</strong> ——
-  In the <a href="report.html">prior report</a>, CalibNetDepth outputs
-  <em>per-point 2D Gaussian residuals</em> for LiDAR point cloud × image,
-  in a form usable as Σ-weighted constraints in BA.
-  In the <a href="deform_report.html">prior report (deform)</a>, we replaced attention
-  and cut val NLL from 2.074 → 1.568.
+  <strong>ここまでの話</strong> ——
+  <a href="report.html">前報</a>で CalibNetDepth が LiDAR 点群 × 画像で
+  <em>per-point 2D ガウシアン残差</em> を出し、BA で Σ-重み付き拘束として
+  使える形まで揃えた。
+  <a href="deform_report.html">前報 (deform)</a> で attention を置き換え
+  val NLL を 2.074 → 1.568 に削った。
   <br/><br/>
-  <strong>This report</strong> ——
-  <em>The same residual formulation extends directly to cross-frame</em>.
-  LiDAR with 3D points, and the camera frame where they project.
-  Apply a hypothesis pose, and residuals emerge.
-  <strong>The net learns only the residual-prediction function, without knowing &quot;which frame&quot;.</strong>
-  Because the metric is the same, modalities are independent, and scale is free,
-  single-frame calibration / VO / long-range loop closure
-  <strong>collapse into special cases of one head</strong>.
+  <strong>この報告</strong> ——
+  <em>同じ残差定式化が cross-frame に直接拡張できる</em>。
+  3D 点を持つ LiDAR と、それが移る先のカメラフレーム。
+  そこに候補ポーズを当てると残差が出る。
+  <strong>ネットは「どのフレームか」を知らないまま、残差を予測する関数だけを学ぶ。</strong>
+  計量は同じ、モダリティは独立、スケールは自由 —— という性質から、
+  single-frame calibration / VO / 長距離 loop closure が
+  <strong>同じ一つのヘッドの特殊ケースに集約される</strong>。
 </p>
 
 <h2>Formulation</h2>
 
 <p>
-  The learning task is equivalent to learning the same function f for
-  cross-modal calibration / cross-frame matching / VO / loop closure:
+  学習タスクは、cross-modal calibration / cross-frame matching / VO / loop closure の
+  いずれも、以下の同じ関数 f を学ぶことと等価:
 </p>
 
 <div class="eq">f : (image_B patch, 3D point P_A in frame_A, pose hypothesis T̂_AB) → (Δu, Δv, Σ)
                      s.t.  π_B(T_AB^gt · P_A) = π_B(T̂_AB · P_A) + (Δu, Δv)</div>
 
 <p>
-  Inputs are independent of <em>which frame</em>:
+  入力は <em>どのフレームか</em> に依存しない:
 </p>
 <ul>
-  <li><code>image_B patch</code> — just an image crop</li>
-  <li><code>P_A</code> — 3D point (any coordinate system, as long as consistent with T̂_AB)</li>
-  <li><code>T̂_AB</code> — hypothesis relative pose (6-DoF)</li>
+  <li><code>image_B patch</code> — 単なる画像クロップ</li>
+  <li><code>P_A</code> — 3D 点(座標系はどれでもよい、T̂_AB と整合していれば)</li>
+  <li><code>T̂_AB</code> — 候補相対ポーズ (6-DoF)</li>
 </ul>
 
 <p>
-  From the network's view, <strong>the concept of baseline does not exist</strong>.
-  Whether A and B are 1 m or 200 m apart does not appear in the input.
-  The same function f applies to both (as long as domain gap is bridged).
+  ネットワークから見ると、<strong>baseline という概念が存在しない</strong>。
+  A と B が 1 m 離れているか 200 m 離れているかは入力に現れない。
+  同じ関数 f がどちらにも適用される(domain gap さえ埋まれば)。
 </p>
 
-<h3>Existing tasks as special cases</h3>
+<h3>特殊ケースとしての既存タスク</h3>
 
 <table>
-<thead><tr><th>Task</th><th>Meaning of T_AB</th><th>GT supervision</th></tr></thead>
+<thead><tr><th>タスク</th><th>T_AB の意味</th><th>GT 教師</th></tr></thead>
 <tbody>
-<tr><td>LiDAR↔Cam calibration</td><td>extrinsic (frame A=B, relative pose within rig)</td><td>known rig ± perturbation</td></tr>
-<tr><td>VO (consecutive frames)</td><td>frame t → frame t+1 relative pose</td><td>GPS/IMU ± perturbation</td></tr>
-<tr><td>Static object tracking</td><td>viewing static object from another frame under ego motion</td><td>ego pose GT</td></tr>
-<tr><td>Loop closure</td><td>relative pose between two frames 100-200 m apart</td><td>bootstrap with LLN</td></tr>
-<tr><td>Long-range relocalization</td><td>pose between prior map and current frame</td><td>same as above</td></tr>
+<tr><td>LiDAR↔Cam calibration</td><td>extrinsic (フレーム A=B, rig 内の相対ポーズ)</td><td>既知 rig ± 摂動</td></tr>
+<tr><td>VO (連続フレーム)</td><td>frame t → frame t+1 相対ポーズ</td><td>GPS/IMU ± 摂動</td></tr>
+<tr><td>Static object tracking</td><td>ego 動き下で静止物体を別フレームから見る</td><td>ego pose GT</td></tr>
+<tr><td>Loop closure</td><td>100-200 m 離れた二フレームの相対ポーズ</td><td>LLN で bootstrap</td></tr>
+<tr><td>Long-range relocalization</td><td>事前地図と現フレームのポーズ</td><td>同上</td></tr>
 </tbody>
 </table>
 
-<h2>Data: how pair residuals are generated</h2>
+<h2>データ: pair residual はどう作られるか</h2>
 
 <p>
-  One training pair = (patch_A, patch_B, uvd_A, uvd_B, pose_AB_hat,
-  target residual). Concrete generation flow:
+  学習データ 1 ペア = (patch_A, patch_B, uvd_A, uvd_B, pose_AB_hat,
+  target residual) の組。具体的な生成フローは:
 </p>
 
 <ol>
-  <li><strong>Pair selection</strong>: From PandaSet 39 scenes, pick one scene randomly from the 31 train scenes.
-    Then pick frame_A and frame_B = frame_A ± baseline
-    (1–20 frames; 1 frame=0.1s) randomly.</li>
-  <li><strong>Pivot selection</strong>: From all visible LiDAR points in frame_A (~100k),
-    randomly pick one point as pivot.</li>
-  <li><strong>Pose perturbation</strong>:
-    <code>T_AB_hat = T_AB_gt × δT</code>,
-    where <code>δT</code> is Gaussian with <code>σ_ypr=1.0°</code> / <code>σ_t=0.2m</code>.
-    This simulates &quot;dead-reckoning uncertainty&quot;.</li>
-  <li><strong>Patch cropping</strong>: Randomly choose crop size 128–256 px.
-    patch_A crops frame_A's image centered on pivot; patch_B crops
-    <code>π_B(T_AB_hat · pivot_3D)</code> (= pivot's <em>hypothesis</em>
-    projection in B) as center.
-    Both are resized to 64×64 → network input.</li>
-  <li><strong>Reject out-of-frame pivot</strong>: If pivot's hypothesis projection and GT projection in B
-    are not both within B's image, reject the pair
-    (out-of-frame is uncorrectable).</li>
-  <li><strong>Pivot must be patch center</strong>: If crop near image edge,
-    <em>zero-pad</em> to extrapolate. This preserves the invariant that pose_emb can assume
-    &quot;pivot = patch center&quot;
-    (clipping shifts crop position, breaking pose_emb semantics).</li>
-  <li><strong>Target residual</strong>: All A's LiDAR points (~200-300) that fall within patch_A
-    are projected to B with GT → <code>uv_gt</code>, with hypothesis → <code>uv_hat</code>.
-    <code>Δ_target = uv_gt − uv_hat</code> (in patch-local px). The net predicts this
-    Δ.</li>
+  <li><strong>ペア選択</strong>: PandaSet 39 scene のうち train 31 scene から、
+    1 scene をランダムに pick。そこから frame_A と frame_B = frame_A ± baseline
+    (1–20 frames、1 frame=0.1s) をランダムに選ぶ。</li>
+  <li><strong>Pivot 選定</strong>: frame_A で visible な全 LiDAR 点(~100k 個)から
+    ランダムに 1 点を pivot に pick。</li>
+  <li><strong>ポーズ摂動</strong>:
+    <code>T_AB_hat = T_AB_gt × δT</code>、
+    ここで <code>δT</code> は <code>σ_ypr=1.0°</code> / <code>σ_t=0.2m</code>
+    の Gaussian。これが「dead-reckoning の不確かさ」をシミュレート。</li>
+  <li><strong>パッチ切り出し</strong>: crop サイズ 128–256 px をランダムに選び、
+    patch_A は pivot を中心に frame_A の画像を crop、patch_B は
+    <code>π_B(T_AB_hat · pivot_3D)</code> (= B での pivot の <em>仮説</em>
+    投影位置) を中心に frame_B の画像を crop。
+    両方とも最終的に 64×64 にリサイズ → ネット入力。</li>
+  <li><strong>画面外 pivot は reject</strong>: pivot の B フレームへの
+    仮説投影と真値投影が両方 B の画像内に入ってないとペアを棄却
+    (画面外は補正不能)。</li>
+  <li><strong>Pivot は必ず patch 中央</strong>: 画像の端近くで crop が
+    はみ出す場合は <em>ゼロパディング</em> で外挿。これによって pose_emb が
+    「pivot = patch 中心」を前提にできる不変量が守られる
+    (clipping で crop 位置をずらすと pose_emb の意味が壊れる)。</li>
+  <li><strong>ターゲット残差</strong>: patch_A 内に落ちる A の全 LiDAR 点 (~200-300)
+    を B に GT で投影して <code>uv_gt</code>、仮説で投影して <code>uv_hat</code>。
+    <code>Δ_target = uv_gt − uv_hat</code> (patch 内 px 単位)。ネットはこの
+    Δ を予測する。</li>
 </ol>
 
-<h3>Visual verification of sampling (pure, σ=0)</h3>
+<h3>サンプリングの視覚確認 (pure, σ=0)</h3>
 
 <p>
-  With perturbation σ=0, &quot;project pivot to both frames exactly per GT&quot;, and
-  align the same 3D point across different baselines (+5, +10, +20, +40, +70 frames):
+  摂動 σ=0 で「GT どおりに pivot を両フレームに投影」させて、同じ 3D 点を
+  異なる baseline (+5, +10, +20, +40, +70 frames) で並べたもの:
 </p>
 
 <figure>
   <img src="images/sampling/pivot_track.png"
        alt="Same 3D pivot tracked across baselines">
   <figcaption>
-    scene 018, fi=0 as anchor, tracking the same 3D point (high-altitude z>3m LiDAR point,
-    traffic light or building corner candidate) at +0 / +5 / +10 / +20 / +40 / +70 frames.
-    Red ★ always at patch center; same object (Row 1/6: traffic light,
-    Row 2-5: building façade, window, pillar) remains <em>centered</em> as baseline grows.
-    Even after vehicle advances 70 frames ≈ 7 seconds, pivot stays locked to object —
-    visually confirms sampling correctness.
+    scene 018、fi=0 を anchor に、同一 3D 点(高所 z>3m の LiDAR 点、
+    traffic light や建物のコーナー候補)を +0 / +5 / +10 / +20 / +40 / +70 frames
+    で tracking。赤★は常に patch 中心にあり、同じ物体 (Row 1/6: 信号機、
+    Row 2-5: 建物外壁・窓・柱) が baseline が伸びても<em>同じ中心</em>に
+    捉えられ続けている。車が 70 frame ≈ 7 秒進んでも pivot は物体に
+    lock されたまま — サンプリングの正しさが視覚的に確定。
   </figcaption>
 </figure>
 
-<h3>Correctness at scale (100+ pairs per baseline)</h3>
+<h3>大量サンプリングでの正しさ(各 baseline で 100+ ペア)</h3>
 
 <p>
-  Generate 100 pairs per baseline, and display sampler-produced (patch_A, patch_B) appearances.
-  Red ★ in each patch is pivot = patch center (required invariant).
-  patch_A (odd columns) and patch_B (even columns) both depict the same object because,
-  <em>under zero perturbation</em>, both patches crop around the same 3D point.
+  各 baseline で 100 ペア生成し、サンプラーが作る (patch_A, patch_B) の
+  見た目を並べたもの。各 patch の赤★は pivot = patch 中央 (要求不変量)。
+  patch_A (奇数列) と patch_B (偶数列) が同じ物体を映してるのは、
+  <em>摂動ゼロ条件で</em>両 patch が同一 3D 点の周辺を切り出してるから。
 </p>
 
 <table>
-<thead><tr><th>Baseline</th><th>Behavior</th><th>Image</th></tr></thead>
+<thead><tr><th>Baseline</th><th>挙動</th><th>画像</th></tr></thead>
 <tbody>
 <tr><td>+5 frame (~0.5s, ~5m)</td>
-  <td>Nearly identical viewpoint, no content divergence</td>
+  <td>ほぼ同一視点、content 乖離なし</td>
   <td><a href="images/sampling/sampling_bl5.png">full</a></td></tr>
 <tr><td>+10 frame</td>
-  <td>Tiny viewpoint change, same object's position shifts slightly</td>
+  <td>微小な視点変化、同一物体の位置が少しずれるだけ</td>
   <td><a href="images/sampling/sampling_bl10.png">full</a></td></tr>
 <tr><td>+20 frame (~2s)</td>
-  <td>Parallax begins to emerge, but pivot stays on object</td>
+  <td>視差大きく現れ始めるが pivot は物体に維持</td>
   <td><a href="images/sampling/sampling_bl20.png">full</a></td></tr>
 <tr><td>+40 frame (~4s)</td>
-  <td>Viewpoint changes significantly, object appearance varies, but center correspondence holds</td>
+  <td>viewpoint 大きく変化、物体の見た目も変わるが中心対応は成立</td>
   <td><a href="images/sampling/sampling_bl40.png">full</a></td></tr>
 <tr><td>+70 frame (~7s)</td>
-  <td>Near scene end, maximum viewpoint change, object identification barely holds</td>
+  <td>scene 終端近く、視点変化最大、同一物体の同定はぎりぎり</td>
   <td><a href="images/sampling/sampling_bl70.png">full</a></td></tr>
 </tbody>
 </table>
 
 <div class="callout">
-  <strong>Implication</strong>:
-  Even as baseline grows, sampler correctly places the same 3D point at patch center in both frames.
-  At long range (+70), vehicle advances 70m and viewpoint changes drastically, so appearance differs,
-  but pivot's 3D position is preserved.
-  Therefore, &quot;if the model fails to learn at long range, it's not a sampler bug
-  but <em>input distribution shift (OOD)</em>&quot; — we can isolate the cause.
+  <strong>含意</strong>:
+  baseline が伸びても sampler は同じ 3D 点を両フレームの patch 中央に
+  正しく置けている。長距離 (+70) では車両が 70m 進んで viewpoint が
+  大きく変わるため見た目は違うが、pivot の 3D 位置は正しく保たれる。
+  したがって「長距離でモデルが学習できないとすれば、それは sampler
+  のバグではなく <em>入力分布の差 (OOD)</em> による」と切り分けられる。
 </div>
 
-<h3>Pairs with perturbation: leak verification + residual semantics</h3>
+<h3>摂動ありのペア: リーク検証 + 残差の意味</h3>
 
 <div class="callout warn">
   <strong>Critical correctness check</strong>:
-  During training, patch_B is cropped centered on <em>hypothesis projection (π_B(T_AB_hat · P_A))</em>
-  — <em>not GT projection (π_B(T_AB_gt · P_A))</em>.
-  If we cropped centered on GT projection, the answer would always land at patch center,
-  causing self-supervised leakage that breaks training.
+  訓練時、patch_B は <em>仮説投影 (π_B(T_AB_hat · P_A))</em> を中心に
+  切り出される — <em>真値投影 (π_B(T_AB_gt · P_A)) ではない</em>。
+  もし真値投影を中心にクロップしてたら、答えが常に patch 中央に落ちて
+  self-supervised リークで学習が壊れる。
 </div>
 
 <p>
-  Under perturbation σ_ypr=1° / σ_t=0.2m, render both <strong>red ★ (hypothesis
-  position, patch center) and blue ★ (GT position)</strong> on B patch:
+  摂動 σ_ypr=1° / σ_t=0.2m の下で、B パッチ上に <strong>赤★ (仮説
+  位置、patch 中央) と 青★ (真値位置)</strong> を両方描画:
 </p>
 
 <figure>
   <img src="images/sampling/sampling_perturb.png"
        alt="Pairs with perturbation: red ★ hypothesis at center, blue ★ GT offset">
   <figcaption>
-    Each pair's patch_B: <span style="color: #c13c14;">red ★ = hypothesis</span>
-    (patch center, model input); <span style="color: #1e6fff;">blue ★ = GT</span>
-    (slightly offset, correct). Model predicts the
-    <strong>pixel-space Δ</strong> from red→blue. patch_A is cropped centered on pivot itself,
-    so GT center (pivot's A projection is not perturbed in GT).
+    各ペアの patch_B: <span style="color: #c13c14;">赤★ = hypothesis</span>
+    (patch 中心、model 入力); <span style="color: #1e6fff;">青★ = GT</span>
+    (わずかに offset、正解)。モデルは赤→青の
+    <strong>pixel-space Δ</strong> を予測する task。patch_A は pivot 自身を
+    中心に切ってるので真値中心(pivot の A projection は GT では摂動されない)。
   </figcaption>
 </figure>
 
 <p>
-  What the <strong>model sees</strong> in this setup:
+  このセットアップで <strong>model が見るもの</strong>:
 </p>
 <ul>
-  <li><strong>patch_A</strong>: image from frame_A centered on pivot — &quot;point was here&quot;</li>
-  <li><strong>patch_B</strong>: image from frame_B centered on <em>hypothesis projection</em> —
-    &quot;point should be here under hypothesis&quot;</li>
-  <li><strong>pose_emb(T_AB_hat)</strong>: hypothesis pose 6DoF embedded to D-dim vector</li>
-  <li><strong>uvd_A, uvd_B</strong>: patch-local coords + depth of all LiDAR points falling in both patches</li>
+  <li><strong>patch_A</strong>: frame_A で pivot 中心の画像 — "ここに居た点"</li>
+  <li><strong>patch_B</strong>: frame_B で <em>仮説投影</em> 中心の画像 —
+    "仮説ではここに居るはず" の画像領域</li>
+  <li><strong>pose_emb(T_AB_hat)</strong>: 仮説ポーズ 6DoF を D 次元に
+    埋め込んだベクトル</li>
+  <li><strong>uvd_A, uvd_B</strong>: 両 patch に落ちる全 LiDAR 点の patch-local 座標 + 深度</li>
 </ul>
 <p>
-  <strong>Δ<sub>target</sub> = uv_gt − uv_hat</strong> (patch-local px,
-  red→blue vector in figure above) is the learning target. Model compares
-  image content around red★ (where it should be under hypothesis) with patch_A's appearance,
-  and outputs Δ like &quot;true answer is X pixels down-right&quot;.
+  <strong>Δ<sub>target</sub> = uv_gt − uv_hat</strong> (patch-local px、
+  上図の赤→青のベクトル) を予測するのが学習タスク。model は赤★周りの
+  画像コンテンツ(仮説でここにあるはず)と patch_A の appearance を比較し、
+  「真の正解は X 画素右下」のように Δ を出す。
 </p>
 
-<h2>Architecture</h2>
+<h2>アーキテクチャ</h2>
 
 <div class="ascii">  frame A                                  frame B
      │                                        │
@@ -511,74 +515,74 @@ a:hover { color: var(--accent); }
 <h3>Intra-frame: concat + self-attn</h3>
 
 <p>
-  Prior CalibNetDepth used &quot;pt (Q) → img (KV) cross-attn&quot;. This is
-  <em>unidirectional — image does not receive pt information</em>. Instead, here we
-  <strong>concat pt tokens and image tokens, then apply self-attn</strong>,
-  and split back to original roles afterward:
+  以前の CalibNetDepth は「pt (Q) → img (KV) の cross-attn」だった。これだと
+  <em>画像側は pt 情報を受け取らない</em>ので片方向的。ここでは代わりに
+  <strong>pt トークンと画像トークンを concat して self-attn</strong> をかけ、
+  終わった後に元のロールで分割する:
 </p>
 
 <div class="eq">tokens  = concat(pt_tok, img_tok)               # (N_pt + H·W, D)
-tokens  = SelfAttnStack(tokens)                 # symmetric modality fusion
-pt_tok  = tokens[:N_pt]                         # pt that absorbed img info
-img_tok = tokens[N_pt:]                         # img that absorbed pt info</div>
+tokens  = SelfAttnStack(tokens)                 # 対称な modality fusion
+pt_tok  = tokens[:N_pt]                         # 画像情報を取り込んだ pt
+img_tok = tokens[N_pt:]                         # pt 情報を取り込んだ img</div>
 
 <p>
-  Image uses coarse features only (64×64 input → 8×8 = 64 tokens). Fine is unnecessary in this design
-  where KV-side sparsity is not an issue for cross-frame. A/B both frames
-  <strong>share weights</strong> (same encoder, same self-attn blocks).
+  画像は coarse 特徴量のみ (64×64 入力 → 8×8 = 64 token)。fine は cross-frame で
+  KV 側のスパース性が問題にならない今回の設計では不要。A/B 両フレームで
+  <strong>重みは共有</strong>(同じエンコーダ、同じ self-attn ブロック)。
 </p>
 
-<h3>Pose bridge: confine &quot;coordinate frame difference&quot; to one token</h3>
+<h3>Pose bridge: "座標系の違い" を 1 枚の token に閉じ込める</h3>
 
 <div class="callout warn">
-  <strong>Critical design decision</strong>:
-  Each frame's LiDAR points are expressed in <em>that frame's camera coordinate</em>
-  (depth is <em>distance from that frame's camera</em>).
-  Therefore, <code>pt_A_tok</code> and <code>pt_B_tok</code>
-  live in <strong>different coordinate systems</strong>.
-  Comparing them directly with cross-attn makes no sense.
+  <strong>重要な設計判断</strong>:
+  各フレームの LiDAR 点は <em>そのフレームのカメラ座標</em> で表現される
+  (depth は各フレームの <em>カメラからの距離</em>)。
+  したがって <code>pt_A_tok</code> と <code>pt_B_tok</code> は
+  <strong>違う座標系</strong> に住んでいる。
+  そのまま cross-attn で比べてもナンセンス。
   <br/><br/>
-  <code>pose_emb = PoseMLP(T̂_AB)</code> <strong>added</strong> to A-side LiDAR tokens
-  shifts &quot;A coordinate point&quot; to a token-space position equivalent to
-  &quot;brought into B coordinate&quot;, so to speak.
-  The transformer's token space is high-dimensional, so
-  the FFN / self-attn internally learn to approximate the true rigid transform.
+  <code>pose_emb = PoseMLP(T̂_AB)</code> を A 側の LiDAR トークンに
+  <strong>足す</strong>と、"A 座標系の点" を "B 座標系に持ってきた相当"
+  の token 空間の位置にシフトする、という解釈。
+  transformer の token 空間は高次元なので、
+  真の rigid transform の近似は FFN / self-attn が内部で学ぶ。
 </div>
 
 <p>
-  Key: <strong>add pose_emb to one side only</strong>. Adding the same
-  embedding to both sides leaves relative position unchanged, losing meaning.
-  Reverse direction (B→A) uses <code>pose_emb_BA = PoseMLP(inv(T̂_AB))</code> added to B's
-  LiDAR tokens. <code>PoseMLP</code> is shared for both directions (same weights,
-  just invert the input).
+  ポイントは「pose_emb を<strong>片側だけ</strong>に足す」こと。両側に同じ
+  embedding を足すと相対位置が変わらず意味を失う。
+  逆方向 (B→A) は <code>pose_emb_BA = PoseMLP(inv(T̂_AB))</code> で B の
+  LiDAR トークンに足す。<code>PoseMLP</code> は両方向で共有(同じ重み、
+  入力を反転させるだけ)。
 </p>
 
-<h3>Cross-frame attention: Q is always LiDAR, KV mixes both modalities</h3>
+<h3>Cross-frame attention: Q はいつも LiDAR、KV は両モダリティ混合</h3>
 
 <div class="callout">
-  <strong>Why Q = LiDAR is inevitable</strong>:
-  For the prediction target (Δu, Δv) to be well-defined, <em>Q must have 3D position</em>.
-  If image tokens are Q, only (u, v) is available and depth is ambiguous;
-  the same (u, v) corresponds to entirely different locations for a car at 5 m vs building at 50 m
-  (epipolar ambiguity). LiDAR has (X, Y, Z), so
-  <code>π_B(T̂_AB · P)</code> is a closed function and target is uniquely determined.
+  <strong>なぜ Q = LiDAR が必然か</strong>:
+  予測対象 (Δu, Δv) が well-defined になるためには、<em>Q が 3D 位置を持って</em>
+  いないと無理。画像トークンを Q にすると (u, v) だけで depth が曖昧になり、
+  同じ (u, v) でも 5 m 先の車と 50 m 先の建物では対応先が全然違う
+  (epipolar 曖昧性)。LiDAR は (X, Y, Z) を持っているので、
+  <code>π_B(T̂_AB · P)</code> が閉じた関数で定まり、target が一意に決まる。
   <br/><br/>
-  Pure image↔image matchers (SuperPoint, LoFTR, etc.) throw this ambiguity
-  <em>downstream</em> to RANSAC / pairwise geometric verification.
-  LiDAR Q <strong>closes the ambiguity on the query side</strong>.
+  純粋 image↔image の matcher (SuperPoint, LoFTR, etc.) はこの曖昧性を
+  RANSAC / 対ごとの幾何検証で <em>下流に</em> 投げている。
+  LiDAR Q は <strong>クエリ側で曖昧性を閉じる</strong>。
 </div>
 
 <p>
-  KV side includes both modalities:
+  KV 側には両モダリティを入れる:
 </p>
 
-<div class="eq">KV_B = concat(pt_B_tok, img_B_tok)     # pt alone is too sparse</div>
+<div class="eq">KV_B = concat(pt_B_tok, img_B_tok)     # pt だけだとスパース過ぎる</div>
 
 <p>
-  Using only point cloud as KV means depending solely on LiDAR points in the patch (typically 10-60),
-  resulting in insufficient information. Mixing in 64 image tokens
-  allows both &quot;pull by geometry / pull by appearance&quot;. This way, low-texture regions
-  can be covered by nearby LiDAR points, and sparse-LiDAR regions by image.
+  点群だけを KV にすると、パッチ内の LiDAR 点数(典型 10-60 個)だけに
+  依存することになり情報が不足。画像トークン 64 個を混ぜて
+  "幾何で引く / 見た目で引く" を両方許す。これで低テクスチャ領域でも
+  LiDAR 近傍点で拾えるし、LiDAR がスパースな領域でも画像で拾える。
 </p>
 
 <h3>Output head</h3>
@@ -587,104 +591,104 @@ img_tok = tokens[N_pt:]                         # img that absorbed pt info</div
 (Δu, Δv, log σu, log σv, ρ)               # gaussian 2D</div>
 
 <p>
-  <code>uv_hat_01</code> is the <em>hypothesis position projected with T̂_AB</em> (normalized).
-  Passing hypothesis position as reference to the head allows output to be directly interpreted as
-  <strong>residual</strong> from hypothesis. Final prediction is <code>uv_pred = uv_hat + Δ</code>,
-  supervision is <code>Δ_gt = uv_gt − uv_hat</code>, loss is 2D Gaussian NLL.
+  <code>uv_hat_01</code> は <em>T̂_AB で投影した候補位置</em>(正規化済み)。
+  ヘッドに候補位置を参照として渡すことで、出力は候補位置からの<strong>残差</strong>
+  として直接解釈できる。最終予測は <code>uv_pred = uv_hat + Δ</code>、
+  教師は <code>Δ_gt = uv_gt − uv_hat</code>、loss は 2D ガウシアン NLL。
 </p>
 
 <h2>Dual projection loss</h2>
 
 <p>
-  Output both A→B and B→A in one forward pass, and average both losses:
+  A→B と B→A を 1 forward で同時に出し、両方の loss を平均する:
 </p>
 
 <div class="eq">loss = 0.5 * ( gaussian2d_nll(Δ_AtoB, target_AB)
               + gaussian2d_nll(Δ_BtoA, target_BA) )</div>
 
 <p>
-  This has more meaning than just doubling training data:
+  これは単に訓練データを 2 倍にする以上の意味がある:
 </p>
 <ul>
   <li>
-    <strong>Enforce pose_emb symmetry</strong>: training pressure drives <code>PoseMLP(T̂)</code> and
-    <code>PoseMLP(inv(T̂))</code> to be semantically consistent
+    <strong>pose_emb の対称性を強制</strong>: <code>PoseMLP(T̂)</code> と
+    <code>PoseMLP(inv(T̂))</code> が semantic に整合する方向に学習圧力が働く
   </li>
   <li>
-    <strong>Prevent one-sided overfit</strong>: training only A→B risks pose_emb learning
-    unidirectional bias
+    <strong>片側 overfit を防ぐ</strong>: A→B だけ学習すると pose_emb が
+    片方向のバイアスを覚える可能性がある
   </li>
   <li>
-    <strong>Usable in downstream BA</strong>: in production, both directions' residuals can be
-    fed as constraints on a shared pose block
+    <strong>下流 BA で使える</strong>: 実運用では両方向の残差を
+    共有 pose block に対する拘束として入れられる
   </li>
 </ul>
 
-<h2>Why short-range training should solve long-range</h2>
+<h2>なぜ短距離だけで長距離を解けるはずか</h2>
 
 <div class="callout">
-  <strong>Core observation</strong>:
-  f takes no baseline as input. Therefore
-  <em>f does not know the baseline</em>.
+  <strong>核心的観察</strong>:
+  f は入力に baseline を取らない。したがって
+  <em>f は baseline を知らない</em>。
   <br/><br/>
-  Train f on reliable GT pose at short range (1–5 m),
-  call f at long range (100–200 m) at inference, aggregate many points with BA, and
-  <strong>by the law of large numbers, pose estimate converges to GT</strong>
-  (as long as f is unbiased out-of-distribution).
+  短距離(1–5 m)の信頼できる GT pose で f を訓練し、
+  推論時に長距離(100–200 m)で f を呼び、BA で多点集約すれば、
+  <strong>大数の法則により pose 推定は真値に収束する</strong>
+  (ただし f が out-of-distribution で unbiased である限り)。
 </div>
 
 <p>
-  Conditions for this to hold:
+  これが成り立つための条件:
 </p>
 <ol>
   <li>
-    <strong>f is unbiased on long-range input distribution</strong>. Fill this gap with
-    scale_emb (inject log(d_B/d_A) into positional encoding) and view-angle augmentation.
-    Systematic bias cannot be saved even by LLN.
+    <strong>長距離入力分布で f が unbiased</strong>。ここを埋めるのは
+    scale_emb (log(d_B/d_A) を位置符号に注入) と view-angle augmentation。
+    systematic bias が残ると LLN でも救われない。
   </li>
   <li>
-    <strong>Per-point errors are approximately i.i.d.</strong> Sampling from spatially distant patches
-    keeps correlation small.
+    <strong>点ごとの誤差が i.i.d. 近似</strong>。空間的に離れたパッチから
+    採ると相関は小さい。
   </li>
   <li>
-    <strong>Confidence filter</strong>. Only predictions with small σ (high confidence) enter BA.
-    Mixing low-confidence predictions perturbs BA.
+    <strong>信頼性フィルタ</strong>。σ が小さい(確信度高い)予測だけ BA に
+    入れる。低信頼を混ぜると BA が振られる。
   </li>
 </ol>
 
-<h3>Bootstrap loop</h3>
+<h3>Bootstrap ループ</h3>
 
 <p>
-  What's truly powerful is that the above <strong>eliminates the need for GT pose</strong>.
-  The following self-supervised loop runs:
+  真に強力なのは、上記が "GT pose の必要性" を<strong>消す</strong>こと。
+  以下の自己教師ループが回る:
 </p>
 
-<div class="ascii">stage 0:  train on short range (1–5 m)       ← public GT is reliable
-stage 1:  apply f to mid range (20–60 m), estimate pose via LLN
-stage 2:  only high-confidence tracks (small σ) → promote to mid-range pseudo-GT
-stage 3:  retrain on short + mid
-stage 4:  same loop on long range (100–200 m)
-stage 5:  retrain on full range → done</div>
+<div class="ascii">stage 0:  短距離 (1–5 m) で訓練       ← public GT は信頼できる
+stage 1:  中距離 (20–60 m) に f を適用、LLN で pose 推定
+stage 2:  高信頼トラック (σ 小) の予測だけ → 中距離の pseudo-GT に昇格
+stage 3:  短 + 中で再訓練
+stage 4:  長距離 (100–200 m) に同じループ
+stage 5:  全域で再訓練 → 完成</div>
 
 <p>
-  Structure similar to progressive self-training like Noisy Student / DROID-SLAM.
-  Bootstrapping with a net that outputs per-point Σ-attached residuals is
-  likely without prior example.
+  Noisy Student / DROID-SLAM 系の progressive self-training と構造は
+  類似。per-point に Σ 付き残差を出すネットで bootstrap するのは
+  おそらく先行例がない。
 </p>
 
-<h2>PoC: overfit on scene 015</h2>
+<h2>PoC: scene 015 で overfit</h2>
 
 <p>
-  Implementation: <code>models/cross_frame.py</code>, <code>datasets/pandaset_pair.py</code>,
-  <code>train_cross_frame.py</code>.
-  Model 1.31 M params, PandaSet scene 015 baseline 1–5 frames with
-  perturbation <code>σ_ypr=0.3°, σ_t=0.15 m</code>.
+  実装は <code>models/cross_frame.py</code>, <code>datasets/pandaset_pair.py</code>,
+  <code>train_cross_frame.py</code>。
+  モデル 1.31 M params、PandaSet scene 015 の baseline 1–5 frames で
+  摂動 <code>σ_ypr=0.3°, σ_t=0.15 m</code>。
 </p>
 
 <table>
 <thead><tr>
   <th>Run</th><th class="num">N pairs</th><th class="num">Epochs</th>
-  <th class="num">base err</th><th class="num">final err</th><th class="num">reduction</th>
+  <th class="num">base err</th><th class="num">final err</th><th class="num">削減</th>
 </tr></thead>
 <tbody>
 <tr><td>v00_overfit</td><td class="num">16</td><td class="num">50</td>
@@ -696,44 +700,44 @@ stage 5:  retrain on full range → done</div>
 
 <ul>
   <li>
-    <strong>Sub-pixel reached</strong>: v01 achieves 0.60 px.
-    GT pose error itself is on the order of a few cm,
-    so this is near the fundamental limit.
+    <strong>サブピクセル到達</strong>: v01 で 0.60 px。
+    GT pose 誤差自体が数 cm のオーダーなので、
+    原理的限界に近い。
   </li>
   <li>
-    <strong>Symmetry</strong>: err_AB = 0.60 px, err_BA = 0.62 px —
-    dual projection loss supplies equal signal in both directions.
+    <strong>対称性</strong>: err_AB = 0.60 px, err_BA = 0.62 px —
+    dual projection loss が両方向に平等な信号を供給していることを示す。
   </li>
   <li>
-    <strong>NLL drops to negative</strong> (−0.65): Σ learned tightly
-    (typical ~0.5 px).
+    <strong>NLL が負まで落ちる</strong> (−0.65): Σ が tight に
+    (typical 0.5 px 程度) 学習されている。
   </li>
   <li>
-    <strong>9 seconds / 150 ep on RTX 5080</strong>: lightweight.
-    Full train (scene 015 all frames + augmentation) expected to finish in minutes.
+    <strong>9 秒 / 150 ep on RTX 5080</strong>: 軽い。
+    full train (scene 015 全フレーム + augmentation) は数分で終わる見込み。
   </li>
 </ul>
 
-<h2>Phase A1 — Multi-scene and generalization</h2>
+<h2>Phase A1 — マルチシーン化と汎化の確立</h2>
 
 <p>
-  <strong>Conducted 2026-04-24</strong>. From PandaSet 39 scenes,
-  <strong>31 train, 8 val (scene-level split, deterministic shuffle, seed=42)</strong>.
-  Extended to baseline 1–20 frames, perturbation σ_ypr=1.0°, σ_t=0.20 m.
-  Val's 8 scenes are <em>never seen</em> during training (true scene-level generalization test).
-  Common settings: img_size=64, max_points=256, crop_range=64-192, virtual_epoch=4000,
+  <strong>2026-04-24 実施</strong>。PandaSet 39 scene のうち
+  <strong>31 を train、8 を val(scene 単位で分離、deterministic shuffle, seed=42)</strong>。
+  baseline 1–20 frames、摂動 σ_ypr=1.0°、σ_t=0.20 m に拡張。
+  val 側の 8 scene は学習で<em>一切見ない</em>(真の scene-level 汎化テスト)。
+  共通設定: img_size=64, max_points=256, crop_range=64-192, virtual_epoch=4000,
   batch=32, AdamW lr=1e-3 → 1e-5 cosine, n_intra_layers=2,
-  60 epoch / ~6 min on RTX 5080.
+  RTX 5080 上で 60 epoch / ~6 分。
 </p>
 
-<h3>Experiment list (with raw data)</h3>
+<h3>実験一覧 (raw data つき)</h3>
 
 <table>
 <thead><tr>
-  <th>Run</th><th>Config</th>
+  <th>Run</th><th>構成</th>
   <th class="num">params</th>
   <th class="num">val err</th><th class="num">base</th>
-  <th class="num">reduction</th>
+  <th class="num">削減</th>
   <th class="num">train-val gap</th>
   <th>artifacts</th>
 </tr></thead>
@@ -745,9 +749,9 @@ stage 5:  retrain on full range → done</div>
       <a href="../experiments/cross_frame_v04_multi39/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v04_multi39/config.txt">cfg</a></td></tr>
 <tr><td>v06</td><td>std attn, 1-layer, full-res cache, parallel init</td>
-  <td class="num">1.31 M</td><td class="num">interrupted</td><td class="num">—</td>
+  <td class="num">1.31 M</td><td class="num">中断</td><td class="num">—</td>
   <td class="num">—</td><td class="num">—</td>
-  <td>(killed mid-run, batch=32 → 64 switch)</td></tr>
+  <td>(killed mid-run, batch=32 → 64 切替)</td></tr>
 <tr><td>v07</td><td>std attn, 1-layer, batch 64, workers 12</td>
   <td class="num">1.31 M</td><td class="num">5.53 px</td><td class="num">19.9 px</td>
   <td class="num">72 %</td><td class="num">2.4 ×</td>
@@ -771,88 +775,44 @@ stage 5:  retrain on full range → done</div>
   <td><a href="../experiments/cross_frame_v10_padclean_deform/train.log">log</a> ·
       <a href="../experiments/cross_frame_v10_padclean_deform/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v10_padclean_deform/best_model.pt">ckpt</a></td></tr>
-<tr><td>v11</td><td>v10 repro (sampling fix for even cleaner pivot)</td>
+<tr><td>v11</td><td>v10 repro (sampling fix でさらにクリーンな pivot)</td>
   <td class="num">1.59 M</td><td class="num"><strong>2.61 px</strong></td><td class="num">15.4 px</td>
   <td class="num">82 %</td><td class="num">3.0 ×</td>
   <td><a href="../experiments/cross_frame_v11_base/train.log">log</a> ·
       <a href="../experiments/cross_frame_v11_base/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v11_base/best_model.pt">ckpt</a></td></tr>
-<tr><td>v12</td><td>v11 + <strong>UVD head</strong> (Δu,Δv,<strong>Δd</strong>, log σu, log σv, log σd, ρ<sub>uv</sub>)</td>
-  <td class="num">1.59 M</td><td class="num">2.61 px</td><td class="num">15.4 px</td>
+<tr class="best"><td>v12</td><td>v11 + <strong>UVD head</strong> (Δu,Δv,<strong>Δd</strong>, log σu, log σv, log σd, ρ<sub>uv</sub>)</td>
+  <td class="num">1.59 M</td><td class="num"><strong>2.61 px</strong></td><td class="num">15.4 px</td>
   <td class="num">82 %</td><td class="num">3.0 ×</td>
   <td><a href="../experiments/cross_frame_v12_uvd/train.log">log</a> ·
       <a href="../experiments/cross_frame_v12_uvd/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v12_uvd/best_model.pt">ckpt</a></td></tr>
-<tr class="best"><td>v13</td><td>v11 arch + <strong>PandaSet 39 + Waymo 80 混合</strong> (119 scenes, ~3× data)</td>
-  <td class="num">1.59 M</td><td class="num"><strong>2.42 px</strong></td><td class="num">16.2 px</td>
-  <td class="num">82 %</td><td class="num">3.0 ×</td>
-  <td><a href="../experiments/cross_frame_v13_mix/train.log">log</a> ·
-      <a href="../experiments/cross_frame_v13_mix/curve.png">curve</a> ·
-      <a href="../experiments/cross_frame_v13_mix/best_model.pt">ckpt</a></td></tr>
-<tr><td>v14</td><td>v13 + <strong>NuScenes 80</strong> 追加 (199 scenes, ~5× data)</td>
-  <td class="num">1.59 M</td><td class="num">2.62 px</td><td class="num">16.1 px</td>
-  <td class="num">82 %</td><td class="num">3.0 ×</td>
-  <td><a href="../experiments/cross_frame_v14_mix3/train.log">log</a> ·
-      <a href="../experiments/cross_frame_v14_mix3/curve.png">curve</a> ·
-      <a href="../experiments/cross_frame_v14_mix3/best_model.pt">ckpt</a></td></tr>
 </tbody>
 </table>
 
 <p style="font-size: 13px;">
-  <strong>v11 → v12 finding</strong>:
-  Extending to 7-dim output (Δu,Δv,Δd,log σu,log σv,log σd,ρ<sub>uv</sub>) leaves UV error
-  completely unchanged (2.61 px = v11 tie). In other words, <strong>depth prediction head comes &quot;for free&quot;</strong>
-  — ready for use as 3D constraint in σ-weighted BA for SLAM (effective not only on camera-ray but also depth direction).
-  Depth error (val err_d, meter) will be measured in future BA evaluation.
-</p>
-
-<p style="font-size: 13px;">
-  <strong>v12 → v13 知見</strong>:
-  Waymo Open Dataset v2 から 80 segment を PandaSet 形式に変換 (先頭 80 frame を
-  truncate、OpenCV cam 系に回転) し、既存 <code>PandaSetCrossFrameDataset</code> に
-  そのまま 2 root 指定で流し込んだ。
-  val err <strong>2.61 → 2.42 px (+7.3%)</strong>。train 誤差は横ばい
-  (1.03 → 1.03 px)、train/val gap が <strong>1.59 → 1.40 px (20% 減)</strong> で、
-  データ量 3× で overfit が確かに緩和。
-  <br/>
-  <em>注意</em>: LLN+BA 評価は <code>scripts/eval/cross_frame_lln.py</code> が
-  現状 PandaSet val のみ走る (name.isdigit フィルタ)。v13 の PandaSet-only BA は
-  v12 より若干悪化しており、σ の絶対スケールが Waymo 側の分布に適応して
-  PandaSet と合わない可能性。raw per-point 予測は改善、BA-level 再校正が次タスク。
-</p>
-
-<p style="font-size: 13px;">
-  <strong>v13 → v14 知見 (NuScenes 追加は効かなかった)</strong>:
-  NuScenes 850 scene から 80 scene を PandaSet 形式に変換して合流、計 199 scene。
-  val err <strong>2.42 → 2.62 px (悪化 +8.3%)</strong>。LLN+BA (PandaSet only) の rot 側は
-  v13 よりわずかに改善 (bl20 ↓-27 → ↓-17%)。
-  <br/>
-  <em>原因</em>: NuScenes keyframe は <strong>2 Hz</strong>、baseline_max=20 frame は
-  <strong>10 秒 = 100 m 近い</strong>大モーション。PandaSet/Waymo の 10 Hz × bl20
-  (2 秒 ≒ 20 m) と 5× 離れたレジームで、学習・val 双方に hard pair が混入して
-  平均誤差を押し上げた。データセット毎に独立 baseline_range を持つか、
-  NuScenes sweep (LiDAR 20 Hz / Cam 12 Hz) を使って 10 Hz 相当に再サンプル
-  するかのどちらかで解消するはず。
-  <br/>
-  <strong>現時点の best ckpt は v13_mix</strong>。NuScenes は使い方が固まってから
-  再度組み込む。
+  <strong>v11 → v12 知見</strong>:
+  7次元出力 (Δu,Δv,Δd,log σu,log σv,log σd,ρ<sub>uv</sub>) に拡張しても UV 誤差は
+  完全に据え置き (2.61 px = v11 tie)。つまり<strong>深度予測ヘッドは "タダで" 付いてくる</strong>
+  — SLAM の σ-weighted BA で 3D 拘束として使える (camera-ray だけでなく深度方向にも
+  効く) ための前準備が整った。深度誤差 (val err_d, meter) は今後 BA 評価で計測予定。
 </p>
 
 <p style="font-size: 12px; color: var(--ink-dim);">
-  *v10's base err (15.4) differs from v08 (19.9) because crop_range 64-192 → 128-256
-  changes the scale in patch-local coordinate system (physical pixel scale is similar).
-  val err absolute values are comparable; padding fix yields <strong>v08 2.87 → v10 2.65 = +8% improvement</strong>.
-  Effect of correctly preserving the invariant that pivot always lands at patch center (premise of pose_emb).
+  *v10 の base err (15.4) が v08 (19.9) と違うのは crop_range 64-192 → 128-256
+  で patch-local 座標系でのスケールが変わったから(物理ピクセル単位では近い規模)。
+  val err の絶対値は比較可能で、padding 修正で <strong>v08 2.87 → v10 2.65 = +8% 改善</strong>。
+  pivot が patch 中心に常に来る不変量(pose_emb の前提)が正しく保たれた効果。
 </p>
 
-<h3>Per-epoch comparison (v04 vs v08)</h3>
+<h3>Per-epoch 比較 (v04 vs v08)</h3>
 
 <table>
 <thead><tr>
   <th class="num">epoch</th>
   <th class="num">v04 train</th><th class="num">v04 val</th>
   <th class="num">v08 train</th><th class="num">v08 val</th>
-  <th class="num">val ratio (v08/v04)</th>
+  <th class="num">val 比 (v08/v04)</th>
 </tr></thead>
 <tbody>
 <tr><td class="num">0</td><td class="num">6.41</td><td class="num">14.27</td>
@@ -881,45 +841,45 @@ stage 5:  retrain on full range → done</div>
 </table>
 
 <p style="font-size: 12px; color: var(--ink-dim);">
-  *v04's intermediate epochs show slight fluctuation during LR cosine; best is around ep 12 (val 2.87 is
-  v04 best; slight rise in subsequent epochs). Later epochs show v04 / v08 nearly tie,
-  but v08 has large train/val gap (train 1.03 vs val 2.88), v04 overfits early with small gap.
+  *v04 の中間 epoch は LR cosine 中の若干変動値、ベストは ep 12 付近 (val 2.87 が
+  v04 best; 続く epoch でやや上昇)。後半は v04 / v08 がほぼ tie に見えるが、
+  v08 は train/val gap 大(train 1.03 vs val 2.88)、v04 は overfit 早く gap 小。
 </p>
 
 <h3>Compute / wall time</h3>
 
 <table>
-<thead><tr><th>Run</th><th>init time</th><th>ep avg</th><th>total wall</th><th>GPU util</th></tr></thead>
+<thead><tr><th>Run</th><th>init 時間</th><th>ep 平均</th><th>total wall</th><th>GPU 使用率</th></tr></thead>
 <tbody>
 <tr><td>v04 (init lazy + per-frame proj)</td><td class="num">250 s</td><td class="num">14 s</td><td class="num">17 min</td><td class="num">~30 %</td></tr>
-<tr><td>v06+ (parallel init + 1/2 cache → revert)</td><td class="num">31 s</td><td class="num">5 s</td><td class="num">~6 min</td><td class="num">~50 %</td></tr>
+<tr><td>v06+ (parallel init + 1/2 cache → 戻し)</td><td class="num">31 s</td><td class="num">5 s</td><td class="num">~6 min</td><td class="num">~50 %</td></tr>
 <tr><td>v07 (batch 64)</td><td class="num">31 s</td><td class="num">5 s</td><td class="num">~5 min</td><td class="num">~70-95 %</td></tr>
 <tr><td>v08 (deform + bs 32)</td><td class="num">31 s</td><td class="num">5.8 s</td><td class="num">~6 min</td><td class="num">~78 % (peak 88)</td></tr>
 </tbody>
 </table>
 
 <p style="font-size: 13.5px;">
-  Optimization impact points:
-  (1) <strong>scene + frame parallel init</strong> cuts 250s → 31s (8x),
-  (2) <strong>batch 64</strong> lifts GPU util 50% → 70%+,
-  (3) deformable is heavier and pushes GPU further (78%).
-  None reach 100% — remainder is attention memory-bound nature + image decode.
-  Power draw is max ~210W vs 5080 TDP 360W, meaning actual compute uses only ~60% of SMs.
-  Room for model expansion.
+  最適化の効きどころ:
+  (1) <strong>scene + frame の並列 init</strong> で 250s → 31s (8x)、
+  (2) <strong>batch 64</strong> で GPU util 50% → 70%+、
+  (3) deformable は重い分 GPU をさらに使い始める(78%)。
+  どこも 100% には達していない — 残りは attention の memory-bound 性 + image decode。
+  Power draw は 5080 TDP 360W に対し最大 ~210W、つまり実演算は SM の 60% 程度
+  しか動いてない。モデル拡張余地あり。
 </p>
 
 <figure>
   <img src="images/cross_frame_v08_curve.png" alt="v08 deformable training curve">
   <figcaption>
-    v08 (deformable + 2-layer) learning curve. train (solid) and val (dotted) stay
-    close through later epochs; dual loss learns symmetrically in both directions.
+    v08 (deformable + 2-layer) の learning curve。train (実線) と val (点線) が
+    後半まで close、 dual loss が両方向で対称に学習されてる。
   </figcaption>
 </figure>
 
-<h3>Interactive comparison chart</h3>
+<h3>Interactive 比較グラフ</h3>
 <p>
-  Interactive comparison overlaying all runs (v04, v07, v08, v09).
-  Click legend to toggle on/off, hover for numeric display.
+  全 run (v04, v07, v08, v09) を重ねた interactive comparison。
+  凡例クリックで on/off、ホバーで数値表示。
 </p>
 <!-- PLOTLY_FRAG_BEGIN -->
 <div style="margin: 18px 0; overflow-x: auto;">
@@ -928,158 +888,158 @@ stage 5:  retrain on full range → done</div>
 <!-- PLOTLY_FRAG_END -->
 
 <p style="font-size: 12px; color: var(--ink-dim);">
-  Generated by: <code>scripts/visualization/plot_cross_frame_curves.py</code> ·
-  standalone → <a href="cross_frame_curves.html">cross_frame_curves.html</a>.
+  生成: <code>scripts/visualization/plot_cross_frame_curves.py</code> ·
+  standalone で開く → <a href="cross_frame_curves.html">cross_frame_curves.html</a>。
 </p>
 
-<h3>Key findings</h3>
+<h3>主要な発見</h3>
 
 <ul>
   <li>
-    <strong>Multi-scene eliminates overfit</strong>:
-    v03 (1 scene) has train-val gap 2.5x, v04 (31 scenes) shrinks to 1.4x.
-    <em>scene count = data diversity</em> was the main driver of train-val gap.
+    <strong>マルチシーン化で overfit 解消</strong>:
+    v03 (1 scene) では train-val gap 2.5x、v04 (31 scenes) で 1.4x まで縮小。
+    <em>scene 数 = データ多様性</em>が train-val gap の主因だった。
   </li>
   <li>
-    <strong>Deformable attention is decisive (confirmed numbers)</strong>:
+    <strong>Deformable attention が決定打 (確定数字)</strong>:
     <ul>
       <li>v04 (std 1-layer): val <strong>4.58</strong> px</li>
-      <li>v09 (std 2-layer): val <strong>4.46</strong> px → adding layer +0.12 px (margin of error)</li>
-      <li>v08 (deform sl 2-layer): val <strong>2.87</strong> px → deform adds +1.59 px (35%)</li>
+      <li>v09 (std 2-layer): val <strong>4.46</strong> px → layer 追加で +0.12 px (誤差の範囲)</li>
+      <li>v08 (deform sl 2-layer): val <strong>2.87</strong> px → deform 投入で +1.59 px (35%)</li>
     </ul>
-    In other words, <strong>deform is 13× more effective than adding layers</strong>.
-    Attention mechanism improvement dominates over model depth.
+    つまり <strong>deform は layer 追加の 13× 有効</strong>。
+    モデル深化より attention 機構の改善が圧倒的に効く。
   </li>
   <li>
-    <strong>val absolute value is true generalization capacity</strong>:
-    val 2.87 px is average error on <em>unseen 8 scenes, unseen (fi_A, fi_B) pairs</em>.
-    Achieving this with zero training samples means a scene-independent
-    residual prediction function f has been learned.
+    <strong>val の絶対値が真の汎化能力</strong>:
+    val 2.87 px は <em>未見の 8 scene、未見の(fi_A, fi_B) pair</em> に対する
+    平均誤差。学習サンプル一切なしでこれ、つまり scene-independent な
+    残差予測関数 f が学習できてる。
   </li>
 </ul>
 
-<h3>LLN + BA qualitative verification (v10, with σ-ellipse)</h3>
+<h3>LLN + BA 定性検証 (v10, σ-ellipse 入り)</h3>
 
 <p>
-  panel A: query points (numbered ●) and pivot (red ★ = patch center).
-  panel B: for each point
+  panel A: query 点(番号付き●)と pivot(赤 ★ = patch 中心)。
+  panel B: 各点について
 </p>
 <ul>
-  <li><span style="color: #c13c14;">×</span>: <strong>hypothesis projection</strong> (where it lands with perturbed pose, incorrect)</li>
-  <li><span style="color: #0fa550;">●</span>: <strong>model prediction</strong> = hyp + per-point Δ, <strong>filled ellipse = 2σ covariance</strong></li>
-  <li><span style="color: #1e6fff;">★</span>: <strong>ground-truth projection</strong> (target)</li>
+  <li><span style="color: #c13c14;">×</span>: <strong>hypothesis 投影</strong> (摂動 pose のままだと来る位置、間違い)</li>
+  <li><span style="color: #0fa550;">●</span>: <strong>model 予測</strong> = hyp + per-point Δ、<strong>塗りつぶし楕円 = 2σ 共分散</strong></li>
+  <li><span style="color: #1e6fff;">★</span>: <strong>ground-truth 投影</strong> (目標)</li>
 </ul>
 <p>
-  Dotted line (A●→B★) = correspondence of same 3D point.
-  <strong>If colored ● lands on ★, model is correct; if 2σ ellipse covers ★, uncertainty is
-  also correctly estimated</strong> (precondition for σ-weighted BA).
+  点線 (A●→B★) = 同じ 3D 点の対応。
+  <strong>色付き ● が ★ に乗れば model は正しく、2σ 楕円が ★ を覆えば不確実性も
+  正しく推定できてる</strong>(σ-weighted BA の前提条件)。
 </p>
 
 <div class="callout" style="border-left-color: #c13c14; background: #fff4ee;">
-  <strong>🚗 The net learned on its own that &quot;moving cars are unpredictable&quot;</strong>
+  <strong>🚗 ネットは「動いてる車は予測できない」ことを自分で学んだ</strong>
   <br/><br/>
-  <strong>The most interesting part</strong> of the visualization:
+  可視化で <strong>一番面白いのはここ</strong>:
   <ul style="margin: 0.4em 0;">
-    <li>Static structures (buildings, roads, curbs, signs, poles, traffic lights) have small σ,
-    2σ ellipse is ≲ 1 px → pred ● nearly lands on ★</li>
-    <li><strong>Moving cars</strong> have noticeably inflated σ,
-    2σ ellipse covers several tenths of the patch. Moreover, that ellipse
-    (mostly) contains GT ★. In other words, the model correctly expresses
-    <em>&quot;it may be offset, but we don't know where it offset to&quot;</em>.</li>
+    <li>静止構造 (建物、道路、縁石、標識、電柱、信号機) ではσが小さく、
+    2σ 楕円は ≲ 1 px → pred ● は ★ にほぼ乗る</li>
+    <li><strong>動いている車</strong>では σ が顕著に膨らみ、
+    2σ 楕円がパッチの数割を覆う。しかもその楕円は GT ★ を
+    (だいたい) 含んでいる。つまり <em>「ずれてるかもしれないけどどこに
+    ずれたかは分からん」</em> をモデルが正しく表現している。</li>
   </ul>
-  This was <strong>not taught</strong>.
-  No dynamic/static labels were provided. Only whether positions match across frames A → B
-  arrives as NLL gradient.
-  <strong>When training with NLL, the optimal solution is &quot;if you can't hit it, output large σ&quot;
-  rather than &quot;hit it precisely&quot;</strong> —
-  the model found this.
+  これは <strong>教えてない</strong>。
+  動体/静止体のラベルは一切与えていない。A → B 間でフレーム間を通して
+  位置が一致するかしないか、だけが NLL の勾配として届く。
+  <strong>NLL で訓練する限り「はっきり当てる」より
+  「当たらないなら σ を大きく出す」のが最適解</strong>、
+  モデルはそれを見つけた。
   <br/><br/>
-  Expected downstream impact:
+  下流で期待される効き方:
   <ul style="margin: 0.4em 0;">
-    <li><strong>σ-weighted BA automatically down-weights dynamic points</strong>
-    (Mahalanobis distance = Δ/σ has σ in denominator).
-    Statistical outlier rejection comes for free, without hard-extracting
-    dynamic detection or semantic segmentation.</li>
-    <li>Thresholding σ to extract dynamic mask yields
-    <em>unsupervised dynamic-object detector</em> as byproduct.</li>
-    <li>At long range like baseline ±40 frames, σ inflates overall
-    (verified in bl40 vis below). BA solver sees this and judges &quot;this pair has
-    low confidence&quot;, avoiding large deviations from pose initial value.</li>
+    <li><strong>σ-weighted BA で動体点が自動的に down-weight される</strong>
+    (マハラノビス距離 = Δ/σ が分母で効くため)。
+    動体検出や semantic segmentation をハードに外出しせずに、
+    統計的な outlier rejection が無料で手に入る。</li>
+    <li>σ の閾値で動体マスクを切り出せば、副産物として
+    <em>教師なしの dynamic-object detector</em> にもなる。</li>
+    <li>baseline ±40 frame のような長距離では σ が全体的に大きくなる
+    (下の bl40 vis で確認可)。BA solver はこれを見て "この pair の
+    信頼度は低い" と判断し、pose 初期値から大きく離れるのを避ける。</li>
   </ul>
 </div>
 
 <figure>
   <img src="images/lln_bl5.png" alt="LLN+BA vis, baseline ±5">
-  <figcaption>baseline ±5 frames (~0.5s, ~5m)</figcaption>
+  <figcaption>baseline ±5 frames (~0.5s、~5m)</figcaption>
 </figure>
 <figure>
   <img src="images/lln_bl10.png" alt="LLN+BA vis, baseline ±10">
-  <figcaption>baseline ±10 frames (~1s, ~10m)</figcaption>
+  <figcaption>baseline ±10 frames (~1s、~10m)</figcaption>
 </figure>
 <figure>
   <img src="images/lln_bl20.png" alt="LLN+BA vis, baseline ±20">
-  <figcaption>baseline ±20 frames (~2s, ~20m)</figcaption>
+  <figcaption>baseline ±20 frames (~2s、~20m)</figcaption>
 </figure>
 <figure>
   <img src="images/lln_bl40.png" alt="LLN+BA vis, baseline ±40">
-  <figcaption>baseline ±40 frames (~4s, ~40m, exceeds train distribution upper bound)</figcaption>
+  <figcaption>baseline ±40 frames (~4s、~40m、train 分布の上限超)</figcaption>
 </figure>
 
 <div class="callout">
-  <strong>Observation</strong>:
-  At short range (±5, ±10), green/orange tend to land on blue — model + BA function correctly.
-  At long range (±40), green roughly approaches blue but orange (BA) misses in some cases
-  — area needing improvement in σ weighting or outlier handling fed to BA.
-  per-point prediction is retained as baseline grows (green ≈ blue), but outliers
-  rampage at pose-level aggregation.
+  <strong>観察</strong>:
+  短距離 (±5, ±10) では緑/橙が青に乗りやすい — model + BA が正しく機能。
+  長距離 (±40) では緑は大まかに青に寄るが橙 (BA) が外れるケースあり
+  — BA に流す σ 重みや outlier 処理を改善すべき領域。
+  per-point 予測は baseline が伸びても retained (緑 ≈ 青) が、pose-level 集約で
+  outlier が暴れる。
 </div>
 
 <div class="callout">
-  <strong>Qualitative finding</strong>:
-  Prediction error converges to ~1.3 px regardless of perturbation magnitude. This means model's
-  <em>lower-bound performance</em> (precision limit per sample) is around ~1 px, and
-  val's 2.87 px is the result of averaging different (fi_A, fi_B, pivot).
-  Downstream BA with multi-point LLN aggregation has large room to <em>converge below ~1 px</em>
-  (borrowing methods from <a href="ba_report.html">BA report</a>).
+  <strong>定性所見</strong>:
+  予測誤差は摂動の大きさによらず ~1.3 px に揃う。これは model の
+  <em>下限性能</em>(1 サンプル単位での精度限界)が ~1 px 付近にあって、
+  val で見える 2.87 px は different (fi_A, fi_B, pivot) を平均した結果。
+  下流の BA で多点 LLN aggregate すれば <em>~1 px 以下に収束</em>する余地大
+  (<a href="ba_report.html">BA レポート</a> の手法を流用)。
 </div>
 
-<h2>Next steps</h2>
+<h2>次のステップ</h2>
 
 <ul>
   <li>
-    <strong>LLN + BA pose-recovery verification</strong> ✅ Done (v10 / v12):
-    bl 5-40 shows rot improves 10-20% but t (translation) tends to worsen
-    — BA solver-side issues (σ-weight or outlier handling) remain for next scrutiny.
-    See <code>experiments/cross_frame_v1*/lln/summary.json</code>.
+    <strong>LLN + BA pose-recovery 検証</strong> ✅ 実施済 (v10 / v12):
+    bl 5-40 で rot は 10-20% 改善するが t (translation) は悪化する傾向
+    — BA solver 側の問題 (σ-重み or outlier 処理) が残るので次回精査。
+    <code>experiments/cross_frame_v1*/lln/summary.json</code> 参照。
   </li>
   <li>
-    <strong>UVD output head</strong> ✅ Done (v12):
-    Added depth prediction head without changing UV precision. Next:
-    add 3D constraint to BA (Mahalanobis w/ diag depth σ), verify if depth info
-    can rescue t's negative improvement.
+    <strong>UVD 出力ヘッド</strong> ✅ 実施済 (v12):
+    UV 精度据え置きで深度予測ヘッド追加。次は
+    BA に 3D 拘束 (Mahalanobis w/ diag depth σ) を入れ、t の負改善が
+    depth 情報で救えるかを検証。
   </li>
   <li>
-    <strong>NuScenes / Waymo mix</strong>:
-    Additional data for short-baseline training. PandaSet 39 scenes → hundreds scale.
-    Waymo pose GT quality has ~0.2° per-segment error, so
-    start PandaSet-main + Waymo auxiliary.
+    <strong>NuScenes / Waymo 混合</strong>:
+    short-baseline 学習用に追加データ。PandaSet 39 scene → 数百 scale。
+    pose GT 品質は Waymo 0.2° 程度の per-segment 誤差があるため、
+    まずは PandaSet メインで + Waymo は補助に。
   </li>
   <li>
-    <strong>Leverage σ as dynamic filter</strong>:
-    Vis confirmed σ inflates for dynamics. Ablation: hard reject σ > θ points at BA input
-    vs soft 1/σ² weighting.
+    <strong>動体フィルタとしての σ の活用</strong>:
+    vis で σ が動体で膨らむことは確認できた。BA 入力で σ > θ の点を
+    ハード reject する実験 vs ソフトに 1/σ² 重みで流す実験の ablation。
   </li>
   <li>
-    <strong>scale_emb injection</strong>: At long baseline, inject depth ratio log(d_B/d_A) into
-    positional encoding. v12 has Δd output, so could also feed back into input
-    for a loop.
+    <strong>scale_emb 導入</strong>: long baseline で深度比 log(d_B/d_A) を
+    positional encoding に注入。v12 で Δd 出力があるので、これを input にも
+    feed back して循環させる手もある。
   </li>
 </ul>
 
-<h2>Related</h2>
+<h2>関連</h2>
 
 <div class="callout">
-  <strong>Code</strong>:
+  <strong>コード</strong>:
   <code>models/cross_frame.py</code> —
   <code>CalibNetCrossFrame</code>, <code>CrossFrameBlock</code>, <code>PoseMLP</code>,
   <code>SelfAttnFusionBlock</code>
@@ -1087,19 +1047,19 @@ stage 5:  retrain on full range → done</div>
   <code>datasets/pandaset_pair.py</code> —
   <code>PandaSetCrossFrameDataset</code> (single-scene short-baseline pair)
   <br/>
-  <code>train_cross_frame.py</code> — trainer for both overfit + full
+  <code>train_cross_frame.py</code> — overfit + full 両対応トレーナ
   <br/>
-  <strong>Experiments</strong>:
+  <strong>実験</strong>:
   <code>experiments/cross_frame_v00_overfit/</code>,
   <code>experiments/cross_frame_v01_overfit_64/</code>
 </div>
 
 <div class="callout">
-  <strong>Related reports</strong>:
-  <a href="ba_report.html">03. Multi-frame BA sweep</a> — sensitivity analysis of BA,
-  the downstream of this net.
-  <a href="deform_report.html">04. Deformable cross-attn</a> — efficiency method
-  portable to intra-frame.
+  <strong>関連レポート</strong>:
+  <a href="ba_report.html">03. Multi-frame BA sweep</a> — 本ネットの
+  downstream になる BA の感度解析。
+  <a href="deform_report.html">04. Deformable cross-attn</a> — intra-frame
+  に転用できる効率化手法。
 </div>
 
 </main>

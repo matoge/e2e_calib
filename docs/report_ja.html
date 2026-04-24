@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
 <link rel="stylesheet" href="assets/report.css">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>e2e_calib — LiDAR/Camera Calibration Experiment Summary</title>
+<title>e2e_calib — LiDAR/Camera Calibration 実験まとめ</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet">
@@ -202,11 +202,11 @@ footer {
 }
 </style>
 </head>
-<body class="lang-en">
+<body class="lang-ja">
 
 <nav class="lang-toggle" aria-label="Language">
-  <button class="lang-btn active" data-lang="en" aria-pressed="true">EN</button>
-  <button class="lang-btn" data-lang="ja" aria-pressed="false">日本語</button>
+  <button class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+  <button class="lang-btn active" data-lang="ja" aria-pressed="true">日本語</button>
 </nav>
 
 <article class="page">
@@ -217,7 +217,7 @@ footer {
   <strong style="color: var(--ink);">docs / reports</strong> &nbsp;·&nbsp;
   <a href="index.html" style="color: var(--ink-dim); text-decoration: none;">01. technical overview</a>
   &nbsp;·&nbsp;
-  <a href="report.html" style="color: var(--accent); text-decoration: none;">02. experiment summary (this page)</a>
+  <a href="report.html" style="color: var(--accent); text-decoration: none;">02. bilingual writeup (this page)</a>
   &nbsp;·&nbsp;
   <a href="ba_report.html" style="color: var(--ink-dim); text-decoration: none;">03. multi-frame BA sweep</a>
   &nbsp;·&nbsp;
@@ -228,36 +228,36 @@ footer {
 
 <div class="eyebrow">
   <span class="en-only">Experiment Report</span>
-  <span class="ja-only">Experiment Report</span>
+  <span class="ja-only">実験レポート</span>
   <span class="dot">●</span><span>2026-04-23</span>
   <span class="dot">●</span><span>e2e_calib</span>
 </div>
 
 <h1 class="title en-only">LiDAR–Camera Calibration<br>experiment summary.</h1>
-<h1 class="title ja-only">LiDAR–Camera Calibration<br>experiment summary.</h1>
+<h1 class="title ja-only">LiDAR–カメラ<br>キャリブレーション 実験まとめ。</h1>
 
 <p class="subtitle en-only">Cross-attention network predicts per-point 2-D Gaussian (μ, Σ) from an image crop and projected LiDAR points. Feed those into pyceres bundle adjustment — one 6-DoF extrinsic falls out per frame. This document summarises five experiments that took the model from synthetic POC to a real-data BA loop.</p>
-<p class="subtitle ja-only">Cross-attention network predicts per-point 2-D Gaussian (μ, Σ) from an image crop and projected LiDAR points. Feed those into pyceres bundle adjustment — one 6-DoF extrinsic falls out per frame. This document summarises five experiments that took the model from synthetic POC to a real-data BA loop.</p>
+<p class="subtitle ja-only">Cross-Attention ネットが画像クロップと投影 LiDAR 点から、点ごとの 2D ガウス分布 (μ, Σ) を返す。それを pyceres のバンドル調整に流すと、フレームごとに 6-DoF 外部パラメータが出る。本ドキュメントは、合成データの POC から実データの BA ループまで、5 つの実験をまとめる。</p>
 
 <div class="meta">
   <span class="en-only"><b>detector</b>&nbsp; CalibNetDepth · 1.62 M</span>
-  <span class="ja-only"><b>detector</b>&nbsp; CalibNetDepth · 1.62 M</span>
+  <span class="ja-only"><b>検出器</b>&nbsp; CalibNetDepth · 1.62 M</span>
   <span class="en-only"><b>solver</b>&nbsp; pyceres 6-DoF</span>
-  <span class="ja-only"><b>solver</b>&nbsp; pyceres 6-DoF</span>
+  <span class="ja-only"><b>ソルバ</b>&nbsp; pyceres 6-DoF</span>
   <span class="en-only"><b>datasets</b>&nbsp; synthetic · PandaSet · NuScenes · Waymo</span>
-  <span class="ja-only"><b>datasets</b>&nbsp; synthetic · PandaSet · NuScenes · Waymo</span>
+  <span class="ja-only"><b>データ</b>&nbsp; 合成 · PandaSet · NuScenes · Waymo</span>
 </div>
 
 
 <h2>
   <span class="num en-only">§ 00 &nbsp; Model</span>
-  <span class="num ja-only">§ 00 &nbsp; Model</span>
+  <span class="num ja-only">§ 00 &nbsp; モデル</span>
   <span class="en-only">CalibNetDepth — one network, all experiments.</span>
-  <span class="ja-only">CalibNetDepth — one network, all experiments.</span>
+  <span class="ja-only">CalibNetDepth — 全実験で共通のネット。</span>
 </h2>
 
 <p class="en-only">Input: an image crop <code>(B, C, H, W)</code> — 64 × 64 RGB by default — plus LiDAR points projected into it, carried as <code>(u, v, depth)</code>. Output: for each point a 2-D Gaussian <code>(Δu, Δv, log σ_u, log σ_v, ρ)</code>, i.e. a displacement mean and full covariance.</p>
-<p class="ja-only">Input: an image crop <code>(B, C, H, W)</code> — 64 × 64 RGB by default — plus LiDAR points projected into it, carried as <code>(u, v, depth)</code>. Output: for each point a 2-D Gaussian <code>(Δu, Δv, log σ_u, log σ_v, ρ)</code>, i.e. a displacement mean and full covariance.</p>
+<p class="ja-only">入力は画像クロップ <code>(B, C, H, W)</code>（既定 64 × 64 RGB）と、そこに投影された LiDAR 点を <code>(u, v, depth)</code> で持ったもの。出力は点ごとの 2D ガウス <code>(Δu, Δv, log σ_u, log σ_v, ρ)</code>、すなわち平均シフトと完全な共分散。</p>
 
 <div class="arch">Image (B, 3, 64, 64)
   └─ CNN backbone ──── coarse_feat (D, 16, 16)
@@ -275,34 +275,34 @@ Points (B, N, 3) [u, v, depth]
    (Δu, Δv, log σ_u, log σ_v, ρ)  per point</div>
 
 <p class="en-only">Loss is the Gaussian NLL of the observed residual against the predicted distribution. Because NLL is a proper scoring rule, training simultaneously pulls μ toward the true residual and σ toward the true spread — under-confident and over-confident predictions are both penalised.</p>
-<p class="ja-only">Loss is the Gaussian NLL of the observed residual against the predicted distribution. Because NLL is a proper scoring rule, training simultaneously pulls μ toward the true residual and σ toward the true spread — under-confident and over-confident predictions are both penalised.</p>
+<p class="ja-only">損失は観測残差に対する予測分布の Gaussian NLL。NLL は proper scoring rule なので、学習中 μ は真の残差へ、σ は真の分布幅へ同時に引き寄せられる — 過信と過小評価の両方が罰される。</p>
 
 <p class="en-only">Variants used below:</p>
-<p class="ja-only">Variants used below:</p>
+<p class="ja-only">本レポートで登場するバリアント：</p>
 <ul>
   <li class="en-only"><code>model_depth.py</code> · <code>CalibNetDepth</code> — 3-ch input <code>(u, v, d)</code>, used in §1.</li>
-  <li class="ja-only"><code>model_depth.py</code> · <code>CalibNetDepth</code> — 3-ch input <code>(u, v, d)</code>, used in §1.</li>
+  <li class="ja-only"><code>model_depth.py</code> · <code>CalibNetDepth</code> — 3 ch 入力 <code>(u, v, d)</code>、§1 で使用。</li>
   <li class="en-only"><code>model_depth.py</code> with ConvNeXt backbone + frustum pooling — used in §2 / §3 / §4.</li>
-  <li class="ja-only"><code>model_depth.py</code> with ConvNeXt backbone + frustum pooling — used in §2 / §3 / §4.</li>
+  <li class="ja-only"><code>model_depth.py</code> に ConvNeXt バックボーン + frustum pooling — §2 / §3 / §4 で使用。</li>
   <li class="en-only"><code>model_deform.py</code> — same CNN, Cross-Attn replaced with MS-Deformable-Attn (§5).</li>
-  <li class="ja-only"><code>model_deform.py</code> — same CNN, Cross-Attn replaced with MS-Deformable-Attn (§5).</li>
+  <li class="ja-only"><code>model_deform.py</code> — CNN は同じ、Cross-Attn を MS-Deformable-Attn に置換（§5）。</li>
 </ul>
 
 
 <h2>
   <span class="num en-only">§ 01 &nbsp; Synthetic POC</span>
-  <span class="num ja-only">§ 01 &nbsp; Synthetic POC</span>
+  <span class="num ja-only">§ 01 &nbsp; 合成データ POC</span>
   <span class="en-only">GridDepthDataset — shape primitives at varying depth.</span>
-  <span class="ja-only">GridDepthDataset — shape primitives at varying depth.</span>
+  <span class="ja-only">GridDepthDataset — 深度の異なる幾何プリミティブ。</span>
 </h2>
 
 <p class="en-only"><code>GridDepthDataset</code> renders a synthetic RGB image with rectangles, circles, and poles at randomised depths, plus a background layer at the largest depth. A 6-DoF-style shift is applied <em>per depth group</em> so each group ends up with its own offset; the model has to disentangle them from a single image.</p>
-<p class="ja-only"><code>GridDepthDataset</code> renders a synthetic RGB image with rectangles, circles, and poles at randomised depths, plus a background layer at the largest depth. A 6-DoF-style shift is applied <em>per depth group</em> so each group ends up with its own offset; the model has to disentangle them from a single image.</p>
+<p class="ja-only"><code>GridDepthDataset</code> は矩形・円・ポールをランダムな深度で配置した合成 RGB 画像を返し、一番奥に背景レイヤを置く。<em>深度グループごと</em>に 6-DoF 風のシフトを与え、モデルは 1 枚の画像からそれを分離しないといけない。</p>
 
 <figure class="hero">
   <img src="assets/result_depth.png" alt="CalibNetDepth v9 on GridDepthDataset">
   <div class="hero-cap en-only"><b>Fig 1 · synthetic</b> CalibNetDepth v9 (<code>v9_3layer_rgb_randdepth</code>) on GridDepthDataset. Object points (close) get tight σ; background points (far) get larger σ — depth-conditioned uncertainty falls out for free.</div>
-  <div class="hero-cap ja-only"><b>Fig 1 · synthetic</b> CalibNetDepth v9 (<code>v9_3layer_rgb_randdepth</code>) on GridDepthDataset. Object points (close) get tight σ; background points (far) get larger σ — depth-conditioned uncertainty falls out for free.</div>
+  <div class="hero-cap ja-only"><b>図 1 · 合成</b>　CalibNetDepth v9 (<code>v9_3layer_rgb_randdepth</code>) on GridDepthDataset。近距離（物体）は σ が小さく、遠距離（背景）は σ が大きい — 深度依存の不確実性が自動で出る。</div>
 </figure>
 
 <div class="metrics">
@@ -316,40 +316,40 @@ Points (B, N, 3) [u, v, depth]
   </div>
   <div class="metric">
     <div class="label en-only">obj σ (close)</div>
-    <div class="label ja-only">obj σ (close)</div>
+    <div class="label ja-only">obj σ（近）</div>
     <div class="value">~0.74<small>px</small></div>
   </div>
   <div class="metric">
     <div class="label en-only">bg σ (far)</div>
-    <div class="label ja-only">bg σ (far)</div>
+    <div class="label ja-only">bg σ（遠）</div>
     <div class="value">~1.8<small>px</small></div>
   </div>
 </div>
 
 <p class="en-only">Best config was <strong>2-layer cascade, cross-attention first, self-attention second</strong>. Trying <code>self_first=True</code> (self-attn before cross-attn) or a full TransformerDecoder (<code>v10_3layer_tfdecoder</code>) degraded obj NLL from 1.45 to 4.6 — the natural ordering is <em>each point first queries the image at its own (u, v, d)</em>, and point-to-point self-attention only makes sense afterwards.</p>
-<p class="ja-only">Best config was <strong>2-layer cascade, cross-attention first, self-attention second</strong>. Trying <code>self_first=True</code> (self-attn before cross-attn) or a full TransformerDecoder (<code>v10_3layer_tfdecoder</code>) degraded obj NLL from 1.45 to 4.6 — the natural ordering is <em>each point first queries the image at its own (u, v, d)</em>, and point-to-point self-attention only makes sense afterwards.</p>
+<p class="ja-only">最良構成は <strong>2 層 cascade、cross-attn 先行 + self-attn 後段</strong>。<code>self_first=True</code>（self-attn を先にする）や TransformerDecoder 構造（<code>v10_3layer_tfdecoder</code>）は obj NLL を 1.45 → 4.6 まで悪化させた — 自然な並びは<em>「各点がまず自分の (u, v, d) で画像に問合せ、点どうしの通信はその後」</em>。</p>
 
 
 <h2>
   <span class="num en-only">§ 02 &nbsp; PandaSet</span>
   <span class="num ja-only">§ 02 &nbsp; PandaSet</span>
   <span class="en-only">First real-data run — object-split val.</span>
-  <span class="ja-only">First real-data run — object-split val.</span>
+  <span class="ja-only">実データ初段 — 物体単位の val split。</span>
 </h2>
 
 <p class="en-only">Jumping from synthetic to PandaSet: 103 scenes, 33,458 object crops (car / truck / bus / pedestrian / bicycle), split object-level to keep the val set fully unseen. Perturbation <code>σ_ypr = 0.5°, σ_t = 0.20 m</code> — the distribution the BA solver will later see.</p>
-<p class="ja-only">Jumping from synthetic to PandaSet: 103 scenes, 33,458 object crops (car / truck / bus / pedestrian / bicycle), split object-level to keep the val set fully unseen. Perturbation <code>σ_ypr = 0.5°, σ_t = 0.20 m</code> — the distribution the BA solver will later see.</p>
+<p class="ja-only">合成から実データへ。PandaSet 103 シーン・33,458 物体クロップ（car / truck / bus / pedestrian / bicycle）を物体単位で split し、val を完全未知に保つ。ずれ分布は <code>σ_ypr = 0.5°, σ_t = 0.20 m</code> — 後段の BA が見ることになる分布と同じ。</p>
 
 <figure class="hero">
   <img src="assets/vis_ps_full.png" alt="PandaSet full-image projection">
   <div class="hero-cap en-only"><b>Fig 2 · PandaSet</b> LiDAR projected onto a PandaSet front-camera frame, colour = depth. Object boxes mark the crops fed to the network.</div>
-  <div class="hero-cap ja-only"><b>Fig 2 · PandaSet</b> LiDAR projected onto a PandaSet front-camera frame, colour = depth. Object boxes mark the crops fed to the network.</div>
+  <div class="hero-cap ja-only"><b>図 2 · PandaSet</b>　PandaSet 前カメラへの LiDAR 投影、色＝深度。枠がネットワークに渡す物体クロップ。</div>
 </figure>
 
 <div class="metrics">
   <div class="metric accent">
     <div class="label en-only">obj err (mean)</div>
-    <div class="label ja-only">obj err (mean)</div>
+    <div class="label ja-only">物体誤差 (平均)</div>
     <div class="value">0.91<small>px</small></div>
   </div>
   <div class="metric accent">
@@ -359,179 +359,179 @@ Points (B, N, 3) [u, v, depth]
   </div>
   <div class="metric">
     <div class="label en-only">scenes / crops</div>
-    <div class="label ja-only">scenes / crops</div>
+    <div class="label ja-only">シーン / crop</div>
     <div class="value">103<small> / 33 k</small></div>
   </div>
   <div class="metric">
     <div class="label en-only">training</div>
-    <div class="label ja-only">training</div>
+    <div class="label ja-only">学習時間</div>
     <div class="value">87<small>min</small></div>
   </div>
 </div>
 
 <p class="en-only">Mean per-object error <strong>0.91 px</strong> — well under the native 4 px LiDAR beam spacing on PandaSet. Full writeup (architecture SVG, per-class breakdown, object-split protocol, 176 val visualisations): <a href="../experiments/ps_v9_objsplit/report.html">ps_v9_objsplit report</a>.</p>
-<p class="ja-only">Mean per-object error <strong>0.91 px</strong> — well under the native 4 px LiDAR beam spacing on PandaSet. Full writeup (architecture SVG, per-class breakdown, object-split protocol, 176 val visualisations): <a href="../experiments/ps_v9_objsplit/report.html">ps_v9_objsplit report</a>.</p>
+<p class="ja-only">物体平均誤差 <strong>0.91 px</strong> — PandaSet の LiDAR ビーム間隔 4 px を大きく下回る。構造 SVG・クラス別内訳・物体単位 split プロトコル・val サンプル 176 枚は：<a href="../experiments/ps_v9_objsplit/report.html">ps_v9_objsplit report</a>。</p>
 
 
 <h2>
   <span class="num en-only">§ 03 &nbsp; NuScenes + Waymo (joint)</span>
-  <span class="num ja-only">§ 03 &nbsp; NuScenes + Waymo (joint)</span>
+  <span class="num ja-only">§ 03 &nbsp; NuScenes + Waymo（合同学習）</span>
   <span class="en-only">One model, three datasets. Plus multicrop augmentation.</span>
-  <span class="ja-only">One model, three datasets. Plus multicrop augmentation.</span>
+  <span class="ja-only">1 モデルで 3 データセット。さらに multicrop augmentation。</span>
 </h2>
 
 <p class="en-only">Same architecture, but trained on the union of NuScenes + PandaSet + Waymo (60 k train / 1.5 k val, object-level shuffle). Baseline run <code>all_v2</code>. The follow-up <code>all_v3_mc</code> is identical except for <strong>crop augmentation</strong>: the 192 × 192 cache (bbox × 3.0) is sampled at a random sub-window side <code>s ∈ [64, 192]</code> per iteration and resized to 64 × 64.</p>
-<p class="ja-only">Same architecture, but trained on the union of NuScenes + PandaSet + Waymo (60 k train / 1.5 k val, object-level shuffle). Baseline run <code>all_v2</code>. The follow-up <code>all_v3_mc</code> is identical except for <strong>crop augmentation</strong>: the 192 × 192 cache (bbox × 3.0) is sampled at a random sub-window side <code>s ∈ [64, 192]</code> per iteration and resized to 64 × 64.</p>
+<p class="ja-only">構造は同じで、NuScenes + PandaSet + Waymo の結合データ（train 60 k / val 1.5 k、物体単位シャッフル）で学習。ベースライン <code>all_v2</code>。後続 <code>all_v3_mc</code> は <strong>crop augmentation のみ</strong> 差し替え：192 × 192 キャッシュ（bbox × 3.0）から <code>s ∈ [64, 192]</code> のランダム sub-window を毎イテレーション引いて 64 × 64 にリサイズ。</p>
 
 <figure class="hero">
   <img src="assets/hero_multicrop_nll.png" alt="val NLL curve all_v2 vs all_v3_mc">
   <div class="hero-cap en-only"><b>Fig 3 · NLL curves</b> Left: val NLL over epochs. <code>all_v2</code> (green) best at ep 95 then collapses; <code>all_v3_mc</code> (red) improves to ep 198 and stays stable. Right: best-epoch breakdown — total / obj / bg all drop ~21 %.</div>
-  <div class="hero-cap ja-only"><b>Fig 3 · NLL curves</b> Left: val NLL over epochs. <code>all_v2</code> (green) best at ep 95 then collapses; <code>all_v3_mc</code> (red) improves to ep 198 and stays stable. Right: best-epoch breakdown — total / obj / bg all drop ~21 %.</div>
+  <div class="hero-cap ja-only"><b>図 3 · NLL 曲線</b>　左：epoch 毎の val NLL。<code>all_v2</code>（緑）は ep 95 で頭打ち → 崩壊。<code>all_v3_mc</code>（赤）は ep 198 まで改善し安定。右：best epoch 内訳 — total / obj / bg すべて約 21% 低下。</div>
 </figure>
 
 <table>
 <thead><tr><th></th><th>all_v2</th><th>all_v3_mc</th><th>Δ</th></tr></thead>
 <tbody>
-<tr><td class="en-only">val NLL (total)</td><td class="ja-only">val NLL (total)</td>
+<tr><td class="en-only">val NLL (total)</td><td class="ja-only">val NLL（合計）</td>
     <td>2.647</td><td class="hl">2.074</td><td>−21.7 %</td></tr>
-<tr><td class="en-only">val NLL (obj)</td><td class="ja-only">val NLL (obj)</td>
+<tr><td class="en-only">val NLL (obj)</td><td class="ja-only">val NLL（obj）</td>
     <td>1.363</td><td class="hl">1.064</td><td>−21.9 %</td></tr>
-<tr><td class="en-only">val NLL (bg)</td><td class="ja-only">val NLL (bg)</td>
+<tr><td class="en-only">val NLL (bg)</td><td class="ja-only">val NLL（bg）</td>
     <td>2.707</td><td class="hl">2.127</td><td>−21.4 %</td></tr>
-<tr><td class="en-only">val mean px err</td><td class="ja-only">val mean px err</td>
+<tr><td class="en-only">val mean px err</td><td class="ja-only">val 平均 px 誤差</td>
     <td>4.03</td><td>4.39</td><td>+9.0 %</td></tr>
 <tr><td class="en-only">best epoch</td><td class="ja-only">best epoch</td>
     <td>95 / 200</td><td class="hl">198 / 200</td><td>—</td></tr>
-<tr><td class="en-only">train–val NLL gap @ best</td><td class="ja-only">train–val NLL gap @ best</td>
+<tr><td class="en-only">train–val NLL gap @ best</td><td class="ja-only">train–val NLL ギャップ @ best</td>
     <td>0.594</td><td class="hl">0.129</td><td>—</td></tr>
 </tbody>
 </table>
 
 <p class="en-only">Pixel error rises by 0.36 px while NLL drops 21.7 %. The only way those two numbers move together under a proper scoring rule is if <strong>σ became honestly calibrated</strong> — the baseline was emitting σ's too small for its μ. That calibration is what §04 feeds into the BA solver. Full report (all tables, per-dataset breakdown, multi-frame BA): <a href="../experiments/all_v3_mc/report.html">all_v3_mc report</a>.</p>
-<p class="ja-only">Pixel error rises by 0.36 px while NLL drops 21.7 %. The only way those two numbers move together under a proper scoring rule is if <strong>σ became honestly calibrated</strong> — the baseline was emitting σ's too small for its μ. That calibration is what §04 feeds into the BA solver. Full report (all tables, per-dataset breakdown, multi-frame BA): <a href="../experiments/all_v3_mc/report.html">all_v3_mc report</a>.</p>
+<p class="ja-only">ピクセル誤差は 0.36 px 増えるが NLL は 21.7 % 低下する。proper scoring rule の下で両者が同時にこう動く理由は一つしかない — <strong>σ の校正が正直になった</strong>（ベースラインは μ に対して σ が小さすぎた）。この校正がそのまま §04 の BA ソルバに効く。全表・データセット別内訳・マルチフレーム BA は：<a href="../experiments/all_v3_mc/report.html">all_v3_mc report</a>。</p>
 
 
 <h2>
   <span class="num en-only">§ 04 &nbsp; Single-frame bundle adjustment</span>
-  <span class="num ja-only">§ 04 &nbsp; Single-frame bundle adjustment</span>
+  <span class="num ja-only">§ 04 &nbsp; 単フレーム バンドル調整</span>
   <span class="en-only">pyceres + per-point Σ — one frame, one 6-DoF fix.</span>
-  <span class="ja-only">pyceres + per-point Σ — one frame, one 6-DoF fix.</span>
+  <span class="ja-only">pyceres + 点ごとの Σ — 1 フレームから 6-DoF を 1 本。</span>
 </h2>
 
 <p class="en-only">The detector outputs per-point Gaussians <code>(μ, Σ)</code>, which are weighted 2-D observations — exactly what a bundle adjuster consumes. <code>ba_singleframe.py</code>:</p>
-<p class="ja-only">The detector outputs per-point Gaussians <code>(μ, Σ)</code>, which are weighted 2-D observations — exactly what a bundle adjuster consumes. <code>ba_singleframe.py</code>:</p>
+<p class="ja-only">検出器の出力 <code>(μ, Σ)</code> は重み付き 2D 観測 — バンドル調整が扱う通貨そのもの。<code>ba_singleframe.py</code>：</p>
 
 <ol>
   <li class="en-only">Group all object instances in a frame under one shared 6-DoF block.</li>
-  <li class="ja-only">Group all object instances in a frame under one shared 6-DoF block.</li>
+  <li class="ja-only">フレーム内の全物体インスタンスを、共有 6-DoF ブロック 1 つでまとめる。</li>
   <li class="en-only">Sample a training-distribution drift <code>(σ_ypr = 0.5°, σ_t = 0.20 m)</code>.</li>
-  <li class="ja-only">Sample a training-distribution drift <code>(σ_ypr = 0.5°, σ_t = 0.20 m)</code>.</li>
+  <li class="ja-only">学習分布の 6-DoF ずれ <code>(σ_ypr = 0.5°, σ_t = 0.20 m)</code> をサンプル。</li>
   <li class="en-only">Run detector on every crop → collect <code>(μ, Σ)</code> for ~8 k points over ~40 objects.</li>
-  <li class="ja-only">Run detector on every crop → collect <code>(μ, Σ)</code> for ~8 k points over ~40 objects.</li>
+  <li class="ja-only">全クロップに検出器をかけ、約 40 物体・約 8 k 点の <code>(μ, Σ)</code> を集める。</li>
   <li class="en-only">Build <code>pyceres.CostFunction</code> with 2N residuals, one 6-param block, weighted by <code>Σ⁻¹</code>.</li>
-  <li class="ja-only">Build <code>pyceres.CostFunction</code> with 2N residuals, one 6-param block, weighted by <code>Σ⁻¹</code>.</li>
+  <li class="ja-only"><code>pyceres.CostFunction</code> を 2N 残差・6 パラメータ 1 ブロック・<code>Σ⁻¹</code> 重みで構築。</li>
   <li class="en-only">Solve. Compose delta into current extrinsic. Re-run detector. Iterate 3 ×.</li>
-  <li class="ja-only">Solve. Compose delta into current extrinsic. Re-run detector. Iterate 3 ×.</li>
+  <li class="ja-only">解く → Δ を現外部に合成 → 検出器を再実行。3 反復。</li>
 </ol>
 
 <figure class="hero">
   <img src="assets/ba_ab.png" alt="BA before/after on one PandaSet val frame">
   <div class="hero-cap en-only"><b>Fig 4 · single-frame BA</b> One PandaSet val frame (scene 030 fi=6, 41 object crops, 37 used). Top / left panel: before, with training-distribution drift (reproj 34.40 px). Bottom / right: after 3 BA iterations (2.90 px, rot 0.17°, trans 4.26 cm).</div>
-  <div class="hero-cap ja-only"><b>Fig 4 · single-frame BA</b> One PandaSet val frame (scene 030 fi=6, 41 object crops, 37 used). Top / left panel: before, with training-distribution drift (reproj 34.40 px). Bottom / right: after 3 BA iterations (2.90 px, rot 0.17°, trans 4.26 cm).</div>
+  <div class="hero-cap ja-only"><b>図 4 · 単フレーム BA</b>　PandaSet val 1 フレーム（scene 030 fi=6、物体クロップ 41、うち BA 使用 37）。上段 / 左：学習分布のずれを入れた状態（再投影 34.40 px）。下段 / 右：3 反復後（2.90 px、回転 0.17°、並進 4.26 cm）。</div>
 </figure>
 
 <div class="metrics">
   <div class="metric accent">
     <div class="label en-only">reproj before → after</div>
-    <div class="label ja-only">reproj before → after</div>
+    <div class="label ja-only">再投影 before → after</div>
     <div class="value">34.4 → 2.9<small>px</small></div>
   </div>
   <div class="metric accent">
     <div class="label en-only">rot err</div>
-    <div class="label ja-only">rot err</div>
+    <div class="label ja-only">回転誤差</div>
     <div class="value">0.17<small>°</small></div>
   </div>
   <div class="metric accent">
     <div class="label en-only">trans err</div>
-    <div class="label ja-only">trans err</div>
+    <div class="label ja-only">並進誤差</div>
     <div class="value">4.26<small>cm</small></div>
   </div>
   <div class="metric">
     <div class="label en-only">iterations</div>
-    <div class="label ja-only">iterations</div>
+    <div class="label ja-only">反復回数</div>
     <div class="value">3</div>
   </div>
 </div>
 
 <p class="en-only">10-frame batch with the <code>all_v3_mc</code> checkpoint from §03: median reprojection <strong>2.04 px</strong>, median rotation <strong>0.11°</strong>, <strong>10 / 10</strong> frames under 10 px (up from 7 / 10 with the baseline <code>all_v2</code> ckpt). Multi-frame joint BA on 10 frames sharing one extrinsic collapses median reprojection further to 0.75 px. Full writeup: <a href="../experiments/ba_singleframe/report.html">ba_singleframe report</a>, 10-frame batch and multi-frame: <a href="../experiments/all_v3_mc/report.html">all_v3_mc §07 / §09</a>.</p>
-<p class="ja-only">10-frame batch with the <code>all_v3_mc</code> checkpoint from §03: median reprojection <strong>2.04 px</strong>, median rotation <strong>0.11°</strong>, <strong>10 / 10</strong> frames under 10 px (up from 7 / 10 with the baseline <code>all_v2</code> ckpt). Multi-frame joint BA on 10 frames sharing one extrinsic collapses median reprojection further to 0.75 px. Full writeup: <a href="../experiments/ba_singleframe/report.html">ba_singleframe report</a>, 10-frame batch and multi-frame: <a href="../experiments/all_v3_mc/report.html">all_v3_mc §07 / §09</a>.</p>
+<p class="ja-only">§03 の <code>all_v3_mc</code> チェックポイントでの 10 フレーム batch：中央値 再投影 <strong>2.04 px</strong>、回転 <strong>0.11°</strong>、<strong>10 / 10</strong> フレームが 10 px 未満（ベースライン <code>all_v2</code> では 7 / 10）。10 フレームで外部パラメータを共有するマルチフレーム BA は中央値再投影を 0.75 px までさらに圧縮する。詳細：<a href="../experiments/ba_singleframe/report.html">ba_singleframe report</a>、10 フレーム batch とマルチフレームは <a href="../experiments/all_v3_mc/report.html">all_v3_mc §07 / §09</a>。</p>
 
 
 <h2>
   <span class="num en-only">§ 05 &nbsp; MS-Deformable-Attn, bf16</span>
-  <span class="num ja-only">§ 05 &nbsp; MS-Deformable-Attn, bf16</span>
+  <span class="num ja-only">§ 05 &nbsp; MS-Deformable-Attn の bf16 化</span>
   <span class="en-only">Cross-Attn → deformable sampling. CUDA kernel extended.</span>
-  <span class="ja-only">Cross-Attn → deformable sampling. CUDA kernel extended.</span>
+  <span class="ja-only">Cross-Attn を deformable sampling に置換。CUDA カーネルを拡張。</span>
 </h2>
 
 <p class="en-only"><code>model_deform.py</code> replaces the dense Cross-Attn with DINO's <strong>Multi-Scale Deformable Attention</strong>: each query samples a small set of learned image locations instead of attending to the full feature map. Two variants:</p>
-<p class="ja-only"><code>model_deform.py</code> replaces the dense Cross-Attn with DINO's <strong>Multi-Scale Deformable Attention</strong>: each query samples a small set of learned image locations instead of attending to the full feature map. Two variants:</p>
+<p class="ja-only"><code>model_deform.py</code> は密な Cross-Attn を DINO の <strong>Multi-Scale Deformable Attention</strong> に置換。各クエリが全特徴マップに attend せず、学習済みのサンプル点に直接アクセスする。バリアント 2 つ：</p>
 
 <ul>
   <li class="en-only"><strong>Single-Level (SL)</strong> — sample from <code>fine_feat</code> only.</li>
-  <li class="ja-only"><strong>Single-Level (SL)</strong> — sample from <code>fine_feat</code> only.</li>
+  <li class="ja-only"><strong>Single-Level (SL)</strong> — <code>fine_feat</code> のみからサンプル。</li>
   <li class="en-only"><strong>Multi-Level (ML)</strong> — sample from <code>coarse_feat</code> + <code>fine_feat</code> with level embedding.</li>
-  <li class="ja-only"><strong>Multi-Level (ML)</strong> — sample from <code>coarse_feat</code> + <code>fine_feat</code> with level embedding.</li>
+  <li class="ja-only"><strong>Multi-Level (ML)</strong> — <code>coarse_feat</code> + <code>fine_feat</code> から level embedding 付きでサンプル。</li>
 </ul>
 
 <p class="en-only">DINO's upstream CUDA kernel was fp32-only. To run it under bf16 autocast we patched <code>ops/src/cuda/ms_deform_attn_cuda.cu</code> and <code>ms_deform_im2col_cuda.cuh</code>:</p>
-<p class="ja-only">DINO's upstream CUDA kernel was fp32-only. To run it under bf16 autocast we patched <code>ops/src/cuda/ms_deform_attn_cuda.cu</code> and <code>ms_deform_im2col_cuda.cuh</code>:</p>
+<p class="ja-only">DINO の本家 CUDA カーネルは fp32 固定だった。bf16 autocast 下で動かすため、<code>ops/src/cuda/ms_deform_attn_cuda.cu</code> と <code>ms_deform_im2col_cuda.cuh</code> にパッチ：</p>
 
 <pre>AT_DISPATCH_FLOATING_TYPES
   → AT_DISPATCH_FLOATING_TYPES_AND2(Half, BFloat16, ...)
 atomicAdd
-  → gpuAtomicAdd        (ATen/cuda/Atomic.cuh, bf16/fp16 support)</pre>
+  → gpuAtomicAdd        (ATen/cuda/Atomic.cuh, bf16/fp16 対応)</pre>
 
 <figure class="hero">
   <img src="assets/vdef_sweep.png" alt="val NLL — baseline / SL / ML">
   <div class="hero-cap en-only"><b>Fig 5 · deformable variants</b> val NLL curves for baseline Cross-Attn, SL, and ML on the same training data and schedule.</div>
-  <div class="hero-cap ja-only"><b>Fig 5 · deformable variants</b> val NLL curves for baseline Cross-Attn, SL, and ML on the same training data and schedule.</div>
+  <div class="hero-cap ja-only"><b>図 5 · deformable 比較</b>　同じ学習データ・スケジュールでの baseline Cross-Attn / SL / ML の val NLL。</div>
 </figure>
 
 <table>
 <thead><tr>
   <th></th>
-  <th class="en-only">fp32 (pre-patch)</th><th class="ja-only">fp32 (pre-patch)</th>
-  <th class="en-only">bf16 (post-patch)</th><th class="ja-only">bf16 (post-patch)</th>
+  <th class="en-only">fp32 (pre-patch)</th><th class="ja-only">fp32（パッチ前）</th>
+  <th class="en-only">bf16 (post-patch)</th><th class="ja-only">bf16（パッチ後）</th>
   <th>Δ</th>
 </tr></thead>
 <tbody>
-<tr><td class="en-only">Single-Level, fwd (ms)</td><td class="ja-only">Single-Level, fwd (ms)</td>
+<tr><td class="en-only">Single-Level, fwd (ms)</td><td class="ja-only">Single-Level, 順伝播 (ms)</td>
     <td>27.7</td><td class="hl">19.3</td><td>−30 %</td></tr>
-<tr><td class="en-only">Multi-Level, fwd (ms)</td><td class="ja-only">Multi-Level, fwd (ms)</td>
+<tr><td class="en-only">Multi-Level, fwd (ms)</td><td class="ja-only">Multi-Level, 順伝播 (ms)</td>
     <td>35.1</td><td class="hl">22.0</td><td>−37 %</td></tr>
-<tr><td class="en-only">numerical parity (max err)</td><td class="ja-only">numerical parity (max err)</td>
-    <td colspan="2" style="text-align:left">&nbsp;&nbsp; 0.039  <span style="color:var(--ink-dim)">— within expected bf16 precision</span></td>
+<tr><td class="en-only">numerical parity (max err)</td><td class="ja-only">数値パリティ (max err)</td>
+    <td colspan="2" style="text-align:left">&nbsp;&nbsp; 0.039  <span style="color:var(--ink-dim)">— bf16 本来の精度の範囲内</span></td>
     <td>—</td></tr>
 </tbody>
 </table>
 
 <p class="en-only">Hardware: RTX 5090 (SM 12.0), PyTorch 2.10, CUDA 12.8. bf16 SL now matches the Flash-Attn Cross-Attn baseline speed (19.5 ms). Committed as <code>85b6ccc</code>.</p>
-<p class="ja-only">Hardware: RTX 5090 (SM 12.0), PyTorch 2.10, CUDA 12.8. bf16 SL now matches the Flash-Attn Cross-Attn baseline speed (19.5 ms). Committed as <code>85b6ccc</code>.</p>
+<p class="ja-only">環境：RTX 5090（SM 12.0）、PyTorch 2.10、CUDA 12.8。bf16 SL は Flash-Attn Cross-Attn ベースライン（19.5 ms）と同等速度。commit <code>85b6ccc</code>。</p>
 
 
 <h2>
   <span class="num en-only">§ 06 &nbsp; Files</span>
-  <span class="num ja-only">§ 06 &nbsp; Files</span>
+  <span class="num ja-only">§ 06 &nbsp; ファイル</span>
   <span class="en-only">Where each experiment's artefacts live.</span>
-  <span class="ja-only">Where each experiment's artefacts live.</span>
+  <span class="ja-only">実験ごとの成果物の場所。</span>
 </h2>
 
 <table>
 <thead><tr>
   <th>§</th>
-  <th class="en-only">experiment / script</th><th class="ja-only">experiment / script</th>
-  <th class="en-only">report</th><th class="ja-only">report</th>
+  <th class="en-only">experiment / script</th><th class="ja-only">実験 / スクリプト</th>
+  <th class="en-only">report</th><th class="ja-only">レポート</th>
 </tr></thead>
 <tbody>
 <tr><td>01</td><td><code>experiments/v9_3layer_rgb_randdepth/</code></td><td>—</td></tr>
@@ -556,8 +556,8 @@ atomicAdd
 <script>
 (function () {
   var KEY = 'report-lang';
-  var saved = localStorage.getItem(KEY) || 'en';
-  if (saved !== 'en' && saved !== 'ja') saved = 'en';
+  var saved = localStorage.getItem(KEY) || 'ja';
+  if (saved !== 'en' && saved !== 'ja') saved = 'ja';
   document.body.className = 'lang-' + saved;
   document.documentElement.setAttribute('lang', saved);
   var btns = document.querySelectorAll('.lang-btn');

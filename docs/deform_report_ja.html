@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
 <link rel="stylesheet" href="assets/report.css">
 <meta charset="utf-8">
@@ -89,115 +89,121 @@ a:hover { color: var(--accent); }
   <span>CalibNetDepth</span>
 </div>
 
-<h1 class="title">Further NLL Improvement<br/>with Deformable Cross-Attention</h1>
+<h1 class="title">Deformable Cross-Attention<br/>でさらに NLL を改善する</h1>
 <p class="subtitle">
-  <strong>Story so far</strong> —
-  In the <a href="report.html">previous report</a>, we tackled LiDAR/camera extrinsic calibration
-  by building a framework around CalibNetDepth that outputs <em>Gaussian-distributed pixel offsets</em>
-  per point, and progressed to joint training on NuScenes + PandaSet + Waymo
-  (<code>all_v3_mc</code>), reducing val NLL from
-  <strong>2.647 → 2.074</strong>.
-  Beyond that point, adding more data had no effect;
-  the learning bottleneck had shifted to the <strong>"where to look"</strong> search side.
+  <strong>ここまでの話</strong> —
+  <a href="report.html">前報</a>では LiDAR/カメラの extrinsic calibration を、
+  点ごとの <em>ガウス分布付きピクセルオフセット</em>を出す
+  CalibNetDepth で解く枠組みを組み、NuScenes + PandaSet + Waymo の
+  合同学習（<code>all_v3_mc</code>）まで進めて val NLL を
+  <strong>2.647 → 2.074</strong> まで削った。
+  そこから先はデータをどう足しても動かず、
+  学習の律速は<strong>「画像のどこを見るか」</strong>の探索側に
+  移っていた。
 </p>
 <p class="subtitle">
-  <strong>This report</strong> —
-  Calibration is ultimately about <strong>offset prediction</strong>:
-  "which pixel should a 3D point move to?" By replacing the structure
-  where this emerges not as an attention score but directly as
-  <em>2D coordinates</em> — i.e., <strong>multi-scale deformable attention</strong> in place of
-  cross-attention — we obtained an additional <strong>val NLL reduction from 2.074 → 1.568 (−24.4%)</strong>.
-  Computation was reduced from dense <code>O(HW)</code> to <code>O(N=4)</code> with on-board inference in mind,
-  and we added bf16 dispatch to the DINO-derived kernel (originally fp32-only),
-  maintaining the same speed as the baseline on RTX 5080 (<strong>19.3 vs 19.5 ms/iter</strong>).
+  <strong>この報告</strong> —
+  キャリブレーションは結局「3D 点が画像のどの画素に動くべきか」の
+  <strong>オフセット予測</strong>そのもの。その形が
+  attention score ではなく <em>2D 座標</em>として直接出てくる構造
+  —— <strong>multi-scale deformable attention</strong> を cross-attention に
+  入れ替えた結果、<strong>val NLL 2.074 → 1.568（−24.4%）</strong> を
+  追加取得。計算量はオンボード推論を見越して
+  dense の <code>O(HW)</code> から <code>O(N=4)</code> に削ぎ、
+  DINO 由来の kernel (fp32 のみ) に bf16 dispatch を足して
+  RTX 5080 上でベースラインと同速 (<strong>19.3 vs 19.5 ms/iter</strong>) を維持。
 </p>
 
-<h2>Motivation: Data Side Has Hit a Ceiling</h2>
+<h2>動機: データ側は頭打ち</h2>
 <p>
-  In the previous report, the data improvements from <code>all_v2 → all_v3_mc</code> (multi-crop + NS/PS/WM joint)
-  reduced val NLL by 21.7%, but around 2.074, adding more training data no longer helped.
-  With the learning bottleneck shifted to
-  <strong>"where to look" search</strong>, we decided to modify the cross-attn blocks.
+  前報で <code>all_v2 → all_v3_mc</code>（マルチクロップ + NS/PS/WM 合同）の
+  データ改善が val NLL を 21.7% 削ったが、この 2.074 あたりで
+  どう訓練データを足しても下がらなくなった。学習の律速が
+  <strong>"どこを見るか" の探索</strong>に移っている、という読みで
+  cross-attn ブロックに手を入れる。
 </p>
 
-<h2>What is deformable attention? (For beginners)</h2>
+<h2>deformable attention ってなに？（初心者向け）</h2>
 
-<h3>What does the original cross-attention do?</h3>
+<h3>元の cross-attention は何をしている？</h3>
 <p>
-  For one query (= one point in the point cloud), the image features are arranged as H×W tokens,
-  then we compute <strong>dot products with all tokens</strong>, apply softmax to produce weights
-  <code>α ∈ [0,1]<sup>HW</sup></code>, and output a weighted sum.
-  This is standard dense cross-attn. While there's a lot of room to learn
-  "which pixels are important" via α, there are two problems:
+  クエリ 1 個（= 点群の 1 点）に対して、画像特徴を H×W 個のトークンに
+  並べて、<strong>全トークンと内積</strong>を取り、softmax で重み
+  <code>α ∈ [0,1]<sup>HW</sup></code> を作り、重み付き和で 1 本の出力を出す。
+  これが普通の dense cross-attn。画像の「どの画素が重要か」を
+  α として学習する余地が大きい反面、問題が 2 つある:
 </p>
 <ul>
   <li>
-    <strong>① Computational cost scales with H·W</strong> — explodes at high resolution.
-    This is one reason DETR (<a href="https://arxiv.org/abs/2005.12872">Carion 2020</a>)
-    couldn't use multi-scale feature maps.
+    <strong>① 計算量が H·W に比例する</strong> — 高解像度で爆発する。
+    DETR (<a href="https://arxiv.org/abs/2005.12872">Carion 2020</a>) が
+    multi-scale feature map を使えなかった原因のひとつ。
   </li>
   <li>
-    <strong>② Slow convergence</strong> — In early training, α is nearly uniform;
-    "where to look" must be carved out as a softmax distribution.
-    This is the main reason DETR required 500 epochs.
+    <strong>② 収束が遅い</strong> — 学習初期は α がほぼ一様分布に近く、
+    「どこを見るか」を softmax の分布として削り出していく必要がある。
+    DETR が 500 epoch 要した一番の原因はこれ。
   </li>
 </ul>
 
-<h3>The idea of deformable attention</h3>
+<h3>deformable attention のアイディア</h3>
 <p>
   Deformable DETR (<a href="https://arxiv.org/abs/2010.04159">Zhu 2021</a>)
-  solves both problems in one stroke:
+  はこの 2 問題を一発で解く:
 </p>
 <ol>
   <li>
-    From the query itself, directly regress <strong>"positions to look at" as offsets Δᵢ,
-    N=4 points</strong>, via an MLP.
+    クエリ自身から<strong> "見に行くべき位置" のオフセット Δᵢ を
+    N=4 個</strong>、MLP で直接回帰させる。
   </li>
   <li>
-    Add Δᵢ to the reference point (= the query's own <code>(u₀, v₀)</code>) and
-    bilinearly sample the image features at <strong>just 4 locations</strong>.
+    reference point (= クエリの自分の <code>(u₀, v₀)</code>) に Δᵢ を足した
+    <strong>たった 4 箇所</strong>で画像特徴をバイリニアサンプル。
   </li>
   <li>
-    Compute a weighted sum of the 4 sampled values using weights <code>aᵢ (Σaᵢ=1)</code>
-    from a separate MLP.
+    4 個のサンプル値を、別 MLP で出した重み <code>aᵢ (Σaᵢ=1)</code> で
+    加重和して出力。
   </li>
 </ol>
 <p>
-  In other words, <strong>"where to look" is regressed directly as 2D coordinates Δᵢ,
-  not as an attention-score probability distribution α</strong>. This achieves:
+  つまり <strong>「どこを見るか」を attention score の確率分布 α ではなく、
+  直接 2D 座標 Δᵢ として回帰</strong>する。これで:
 </p>
 <ul>
-  <li><strong>① Complexity O(HW) → O(N)</strong>. From HW=256/1024 → N=4, a 2-order-of-magnitude reduction.</li>
+  <li><strong>① 計算量 O(HW) → O(N)</strong>。HW=256 / 1024 → N=4 なので 2 桁減。</li>
   <li>
-    <strong>② Faster convergence</strong>. At initialization, Δᵢ are placed radially at 4 points
-    (see <code>_reset_parameters</code> in the
-    <a href="https://github.com/fundamentalvision/Deformable-DETR/blob/main/models/ops/modules/ms_deform_attn.py">reference implementation</a>),
-    and optimization in coordinate space proceeds from early training.
-    No epochs spent sharpening softmax.
+    <strong>② 収束が速い</strong>。初期化で Δᵢ は放射状 4 点に置かれ
+    （<a href="https://github.com/fundamentalvision/Deformable-DETR/blob/main/models/ops/modules/ms_deform_attn.py">参考実装</a>
+    の <code>_reset_parameters</code>）、学習初期から
+    「どこを見るか」の座標空間で最適化が進む。
+    softmax を尖らせる epoch が要らない。
   </li>
 </ul>
 
-<h3>Reconciling "narrow field of view" and "too broad"</h3>
+<h3>"視野が狭い" と "広すぎる" を両立</h3>
 <p>
-  "Only seeing N=4" sounds like a CNN-style local window, but Δᵢ can take any position
-  in normalized coords <code>[0,1]²</code>, so it can sample anywhere in the image.
-  In other words, <strong>global receptive field unconstrained by CNN locality, without the quadratic cost of attention</strong>
-  is the key. This follows the same idea as the ancestor Deformable Convolution
-  (<a href="https://arxiv.org/abs/1703.06211">Dai 2017</a>), which added learnable offsets to conv
-  to adapt to scale changes and deformations, but brought that idea to attention.
+  "N=4 しか見ない" と聞くと CNN のような局所窓と同じに見えるが、Δᵢ は
+  normalized coord <code>[0,1]²</code> の任意の位置を取れるので、
+  画像のどこでもサンプルできる。つまり <strong>CNN の局所性に縛られない
+  大域的な受容野を、attention の二次コストなしで持てる</strong>のが肝。
+  先祖の Deformable Convolution
+  (<a href="https://arxiv.org/abs/1703.06211">Dai 2017</a>) が conv に
+  学習可能オフセットを足してスケール変化・変形に適応させたのと同じ発想を、
+  attention に持ち込んだのが deformable attention。
 </p>
 
-<h3>Fit with this task</h3>
+<h3>本タスクとの相性</h3>
 <p>
-  Extrinsic calibration is ultimately about
-  <strong>"determining which pixel a 3D point should correspond to."</strong>
-  The correct pixel is a single location, so dense cross-attn with softmax over all pixels is wasteful.
-  On the other hand, Δᵢ in deformable attention is
-  <strong>"the offset to the pixel to look at" itself</strong>, so the inductive bias directly overlaps with the task definition.
-  This became the foundation for breaking through the 2.07 wall in the ablation studies below.
+  Extrinsic calibration は結局
+  <strong>「3D 点が画像のどの画素に対応すべきか」を当てる問題</strong>。
+  正解の画素は一箇所なので、全画素で softmax する dense cross-attn は
+  無駄が多い。一方 deformable attention の Δᵢ は
+  <strong>「見るべき画素へのオフセット」そのもの</strong>で、タスクの定義と
+  inductive bias が直接重なる。これが後半の ablation で 2.07 の壁を
+  抜ける土台になっている。
 </p>
 
-<h2>Mechanism</h2>
+<h2>機構</h2>
 
 <figure>
 <svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg"
@@ -378,65 +384,65 @@ a:hover { color: var(--accent); }
       <tspan fill="#6b6a63">O(HW)</tspan> with HW = 256 (coarse) / 1024 (fine)
     </text>
     <text x="450" y="398" text-anchor="middle" font-size="11" fill="#6b6a63">
-      and "where to look" is learned explicitly as Δᵢ, not implicitly via attention scores
+      かつ "どこを見るか" は attention score の暗黙探索ではなく Δᵢ として explicit に学習
     </text>
   </g>
 </svg>
 <figcaption>
-  Fig 1 · MS-Deformable Attention. The query directly outputs sampling positions Δᵢ and weights aᵢ,
-  bilinear-samples at offsets from ref=(u₀,v₀), and computes a weighted sum.
-  Weights are shown as circle sizes (post-softmax).
+  Fig 1 · MS-Deformable Attention. query がサンプリング位置 Δᵢ と重み aᵢ を
+  直接出力し、ref=(u₀,v₀) からのオフセット上で bilinear サンプルして加重和。
+  weights は円サイズで示した（softmax 済）。
 </figcaption>
 </figure>
 
-<h2>Implementation</h2>
+<h2>実装</h2>
 <p>
-  The official <code>MSDeformAttn</code> CUDA kernel from
   <a href="https://github.com/fundamentalvision/Deformable-DETR">Deformable-DETR</a>
-  (DINO lineage) is <strong>fp32-only</strong>; when placed inside bf16 autocast,
-  autocast inserts fp32 casts, causing buffer transfers back and forth just for that section, slowing it down.
+  (DINO 系) 公式の <code>MSDeformAttn</code> CUDA kernel は
+  <strong>fp32 専用</strong>で、bf16 autocast の中に置くと autocast が
+  fp32 キャストを差し込み、そこだけで前後のバッファ転送が走って遅くなる。
 </p>
 <p>
-  We rewrote <code>ops/src/*.cu</code> to use <code>AT_DISPATCH_FLOATING_TYPES_AND2</code>
-  (fp32 / fp16 / <strong>bf16</strong>) and replaced atomic operations with
-  <code>gpuAtomicAdd</code> variants. The RTX 5080 has a bf16
-  tensor-core path, so
-  <strong>the kernel can be invoked directly inside autocast with no fp32 cast</strong>.
-  Result: same speed as baseline (19.3 vs 19.5 ms/iter).
+  <code>ops/src/*.cu</code> を <code>AT_DISPATCH_FLOATING_TYPES_AND2</code>
+  (fp32 / fp16 / <strong>bf16</strong>) に書き換え、atomic 演算も
+  <code>gpuAtomicAdd</code> 版に差し替えた。RTX 5080 は bf16 の
+  tensor-core path を持っているので、
+  <strong>autocast 内でも fp32 キャストなしで kernel 直叩き</strong>できる。
+  結果ベースラインと同速 (19.3 vs 19.5 ms/iter)。
 </p>
 
-<h3>3 Modes</h3>
-<pre><code>deform_mode = 'none'  # old CrossAttentionBlockCov (baseline)
-deform_mode = 'sl'    # single-level: each block samples 1 level (coarse or fine)
-                      #   with N=4 points
-deform_mode = 'ml'    # multi-level: each block samples both coarse+fine
-                      #   with N=4 points each + learnable level embedding
+<h3>3 モード</h3>
+<pre><code>deform_mode = 'none'  # 旧 CrossAttentionBlockCov（ベースライン）
+deform_mode = 'sl'    # 単一レベル: 各ブロックが 1 レベル (coarse or fine)
+                      #   を N=4 点でサンプル
+deform_mode = 'ml'    # 多レベル: 各ブロックが coarse+fine 両方を
+                      #   N=4 点ずつ + 学習可能な level embedding
 </code></pre>
 
 <p>
-  The ML mode adds only <code>level_embed = nn.Parameter(zeros(2, D))</code>
-  ≈512 parameters.
+  ML モード追加パラメータは <code>level_embed = nn.Parameter(zeros(2, D))</code>
+  の ≈512 個のみ。
 </p>
 
-<h2>Ablation: Training Curves</h2>
+<h2>ablation: 学習曲線</h2>
 
 <figure>
   <img src="assets/vdef_sweep.png" alt="val NLL vs epoch — baseline vs deform SL vs deform ML (full 0–200 epoch)">
   <figcaption>
-    Fig 2 · Val NLL over epochs with identical data & schedule (NS+PS+WM 60k / 200 epoch / cosine lr).
-    Baseline (none, gray) plateaus around 2.07.
-    deform-SL (blue) / deform-ML (red) <strong>already reach baseline's final value by ep ~80</strong>
-    and continue to descend, converging at 1.57. Both convergence speed and final performance favor deform.
+    Fig 2 · 同一データ・同一スケジュール (NS+PS+WM 60k / 200 epoch / cosine lr)
+    での val NLL 推移。ベースライン (none, グレー) は 2.07 付近で頭打ち。
+    deform-SL (青) / deform-ML (赤) は <strong>ep ~80 で既に baseline 最終値に到達</strong>
+    し、そこから更に下降して 1.57 で収束。収束速度・最終性能とも deform が優位。
   </figcaption>
 </figure>
 
 <figure>
   <img src="assets/vdef_learning_curves.png" alt="val NLL decomposition: total / obj / bg across 100-200 epochs">
   <figcaption>
-    Fig 3 · Val NLL decomposed into total / obj / bg (ep 100-200 zoom).
-    Deform reduces both obj / bg simultaneously, but <strong>obj improvement is striking</strong>
-    (1.06 → 0.57/0.61) — "offset search" works naturally for foreground object localization,
-    consistent with the mechanism. Best-epoch values shown at line endpoints.
+    Fig 3 · val NLL を total / obj / bg に分解 (ep 100-200 ズーム)。
+    deform は obj / bg 両方を同時に下げるが、<strong>obj の改善幅が顕著</strong>
+    (1.06 → 0.57/0.61) — 前景物体の位置推定で「オフセット探索」が素直に効く、
+    という機構と整合。各線の終端に best-epoch 値。
   </figcaption>
 </figure>
 
@@ -446,7 +452,7 @@ deform_mode = 'ml'    # multi-level: each block samples both coarse+fine
   <th class="num">val NLL (total)</th>
   <th class="num">val NLL (obj)</th>
   <th class="num">val NLL (bg)</th>
-  <th class="num">Relative Δ (total)</th>
+  <th class="num">相対 Δ (total)</th>
   <th class="num">iter (ms)</th>
 </tr></thead>
 <tbody>
@@ -472,58 +478,59 @@ deform_mode = 'ml'    # multi-level: each block samples both coarse+fine
 </table>
 
 <div class="callout">
-  <strong>Observations</strong>:
+  <strong>所見</strong>:
   <ul>
-    <li>Both SL/ML achieve ~<strong>−0.5 NLL</strong>. Broke through the 2.07 wall that data alone couldn't budge.</li>
-    <li>The obj NLL improvement (<strong>1.064 → 0.57/0.61</strong>) is larger than bg (2.13 → 1.62)
-        — foreground object localization is where "offset search" works naturally,
-        consistent with the mechanism (Fig 1).</li>
-    <li><strong>SL and ML are nearly tied</strong>. The added complexity of ML doesn't pay off in this setting.
-        The expressiveness of N=4×2 level is roughly equivalent to the SL configuration
-        <em>applying N=4×1 level across 2 blocks</em>.</li>
-    <li>Thanks to the bf16 kernel, speed matches baseline (19.3 vs 19.5 ms/iter).</li>
+    <li>SL/ML どちらも約 <strong>−0.5 NLL</strong>。データ側では動かなかった
+        2.07 の壁を一発で抜けた。</li>
+    <li>obj NLL の改善幅 (<strong>1.064 → 0.57/0.61</strong>) が bg (2.13 → 1.62)
+        より大きい — 前景物体の位置推定こそ
+        「オフセット探索」が素直に効く場所、という機構 (Fig 1) の読みと整合。</li>
+    <li><strong>SL と ML はほぼ同点</strong>。ML の複雑化はこの設定では元が取れない。
+        N=4×2 level の表現力は <em>N=4×1 level を 2 ブロックかける</em> 構成
+        (SL) とほぼ等価。</li>
+    <li>bf16 カーネルのおかげで速度はベースラインと同等 (19.3 vs 19.5 ms/iter)。</li>
   </ul>
 </div>
 
-<h2>Pitfalls</h2>
+<h2>躓いた箇所</h2>
 
 <div class="callout warn">
-  <strong>Silent refactor bug in block order
+  <strong>Block 順の silent refactor バグ
     (<a href="https://github.com/matoge/e2e_calib/commit/85b6ccc">85b6ccc</a>)</strong>:
-  When adding deformable, a refactor broke the block execution order for <code>n_layers≥3</code>,
-  causing <code>cross_fine</code> and <code>cross_refine</code> to swap feature levels.
-  Loading the pre-refactor <code>all_v3_mc</code> ckpt via <code>load_state_dict</code>
-  silently mis-wired the blocks.
-  → Fixed in <code>4517107</code>/<code>45b9fcb</code> by restoring
-  <code>coarse → refine → fine → fine2</code> order.
-  To avoid breaking deform-trained weights, conditioned on <code>deform_mode</code> for coexistence.
+  deformable を足す refactor で <code>n_layers≥3</code> の時のブロック実行順が
+  崩れ、<code>cross_fine</code> と <code>cross_refine</code> が feature レベルを
+  取り違えるバグを混入。pre-refactor の <code>all_v3_mc</code> ckpt を
+  <code>load_state_dict</code> で読み込むと silently mis-wired になる。
+  → <code>4517107</code>/<code>45b9fcb</code> で
+  <code>coarse → refine → fine → fine2</code> 順を復元。deform 訓練済み重みも
+  壊さないよう <code>deform_mode</code> で条件化して共存。
 </div>
 
-<h2>Reproduction</h2>
+<h2>再現</h2>
 
-<pre><code># sweep (SL + ML in parallel)
+<pre><code># sweep (SL + ML を並列で)
 python scripts/training/train_deform_sweep.py
 
-# baseline (deform_mode='none')
+# ベースライン (deform_mode='none')
 python scripts/training/train_all_v2_mc.py</code></pre>
 
-<h2>Next Steps</h2>
+<h2>次のステップ</h2>
 <ul>
-  <li><strong>Re-evaluate BA downstream</strong> — The deform ckpt through
-      <code>ba_kb_multiframe</code> hasn't converged yet (model-side alignment issue).
-      Identify the cause and re-measure. This report covers training metrics only.</li>
-  <li><strong>N_points sweep</strong> — Currently fixed at N=4. Try N=2 / 8 to see
-      the tradeoff between granularity vs overfitting. Could further reduce obj NLL.</li>
-  <li><strong>Visualize sampling offsets</strong> — After training,
-      plot where Δᵢ(q, image) actually points.
-      Verify what the schematic in Fig 1 corresponds to in real measurements.</li>
-  <li><strong>Adapt to Gaussian-query residual net</strong> —
-      Connect to the <a href="report.html">patch-warp idea</a>, port to a generalized residual head
-      that outputs (Δu, Δv, Σ) from 3D primitives (surfel / gaussian).</li>
+  <li><strong>BA 下流の再評価</strong> — deform ckpt を通した
+      <code>ba_kb_multiframe</code> が未収束（モデル側の軸合わせ issue）。
+      原因特定して再計測。本レポートでは訓練指標のみを報告。</li>
+  <li><strong>N_points スイープ</strong> — N=4 固定。N=2 / 8 で粒度 vs overfitting
+      のトレードオフを見る。obj NLL がさらに下がる可能性あり。</li>
+  <li><strong>Sampling offset の可視化</strong> — 学習後に
+      Δᵢ(q, image) が実際どこを指しているかを出す。
+      Fig 1 で描いた模式図が実測で何に対応しているか確認。</li>
+  <li><strong>Gaussian-query 残差ネットへ流用</strong> —
+      <a href="report.html">patch-warp 案</a>に接続し、3D primitive
+      (surfel / gaussian) から (Δu, Δv, Σ) を出す一般化残差ヘッドに移植。</li>
 </ul>
 
 <div class="callout">
-  <strong>Related files</strong>:
+  <strong>関連ファイル</strong>:
   <code>models/model_deform.py</code> ·
   <code>models/model_depth.py</code> ·
   <code>ops/</code> (bf16 MSDeformAttn kernel) ·
