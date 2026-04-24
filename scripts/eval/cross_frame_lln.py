@@ -336,8 +336,17 @@ def run(args):
 
     ckpt_path = Path(args.ckpt_dir) / 'best_model.pt'
     print(f'loading ckpt {ckpt_path}')
-    model = CalibNetCrossFrame(img_size=args.img_size).to(DEVICE)
-    model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
+    sd = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
+    deform = 'sl' if any('deform_img' in k for k in sd.keys()) else 'none'
+    n_cross = sum(1 for k in sd.keys()
+                  if k.startswith('cross_blocks.') and k.endswith('.proj.weight'))
+    n_intra = max(1, sum(1 for k in sd.keys()
+                  if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
+    print(f'  detected: deform={deform}, n_cross={n_cross}, n_intra={n_intra}')
+    model = CalibNetCrossFrame(img_size=args.img_size,
+                                n_cross_layers=n_cross, n_intra_layers=n_intra,
+                                deform_mode=deform).to(DEVICE)
+    model.load_state_dict(sd)
     model.eval()
 
     # Build val scenes (same scene-level split as training)
