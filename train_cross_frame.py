@@ -164,6 +164,10 @@ def main():
                     help='multi-scene mode: root directory containing all scene folders')
     ap.add_argument('--train-frac', type=float, default=0.80,
                     help='scene-level train fraction (only used with --scenes-root)')
+    ap.add_argument('--cameras', default='front_camera',
+                    help='comma-separated camera names per scene, or "all" for every camera present. '
+                         'PandaSet has 6 (front/back/{front,,}_{left,right}_camera); '
+                         'Waymo-converted scenes typically only have front_camera.')
     ap.add_argument('--img-size', type=int, default=64)
     ap.add_argument('--max-points', type=int, default=256)
     ap.add_argument('--batch-size', type=int, default=32)
@@ -192,6 +196,30 @@ def main():
                     help='Waymo training data root')
     ap.add_argument('--max-train-scenes', type=int, default=0,
                     help='cap number of train scenes (0 = all)')
+    # online mining: overfit-triggered val→train migration
+    ap.add_argument('--mine-val', action='store_true',
+                    help='enable uniform-random val→train migration when val err plateaus')
+    ap.add_argument('--val-pool-size', type=int, default=2000,
+                    help='val virtual_epoch_len (enlarged pool for mining; default 2000)')
+    ap.add_argument('--migrate-k', type=int, default=100,
+                    help='samples to migrate from val→train per overfit trigger')
+    ap.add_argument('--overfit-patience', type=int, default=2,
+                    help='consecutive val checks w/o improvement before migration fires')
+    ap.add_argument('--overfit-metric', default='nll', choices=['err', 'nll'],
+                    help='which val metric triggers migration: err=val_err_px (easier to interpret), '
+                         'nll=val_nll (catches σ-calibration breakdown earlier)')
+    ap.add_argument('--rewind-back', type=int, default=3,
+                    help='on MIGRATE, rewind model to N val-checks ago (0 = no rewind). '
+                         'Default 3 ≈ log_every*3 epochs before trigger.')
+    ap.add_argument('--rewind-lr-reset', action='store_true', default=True,
+                    help='also reset LR to --lr on rewind and re-cosine for remaining epochs')
+    ap.add_argument('--sentinel-size', type=int, default=0,
+                    help='when >0, use sentinel-infinite mode: eval always runs on '
+                         'idx [0..sentinel_size), mining pulls from idx [sentinel_size..∞). '
+                         '0 = legacy finite val_pool_size mode.')
+    ap.add_argument('--stop-no-improve-migrations', type=int, default=0,
+                    help='stop training if this many consecutive migrations fail to '
+                         'improve global-best val_nll. 0 = no early stop (run full epochs).')
     args = ap.parse_args()
 
     out_dir = Path('experiments/cross_frame_' + args.name)
@@ -214,6 +242,7 @@ def main():
         baseline_range=(args.baseline_min, args.baseline_max),
         sigma_ypr=args.sigma_ypr, sigma_t=args.sigma_t,
         crop_range=(args.crop_min, args.crop_max),
+        cameras=args.cameras,
     )
     if args.scenes_root:
         ds_kwargs['scenes_root'] = args.scenes_root
@@ -227,7 +256,7 @@ def main():
     )
     ds_val = PandaSetCrossFrameDataset(
         split='val',
-        virtual_epoch_len=400, seed=123,
+        virtual_epoch_len=args.val_pool_size, seed=123,
         **ds_kwargs,
     )
 
@@ -249,9 +278,47 @@ def main():
         loader = DataLoader(ds_train, batch_size=args.batch_size, shuffle=True,
                              num_workers=args.num_workers, persistent_workers=True,
                              pin_memory=True, prefetch_factor=4)
-        val_loader = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False,
-                                 num_workers=max(2, args.num_workers // 2),
-                                 persistent_workers=True, pin_memory=True)
+        if args.sentinel_size > 0:
+            # sentinel mode: eval on fixed idx [0..sentinel_size), mining pulls [sentinel_size..∞)
+            from torch.utils.data import Subset
+            ds_val.virtual_epoch_len = max(ds_val.virtual_epoch_len,
+                                            args.sentinel_size)
+            val_loader = DataLoader(
+                Subset(ds_val, list(range(args.sentinel_size))),
+                batch_size=args.batch_size, shuffle=False,
+                num_workers=args.num_workers,
+                persistent_workers=True, pin_memory=True, prefetch_factor=4)
+        else:
+            val_loader = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False,
+                                     num_workers=args.num_workers,
+                                     persistent_workers=True, pin_memory=True, prefetch_factor=4)
+
+    # ─── online mining state ──────────────────────────────────────────────────
+    # val-pool mining: overfit triggered val→train migration.
+    # Strategy: uniform-random sample K val examples when val_err plateaus and
+    # append to a CPU-side buffer. Training batches additionally iterate through
+    # this buffer every epoch so migrated samples keep getting gradient steps
+    # — never restart from scratch.
+    migrated_samples: list = []                         # list[dict of CPU tensors]
+    # two mining source modes:
+    #   - legacy  : remaining_val_idx starts as range(val_pool_size), shrinks on migration
+    #   - sentinel: mining draws from idx [sentinel_size..∞) in ds_val, virtually infinite
+    remaining_val_idx: list = list(range(args.val_pool_size))
+    next_mining_idx = args.sentinel_size    # sentinel mode: ever-incrementing counter
+    rng_mine = np.random.default_rng(0)
+    best_val_for_mining = float('inf')
+    global_best_val = float('inf')          # never resets — for early-stop criterion
+    n_mig_since_global_best = 0             # migrations count since last global best update
+    n_since_improve = 0
+    n_migrations = 0
+    # ring buffer of (ep, model_sd, opt_sd) for rewind on MIGRATE
+    ckpt_ring: list = []
+    ring_max = args.rewind_back + 1
+
+    def _collate_dicts(batch_list):
+        keep_keys = [k for k in batch_list[0].keys()
+                     if not isinstance(batch_list[0][k], (int, str))]
+        return {k: torch.stack([b[k] for b in batch_list]) for k in keep_keys}
 
     # model
     model = CalibNetCrossFrame(
@@ -280,6 +347,10 @@ def main():
             return None
         model.eval()
         vl, vA, vB, vbase, vdA, vdB, vd_base = [], [], [], [], [], [], []
+        # Always use val_loader (parallel DataLoader). When mine_val=True, the loader
+        # walks the full val_pool including samples that have been migrated — but
+        # migrated ∈ train now, their residuals are near 0 → they inflate val slightly
+        # (≤ migrated/pool frac). Accept the bias for 50-100× eval speedup.
         for batch in val_loader:
             _, m = step(model, batch, uvd_mode=args.uvd)
             vl.append(m['loss']); vA.append(m['err_AB'])
@@ -294,11 +365,27 @@ def main():
                        base_d=float(np.mean(vd_base)))
         return out
 
+    def _mig_batch_iter():
+        """Yield collated batches from migrated_samples (reshuffled each epoch)."""
+        if not migrated_samples:
+            return
+        idx = list(range(len(migrated_samples)))
+        rng_mine.shuffle(idx)
+        for i in range(0, len(idx), args.batch_size):
+            chunk = idx[i:i+args.batch_size]
+            if len(chunk) < args.batch_size:
+                break
+            yield _collate_dicts([migrated_samples[j] for j in chunk])
+
+    break_flag = False
     for ep in range(args.epochs):
+        if break_flag:
+            break
         model.train()
         ep_losses, ep_errs_AB, ep_errs_BA, ep_base_AB = [], [], [], []
         ep_errs_d_AB, ep_errs_d_BA, ep_base_d = [], [], []
-        for batch in loader:
+
+        def _do_step(batch):
             opt.zero_grad(set_to_none=True)
             loss, m = step(model, batch, uvd_mode=args.uvd)
             loss.backward()
@@ -310,6 +397,13 @@ def main():
             if args.uvd:
                 ep_errs_d_AB.append(m['err_d_AB']); ep_errs_d_BA.append(m['err_d_BA'])
                 ep_base_d.append(m['base_d_AB'])
+
+        for batch in loader:
+            _do_step(batch)
+        # Additional migrated-sample passes each epoch (keeps them in the gradient diet).
+        if args.mine_val:
+            for batch in _mig_batch_iter():
+                _do_step(batch)
         sched.step()
 
         curves['epoch'].append(ep)
@@ -327,9 +421,94 @@ def main():
             curves['val_err_BA'].append(v['err_BA'])
             curves['val_base_AB'].append(v['base_AB'])
 
+            # overfit-triggered val→train migration
+            if args.mine_val:
+                # Every val check: push current snapshot into ring buffer.
+                # CPU-side copy so we don't bloat GPU memory.
+                def _cpu_sd(sd):
+                    return {k: v_.detach().cpu().clone() for k, v_ in sd.items()}
+                ckpt_ring.append(dict(ep=ep,
+                                       model=_cpu_sd(model.state_dict()),
+                                       opt=opt.state_dict()))
+                if len(ckpt_ring) > ring_max:
+                    ckpt_ring.pop(0)
+
+                if args.overfit_metric == 'nll':
+                    cur = v['loss']          # val NLL — catches σ-calib collapse earliest
+                else:
+                    cur = 0.5 * (v['err_AB'] + v['err_BA'])
+                if cur < best_val_for_mining - 1e-3:
+                    best_val_for_mining = cur
+                    n_since_improve = 0
+                else:
+                    n_since_improve += 1
+                # global best (never resets) — for early-stop "data exhausted" detection
+                if cur < global_best_val - 1e-3:
+                    global_best_val = cur
+                    n_mig_since_global_best = 0
+
+                can_migrate = (n_since_improve >= args.overfit_patience)
+                if args.sentinel_size > 0:
+                    # sentinel mode: pull fresh idx [next_mining_idx..) — never hit sentinel or prior mines
+                    pool_ok = True   # virtually infinite
+                else:
+                    pool_ok = len(remaining_val_idx) >= args.migrate_k
+
+                if can_migrate and pool_ok:
+                    if args.sentinel_size > 0:
+                        pick_idx = list(range(next_mining_idx,
+                                                next_mining_idx + args.migrate_k))
+                        next_mining_idx += args.migrate_k
+                        pool_log = f'next_mining_idx={next_mining_idx} (sentinel+∞ mode)'
+                    else:
+                        pick = rng_mine.choice(len(remaining_val_idx),
+                                                size=args.migrate_k, replace=False)
+                        pick_idx = [remaining_val_idx[i] for i in sorted(pick.tolist(), reverse=True)]
+                        for i in sorted(pick.tolist(), reverse=True):
+                            del remaining_val_idx[i]
+                        pool_log = f'val pool remaining {len(remaining_val_idx)}'
+                    # materialize samples (strip non-tensor scalars)
+                    for ji in pick_idx:
+                        s = ds_val[ji]
+                        s = {k: v_ for k, v_ in s.items()
+                             if not isinstance(v_, (int, str))}
+                        migrated_samples.append(s)
+                    n_migrations += 1
+                    log(f'  [MIGRATE#{n_migrations}] '
+                        f'moved {args.migrate_k} val→train (total migrated {len(migrated_samples)}, '
+                        f'{pool_log})')
+
+                    # rewind: pop oldest snapshot from ring and restore
+                    if args.rewind_back > 0 and ckpt_ring:
+                        rw = ckpt_ring[0]            # oldest in ring
+                        model.load_state_dict({k: v_.to(DEVICE) for k, v_ in rw['model'].items()})
+                        opt.load_state_dict(rw['opt'])
+                        log(f'  [REWIND] model ← snapshot from ep {rw["ep"]} '
+                            f'(current ep {ep}, rewound by {ep - rw["ep"]} epochs)')
+
+                    # LR schedule reset: fresh cosine for remaining epochs
+                    if args.rewind_lr_reset:
+                        for pg in opt.param_groups:
+                            pg['lr'] = args.lr
+                        remaining = max(1, args.epochs - ep)
+                        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                            opt, T_max=remaining, eta_min=args.lr * 1e-2)
+                        log(f'  [LR-RESET] lr ← {args.lr:.1e}, cosine restart over {remaining} remaining epochs')
+
+                    n_since_improve = 0
+                    best_val_for_mining = float('inf')
+                    ckpt_ring.clear()   # fresh ring — we just rewound, old entries irrelevant
+                    n_mig_since_global_best += 1
+                    if (args.stop_no_improve_migrations > 0 and
+                            n_mig_since_global_best >= args.stop_no_improve_migrations):
+                        log(f'  [EARLY-STOP] {n_mig_since_global_best} consecutive migrations '
+                            f'without global val_nll improvement (best={global_best_val:.3f}) — '
+                            f'data saturated, stopping training.')
+                        break_flag = True
+
         if ep % args.log_every == 0 or ep == args.epochs - 1:
             val_str = (f'  val_err={0.5*(v["err_AB"]+v["err_BA"]):.2f}px '
-                       f'(base {v["base_AB"]:.2f})'
+                       f'(base {v["base_AB"]:.2f})  val_nll={v["loss"]:.2f}'
                        if do_val else '')
             depth_str = ''
             if args.uvd:
@@ -379,6 +558,27 @@ def main():
     plt.savefig(out_dir / 'curve.png', dpi=120, bbox_inches='tight', facecolor='#f6f4ed')
     log(f'saved curve → {out_dir}/curve.png')
     log(f'best {"val" if not overfit else "train"} err = {best_err:.2f} px')
+
+    # auto-run BA reprojection visualization on best_model.pt
+    try:
+        import subprocess
+        viz_out = out_dir / 'ba_reproject.png'
+        log(f'running vis_ba_reproject → {viz_out} ...')
+        r = subprocess.run(
+            ['python', 'scripts/visualization/vis_ba_reproject.py',
+             '--ckpt', str(out_dir),
+             '--n-pairs', '4',
+             '--baseline-min', str(max(1, args.baseline_min)),
+             '--baseline-max', str(min(args.baseline_max, 10)),
+             '--out', str(viz_out)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if r.returncode == 0 and viz_out.exists():
+            log(f'saved viz → {viz_out}')
+        else:
+            log(f'[viz] failed (rc={r.returncode}): {r.stderr.strip().splitlines()[-3:] if r.stderr else ""}')
+    except Exception as e:
+        log(f'[viz] skipped: {e!r}')
 
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@ Flow:
 
 Everything in SI units: ypr in degrees, t in meters.
 """
-import json, random
+import json, os, random, zipfile
 from pathlib import Path
 from typing import List, Union
 
@@ -23,6 +23,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
+
+try:
+    import turbojpeg as _tj
+    _HAVE_TJ = True
+except ImportError:
+    _HAVE_TJ = False
 
 
 # ─── small geometry utilities ────────────────────────────────────────────────
@@ -40,14 +46,45 @@ def _quat_pos_to_mat(heading, position):
     return M
 
 
-def _project(pts_world, T_w2c, K):
+def _proj_cam(pts_cam, K, dist=None):
+    """Project camera-frame points to pixel uv, optionally with OpenCV radial
+    distortion (k1, k2, k3). Accepts (N,3) or (3,) single point and returns
+    (N,2) or (2,) accordingly.
+
+    Distortion model (same as OpenCV pinhole + radial, no tangential):
+        r² = x_n² + y_n²     where x_n = X/Z, y_n = Y/Z
+        f  = 1 + k1 r² + k2 r⁴ + k3 r⁶
+        u  = fx · (x_n · f) + cx
+        v  = fy · (y_n · f) + cy
+    dist=None (or all-zero) falls through to pure pinhole — bit-identical to
+    the legacy path for existing PandaSet / NuScenes intrinsics.
+    """
+    single = (pts_cam.ndim == 1)
+    if single:
+        pts_cam = pts_cam[None, :]
+    z = pts_cam[:, 2]
+    zc = np.clip(z, 1e-6, None)
+    x_n = pts_cam[:, 0] / zc
+    y_n = pts_cam[:, 1] / zc
+    if dist is not None and np.any(dist):
+        r2 = x_n * x_n + y_n * y_n
+        f = 1.0 + dist[0] * r2 + dist[1] * r2 * r2 + dist[2] * r2 * r2 * r2
+        x_n = x_n * f
+        y_n = y_n * f
+    u = K[0, 0] * x_n + K[0, 2]
+    v = K[1, 1] * y_n + K[1, 2]
+    uv = np.stack([u, v], axis=1).astype(np.float32)
+    return uv[0] if single else uv
+
+
+def _project(pts_world, T_w2c, K, dist=None):
     """Project world points into camera. Returns (uv (N,2), z (N,)) in pixel coords."""
     N = pts_world.shape[0]
     homo = np.concatenate([pts_world, np.ones((N, 1), dtype=pts_world.dtype)], axis=1)
-    pts_cam = (T_w2c @ homo.T)[:3]
-    z = pts_cam[2]
-    uv = (K @ pts_cam)[:2] / np.clip(z, 1e-6, None)
-    return uv.T.astype(np.float32), z.astype(np.float32)
+    pts_cam = (T_w2c @ homo.T)[:3].T  # (N, 3)
+    z = pts_cam[:, 2].astype(np.float32)
+    uv = _proj_cam(pts_cam, K, dist)
+    return uv, z
 
 
 def _ypr_t_to_mat(ypr_deg, t):
@@ -75,81 +112,175 @@ def _invert_mat(M):
 # ─── per-scene container ─────────────────────────────────────────────────────
 
 class _SceneData:
-    """Holds metadata + precomputed per-frame projections for ONE scene."""
+    """Holds metadata + precomputed per-frame projections for ONE (scene, camera) pair."""
 
-    def __init__(self, scene_root: Path):
+    def __init__(self, scene_root: Path, camera_name: str = 'front_camera'):
         self.root = scene_root
+        self.camera_name = camera_name
+        # identifier used by collate/debug: "<scene>/<cam>"
+        self.scene_id = f'{scene_root.name}/{camera_name}'
 
-        # intrinsics
-        intr = json.loads((scene_root / 'camera/front_camera/intrinsics.json').read_text())
+        cam_dir = scene_root / 'camera' / camera_name
+
+        # intrinsics (pinhole K + optional OpenCV radial distortion k1,k2,k3)
+        intr = json.loads((cam_dir / 'intrinsics.json').read_text())
         self.K = np.array([[intr['fx'], 0, intr['cx']],
                            [0, intr['fy'], intr['cy']],
                            [0,          0,          1]], dtype=np.float32)
+        self.dist = np.array([intr.get('k1', 0.0),
+                              intr.get('k2', 0.0),
+                              intr.get('k3', 0.0)], dtype=np.float32)
 
-        # poses
-        poses = json.loads((scene_root / 'camera/front_camera/poses.json').read_text())
+        # poses (world→cam for THIS camera)
+        poses = json.loads((cam_dir / 'poses.json').read_text())
         self.n_frames = len(poses)
         self.T_w2c = np.stack([_quat_pos_to_mat(p['heading'], p['position']) for p in poses])
 
-        # image/lidar paths
-        self.image_paths = [scene_root / f'camera/front_camera/{fi:02d}.jpg' for fi in range(self.n_frames)]
-        self.lidar_paths = [scene_root / f'lidar/{fi:02d}.pkl'              for fi in range(self.n_frames)]
+        # image/lidar paths (lidar is shared across cameras in a scene)
+        self.image_paths = [cam_dir / f'{fi:02d}.jpg' for fi in range(self.n_frames)]
+        self.lidar_paths = []
+        for fi in range(self.n_frames):
+            p = scene_root / f'lidar/{fi:02d}.pkl'
+            if not p.exists():
+                pgz = scene_root / f'lidar/{fi:02d}.pkl.gz'
+                if pgz.exists():
+                    p = pgz
+            self.lidar_paths.append(p)
 
         # image size (assume all same in scene) from first image
         with Image.open(self.image_paths[0]) as im:
             self.IW, self.IH = im.size
 
-        # frame-level caches: computed lazily (but always via precompute_all())
-        self._img_cache = {}
-        self._frame_cache = {}
-
     # ------------------------------------------------------------------ helpers
+    # On-disk projection cache: precompute once per (scene, camera) to an npz
+    # file; frame_data() mmap-reads it every call so the OS page cache handles
+    # residency and worker RAM never accumulates.
 
-    # image cache stores FULL-resolution pre-decoded arrays (default).
-    # Set img_scale_div > 1 only when memory pressure forces it; quality is
-    # the priority for cross-frame matching.
-    img_scale_div: int = 1     # 1 = full res, 2 = 1/2, 4 = 1/4
+    img_scale_div: int = 1
+    _MCU: int = 16   # libjpeg-turbo crop alignment (4:2:0 → 16-px MCU)
 
     def load_image(self, fi):
-        if fi not in self._img_cache:
+        with Image.open(self.image_paths[fi]) as im:
+            arr = np.array(im.convert('RGB'))
+        if self.img_scale_div > 1:
+            H, W = arr.shape[:2]
+            h = H // self.img_scale_div
+            w = W // self.img_scale_div
+            arr = np.array(Image.fromarray(arr).resize((w, h), Image.BILINEAR))
+        return arr
+
+    def load_patch(self, fi, u0_full, v0_full, s_full):
+        """Return an (s, s, 3) uint8 patch at full-res coords (u0, v0) with
+        size s. Regions outside the image are zero-padded. Uses libjpeg-turbo
+        lossless transform + SIMD decompress so only the enclosing MCU tiles
+        are decoded (≈9× faster than full decode)."""
+        u0, v0, s = int(u0_full), int(v0_full), int(s_full)
+        out = np.zeros((s, s, 3), dtype=np.uint8)
+        IW, IH = self.IW, self.IH
+        # intersect with image
+        su0 = max(0, u0); sv0 = max(0, v0)
+        su1 = min(IW, u0 + s); sv1 = min(IH, v0 + s)
+        if su1 <= su0 or sv1 <= sv0:
+            return out
+        if _HAVE_TJ:
+            MCU = self._MCU
+            ju0 = (su0 // MCU) * MCU
+            jv0 = (sv0 // MCU) * MCU
+            ju1 = min(IW, ((su1 + MCU - 1) // MCU) * MCU)
+            jv1 = min(IH, ((sv1 + MCU - 1) // MCU) * MCU)
+            jw, jh = ju1 - ju0, jv1 - jv0
+            with open(self.image_paths[fi], 'rb') as f:
+                blob = f.read()
+            cropped_jpeg = _tj.transform(blob, crop=True,
+                                          x=ju0, y=jv0, w=jw, h=jh,
+                                          perfect=False)
+            img = np.asarray(_tj.decompress(cropped_jpeg,
+                                            pixelformat=_tj.PF.RGB))
+            # img shape may exceed (jh, jw) if turbojpeg rounded; clamp.
+            img = img[:jh, :jw]
+            out[sv0 - v0:sv1 - v0, su0 - u0:su1 - u0] = \
+                img[sv0 - jv0:sv1 - jv0, su0 - ju0:su1 - ju0]
+        else:
+            # PIL fallback: crop-before-decode (partial IDCT via libjpeg)
             with Image.open(self.image_paths[fi]) as im:
-                arr = np.array(im.convert('RGB'))
-            if self.img_scale_div > 1:
-                H, W = arr.shape[:2]
-                h = H // self.img_scale_div
-                w = W // self.img_scale_div
-                # fast downsample via PIL (SIMD-optimised)
-                arr = np.array(Image.fromarray(arr).resize((w, h), Image.BILINEAR))
-            self._img_cache[fi] = arr
-        return self._img_cache[fi]
+                sub = np.array(im.crop((su0, sv0, su1, sv1)).convert('RGB'))
+            out[sv0 - v0:sv1 - v0, su0 - u0:su1 - u0] = sub
+        return out
+
+    def _proj_cache_path(self, fi):
+        # packed binary: [N:uint32 LE][pts_w: N*12][uv: N*8][z: N*4][in_view: N]
+        # → single file, single memmap, zero-copy reads.
+        return self.root / '_proj_cache' / self.camera_name / f'{fi:02d}.bin'
+
+    def _build_proj(self, fi):
+        df = pd.read_pickle(self.lidar_paths[fi])
+        pts_w = df[['x', 'y', 'z']].values.astype(np.float32)
+        uv, z = _project(pts_w, self.T_w2c[fi], self.K, self.dist)
+        in_view = ((z > 1.0) &
+                   (uv[:, 0] > 0) & (uv[:, 0] < self.IW) &
+                   (uv[:, 1] > 0) & (uv[:, 1] < self.IH))
+        return pts_w, uv.astype(np.float32), z.astype(np.float32), in_view
+
+    def _read_packed(self, p):
+        m = np.memmap(p, dtype=np.uint8, mode='r')
+        if m.size < 4:
+            raise ValueError(f'cache too small: {p}')
+        N = int(m[:4].view(np.uint32)[0])
+        expect = 4 + N * (12 + 8 + 4 + 1)
+        if m.size != expect:
+            raise ValueError(f'cache size mismatch: {p} ({m.size} vs {expect} for N={N})')
+        off = 4
+        pts_w = m[off:off + N*12].view(np.float32).reshape(N, 3); off += N*12
+        uv    = m[off:off + N*8 ].view(np.float32).reshape(N, 2); off += N*8
+        z     = m[off:off + N*4 ].view(np.float32);               off += N*4
+        in_view = m[off:off + N ].view(np.bool_)
+        return pts_w, uv, z, in_view
+
+    def _write_packed(self, p, pts_w, uv, z, in_view):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(f'.{os.getpid()}.tmp')
+        N = pts_w.shape[0]
+        with open(tmp, 'wb') as f:
+            f.write(np.uint32(N).tobytes())
+            f.write(np.ascontiguousarray(pts_w, dtype=np.float32).tobytes())
+            f.write(np.ascontiguousarray(uv,    dtype=np.float32).tobytes())
+            f.write(np.ascontiguousarray(z,     dtype=np.float32).tobytes())
+            f.write(np.ascontiguousarray(in_view, dtype=np.bool_).tobytes())
+        tmp.rename(p)
 
     def frame_data(self, fi):
-        """Return (pts_world, uv_own_cam, z_own_cam, in_view_mask)."""
-        if fi not in self._frame_cache:
-            df = pd.read_pickle(self.lidar_paths[fi])
-            pts_w = df[['x', 'y', 'z']].values.astype(np.float32)
-            uv, z = _project(pts_w, self.T_w2c[fi], self.K)
-            in_view = ((z > 1.0) &
-                       (uv[:, 0] > 0) & (uv[:, 0] < self.IW) &
-                       (uv[:, 1] > 0) & (uv[:, 1] < self.IH))
-            self._frame_cache[fi] = (pts_w, uv, z, in_view)
-        return self._frame_cache[fi]
+        """Return (pts_world, uv_own_cam, z_own_cam, in_view_mask).
+        Memmap-reads the packed binary cache; builds it on first access.
+        Corrupt cache files are deleted and rebuilt transparently."""
+        p = self._proj_cache_path(fi)
+        if p.exists():
+            try:
+                return self._read_packed(p)
+            except (ValueError, OSError):
+                try: p.unlink()
+                except OSError: pass
+        pts_w, uv, z, in_view = self._build_proj(fi)
+        try:
+            self._write_packed(p, pts_w, uv, z, in_view)
+        except OSError:
+            pass
+        return pts_w, uv, z, in_view
 
-    def precompute_all(self, preload_images: bool = True, n_workers: int = 8):
-        """Eagerly compute per-frame projections (and optionally decode images),
-        in parallel via ThreadPoolExecutor (numpy + PIL release the GIL during
-        decode/projection so threads scale well).
-
-        With DataLoader workers, parent precomputes → workers fork via COW,
-        so the dataset is effectively read-only and disk I/O at training
-        time drops to zero.
-        """
+    def precompute_all(self, n_workers: int = 8, **_ignored):
+        """Build the on-disk projection cache for every frame. Idempotent:
+        skips frames whose cache file already exists. Runs in parent only.
+        Does NOT hold results in memory — cache is the output."""
         from concurrent.futures import ThreadPoolExecutor
-        fis = list(range(self.n_frames))
+        missing = [fi for fi in range(self.n_frames)
+                   if not self._proj_cache_path(fi).exists()]
+        if not missing:
+            return
+        def _build_and_drop(fi):
+            self.frame_data(fi)  # side-effect: writes npz
+            return None
         with ThreadPoolExecutor(max_workers=n_workers) as ex:
-            list(ex.map(self.frame_data, fis))
-            if preload_images:
-                list(ex.map(self.load_image, fis))
+            for _ in ex.map(_build_and_drop, missing):
+                pass
 
 
 # ─── main dataset ────────────────────────────────────────────────────────────
@@ -181,6 +312,7 @@ class PandaSetCrossFrameDataset(Dataset):
                  crop_range = (128, 256),
                  virtual_epoch_len: int = 2000,
                  frame_train_frac: float = 1.0,
+                 cameras: Union[List[str], str, None] = None,
                  seed: int = 42):
         super().__init__()
         self.img_size = img_size
@@ -193,6 +325,14 @@ class PandaSetCrossFrameDataset(Dataset):
         self.split = split
         self.rng = np.random.default_rng(seed)
 
+        # cameras: single str, comma-separated str, list, or None (→ front_camera).
+        # Special value 'all' = use every camera that exists under each scene.
+        if cameras is None:
+            cameras = ['front_camera']
+        elif isinstance(cameras, str):
+            cameras = [c.strip() for c in cameras.split(',') if c.strip()]
+        self.cameras = cameras
+
         # ── resolve scene list ──
         # scenes_root can be a single path or a comma-separated list of roots
         # (for mixing PandaSet + Waymo-converted scenes).
@@ -200,10 +340,13 @@ class PandaSetCrossFrameDataset(Dataset):
             roots = [Path(r) for r in str(scenes_root).split(',')]
             scene_roots = []
             for root in roots:
-                # A scene is any direct child dir containing the expected layout.
+                # A scene is any direct child dir that has at least one camera.
                 # (Relaxed from `.name.isdigit()` so Waymo segment names work.)
                 for p in sorted(root.iterdir()):
-                    if p.is_dir() and (p / 'camera/front_camera/intrinsics.json').exists():
+                    if p.is_dir() and (p / 'camera').is_dir() and any(
+                        (p / 'camera' / c / 'intrinsics.json').exists()
+                        for c in (['front_camera'] if self.cameras == ['all'] else self.cameras)
+                    ):
                         scene_roots.append(str(p))
         elif scene_roots is None and scene_root is not None:
             # legacy single scene: use whole scene for requested split
@@ -213,8 +356,9 @@ class PandaSetCrossFrameDataset(Dataset):
             raise ValueError('Must provide scenes_root, scene_roots, or scene_root')
 
         # ── scene-level split ──
+        # CRITICAL: split at the physical-scene level (not scene×camera), so the
+        # same physical scene's cameras never straddle train/val.
         if len(scene_roots) > 1 and 0.0 < train_frac < 1.0:
-            # deterministic scene shuffle, then split
             shuffled = sorted(scene_roots)
             random.Random(seed).shuffle(shuffled)
             cutoff = int(len(shuffled) * train_frac)
@@ -227,12 +371,30 @@ class PandaSetCrossFrameDataset(Dataset):
         else:
             split_roots = scene_roots
 
+        # ── expand (scene × camera) pairs, filtering out missing cameras ──
+        scene_cam_pairs: List[tuple] = []
+        for sr in split_roots:
+            sp = Path(sr)
+            if self.cameras == ['all']:
+                cam_list = sorted(
+                    d.name for d in (sp / 'camera').iterdir()
+                    if d.is_dir() and (d / 'intrinsics.json').exists()
+                )
+            else:
+                cam_list = [c for c in self.cameras
+                            if (sp / 'camera' / c / 'intrinsics.json').exists()]
+            for c in cam_list:
+                scene_cam_pairs.append((sr, c))
+
         from concurrent.futures import ThreadPoolExecutor
-        print(f'[PandaSetCrossFrameDataset/{split}] loading {len(split_roots)} scenes (parallel)…',
+        print(f'[PandaSetCrossFrameDataset/{split}] loading {len(split_roots)} scenes '
+              f'× {len(self.cameras) if self.cameras != ["all"] else "all"} cams '
+              f'= {len(scene_cam_pairs)} (scene, camera) pairs…',
               flush=True)
 
-        def _load_scene(sr):
-            scn = _SceneData(Path(sr))
+        def _load_scene(sr_cam):
+            sr, cam = sr_cam
+            scn = _SceneData(Path(sr), camera_name=cam)
             scn.precompute_all(n_workers=4)   # within-scene threads
             all_fi = list(range(scn.n_frames))
             if frame_train_frac < 1.0:
@@ -244,20 +406,29 @@ class PandaSetCrossFrameDataset(Dataset):
                 scn.fi_pool = all_fi
             return scn
 
-        # ThreadPool over scenes; numpy + PIL release GIL during heavy work.
         with ThreadPoolExecutor(max_workers=8) as ex:
-            self.scenes: List[_SceneData] = list(ex.map(_load_scene, split_roots))
+            self.scenes: List[_SceneData] = list(ex.map(_load_scene, scene_cam_pairs))
 
         for scn in self.scenes:
-            print(f'  · {scn.root.name}: {scn.n_frames} frames, pool={len(scn.fi_pool)}',
+            print(f'  · {scn.scene_id}: {scn.n_frames} frames, pool={len(scn.fi_pool)}',
                   flush=True)
 
         print(f'[PandaSetCrossFrameDataset/{split}] ready. '
-              f'{len(self.scenes)} scenes, '
+              f'{len(self.scenes)} (scene, cam) pairs, '
               f'{sum(len(s.fi_pool) for s in self.scenes)} total frames',
               flush=True)
 
     # ------------------------------------------------------------------ helpers
+
+    def _resize_patch(self, patch_img, u0_full, v0_full, s_full):
+        """Take a pre-cropped (s, s, 3) uint8 patch (already zero-padded for
+        out-of-image by load_patch), resize to img_size, return (tensor, box)."""
+        s = int(s_full)
+        t = torch.from_numpy(patch_img).permute(2, 0, 1).float() / 255.0
+        t = F.interpolate(t.unsqueeze(0),
+                          size=(self.img_size, self.img_size),
+                          mode='bilinear', align_corners=False).squeeze(0)
+        return t, (int(u0_full), int(v0_full), s, s)
 
     def _crop_patch(self, img_cached, u0_full, v0_full, s_full, IW, IH, scale_div):
         """Pivot stays at exact patch center — pad outside-FOV with zeros so
@@ -373,8 +544,8 @@ class PandaSetCrossFrameDataset(Dataset):
         P_center_Bg  = (T_A_to_B_gt @ np.append(P_center_A, 1.0))[:3]
         if P_center_Bh[2] < 1.0 or P_center_Bg[2] < 1.0:
             return None
-        uc_B_hat = (K @ P_center_Bh)[:2] / P_center_Bh[2]
-        uc_B_gt  = (K @ P_center_Bg)[:2] / P_center_Bg[2]
+        uc_B_hat = _proj_cam(P_center_Bh, K, scn.dist)
+        uc_B_gt  = _proj_cam(P_center_Bg, K, scn.dist)
         uc_B_hat = uc_B_hat.astype(np.float32)
         uc_B_gt  = uc_B_gt.astype(np.float32)
         # pivot projection must land INSIDE the actual image in B under both
@@ -394,10 +565,12 @@ class PandaSetCrossFrameDataset(Dataset):
         v0_A = vc_A - half
         u0_B = uc_B_hat[0] - half
         v0_B = uc_B_hat[1] - half
-        img_A_full = scn.load_image(fi_A)
-        img_B_full = scn.load_image(fi_B)
-        pa = self._crop_patch(img_A_full, u0_A, v0_A, CROP, IW, IH, scn.img_scale_div)
-        pb = self._crop_patch(img_B_full, u0_B, v0_B, CROP, IW, IH, scn.img_scale_div)
+        if CROP < 2:
+            return None
+        patch_A_img = scn.load_patch(fi_A, u0_A, v0_A, CROP)
+        patch_B_img = scn.load_patch(fi_B, u0_B, v0_B, CROP)
+        pa = self._resize_patch(patch_A_img, u0_A, v0_A, CROP)
+        pb = self._resize_patch(patch_B_img, u0_B, v0_B, CROP)
         if pa is None or pb is None:
             return None
         patch_A, box_A = pa
@@ -420,10 +593,10 @@ class PandaSetCrossFrameDataset(Dataset):
         good_qa = (P_QA_in_B_gt[:, 2] > 0.5) & (P_QA_in_B_hat[:, 2] > 0.5)
         if good_qa.sum() < 4:
             return None
-        uv_B_gt_full_A  = (K @ P_QA_in_B_gt[good_qa].T)[:2]  / P_QA_in_B_gt[good_qa, 2]
-        uv_B_hat_full_A = (K @ P_QA_in_B_hat[good_qa].T)[:2] / P_QA_in_B_hat[good_qa, 2]
-        uv_B_gt_local_A  = self._uv_to_patch_local(uv_B_gt_full_A.T.astype(np.float32),  box_B)
-        uv_B_hat_local_A = self._uv_to_patch_local(uv_B_hat_full_A.T.astype(np.float32), box_B)
+        uv_B_gt_full_A  = _proj_cam(P_QA_in_B_gt[good_qa],  K, scn.dist)
+        uv_B_hat_full_A = _proj_cam(P_QA_in_B_hat[good_qa], K, scn.dist)
+        uv_B_gt_local_A  = self._uv_to_patch_local(uv_B_gt_full_A,  box_B)
+        uv_B_hat_local_A = self._uv_to_patch_local(uv_B_hat_full_A, box_B)
 
         uv_A_patch    = uv_A_patch[good_qa]
         z_A_patch     = z_A_patch[good_qa]
@@ -456,10 +629,10 @@ class PandaSetCrossFrameDataset(Dataset):
         good_qb = (P_QB_in_A_gt[:, 2] > 0.5) & (P_QB_in_A_hat[:, 2] > 0.5)
         if good_qb.sum() < 4:
             return None
-        uv_A_gt_full_B  = (K @ P_QB_in_A_gt[good_qb].T)[:2]  / P_QB_in_A_gt[good_qb, 2]
-        uv_A_hat_full_B = (K @ P_QB_in_A_hat[good_qb].T)[:2] / P_QB_in_A_hat[good_qb, 2]
-        uv_A_gt_local_B  = self._uv_to_patch_local(uv_A_gt_full_B.T.astype(np.float32),  box_A)
-        uv_A_hat_local_B = self._uv_to_patch_local(uv_A_hat_full_B.T.astype(np.float32), box_A)
+        uv_A_gt_full_B  = _proj_cam(P_QB_in_A_gt[good_qb],  K, scn.dist)
+        uv_A_hat_full_B = _proj_cam(P_QB_in_A_hat[good_qb], K, scn.dist)
+        uv_A_gt_local_B  = self._uv_to_patch_local(uv_A_gt_full_B,  box_A)
+        uv_A_hat_local_B = self._uv_to_patch_local(uv_A_hat_full_B, box_A)
         uv_B_patch = uv_B_patch[good_qb]
         z_B_patch  = z_B_patch[good_qb]
         inb2 = ((uv_A_hat_local_B[:, 0] >= 0) & (uv_A_hat_local_B[:, 0] < self.img_size) &
@@ -532,7 +705,7 @@ class PandaSetCrossFrameDataset(Dataset):
             pad_A = torch.from_numpy(pad_A),
             pad_B = torch.from_numpy(pad_B),
             fi_A = fi_A, fi_B = fi_B,
-            scene = scn.root.name,
+            scene = scn.scene_id,
         )
 
 
