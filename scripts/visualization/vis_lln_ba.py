@@ -28,7 +28,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from matplotlib.patches import ConnectionPatch
+from matplotlib.patches import ConnectionPatch, Ellipse
 
 from datasets.pandaset_pair import _SceneData, _ypr_t_to_mat, _invert_mat
 from models.cross_frame import CalibNetCrossFrame
@@ -41,6 +41,21 @@ def project_batch(P_cam, K):
     z = np.clip(P_cam[:, 2], 1e-6, None)
     uv = (K @ P_cam.T)[:2] / z
     return uv.T
+
+
+def cov_ellipse_axes(sx, sy, rho):
+    """2x2 covariance → (width, height, angle_deg) for matplotlib.Ellipse (1σ)."""
+    cxx = sx * sx
+    cyy = sy * sy
+    cxy = rho * sx * sy
+    tr = cxx + cyy
+    det = cxx * cyy - cxy * cxy
+    disc = max(tr * tr / 4.0 - det, 0.0) ** 0.5
+    l1 = tr / 2.0 + disc
+    l2 = max(tr / 2.0 - disc, 1e-12)
+    angle = 0.5 * np.degrees(np.arctan2(2 * cxy, cxx - cyy))
+    # return 2σ diameter for visibility (patches are 64 px; 1σ ≈ 1-2 px typical)
+    return 4 * np.sqrt(l1), 4 * np.sqrt(l2), angle
 
 
 def main(args):
@@ -212,9 +227,18 @@ def main(args):
             ax_B.annotate('', xy=uv_pred_l[i], xytext=uv_hat_l[i],
                            arrowprops=dict(arrowstyle='-|>', color=c, lw=2.0, alpha=0.9),
                            zorder=4)
-            # B: pred ●
-            ax_B.plot(uv_pred_l[i, 0], uv_pred_l[i, 1], 'o', color=c, markersize=14,
-                       markeredgecolor='black', mew=0.8, zorder=6)
+            # B: 2σ covariance ellipse (filled, prominent) — the star of the show
+            w, h, ang = cov_ellipse_axes(sx[i], sy[i], rho[i])
+            ell_fill = Ellipse(xy=(uv_pred_l[i, 0], uv_pred_l[i, 1]),
+                               width=w, height=h, angle=ang,
+                               facecolor=c, edgecolor='none', alpha=0.28, zorder=5)
+            ell_edge = Ellipse(xy=(uv_pred_l[i, 0], uv_pred_l[i, 1]),
+                               width=w, height=h, angle=ang,
+                               facecolor='none', edgecolor=c, alpha=0.95, lw=2.0, zorder=6)
+            ax_B.add_patch(ell_fill); ax_B.add_patch(ell_edge)
+            # B: pred ● (tiny dot at center)
+            ax_B.plot(uv_pred_l[i, 0], uv_pred_l[i, 1], 'o', color=c, markersize=4,
+                       markeredgecolor='white', mew=0.6, zorder=7)
             # B: GT ★
             ax_B.plot(uv_gt_l[i, 0], uv_gt_l[i, 1], '*', color=c, markersize=22,
                        markeredgecolor='white', mew=1.5, zorder=7)
