@@ -16,7 +16,10 @@ import torch
 import torch.nn as nn
 from models.model import CNNBackbone, PointMLP, D
 
-MIN_SIGMA = 0.3   # px  — floor prevents NLL collapsing to -inf
+MIN_SIGMA = 0.7   # px  — floor prevents NLL collapsing to -inf; raised from 0.3
+                  #       after v13-v16 showed σ overfits to train-time err ~1px
+                  #       leaving val z=err/σ ≈ 6-8× (overconfidence). A higher
+                  #       floor costs a little train NLL but keeps σ BA-usable.
 MAX_SIGMA = 30.0  # px  — ceiling prevents explosion
 
 

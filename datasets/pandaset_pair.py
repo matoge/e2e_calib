@@ -344,8 +344,20 @@ class PandaSetCrossFrameDataset(Dataset):
         uv_A_all   = uv_Af[in_A]
         z_A_all    = z_Af[in_A]
 
-        # 6. pick center 3D point from A
-        ci = int(rng.integers(len(pts_w_A_in)))
+        # 6. pick center 3D point from A via spatial-bin stratified sampling.
+        # Uniform rng.integers over all in-view points heavily biases toward
+        # ground (LiDAR density much higher on near/horizontal surfaces), so
+        # the σ head over-specialises to the ground. Instead, bin uv_A_all
+        # into a coarse image grid, pick an occupied cell uniformly, then pick
+        # a point inside that cell — cell-level uniform, not point-level.
+        H_BINS, W_BINS = 4, 6
+        u_bin = np.clip((uv_A_all[:, 0] * W_BINS / scn.IW).astype(int), 0, W_BINS - 1)
+        v_bin = np.clip((uv_A_all[:, 1] * H_BINS / scn.IH).astype(int), 0, H_BINS - 1)
+        flat_bin = v_bin * W_BINS + u_bin
+        occupied = np.unique(flat_bin)
+        b = int(rng.choice(occupied))
+        in_bin = np.where(flat_bin == b)[0]
+        ci = int(rng.choice(in_bin))
         P_center_w = pts_w_A_in[ci]
         uc_A, vc_A = uv_A_all[ci]
 
