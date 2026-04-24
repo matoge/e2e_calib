@@ -107,12 +107,23 @@ a:hover { color: var(--accent); }
   <span>dual projection learner</span>
 </div>
 
-<h1 class="title">一つのヘッドで<br/>"この 3D 点は別のフレームのどこに来るか" を学ぶ。</h1>
+<h1 class="title">One head that learns<br/>&ldquo;where does this 3D point land in another frame?&rdquo;</h1>
+
+<figure class="r-hero" style="margin: 24px 0 36px;">
+  <img src="images/lln_bl5.png"
+       alt="Cross-frame residual head visualization: predicted per-point (Δu, Δv, Σ) for 3D LiDAR points reprojected into a second camera frame"
+       style="width: 100%; border: 1px solid var(--border); background: var(--panel);">
+  <figcaption style="font-family: var(--f-mono); font-size: 12px; color: var(--ink-dim); margin-top: 8px; letter-spacing: 0.04em;">
+    A single residual head maps (patch<sub>B</sub>, 3D point P<sub>A</sub>, hypothesis pose T&#770;<sub>AB</sub>)
+    to per-point (&Delta;u, &Delta;v, &Sigma;). Green &bull; = model prediction, filled ellipse = 2&sigma; covariance,
+    blue &starf; = ground truth projection. The same function covers LiDAR&harr;camera calibration, VO, and loop closure.
+  </figcaption>
+</figure>
+
 <p class="subtitle">
-  CalibNetDepth が「同一フレーム内のモダリティ間ズレ」を学んでいたのを、
-  「任意フレーム間・任意モダリティ間のズレ」に一般化する。dual projection
-  loss で対称的に訓練し、バウンディングボックス無し・事前地図無しで
-  super long-baseline の pose 推定に到達するための基盤ネット。
+  CalibNetDepth learned &quot;intra-frame, cross-modal misalignment&quot;; this work generalizes it to
+  &quot;arbitrary-frame, arbitrary-modality misalignment&quot;. Trained symmetrically with a dual projection
+  loss. The foundation for super-long-baseline pose estimation without bounding boxes or prior maps.
 </p>
 
 <h2 style="margin-top: 1.5em;">この問題は何なのか — 古典から現代まで</h2>

@@ -131,11 +131,21 @@
 <div class="cf-page">
 
 <h1>A Single Residual Head for Calibration, VO, and Loop Closure</h1>
+
+<figure style="margin: 24px 0 32px;">
+  <img src="images/lln_bl5.png"
+       alt="Cross-frame residual head: per-point (Δu, Δv, Σ) predictions on a second camera frame"
+       style="width: 100%; border: 1px solid #d9d6cd; background: #fff;">
+  <figcaption style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; color: #6b6a63; margin-top: 8px; letter-spacing: 0.04em;">
+    Same 3D LiDAR points reprojected across a short baseline. Green &bull; = model prediction,
+    filled ellipse = 2&sigma; covariance, blue &starf; = ground-truth projection.
+  </figcaption>
+</figure>
+
 <p class="subtitle">
 LiDAR 3D &mdash;&mdash; camera images &mdash;&mdash; hypothesis pose &mdash;&mdash;
-ひとつの <em>&quot;この 3D 点は別フレームのどこにずれるか&quot;</em>
-関数を学ぶだけで、calibration / VO / loop closure / BA が
-同じ一つの呼び出しに集約される。
+learn a single function &mdash; <em>&quot;where does this 3D point land in another frame?&quot;</em> &mdash;
+and calibration / VO / loop closure / BA all collapse into the same call.
 </p>
 
 <div class="lede">
