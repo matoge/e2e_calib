@@ -178,9 +178,9 @@ class PandaSetCrossFrameDataset(Dataset):
                  sigma_ypr: float = 0.3,
                  sigma_t:   float = 0.15,
                  max_points: int = 96,
-                 crop_range = (64, 192),
+                 crop_range = (128, 256),
                  virtual_epoch_len: int = 2000,
-                 frame_train_frac: float = 1.0,  # if <1.0, also split by frame inside each scene
+                 frame_train_frac: float = 1.0,
                  seed: int = 42):
         super().__init__()
         self.img_size = img_size
@@ -254,29 +254,35 @@ class PandaSetCrossFrameDataset(Dataset):
     # ------------------------------------------------------------------ helpers
 
     def _crop_patch(self, img_cached, u0_full, v0_full, s_full, IW, IH, scale_div):
-        """img_cached is at full_res / scale_div; u0/v0/s are in FULL-res px.
-        We do all coordinate bookkeeping in full-res and only convert to the
-        cache's lower resolution at the slice step.
+        """Pivot stays at exact patch center — pad outside-FOV with zeros so
+        pose_emb's "pivot = patch center" invariant holds. Patch box returned
+        in FULL-res coords (may include out-of-image area, which is zero-padded).
 
-        Returns: (tensor (3, img_size, img_size), box in FULL-res px).
+        img_cached is at full_res / scale_div; u0/v0/s are in FULL-res px.
         """
-        u0i, v0i = int(u0_full), int(v0_full)
-        u1i, v1i = u0i + int(s_full), v0i + int(s_full)
-        u0i = max(0, u0i); v0i = max(0, v0i)
-        u1i = min(IW, u1i); v1i = min(IH, v1i)
-        if u1i - u0i < 2 or v1i - v0i < 2:
+        s_full_i = int(s_full)
+        u0i = int(u0_full); v0i = int(v0_full)
+        u1i = u0i + s_full_i; v1i = v0i + s_full_i
+        # cache-resolution target box
+        u0c = u0i // scale_div; v0c = v0i // scale_div
+        u1c = u1i // scale_div; v1c = v1i // scale_div
+        cw = u1c - u0c; ch = v1c - v0c
+        if cw < 2 or ch < 2:
             return None
-        # Map to cache resolution. Cache is integer-scaled, so trivial division.
-        u0c, v0c = u0i // scale_div, v0i // scale_div
-        u1c, v1c = u1i // scale_div, v1i // scale_div
-        if u1c - u0c < 2 or v1c - v0c < 2:
-            return None
-        patch = img_cached[v0c:v1c, u0c:u1c]
-        t = torch.from_numpy(patch).permute(2, 0, 1).float() / 255.0
+        # clip cache box to valid image area
+        src_u0 = max(0, u0c); src_v0 = max(0, v0c)
+        src_u1 = min(img_cached.shape[1], u1c); src_v1 = min(img_cached.shape[0], v1c)
+        out = np.zeros((ch, cw, img_cached.shape[2]), dtype=img_cached.dtype)
+        inner_w = src_u1 - src_u0; inner_h = src_v1 - src_v0
+        if inner_w > 0 and inner_h > 0:
+            out_pad_left = src_u0 - u0c
+            out_pad_top  = src_v0 - v0c
+            out[out_pad_top:out_pad_top + inner_h,
+                out_pad_left:out_pad_left + inner_w] = img_cached[src_v0:src_v1, src_u0:src_u1]
+        t = torch.from_numpy(out).permute(2, 0, 1).float() / 255.0
         t = F.interpolate(t.unsqueeze(0), size=(self.img_size, self.img_size),
                            mode='bilinear', align_corners=False).squeeze(0)
-        # Return box in FULL-res px (so uv conversion stays consistent)
-        return t, (u0i, v0i, u1i - u0i, v1i - v0i)
+        return t, (u0i, v0i, s_full_i, s_full_i)
 
     def _uv_to_patch_local(self, uv_full, crop_box):
         u0, v0, cw, ch = crop_box
@@ -343,21 +349,33 @@ class PandaSetCrossFrameDataset(Dataset):
         δT       = _ypr_t_to_mat(ypr_pert, t_pert)
         T_A_to_B_hat = T_A_to_B_gt @ δT
 
-        # 8. project center into B with T_hat
+        # 8. project center into B under both hat and gt
         P_center_A   = (T_w2A @ np.append(P_center_w, 1.0))[:3]
         P_center_Bh  = (T_A_to_B_hat @ np.append(P_center_A, 1.0))[:3]
-        if P_center_Bh[2] < 1.0:
+        P_center_Bg  = (T_A_to_B_gt @ np.append(P_center_A, 1.0))[:3]
+        if P_center_Bh[2] < 1.0 or P_center_Bg[2] < 1.0:
             return None
         uc_B_hat = (K @ P_center_Bh)[:2] / P_center_Bh[2]
+        uc_B_gt  = (K @ P_center_Bg)[:2] / P_center_Bg[2]
         uc_B_hat = uc_B_hat.astype(np.float32)
+        uc_B_gt  = uc_B_gt.astype(np.float32)
+        # pivot projection must land INSIDE the actual image in B under both
+        # hypothesis and ground-truth poses (otherwise the pair is degenerate:
+        # the pivot's "true" location is outside any image we have).
+        if not (0 <= uc_B_hat[0] < IW and 0 <= uc_B_hat[1] < IH):
+            return None
+        if not (0 <= uc_B_gt[0]  < IW and 0 <= uc_B_gt[1]  < IH):
+            return None
 
         # 9. crop patches with random shared size
+        # pivot stays at EXACT patch center — padding (inside _crop_patch)
+        # handles any out-of-image area so pose_emb semantics are preserved.
         CROP = int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
         half = CROP / 2
-        u0_A = max(0, min(IW - CROP, uc_A - half))
-        v0_A = max(0, min(IH - CROP, vc_A - half))
-        u0_B = max(0, min(IW - CROP, uc_B_hat[0] - half))
-        v0_B = max(0, min(IH - CROP, uc_B_hat[1] - half))
+        u0_A = uc_A - half
+        v0_A = vc_A - half
+        u0_B = uc_B_hat[0] - half
+        v0_B = uc_B_hat[1] - half
         img_A_full = scn.load_image(fi_A)
         img_B_full = scn.load_image(fi_B)
         pa = self._crop_patch(img_A_full, u0_A, v0_A, CROP, IW, IH, scn.img_scale_div)
