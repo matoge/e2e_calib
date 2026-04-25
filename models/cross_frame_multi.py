@@ -441,6 +441,64 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
         return (clamp_fn(raw_AtoB, self.img_size),
                 clamp_fn(raw_BtoA, self.img_size))
 
+    # ──────────────── N-frame stacked-tensor forward path ────────────────
+    # Inputs are stacked along a frame axis so the same code handles
+    # N=2 (pair), N=3 (triplet), and N=4+ later. For each (Q=i, T=j) with
+    # i ≠ j, we cross-attend Q's tokens to KV built from all other frames
+    # (target j first, others as auxiliary context) and emit a residual
+    # against `uv_hat[i, j]`. Output is a (B, N, N, max_pts, out_dim) raw
+    # tensor with diag(i=j) zero; step_n() masks those out plus pad_dir.
+
+    def forward_n(self,
+                  patches: torch.Tensor,        # (B, N, 3, H, W)
+                  uvd: torch.Tensor,            # (B, N, max_pts, 3)
+                  pad: torch.Tensor,            # (B, N, max_pts) bool
+                  uvd_full: torch.Tensor,       # (B, N, N_FULL, 3)
+                  pad_full: torch.Tensor,       # (B, N, N_FULL) bool
+                  pose_hat_6dof: torch.Tensor,  # (B, N, N, 6)
+                  uv_hat: torch.Tensor,         # (B, N, N, max_pts, 2) — local patch coords
+                  ) -> torch.Tensor:
+        B, N = patches.shape[0], patches.shape[1]
+        assert N - 1 <= self.max_kv_frames, (
+            f'N-1={N-1} KV frames > max_kv_frames={self.max_kv_frames}; '
+            f'rebuild model with max_kv_frames>={N-1}')
+
+        # 1. encode each frame once (shared encoder weights). Per-frame results
+        #    cached so each (Q, T) pair below just reuses.
+        pt_list, img_list = [], []
+        for k in range(N):
+            pt_k, _, img_k = self._encode_frame(
+                patches[:, k], uvd[:, k], pad[:, k],
+                uvd_full=uvd_full[:, k], pad_full=pad_full[:, k])
+            pt_list.append(pt_k)
+            img_list.append(img_k)
+
+        # 2. for each (i, j), Q-shift by pose_hat[i,j], KV = all other frames
+        clamp_fn = clamp_params if self._out_dim == 5 else clamp_params_uvd
+        raws = torch.zeros(B, N, N, pt_list[0].shape[1], self._out_dim,
+                           device=patches.device, dtype=pt_list[0].dtype)
+        for i in range(N):
+            for j in range(N):
+                if i == j:
+                    continue
+                pose_emb_ij = self.pose_mlp(pose_hat_6dof[:, i, j]).unsqueeze(1)
+                q = pt_list[i] + pose_emb_ij
+                # KV order: target j first (so its uv_hat lives at level 0
+                # which is what the deformable head's bias-via-Q-conditioned
+                # weight MLP can favour). Aux frames follow.
+                kv_order = [j] + [k for k in range(N) if k != i and k != j]
+                img_2d_list = [img_list[k]                   for k in kv_order]
+                ref_list    = [uv_hat[:, i, k] / self.img_size for k in kv_order]
+                pt_kv_list  = [pt_list[k]                    for k in kv_order]
+                pt_pad_list = [pad[:, k]                     for k in kv_order]
+                bias_list   = [self.pose_bias(pose_hat_6dof[:, i, k]) for k in kv_order]
+                raw_ij = self._multi_forward(
+                    q, img_2d_list, ref_list,
+                    pt_kv_list, pt_pad_list, bias_list,
+                    uv_hat[:, i, j] / self.img_size, q_pad=pad[:, i])
+                raws[:, i, j] = clamp_fn(raw_ij, self.img_size)
+        return raws
+
 
 def _ypr_t_to_T(pose_6dof: torch.Tensor) -> torch.Tensor:
     """(..., 6) [yaw, pitch, roll, tx, ty, tz] (degrees) → (..., 4, 4).

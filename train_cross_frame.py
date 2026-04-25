@@ -169,6 +169,52 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False):
     return loss, metrics
 
 
+# ─── n-frame stacked-tensor step ─────────────────────────────────────────────
+# For datasets emitting (B, N, ...) per-frame and (B, N, N, ...) per-pair
+# fields, run model.forward_n once and compute NLL on every (i, j) with i ≠ j,
+# masked by pad_dir[i, j].
+
+def step_n(model, batch):
+    batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
+    raws = model.forward_n(
+        patches       = batch['patches'],
+        uvd           = batch['uvd'],
+        pad           = batch['pad'],
+        uvd_full      = batch['uvd_full'],
+        pad_full      = batch['pad_full'],
+        pose_hat_6dof = batch['pose_hat_6dof'],
+        uv_hat        = batch['uv_hat'],
+    )
+    B, N = batch['patches'].shape[0], batch['patches'].shape[1]
+    losses, errs, bases = [], [], []
+    pair_metrics = {}
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                continue
+            raw_ij = raws[:, i, j]
+            uv_hat_ij = batch['uv_hat'][:, i, j]
+            uv_gt_ij  = batch['uv_gt' ][:, i, j]
+            pad_ij    = batch['pad_dir'][:, i, j]
+            loss_ij, m_ij = residual_nll_and_metrics(
+                raw_ij, uv_hat_ij, uv_gt_ij, pad_ij, 64)
+            losses.append(loss_ij)
+            errs.append(m_ij['err_px'])
+            bases.append(m_ij['base_px'])
+            pair_metrics[f'err_{i}{j}']  = m_ij['err_px']
+            pair_metrics[f'base_{i}{j}'] = m_ij['base_px']
+    loss = torch.stack(losses).mean()
+    metrics = dict(
+        loss=loss.item(),
+        err_AB=float(np.mean(errs)),       # mean across all directions
+        base_AB=float(np.mean(bases)),     # (reuse legacy key for plotter compat)
+        err_BA=float(np.mean(errs)),
+        base_BA=float(np.mean(bases)),
+        **pair_metrics,
+    )
+    return loss, metrics
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -251,6 +297,11 @@ def main():
                     help='enable triplet dataset (A,M,B) + CalibNetMultiFrame model. '
                          'M is the middle frame; KV concatenates {M, B} with per-frame '
                          'pose-bias added to attention scores (relative-only, RPE-style).')
+    ap.add_argument('--n-frames', type=int, default=2,
+                    help='2 = legacy pair / triplet-as-aux-KV path (default). '
+                         '3+ = stacked-array N-frame path: dataset emits (N, ...) and '
+                         '(N, N, ...) tensors, model.forward_n() supervises every (i, j) '
+                         'direction. Random-walk perturbation per adjacent segment.')
     ap.add_argument('--stop-no-improve-migrations', type=int, default=0,
                     help='stop training if this many consecutive migrations fail to '
                          'improve global-best val_nll. 0 = no early stop (run full epochs).')
@@ -271,13 +322,15 @@ def main():
     log(f'args = {vars(args)}')
 
     # dataset
+    n_frames_path = max(args.n_frames, 2)
     ds_kwargs = dict(
         img_size=args.img_size, max_points=args.max_points,
         baseline_range=(args.baseline_min, args.baseline_max),
         sigma_ypr=args.sigma_ypr, sigma_t=args.sigma_t,
         crop_range=(args.crop_min, args.crop_max),
         cameras=args.cameras,
-        triplet=args.multi_frame,
+        triplet=args.multi_frame and n_frames_path == 2,   # legacy aux-KV
+        n_frames=n_frames_path,
     )
     if args.scenes_root:
         ds_kwargs['scenes_root'] = args.scenes_root
@@ -366,6 +419,7 @@ def main():
         n_cross_layers=args.n_cross_layers,
         deform_mode=args.deform_mode,
         out_dim=(7 if args.uvd else 5),
+        max_kv_frames=max(2, n_frames_path - 1),
     ).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f'model params: {n_params/1e6:.3f} M')
@@ -419,7 +473,10 @@ def main():
         # migrated ∈ train now, their residuals are near 0 → they inflate val slightly
         # (≤ migrated/pool frac). Accept the bias for 50-100× eval speedup.
         for batch in val_loader:
-            _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
+            if n_frames_path >= 3:
+                _, m = step_n(model, batch)
+            else:
+                _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
             if args.uvd:
@@ -454,7 +511,10 @@ def main():
 
         def _do_step(batch):
             opt.zero_grad(set_to_none=True)
-            loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
+            if n_frames_path >= 3:
+                loss, m = step_n(model, batch)
+            else:
+                loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
