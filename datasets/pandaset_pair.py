@@ -493,15 +493,29 @@ class PandaSetCrossFrameDataset(Dataset):
             return None
         fi_A = int(rng.choice(scn.fi_pool))
         # 2. fi_B: nearby frame. baseline_max is per-camera:
-        #   front/back (pure, no left/right/side) → unlimited (clip to scene length)
+        #   front/back (pure, no left/right/side) → unlimited (scene length)
         #   side / front_left / rear_right / etc.                → baseline_max
+        # Pick direction first, then delta bounded by how much room is left
+        # on that side of fi_A — keeps the sampling uniform within a valid
+        # range instead of throwing away invalid draws.
         bmin, bmax = self.baseline_range
         cn = scn.camera_name.lower()
         is_fb = (('front' in cn or 'back' in cn or 'rear' in cn)
                  and 'left' not in cn and 'right' not in cn and 'side' not in cn)
-        eff_max = (scn.n_frames - 1) if is_fb else bmax
-        eff_max = max(bmin, eff_max)
-        delta = int(rng.integers(bmin, eff_max + 1)) * int(rng.choice([-1, 1]))
+        direction = int(rng.choice([-1, 1]))
+        if direction > 0:
+            room = scn.n_frames - 1 - fi_A
+        else:
+            room = fi_A
+        eff_max = room if is_fb else min(bmax, room)
+        if eff_max < bmin:
+            # try the other direction
+            direction = -direction
+            room = scn.n_frames - 1 - fi_A if direction > 0 else fi_A
+            eff_max = room if is_fb else min(bmax, room)
+            if eff_max < bmin:
+                return None
+        delta = int(rng.integers(bmin, eff_max + 1)) * direction
         fi_B = fi_A + delta
         if fi_B < 0 or fi_B >= scn.n_frames:
             return None
