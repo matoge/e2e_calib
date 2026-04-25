@@ -313,8 +313,13 @@ class PandaSetCrossFrameDataset(Dataset):
                  virtual_epoch_len: int = 2000,
                  frame_train_frac: float = 1.0,
                  cameras: Union[List[str], str, None] = None,
+                 n_frames: int = 2,        # 2 = pair (legacy), 3+ = stacked-array path
+                 triplet: bool = False,    # legacy: append M as aux KV in the
+                                           # named-field pair output (used by v51-v55)
                  seed: int = 42):
         super().__init__()
+        if n_frames not in (2, 3):
+            raise NotImplementedError(f'n_frames={n_frames} not yet supported')
         self.img_size = img_size
         self.baseline_range = baseline_range
         self.sigma_ypr = sigma_ypr
@@ -323,6 +328,10 @@ class PandaSetCrossFrameDataset(Dataset):
         self.crop_range = crop_range
         self.virtual_epoch_len = virtual_epoch_len
         self.split = split
+        self.n_frames = n_frames
+        # `triplet` keeps the legacy v51-v55 behaviour (named fields + M aux KV);
+        # the new stacked-array path is gated by n_frames >= 3 and is independent.
+        self.triplet = triplet
         self.rng = np.random.default_rng(seed)
 
         # cameras: single str, comma-separated str, list, or None (→ front_camera).
@@ -482,10 +491,314 @@ class PandaSetCrossFrameDataset(Dataset):
 
     def __getitem__(self, idx):
         for retry in range(30):
-            sample = self._try_one(idx + retry * 9973)
+            if self.n_frames == 2:
+                sample = self._try_one(idx + retry * 9973)
+            else:
+                sample = self._try_one_nframe(idx + retry * 9973)
             if sample is not None:
                 return sample
-        raise RuntimeError("could not form a valid cross-frame pair in 30 tries")
+        raise RuntimeError(
+            f'could not form a valid {self.n_frames}-frame sample in 30 tries')
+
+    # ─────────────────────── N-frame stacked-tensor path ────────────────────
+    # Outputs are (N, ...) for per-frame fields and (N, N, ...) for per-pair
+    # fields, so going N=3 → N=4+ is just a loop bound. Random-walk
+    # perturbation per adjacent segment, AB total σ matches the legacy iid
+    # case so pair vs multi-frame stay apples-to-apples.
+
+    def _try_one_nframe(self, idx):
+        N = self.n_frames
+        rng = np.random.default_rng((idx + 1) * 2654435761 & 0xFFFFFFFF)
+        scn: _SceneData = self.scenes[int(rng.integers(len(self.scenes)))]
+        IW, IH, K = scn.IW, scn.IH, scn.K
+
+        # 1. pick fi list (anchor + N-1 nearby frames around it)
+        if not scn.fi_pool:
+            return None
+        fi_anchor = int(rng.choice(scn.fi_pool))
+        bmin, bmax = self.baseline_range
+        cn = scn.camera_name.lower()
+        is_fb = (('front' in cn or 'back' in cn or 'rear' in cn)
+                 and 'left' not in cn and 'right' not in cn and 'side' not in cn)
+        direction = int(rng.choice([-1, 1]))
+        if direction > 0:
+            room = scn.n_frames - 1 - fi_anchor
+        else:
+            room = fi_anchor
+        eff_max = room if is_fb else min(bmax, room)
+        if eff_max < bmin:
+            direction = -direction
+            room = scn.n_frames - 1 - fi_anchor if direction > 0 else fi_anchor
+            eff_max = room if is_fb else min(bmax, room)
+            if eff_max < bmin:
+                return None
+        delta_total = int(rng.integers(bmin, eff_max + 1)) * direction
+        fi_far = fi_anchor + delta_total
+        if fi_far < 0 or fi_far >= scn.n_frames:
+            return None
+        # Place N frames evenly along [fi_anchor, fi_far]; keep monotonic order.
+        fis_lin = np.linspace(fi_anchor, fi_far, N).round().astype(int)
+        fis = [int(x) for x in fis_lin]
+        if len(set(fis)) < N:
+            return None  # degenerate spacing for this baseline
+
+        # 2. GT poses T_w2[i] and T_gt[i, j] = T_w2[j] @ T_w2[i]^{-1}
+        T_w2 = [scn.T_w2c[fi].astype(np.float32) for fi in fis]
+        T_w2inv = [_invert_mat(T) for T in T_w2]
+        T_gt = np.zeros((N, N, 4, 4), dtype=np.float32)
+        for i in range(N):
+            for j in range(N):
+                T_gt[i, j] = T_w2[j] @ T_w2inv[i]
+
+        # 3. random-walk perturbation per adjacent segment.
+        # σ_seg / σ_total = √(d_seg / d_total) so var(δ_total) = sum(var(δ_seg))
+        # = σ²_total ⇒ AB total σ unchanged from the legacy iid case.
+        d_seg = [abs(fis[i + 1] - fis[i]) for i in range(N - 1)]
+        d_total = sum(d_seg)
+        if d_total == 0:
+            return None
+        delta_seg = []                                          # 4×4 each
+        for d in d_seg:
+            s = float(np.sqrt(d / d_total))
+            ypr = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr * s
+            t   = rng.standard_normal(3).astype(np.float32) * self.sigma_t   * s
+            delta_seg.append(_ypr_t_to_mat(ypr, t))
+
+        # 4. compose hat poses along chain. T_hat[i, i+1] = T_gt[i, i+1] @ δ_seg[i]
+        T_hat = np.zeros_like(T_gt)
+        for i in range(N):
+            T_hat[i, i] = np.eye(4, dtype=np.float32)
+        for i in range(N - 1):
+            T_hat[i, i + 1] = T_gt[i, i + 1] @ delta_seg[i]
+            T_hat[i + 1, i] = _invert_mat(T_hat[i, i + 1])
+        # non-adjacent: chain along sorted axis
+        # for N=3: T_hat[0,2] = T_hat[1,2] @ T_hat[0,1]
+        for span in range(2, N):
+            for i in range(N - span):
+                j = i + span
+                T_hat[i, j] = T_hat[j - 1, j] @ T_hat[i, j - 1]
+                T_hat[j, i] = _invert_mat(T_hat[i, j])
+
+        # 5. anchor pivot in frame 0 via stratified spatial sampling
+        pts_w_0, uv_0_full, z_0_full, in_0 = scn.frame_data(fis[0])
+        if in_0.sum() < 50:
+            return None
+        pts_w_0_in = pts_w_0[in_0]
+        uv_0_all   = uv_0_full[in_0]
+        H_BINS, W_BINS = 4, 6
+        u_bin = np.clip((uv_0_all[:, 0] * W_BINS / IW).astype(int), 0, W_BINS - 1)
+        v_bin = np.clip((uv_0_all[:, 1] * H_BINS / IH).astype(int), 0, H_BINS - 1)
+        flat_bin = v_bin * W_BINS + u_bin
+        occupied = np.unique(flat_bin)
+        b = int(rng.choice(occupied))
+        in_bin = np.where(flat_bin == b)[0]
+        ci = int(rng.choice(in_bin))
+        P_center_w = pts_w_0_in[ci]
+        uc_full = np.zeros((N, 2), dtype=np.float32)
+        uc_full[0] = uv_0_all[ci]
+        # 6. project pivot into each other frame using HAT pose
+        P_center_in0 = (T_w2[0] @ np.append(P_center_w, 1.0))[:3].astype(np.float32)
+        for i in range(1, N):
+            P_in_i = (T_hat[0, i] @ np.append(P_center_in0, 1.0))[:3]
+            if P_in_i[2] < 1.0:
+                return None
+            uvi = _proj_cam(P_in_i, K, scn.dist).astype(np.float32)
+            if not (0 <= uvi[0] < IW and 0 <= uvi[1] < IH):
+                return None
+            uc_full[i] = uvi
+        # also gate on GT projection in-image (same constraint as legacy code)
+        for i in range(1, N):
+            P_in_i_gt = (T_gt[0, i] @ np.append(P_center_in0, 1.0))[:3]
+            if P_in_i_gt[2] < 1.0:
+                return None
+            uv_gt_i = _proj_cam(P_in_i_gt, K, scn.dist)
+            if not (0 <= uv_gt_i[0] < IW and 0 <= uv_gt_i[1] < IH):
+                return None
+
+        # 7. crop patches with shared random size, centered on hat projection
+        CROP = int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
+        if CROP < 2:
+            return None
+        half = CROP / 2
+        boxes = []
+        patches = []
+        for i in range(N):
+            u0_i = float(uc_full[i, 0]) - half
+            v0_i = float(uc_full[i, 1]) - half
+            patch_img = scn.load_patch(fis[i], u0_i, v0_i, CROP)
+            pi = self._resize_patch(patch_img, u0_i, v0_i, CROP)
+            if pi is None:
+                return None
+            patch_i, box_i = pi
+            patches.append(patch_i)
+            boxes.append(box_i)
+
+        # 8. per-frame query points: in-patch LiDAR
+        max_pts = self.max_points
+        N_FULL = 2048
+        IMG = self.img_size
+
+        pts_3d_in_cam = np.zeros((N, max_pts, 3), dtype=np.float32)
+        uvd_arr       = np.zeros((N, max_pts, 3), dtype=np.float32)
+        pad_arr       = np.ones((N, max_pts), dtype=bool)
+        uvd_full_arr  = np.zeros((N, N_FULL, 3), dtype=np.float32)
+        pad_full_arr  = np.ones((N, N_FULL), dtype=bool)
+
+        for i in range(N):
+            box_i = boxes[i]
+            if i == 0:
+                pts_w_i, uv_i_full, z_i_full, in_i = pts_w_0, uv_0_full, z_0_full, in_0
+            else:
+                pts_w_i, uv_i_full, z_i_full, in_i = scn.frame_data(fis[i])
+                if in_i.sum() < 4:
+                    return None
+            uv_in = uv_i_full[in_i]
+            z_in  = z_i_full[in_i]
+            pts_w_in = pts_w_i[in_i]
+            in_box = ((uv_in[:, 0] >= box_i[0]) & (uv_in[:, 0] < box_i[0] + box_i[2]) &
+                      (uv_in[:, 1] >= box_i[1]) & (uv_in[:, 1] < box_i[1] + box_i[3]) &
+                      (z_in > 1.0))
+            if in_box.sum() < 4:
+                return None
+            pts_w_q   = pts_w_in[in_box]
+            uv_q_full = uv_in[in_box]
+            z_q       = z_in[in_box].astype(np.float32)
+            uv_q_local = self._uv_to_patch_local(uv_q_full, box_i)
+            # 3D points in cam_i frame
+            homo = np.column_stack([pts_w_q, np.ones(len(pts_w_q), dtype=np.float32)])
+            P_in_i = (T_w2[i] @ homo.T)[:3].T.astype(np.float32)
+
+            # full frustum context (N_FULL pts, stratified)
+            uvd_full_arr[i], pad_full_arr[i] = self._pack_full_local(
+                uv_q_local, z_q, N_FULL, IMG, rng)
+
+            # subsample to max_points (stratified spatial-grid pick)
+            n = len(uv_q_local)
+            if n > max_pts:
+                G = int(np.sqrt(max_pts))
+                cell = IMG / G
+                cj = np.clip((uv_q_local[:, 0] / cell).astype(np.int32), 0, G - 1)
+                ck = np.clip((uv_q_local[:, 1] / cell).astype(np.int32), 0, G - 1)
+                cid = ck * G + cj
+                du = uv_q_local[:, 0] - (cj + 0.5) * cell
+                dv = uv_q_local[:, 1] - (ck + 0.5) * cell
+                d2 = du * du + dv * dv
+                sel = []
+                for u_c in np.unique(cid):
+                    mem = np.where(cid == u_c)[0]
+                    sel.append(int(mem[np.argmin(d2[mem])]))
+                pick = np.array(sorted(set(sel)), dtype=np.int64)
+            else:
+                pick = np.arange(n, dtype=np.int64)
+            n_use = len(pick)
+            uvd_arr[i, :n_use, 0] = uv_q_local[pick, 0]
+            uvd_arr[i, :n_use, 1] = uv_q_local[pick, 1]
+            uvd_arr[i, :n_use, 2] = z_q[pick] / 50.0
+            pts_3d_in_cam[i, :n_use] = P_in_i[pick]
+            pad_arr[i, :n_use] = False
+
+        # 9. per-direction projection of pts_3d[i] → frame j
+        uv_hat_arr = np.zeros((N, N, max_pts, 2), dtype=np.float32)
+        uv_gt_arr  = np.zeros((N, N, max_pts, 2), dtype=np.float32)
+        d_hat_arr  = np.zeros((N, N, max_pts),    dtype=np.float32)
+        d_gt_arr   = np.zeros((N, N, max_pts),    dtype=np.float32)
+        pad_dir_arr = np.ones((N, N, max_pts),    dtype=bool)
+        for i in range(N):
+            valid_i_pts = ~pad_arr[i]                          # (max_pts,)
+            for j in range(N):
+                if i == j:
+                    continue
+                box_j = boxes[j]
+                P_i = pts_3d_in_cam[i]                          # (max_pts, 3)
+                homo = np.concatenate([P_i, np.ones((max_pts, 1), dtype=np.float32)],
+                                       axis=1)
+                P_j_hat = (T_hat[i, j] @ homo.T)[:3].T          # (max_pts, 3)
+                P_j_gt  = (T_gt [i, j] @ homo.T)[:3].T
+                d_hat_arr[i, j] = P_j_hat[:, 2]
+                d_gt_arr [i, j] = P_j_gt [:, 2]
+                # only project rows whose depth is positive (avoid log/divide by zero
+                # in _proj_cam internals); junk rows get pad_dir True below.
+                valid_depth = (P_j_hat[:, 2] > 0.5) & (P_j_gt[:, 2] > 0.5) & valid_i_pts
+                if valid_depth.any():
+                    uv_full_hat = _proj_cam(P_j_hat[valid_depth], K, scn.dist).astype(np.float32)
+                    uv_full_gt  = _proj_cam(P_j_gt [valid_depth], K, scn.dist).astype(np.float32)
+                    uv_local_hat = self._uv_to_patch_local(uv_full_hat, box_j)
+                    uv_local_gt  = self._uv_to_patch_local(uv_full_gt,  box_j)
+                    uv_hat_arr[i, j, valid_depth] = uv_local_hat
+                    uv_gt_arr [i, j, valid_depth] = uv_local_gt
+                    in_patch_hat = ((uv_local_hat[:, 0] >= 0) & (uv_local_hat[:, 0] < IMG) &
+                                    (uv_local_hat[:, 1] >= 0) & (uv_local_hat[:, 1] < IMG))
+                    in_patch_gt  = ((uv_local_gt [:, 0] >= 0) & (uv_local_gt [:, 0] < IMG) &
+                                    (uv_local_gt [:, 1] >= 0) & (uv_local_gt [:, 1] < IMG))
+                    valid_idx = np.where(valid_depth)[0]
+                    valid_full = np.zeros(max_pts, dtype=bool)
+                    valid_full[valid_idx[in_patch_hat & in_patch_gt]] = True
+                    pad_dir_arr[i, j] = ~valid_full
+
+        # 10. assemble pose (N, N, 6) ypr+t in degrees
+        pose_hat_arr = np.zeros((N, N, 6), dtype=np.float32)
+        pose_gt_arr  = np.zeros((N, N, 6), dtype=np.float32)
+        for i in range(N):
+            for j in range(N):
+                if i == j:
+                    continue
+                ypr_h, t_h = _mat_to_ypr_t(T_hat[i, j])
+                ypr_g, t_g = _mat_to_ypr_t(T_gt [i, j])
+                pose_hat_arr[i, j] = np.concatenate([ypr_h, t_h])
+                pose_gt_arr [i, j] = np.concatenate([ypr_g, t_g])
+
+        # 11. tensorize
+        out = dict(
+            patches      = torch.stack(patches, dim=0).float(),    # (N, 3, H, W)
+            uvd          = torch.from_numpy(uvd_arr),
+            pad          = torch.from_numpy(pad_arr),
+            uvd_full     = torch.from_numpy(uvd_full_arr),
+            pad_full     = torch.from_numpy(pad_full_arr),
+            pose_hat_6dof= torch.from_numpy(pose_hat_arr),
+            pose_gt_6dof = torch.from_numpy(pose_gt_arr),
+            uv_hat       = torch.from_numpy(uv_hat_arr),
+            uv_gt        = torch.from_numpy(uv_gt_arr),
+            d_hat        = torch.from_numpy(d_hat_arr),
+            d_gt         = torch.from_numpy(d_gt_arr),
+            pad_dir      = torch.from_numpy(pad_dir_arr),
+            fi           = torch.tensor(fis, dtype=torch.long),
+            scene        = scn.scene_id,
+        )
+        return out
+
+    @staticmethod
+    def _pack_full_local(uv_local, z, n_full, img_size, rng):
+        """Pack (n_full, 3) = uv_local + z/50, padded. Stratified subsample."""
+        uvd = np.concatenate([uv_local, (z / 50.0)[:, None]], axis=1).astype(np.float32)
+        n = len(uvd)
+        if n > n_full:
+            G = int(np.sqrt(n_full))
+            cell = img_size / G
+            cj = np.clip((uv_local[:, 0] / cell).astype(np.int32), 0, G - 1)
+            ck = np.clip((uv_local[:, 1] / cell).astype(np.int32), 0, G - 1)
+            cid = ck * G + cj
+            du = uv_local[:, 0] - (cj + 0.5) * cell
+            dv = uv_local[:, 1] - (ck + 0.5) * cell
+            d2 = du * du + dv * dv
+            sel = []
+            for u_c in np.unique(cid):
+                mem = np.where(cid == u_c)[0]
+                sel.append(int(mem[np.argmin(d2[mem])]))
+            kept = np.array(sorted(set(sel)), dtype=np.int64)
+            if len(kept) < n_full:
+                rest = np.setdiff1d(np.arange(n), kept, assume_unique=False)
+                if len(rest):
+                    fill = rng.choice(rest, size=min(n_full - len(kept), len(rest)),
+                                      replace=False)
+                    kept = np.concatenate([kept, fill])[:n_full]
+            uvd = uvd[kept]
+            n = len(uvd)
+        pad = np.zeros(n_full, dtype=bool)
+        if n < n_full:
+            pad[n:] = True
+            uvd = np.concatenate([uvd, np.zeros((n_full - n, 3), dtype=np.float32)],
+                                 axis=0)
+        return uvd, pad
 
     def _try_one(self, idx):
         rng = np.random.default_rng((idx + 1) * 2654435761 & 0xFFFFFFFF)
@@ -603,6 +916,37 @@ class PandaSetCrossFrameDataset(Dataset):
         patch_A, box_A = pa
         patch_B, box_B = pb
 
+        # 9b. triplet — pick fi_M between fi_A and fi_B, project pivot into M
+        if self.triplet:
+            fi_M = int(round(0.5 * (fi_A + fi_B)))
+            if fi_M == fi_A or fi_M == fi_B:
+                return None
+            T_w2M = scn.T_w2c[fi_M]
+            P_center_M = (T_w2M @ np.append(P_center_w, 1.0))[:3]
+            if P_center_M[2] < 1.0:
+                return None
+            uc_M_arr = _proj_cam(P_center_M, K, scn.dist).astype(np.float32)
+            uc_M, vc_M = float(uc_M_arr[0]), float(uc_M_arr[1])
+            if not (0 <= uc_M < IW and 0 <= vc_M < IH):
+                return None
+            u0_M = uc_M - half
+            v0_M = vc_M - half
+            patch_M_img = scn.load_patch(fi_M, u0_M, v0_M, CROP)
+            pm = self._resize_patch(patch_M_img, u0_M, v0_M, CROP)
+            if pm is None:
+                return None
+            patch_M, box_M = pm
+            T_A_to_M_gt = T_w2M @ T_A2w  # auxiliary; treated as exact in PoC
+            ypr_AM_gt, t_AM_gt = _mat_to_ypr_t(T_A_to_M_gt)
+            pts_w_M, uv_Mf, z_Mf, in_M = scn.frame_data(fi_M)
+            in_box_M = ((uv_Mf[:, 0] >= box_M[0]) & (uv_Mf[:, 0] < box_M[0] + box_M[2]) &
+                        (uv_Mf[:, 1] >= box_M[1]) & (uv_Mf[:, 1] < box_M[1] + box_M[3]) &
+                        (z_Mf > 1.0))
+            if in_box_M.sum() < 4:
+                return None
+            uv_M_patch = self._uv_to_patch_local(uv_Mf[in_box_M], box_M)
+            z_M_patch  = z_Mf[in_box_M].astype(np.float32)
+
         # 10. A-query points = A's in-patch LiDAR
         u0, v0, cw, ch = box_A
         in_box_A = ((uv_A_all[:, 0] >= u0) & (uv_A_all[:, 0] < u0 + cw) &
@@ -678,6 +1022,23 @@ class PandaSetCrossFrameDataset(Dataset):
         d_B_gt_of_A  = P_QA_in_B_gt [good_qa][inb, 2].astype(np.float32)
         d_A_hat_of_B = P_QB_in_A_hat[good_qb][inb2, 2].astype(np.float32)
         d_A_gt_of_B  = P_QB_in_A_gt [good_qb][inb2, 2].astype(np.float32)
+
+        # 11b. triplet — project filtered A/B query points into M frame
+        # (treated as exact pose: uv_M_hat == uv_M_gt in PoC)
+        if self.triplet:
+            # A-query → M
+            P_QA_filt = P_QA_in_A[good_qa][inb]              # (N_A, 3) in A-cam
+            P_QA_in_M = (np.column_stack([P_QA_filt, np.ones(len(P_QA_filt))]) @ T_A_to_M_gt.T)[:, :3]
+            uv_M_full_A  = _proj_cam(P_QA_in_M, K, scn.dist)
+            uv_M_local_A = self._uv_to_patch_local(uv_M_full_A, box_M)
+            d_M_of_A     = P_QA_in_M[:, 2].astype(np.float32)
+            # B-query → M (via T_B→A → T_A→M)
+            T_B_to_M_gt  = T_A_to_M_gt @ _invert_mat(T_A_to_B_gt)
+            P_QB_filt = P_QB_in_B[good_qb][inb2]
+            P_QB_in_M = (np.column_stack([P_QB_filt, np.ones(len(P_QB_filt))]) @ T_B_to_M_gt.T)[:, :3]
+            uv_M_full_B  = _proj_cam(P_QB_in_M, K, scn.dist)
+            uv_M_local_B = self._uv_to_patch_local(uv_M_full_B, box_M)
+            d_M_of_B     = P_QB_in_M[:, 2].astype(np.float32)
 
         # 12. spatial-grid stratified subsample → pad to max_points
         # G×G grid in patch-local space, keep one point per cell (the one
@@ -757,11 +1118,87 @@ class PandaSetCrossFrameDataset(Dataset):
 
         uvd_A_full, pad_A_full = _pack_full(uv_A_patch, z_A_patch)
         uvd_B_full, pad_B_full = _pack_full(uv_B_patch, z_B_patch)
+        if self.triplet:
+            uvd_M_full, pad_M_full = _pack_full(uv_M_patch, z_M_patch)
+            # stratify M down to max_points (no GT/hat correspondence — auxiliary)
+            def _pad_m(uv_q, z_q):
+                N = len(uv_q)
+                if N > self.max_points:
+                    G = int(np.sqrt(self.max_points))
+                    cell = self.img_size / G
+                    cj = np.clip((uv_q[:, 0] / cell).astype(np.int32), 0, G - 1)
+                    ci = np.clip((uv_q[:, 1] / cell).astype(np.int32), 0, G - 1)
+                    cid = ci * G + cj
+                    du  = uv_q[:, 0] - (cj + 0.5) * cell
+                    dv  = uv_q[:, 1] - (ci + 0.5) * cell
+                    d2  = du * du + dv * dv
+                    sel = []
+                    for u_c in np.unique(cid):
+                        mem = np.where(cid == u_c)[0]
+                        sel.append(int(mem[np.argmin(d2[mem])]))
+                    pick = np.array(sorted(set(sel)), dtype=np.int64)
+                else:
+                    pick = np.arange(N, dtype=np.int64)
+                N_use = len(pick)
+                uv_q = uv_q[pick]; z_q = z_q[pick]
+                pad = np.zeros(self.max_points, dtype=bool)
+                if N_use < self.max_points:
+                    pad[N_use:] = True
+                    pad_n = self.max_points - N_use
+                    uv_q = np.concatenate([uv_q, np.zeros((pad_n, 2), np.float32)])
+                    z_q  = np.concatenate([z_q,  np.zeros(pad_n, np.float32)])
+                return uv_q, z_q, pad
+            uv_M_patch, z_M_patch, pad_M = _pad_m(uv_M_patch, z_M_patch)
 
-        uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A, pad_A = _pad(
-            uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A)
-        uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B, pad_B = _pad(
-            uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B)
+        if self.triplet:
+            # extend _pad to also stratify uv_M_local_*; share the same pick.
+            def _pad8(uv_q, z_q, uv_hat, uv_gt, d_hat, d_gt, uv_M, d_M):
+                N = len(uv_q)
+                if N > self.max_points:
+                    G = int(np.sqrt(self.max_points))
+                    cell = self.img_size / G
+                    cj = np.clip((uv_q[:, 0] / cell).astype(np.int32), 0, G - 1)
+                    ci = np.clip((uv_q[:, 1] / cell).astype(np.int32), 0, G - 1)
+                    cid = ci * G + cj
+                    du  = uv_q[:, 0] - (cj + 0.5) * cell
+                    dv  = uv_q[:, 1] - (ci + 0.5) * cell
+                    d2  = du * du + dv * dv
+                    sel = []
+                    for u_c in np.unique(cid):
+                        mem = np.where(cid == u_c)[0]
+                        sel.append(int(mem[np.argmin(d2[mem])]))
+                    pick = np.array(sorted(set(sel)), dtype=np.int64)
+                else:
+                    pick = np.arange(N, dtype=np.int64)
+                arrs = [uv_q[pick], z_q[pick], uv_hat[pick], uv_gt[pick],
+                        d_hat[pick], d_gt[pick], uv_M[pick], d_M[pick]]
+                N_use = len(pick)
+                pad = np.zeros(self.max_points, dtype=bool)
+                if N_use < self.max_points:
+                    pad[N_use:] = True
+                    pad_n = self.max_points - N_use
+                    arrs[0] = np.concatenate([arrs[0], np.zeros((pad_n, 2), np.float32)])
+                    arrs[1] = np.concatenate([arrs[1], np.zeros(pad_n, np.float32)])
+                    arrs[2] = np.concatenate([arrs[2], np.zeros((pad_n, 2), np.float32)])
+                    arrs[3] = np.concatenate([arrs[3], np.zeros((pad_n, 2), np.float32)])
+                    arrs[4] = np.concatenate([arrs[4], np.zeros(pad_n, np.float32)])
+                    arrs[5] = np.concatenate([arrs[5], np.zeros(pad_n, np.float32)])
+                    arrs[6] = np.concatenate([arrs[6], np.zeros((pad_n, 2), np.float32)])
+                    arrs[7] = np.concatenate([arrs[7], np.zeros(pad_n, np.float32)])
+                return (*arrs, pad)
+            (uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A,
+             d_B_gt_of_A, uv_M_local_A, d_M_of_A, pad_A) = _pad8(
+                uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A,
+                d_B_hat_of_A, d_B_gt_of_A, uv_M_local_A, d_M_of_A)
+            (uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B,
+             d_A_gt_of_B, uv_M_local_B, d_M_of_B, pad_B) = _pad8(
+                uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B,
+                d_A_hat_of_B, d_A_gt_of_B, uv_M_local_B, d_M_of_B)
+        else:
+            uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A, pad_A = _pad(
+                uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A)
+            uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B, pad_B = _pad(
+                uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B)
 
         z_A_norm = z_A_patch / 50.0
         z_B_norm = z_B_patch / 50.0
@@ -769,7 +1206,7 @@ class PandaSetCrossFrameDataset(Dataset):
         ypr_AB_hat, t_AB_hat = _mat_to_ypr_t(T_A_to_B_hat)
         ypr_BA_hat, t_BA_hat = _mat_to_ypr_t(_invert_mat(T_A_to_B_hat))
 
-        return dict(
+        out = dict(
             patch_A = patch_A.float(),
             patch_B = patch_B.float(),
             uvd_A   = torch.from_numpy(
@@ -797,6 +1234,21 @@ class PandaSetCrossFrameDataset(Dataset):
             fi_A = fi_A, fi_B = fi_B,
             scene = scn.scene_id,
         )
+        if self.triplet:
+            z_M_norm = z_M_patch / 50.0
+            out['patch_M']      = patch_M.float()
+            out['uvd_M']        = torch.from_numpy(
+                np.concatenate([uv_M_patch, z_M_norm[:, None]], axis=1)).float()
+            out['pad_M']        = torch.from_numpy(pad_M)
+            out['uvd_M_full']   = torch.from_numpy(uvd_M_full)
+            out['pad_M_full']   = torch.from_numpy(pad_M_full)
+            out['pose_AM_6dof'] = torch.from_numpy(
+                np.concatenate([ypr_AM_gt, t_AM_gt]).astype(np.float32))
+            # A-query → M reference (= GT in PoC since pose_AM is treated exact)
+            out['uv_M_hat_of_A'] = torch.from_numpy(uv_M_local_A).float()
+            out['uv_M_hat_of_B'] = torch.from_numpy(uv_M_local_B).float()
+            out['fi_M']         = fi_M
+        return out
 
 
 # ─── smoke test ───────────────────────────────────────────────────────────────

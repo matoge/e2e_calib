@@ -31,7 +31,7 @@ import matplotlib.cm as cm
 from matplotlib.patches import ConnectionPatch
 
 from datasets.pandaset_pair import _SceneData, _ypr_t_to_mat
-from models.cross_frame import CalibNetCrossFrame
+from models.cross_frame_multi import CalibNetMultiFrame
 from scripts.eval.cross_frame_lln import make_pair, infer_batch, ba_recover
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -45,7 +45,7 @@ def load_model(ckpt_dir):
     n_intra = max(1, sum(1 for k in sd if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
     proj_w = [sd[k] for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight')]
     out_dim = proj_w[0].shape[0] if proj_w else 5
-    m = CalibNetCrossFrame(img_size=IMG_SIZE, deform_mode=deform,
+    m = CalibNetMultiFrame(img_size=IMG_SIZE, deform_mode=deform,
                             n_cross_layers=n_cross, n_intra_layers=n_intra,
                             out_dim=out_dim).to(DEVICE)
     m.load_state_dict(sd); m.eval()
@@ -174,15 +174,34 @@ def main(args):
     print(f'loaded {ckpt.name}  out_dim={out_dim}')
 
     import random as _r
-    root = Path('/mnt/mininas/datasets/pandaset')
-    names = sorted([p.name for p in root.iterdir() if p.is_dir() and p.name.isdigit()])
-    shuffled = sorted([str(root / n) for n in names])
-    _r.Random(42).shuffle(shuffled)
-    cutoff = int(len(shuffled) * 0.8)
-    val_roots = shuffled[cutoff:]
+    # build (scene, camera) pair pool from --scenes-root; use val split (last 20%).
+    scene_roots = []
+    for root_str in str(args.scenes_root).split(','):
+        root = Path(root_str.strip())
+        for p in sorted(root.iterdir()):
+            if p.is_dir() and (p / 'camera').is_dir():
+                scene_roots.append(str(p))
+    _r.Random(42).shuffle(scene_roots)
+    cutoff = int(len(scene_roots) * 0.8)
+    val_roots = scene_roots[cutoff:] if len(scene_roots) > 5 else scene_roots
+    if args.cameras.lower() == 'all':
+        def cams_of(sr):
+            d = Path(sr) / 'camera'
+            return sorted(c.name for c in d.iterdir()
+                          if c.is_dir() and (c / 'intrinsics.json').exists())
+    else:
+        wanted = [c.strip() for c in args.cameras.split(',')]
+        def cams_of(sr):
+            return [c for c in wanted
+                    if (Path(sr) / 'camera' / c / 'intrinsics.json').exists()]
+    pairs = [(sr, cam) for sr in val_roots for cam in cams_of(sr)]
+    _r.Random(42).shuffle(pairs)
+    print(f'viz pool: {len(pairs)} (scene, cam) pairs from {len(val_roots)} val scenes')
     scenes = []
-    for sr in val_roots[:6]:
-        scn = _SceneData(Path(sr)); scn.precompute_all(preload_images=False); scenes.append(scn)
+    for sr, cam in pairs[:min(24, len(pairs))]:
+        scn = _SceneData(Path(sr), camera_name=cam)
+        scn.precompute_all()
+        scenes.append(scn)
 
     rng = np.random.default_rng(args.seed)
     n_rows = args.n_pairs
@@ -210,7 +229,7 @@ def main(args):
         if left['in_mask'].sum() < 4 or right['in_mask'].sum() < 4: continue
 
         draw_pair_panel(fig, axes[row, 0], axes[row, 1], left,
-                        tag=f'scn {scn.root.name} fi {fi_A}→{fi_B}  σ=1°/0.2m')
+                        tag=f'{scn.scene_id} fi {fi_A}→{fi_B}  σ=1°/0.2m')
         draw_pair_panel(fig, axes[row, 2], axes[row, 3], right,
                         tag=f'(identity σ=0)')
         row += 1
@@ -236,5 +255,9 @@ if __name__ == '__main__':
     ap.add_argument('--baseline-max', type=int, default=10)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--out', default='experiments/ba_reproject_v15.png')
+    ap.add_argument('--scenes-root', default='/mnt/nvme6t/pandaset',
+                    help='comma-separated dataset roots to sample val scenes from')
+    ap.add_argument('--cameras', default='all',
+                    help='"all" or comma-separated camera names')
     args = ap.parse_args()
     main(args)

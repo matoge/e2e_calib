@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 
 from datasets.pandaset_pair import PandaSetCrossFrameDataset
 from models.cross_frame import CalibNetCrossFrame
+from models.cross_frame_multi import CalibNetMultiFrame
 from models.model_cov import gaussian2d_nll, gaussian_uvd_nll
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -116,7 +117,7 @@ def residual_uvd_nll_and_metrics(raw, uv_hat, uv_gt, d_hat, d_gt, pad_mask, img_
 
 # ─── one step ─────────────────────────────────────────────────────────────────
 
-def step(model, batch, uvd_mode=False, frustum_full=True):
+def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False):
     batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
     kw = {}
     if frustum_full:
@@ -124,6 +125,15 @@ def step(model, batch, uvd_mode=False, frustum_full=True):
         kw['uvd_B_full'] = batch.get('uvd_B_full')
         kw['pad_A_full'] = batch.get('pad_A_full')
         kw['pad_B_full'] = batch.get('pad_B_full')
+    if multi_frame:
+        kw['patch_M']        = batch['patch_M']
+        kw['uvd_M']          = batch['uvd_M']
+        kw['pad_M']          = batch['pad_M']
+        kw['uvd_M_full']     = batch.get('uvd_M_full')
+        kw['pad_M_full']     = batch.get('pad_M_full')
+        kw['pose_AM_6dof']   = batch['pose_AM_6dof']
+        kw['uv_M_hat_of_A']  = batch['uv_M_hat_of_A']
+        kw['uv_M_hat_of_B']  = batch['uv_M_hat_of_B']
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
         patch_B=batch['patch_B'], uvd_B=batch['uvd_B'],
@@ -228,6 +238,19 @@ def main():
                     help='when >0, use sentinel-infinite mode: eval always runs on '
                          'idx [0..sentinel_size), mining pulls from idx [sentinel_size..∞). '
                          '0 = legacy finite val_pool_size mode.')
+    ap.add_argument('--init-from', default=None,
+                    help='path to a previous experiment dir (or .pt). Encoder weights '
+                         '(cnn, point_mlp, frustum_enc, intra_blocks, pose_mlp) are loaded '
+                         'and FROZEN. Only the new pieces (cross_blocks, pose_bias) train. '
+                         'Use this to fine-tune multi-frame on top of a converged pair-net.')
+    ap.add_argument('--no-freeze', action='store_true',
+                    help='with --init-from, skip freezing the frame encoder so all '
+                         'params train (full fine-tune). Useful for ablation: did freeze '
+                         'matter, or does the multi-frame head need encoder co-training?')
+    ap.add_argument('--multi-frame', action='store_true',
+                    help='enable triplet dataset (A,M,B) + CalibNetMultiFrame model. '
+                         'M is the middle frame; KV concatenates {M, B} with per-frame '
+                         'pose-bias added to attention scores (relative-only, RPE-style).')
     ap.add_argument('--stop-no-improve-migrations', type=int, default=0,
                     help='stop training if this many consecutive migrations fail to '
                          'improve global-best val_nll. 0 = no early stop (run full epochs).')
@@ -254,6 +277,7 @@ def main():
         sigma_ypr=args.sigma_ypr, sigma_t=args.sigma_t,
         crop_range=(args.crop_min, args.crop_max),
         cameras=args.cameras,
+        triplet=args.multi_frame,
     )
     if args.scenes_root:
         ds_kwargs['scenes_root'] = args.scenes_root
@@ -281,7 +305,7 @@ def main():
             f'{(fixed[0]["uv_B_gt_of_A"] - fixed[0]["uv_B_hat_of_A"])[~fixed[0]["pad_A"]].abs().mean().item():.2f} px')
 
         def collate(batch):
-            keep_keys = [k for k in batch[0].keys() if not isinstance(batch[0][k], int)]
+            keep_keys = [k for k in batch[0].keys() if not isinstance(batch[0][k], (int, str))]
             return {k: torch.stack([b[k] for b in batch]) for k in keep_keys}
         loader = [collate(fixed[i:i+args.batch_size])
                   for i in range(0, len(fixed), args.batch_size)]
@@ -331,8 +355,12 @@ def main():
                      if not isinstance(batch_list[0][k], (int, str))]
         return {k: torch.stack([b[k] for b in batch_list]) for k in keep_keys}
 
-    # model
-    model = CalibNetCrossFrame(
+    # model — always CalibNetMultiFrame.
+    # Pair mode (no --multi-frame): N_kv_frames=1, MSDeformAttn level=B alone,
+    # per-frame bias degenerate (cancels). Multi-frame: N_kv_frames=2, level
+    # per frame (M, B), per-level reference uv from pose projection. Q-shift
+    # via pose_mlp gives explicit pose channel in pair mode.
+    model = CalibNetMultiFrame(
         img_size=args.img_size,
         n_intra_layers=args.n_intra_layers,
         n_cross_layers=args.n_cross_layers,
@@ -342,7 +370,35 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     log(f'model params: {n_params/1e6:.3f} M')
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    # ─── fine-tune mode: load matching keys + freeze frame encoder ─────────
+    # Frame-encoder modules (data-dependent) get frozen; only the new
+    # cross-frame pieces train. See docs/experiment_progression.html.
+    FREEZE_PREFIXES = ('cnn.', 'point_mlp.', 'frustum_enc.',
+                       'intra_blocks.', 'pose_mlp.')
+    if args.init_from:
+        ckpt_path = Path(args.init_from)
+        if ckpt_path.is_dir():
+            ckpt_path = ckpt_path / 'best_model.pt'
+        sd = torch.load(ckpt_path, map_location=DEVICE)
+        loaded = model.load_state_dict(sd, strict=False)
+        log(f'init-from {ckpt_path}: '
+            f'{len(sd) - len(loaded.unexpected_keys)} keys loaded, '
+            f'{len(loaded.missing_keys)} missing (new), '
+            f'{len(loaded.unexpected_keys)} unexpected (dropped)')
+        n_frozen = 0
+        if not args.no_freeze:
+            for name, p in model.named_parameters():
+                if any(name.startswith(pre) for pre in FREEZE_PREFIXES):
+                    p.requires_grad = False
+                    n_frozen += p.numel()
+        n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        log(f'  frozen params: {n_frozen/1e6:.3f} M  trainable: {n_train/1e6:.3f} M'
+            f'{" (no-freeze: full fine-tune)" if args.no_freeze else ""}')
+
+    opt = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=1e-4,
+    )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=args.epochs, eta_min=args.lr * 1e-2)
 
@@ -363,7 +419,7 @@ def main():
         # migrated ∈ train now, their residuals are near 0 → they inflate val slightly
         # (≤ migrated/pool frac). Accept the bias for 50-100× eval speedup.
         for batch in val_loader:
-            _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full)
+            _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
             if args.uvd:
@@ -398,7 +454,7 @@ def main():
 
         def _do_step(batch):
             opt.zero_grad(set_to_none=True)
-            loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full)
+            loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
@@ -548,10 +604,11 @@ def main():
     # final plot
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), dpi=120)
     fig.patch.set_facecolor('#f6f4ed')
-    ax[0].plot(curves['epoch'], curves['loss'], color='#174734', lw=2, label='train')
+    ax[0].plot(curves['epoch'], curves['loss'], color='#174734', lw=2, label='train NLL')
     if not overfit and curves['val_loss']:
         val_eps = [e for e in curves['epoch'] if (e % args.log_every == 0 or e == args.epochs - 1)]
-        ax[0].plot(val_eps, curves['val_loss'], color='#c13c14', lw=2, marker='o', ms=4, label='val')
+        ax[0].plot(val_eps, curves['val_loss'], color='#c13c14', lw=2, marker='o', ms=4, label='val NLL')
+    ax[0].set_title('NLL loss', loc='left')
     ax[0].set_title('NLL loss', loc='left'); ax[0].set_xlabel('epoch'); ax[0].grid(alpha=0.25)
     ax[0].legend(frameon=False)
     ax[1].plot(curves['epoch'], curves['err_AB'], color='#c13c14', lw=2, label='train err A→B')
@@ -571,6 +628,9 @@ def main():
     log(f'best {"val" if not overfit else "train"} err = {best_err:.2f} px')
 
     # auto-run BA reprojection visualization on best_model.pt
+    if args.multi_frame:
+        log('[viz] skipped: multi-frame model not yet supported by vis_ba_reproject')
+        return
     try:
         import subprocess
         viz_out = out_dir / 'ba_reproject.png'
