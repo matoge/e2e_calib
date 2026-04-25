@@ -343,10 +343,16 @@ class PandaSetCrossFrameDataset(Dataset):
                 # A scene is any direct child dir that has at least one camera.
                 # (Relaxed from `.name.isdigit()` so Waymo segment names work.)
                 for p in sorted(root.iterdir()):
-                    if p.is_dir() and (p / 'camera').is_dir() and any(
-                        (p / 'camera' / c / 'intrinsics.json').exists()
-                        for c in (['front_camera'] if self.cameras == ['all'] else self.cameras)
-                    ):
+                    if not (p.is_dir() and (p / 'camera').is_dir()):
+                        continue
+                    if self.cameras == ['all']:
+                        # any subdir with intrinsics counts as a valid camera
+                        has_cam = any((d / 'intrinsics.json').exists()
+                                      for d in (p / 'camera').iterdir() if d.is_dir())
+                    else:
+                        has_cam = any((p / 'camera' / c / 'intrinsics.json').exists()
+                                      for c in self.cameras)
+                    if has_cam:
                         scene_roots.append(str(p))
         elif scene_roots is None and scene_root is not None:
             # legacy single scene: use whole scene for requested split
@@ -713,6 +719,45 @@ class PandaSetCrossFrameDataset(Dataset):
                 d_gt     = np.concatenate([d_gt,     np.zeros(pad_n, np.float32)])
             return uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt, pad
 
+        # ── snapshot the FULL in-box sets BEFORE subsampling, for frustum
+        # local-encoder lookup (model side runs on GPU, no CPU cost concern).
+        # Pad to N_FULL=2048 with mask; if more, stratify-truncate to keep
+        # spatial coverage (avoids dense-region bias).
+        N_FULL = 2048
+        def _pack_full(uv, z):
+            uvd = np.concatenate([uv, (z / 50.0)[:, None]], axis=1).astype(np.float32)
+            N = len(uvd)
+            if N > N_FULL:
+                G_full = int(np.sqrt(N_FULL))   # ~45
+                cell_full = self.img_size / G_full
+                cj = np.clip((uv[:, 0] / cell_full).astype(np.int32), 0, G_full - 1)
+                ci = np.clip((uv[:, 1] / cell_full).astype(np.int32), 0, G_full - 1)
+                cid = ci * G_full + cj
+                du = uv[:, 0] - (cj + 0.5) * cell_full
+                dv = uv[:, 1] - (ci + 0.5) * cell_full
+                d2 = du * du + dv * dv
+                sel = []
+                for u_c in np.unique(cid):
+                    mem = np.where(cid == u_c)[0]
+                    sel.append(int(mem[np.argmin(d2[mem])]))
+                # if grid yields fewer than N_FULL (sparse cells), fill rest randomly
+                kept = np.array(sorted(set(sel)), dtype=np.int64)
+                if len(kept) < N_FULL:
+                    rest = np.setdiff1d(np.arange(N), kept, assume_unique=False)
+                    fill = self.rng.choice(rest, size=min(N_FULL - len(kept), len(rest)),
+                                           replace=False) if len(rest) > 0 else np.empty(0, dtype=np.int64)
+                    kept = np.concatenate([kept, fill])[:N_FULL]
+                uvd = uvd[kept]
+                N = len(uvd)
+            pad = np.zeros(N_FULL, dtype=bool)
+            if N < N_FULL:
+                pad[N:] = True
+                uvd = np.concatenate([uvd, np.zeros((N_FULL - N, 3), dtype=np.float32)], axis=0)
+            return uvd, pad
+
+        uvd_A_full, pad_A_full = _pack_full(uv_A_patch, z_A_patch)
+        uvd_B_full, pad_B_full = _pack_full(uv_B_patch, z_B_patch)
+
         uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A, pad_A = _pad(
             uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A)
         uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B, pad_B = _pad(
@@ -745,6 +790,10 @@ class PandaSetCrossFrameDataset(Dataset):
                 np.concatenate([ypr_BA_hat, t_BA_hat]).astype(np.float32)),
             pad_A = torch.from_numpy(pad_A),
             pad_B = torch.from_numpy(pad_B),
+            uvd_A_full = torch.from_numpy(uvd_A_full),       # (N_FULL, 3) frustum-context
+            uvd_B_full = torch.from_numpy(uvd_B_full),
+            pad_A_full = torch.from_numpy(pad_A_full),       # (N_FULL,) bool
+            pad_B_full = torch.from_numpy(pad_B_full),
             fi_A = fi_A, fi_B = fi_B,
             scene = scn.scene_id,
         )

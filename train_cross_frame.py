@@ -116,14 +116,21 @@ def residual_uvd_nll_and_metrics(raw, uv_hat, uv_gt, d_hat, d_gt, pad_mask, img_
 
 # ─── one step ─────────────────────────────────────────────────────────────────
 
-def step(model, batch, uvd_mode=False):
+def step(model, batch, uvd_mode=False, frustum_full=True):
     batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
+    kw = {}
+    if frustum_full:
+        kw['uvd_A_full'] = batch.get('uvd_A_full')
+        kw['uvd_B_full'] = batch.get('uvd_B_full')
+        kw['pad_A_full'] = batch.get('pad_A_full')
+        kw['pad_B_full'] = batch.get('pad_B_full')
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
         patch_B=batch['patch_B'], uvd_B=batch['uvd_B'],
         pose_AB_6dof=batch['pose_AB_6dof'], pose_BA_6dof=batch['pose_BA_6dof'],
         uv_B_hat_of_A=batch['uv_B_hat_of_A'], uv_A_hat_of_B=batch['uv_A_hat_of_B'],
         pad_A=batch['pad_A'], pad_B=batch['pad_B'],
+        **kw,
     )
     if uvd_mode:
         loss_AB, m_AB = residual_uvd_nll_and_metrics(
@@ -189,6 +196,10 @@ def main():
     ap.add_argument('--uvd', action=argparse.BooleanOptionalAction, default=True,
                     help='predict (Δu,Δv,Δd) with 3D gaussian NLL instead of 2D (default: on; '
                          'pass --no-uvd for legacy 5-dim)')
+    ap.add_argument('--frustum-full', action=argparse.BooleanOptionalAction, default=True,
+                    help='if set, FrustumLocalEncoder reads neighbors from the FULL '
+                         'in-box LiDAR set (uvd_*_full padded to N=2048) instead of '
+                         'just the stratified-256 query subset. --no-frustum-full = legacy.')
     ap.add_argument('--dataset', default='pandaset',
                     choices=['pandaset', 'waymo', 'pandaset+waymo'],
                     help='training dataset(s)')
@@ -352,7 +363,7 @@ def main():
         # migrated ∈ train now, their residuals are near 0 → they inflate val slightly
         # (≤ migrated/pool frac). Accept the bias for 50-100× eval speedup.
         for batch in val_loader:
-            _, m = step(model, batch, uvd_mode=args.uvd)
+            _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
             if args.uvd:
@@ -387,7 +398,7 @@ def main():
 
         def _do_step(batch):
             opt.zero_grad(set_to_none=True)
-            loss, m = step(model, batch, uvd_mode=args.uvd)
+            loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
@@ -567,9 +578,11 @@ def main():
         r = subprocess.run(
             ['python', 'scripts/visualization/vis_ba_reproject.py',
              '--ckpt', str(out_dir),
-             '--n-pairs', '4',
+             '--n-pairs', '6',
              '--baseline-min', str(max(1, args.baseline_min)),
              '--baseline-max', str(min(args.baseline_max, 10)),
+             '--scenes-root', args.scenes_root or str(Path(args.scene).parent),
+             '--cameras', args.cameras,
              '--out', str(viz_out)],
             capture_output=True, text=True, timeout=600,
         )

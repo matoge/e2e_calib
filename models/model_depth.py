@@ -45,44 +45,57 @@ class FrustumLocalEncoder(nn.Module):
             nn.Linear(d_out, d_out),
         )
 
-    def forward(self, uvd: torch.Tensor, pad_mask=None) -> torch.Tensor:
-        # uvd: (B, N, 3)  U,V in [0,img_size], D in [0,1]
-        B, N, _ = uvd.shape
+    def forward(self, query_uvd: torch.Tensor,
+                full_uvd: torch.Tensor = None,
+                full_pad_mask: torch.Tensor = None,
+                query_pad_mask: torch.Tensor = None) -> torch.Tensor:
+        """Local-feature encoding.
 
-        # relative coords: rel[b,i,j] = uvd[b,j] - uvd[b,i]
-        rel = uvd.unsqueeze(2) - uvd.unsqueeze(1)   # (B, N, N, 3)
+        For each *query* point, find neighbors in *full_uvd* via box filter
+        + top-k UV-nearest, MLP on relative (Δu, Δv, Δd), MaxPool.
 
-        # box filter
+        Args:
+            query_uvd:      (B, N_q, 3)  U,V in [0,img_size], D in [0,1]
+            full_uvd:       (B, N_kv, 3)  context point cloud. If None, falls
+                             back to legacy single-set behavior (full = query).
+            full_pad_mask:  (B, N_kv) bool — True = padded entry to ignore
+            query_pad_mask: (B, N_q)  bool — kept for API compat; not used here
+
+        Returns:
+            (B, N_q, d_out) — local feature per query point
+        """
+        if full_uvd is None:
+            full_uvd = query_uvd
+            if full_pad_mask is None:
+                full_pad_mask = query_pad_mask
+        B, N_q, _ = query_uvd.shape
+        N_kv = full_uvd.shape[1]
+
+        # relative coords: rel[b, i, j] = full_uvd[b, j] - query_uvd[b, i]
+        rel = full_uvd.unsqueeze(1) - query_uvd.unsqueeze(2)   # (B, N_q, N_kv, 3)
+
         in_box = ((rel[..., 0].abs() < self.r_uv) &
                   (rel[..., 1].abs() < self.r_uv) &
                   (rel[..., 2].abs() < self.r_d))
-        # exclude self
-        in_box[:, range(N), range(N)] = False
-        # exclude padded neighbors
-        if pad_mask is not None:
-            in_box = in_box & ~pad_mask.unsqueeze(1)   # (B, 1, N)
+        # exclude exact self-coord matches (when query is a subset of full)
+        self_match = ((rel[..., 0] == 0) & (rel[..., 1] == 0) & (rel[..., 2] == 0))
+        in_box = in_box & ~self_match
+        if full_pad_mask is not None:
+            in_box = in_box & ~full_pad_mask.unsqueeze(1)        # (B, 1, N_kv)
 
-        # UV-squared distance; mask out non-box with large value
-        uv_d2 = rel[..., 0] ** 2 + rel[..., 1] ** 2  # (B, N, N)
+        uv_d2 = rel[..., 0] ** 2 + rel[..., 1] ** 2              # (B, N_q, N_kv)
         uv_d2 = uv_d2.masked_fill(~in_box, 1e9)
 
-        # top-k nearest
-        k = min(self.k, N)
-        _, topk_idx = uv_d2.topk(k, dim=-1, largest=False)   # (B, N, k)
+        k = min(self.k, N_kv)
+        _, topk_idx = uv_d2.topk(k, dim=-1, largest=False)       # (B, N_q, k)
 
-        # gather relative features
         idx_exp  = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3)
-        topk_rel = rel.gather(2, idx_exp)              # (B, N, k, 3)
-        valid    = uv_d2.gather(2, topk_idx) < 1e8    # (B, N, k)
+        topk_rel = rel.gather(2, idx_exp)                        # (B, N_q, k, 3)
+        valid    = uv_d2.gather(2, topk_idx) < 1e8               # (B, N_q, k)
 
-        # shared MLP + mask invalid
-        feat = self.mlp(topk_rel)                      # (B, N, k, d_out)
+        feat = self.mlp(topk_rel)                                # (B, N_q, k, d_out)
         feat = feat.masked_fill(~valid.unsqueeze(-1), -1e9)
-
-        # MaxPool over k neighbors
-        feat, _ = feat.max(dim=2)                      # (B, N, d_out)
-
-        # zero out points with no valid neighbor
+        feat, _ = feat.max(dim=2)                                # (B, N_q, d_out)
         feat = feat.masked_fill(~valid.any(dim=-1, keepdim=True), 0.0)
         return feat
 

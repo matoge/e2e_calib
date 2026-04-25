@@ -244,8 +244,14 @@ class CalibNetCrossFrame(nn.Module):
 
     # ------------------------------------------------------------------ helpers
 
-    def _encode_frame(self, image, uvd, pad_mask=None):
+    def _encode_frame(self, image, uvd, pad_mask=None,
+                      uvd_full=None, pad_full=None):
         """Per-frame intra encoding.
+
+        uvd       : (B, N_q, 3)  — *query* points (stratified, fed to attention)
+        uvd_full  : (B, N_kv, 3) — full in-box context for frustum local-encoder.
+                                    If None, frustum falls back to legacy
+                                    (full == query, sparse-region bias).
 
         Returns:
             pt_tok  : (B, N_pt, D)   — point-derived tokens after fusion
@@ -254,13 +260,16 @@ class CalibNetCrossFrame(nn.Module):
         """
         coarse, _ = self.cnn(image)                         # coarse: (B, D, H/8, W/8)
         B, D_, Hc, Wc = coarse.shape
-        img_tok = coarse.flatten(2).permute(0, 2, 1)        # (B, H*W, D)  PE already baked in
+        img_tok = coarse.flatten(2).permute(0, 2, 1)        # (B, H*W, D)
 
         uv_01 = uvd[..., :2] / self.img_size
         uvd_n = torch.cat([uv_01, uvd[..., 2:3]], dim=-1)
         pt_tok = self.point_mlp(uvd_n)
         if self.frustum_enc is not None:
-            pt_tok = pt_tok + self.frustum_enc(uvd, pad_mask=pad_mask)
+            pt_tok = pt_tok + self.frustum_enc(uvd,
+                                                full_uvd=uvd_full,
+                                                full_pad_mask=pad_full,
+                                                query_pad_mask=pad_mask)
 
         # Concatenate: [pt tokens ‖ img tokens]
         N_pt  = pt_tok.shape[1]
@@ -306,11 +315,17 @@ class CalibNetCrossFrame(nn.Module):
     def forward(self, patch_A, uvd_A, patch_B, uvd_B,
                 pose_AB_6dof, pose_BA_6dof,
                 uv_B_hat_of_A, uv_A_hat_of_B,
-                pad_A=None, pad_B=None):
+                pad_A=None, pad_B=None,
+                uvd_A_full=None, uvd_B_full=None,
+                pad_A_full=None, pad_B_full=None):
         """Returns (raw_AtoB (B,N_A,5), raw_BtoA (B,N_B,5))."""
-        # 1. intra-frame encode (shared weights)
-        pt_A, img_A_flat, img_A_2d = self._encode_frame(patch_A, uvd_A, pad_A)
-        pt_B, img_B_flat, img_B_2d = self._encode_frame(patch_B, uvd_B, pad_B)
+        # 1. intra-frame encode (shared weights). uvd_*_full feeds the
+        #    frustum local-encoder so each query point sees the FULL in-box
+        #    LiDAR neighborhood (not just the stratified-256 attention set).
+        pt_A, img_A_flat, img_A_2d = self._encode_frame(
+            patch_A, uvd_A, pad_A, uvd_full=uvd_A_full, pad_full=pad_A_full)
+        pt_B, img_B_flat, img_B_2d = self._encode_frame(
+            patch_B, uvd_B, pad_B, uvd_full=uvd_B_full, pad_full=pad_B_full)
 
         # 2. pose embeddings
         pose_emb_AB = self.pose_mlp(pose_AB_6dof).unsqueeze(1)     # (B, 1, D)
