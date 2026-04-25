@@ -492,9 +492,16 @@ class PandaSetCrossFrameDataset(Dataset):
         if not scn.fi_pool:
             return None
         fi_A = int(rng.choice(scn.fi_pool))
-        # 2. fi_B: nearby frame
+        # 2. fi_B: nearby frame. baseline_max is per-camera:
+        #   front/back (pure, no left/right/side) → unlimited (clip to scene length)
+        #   side / front_left / rear_right / etc.                → baseline_max
         bmin, bmax = self.baseline_range
-        delta = int(rng.integers(bmin, bmax + 1)) * int(rng.choice([-1, 1]))
+        cn = scn.camera_name.lower()
+        is_fb = (('front' in cn or 'back' in cn or 'rear' in cn)
+                 and 'left' not in cn and 'right' not in cn and 'side' not in cn)
+        eff_max = (scn.n_frames - 1) if is_fb else bmax
+        eff_max = max(bmin, eff_max)
+        delta = int(rng.integers(bmin, eff_max + 1)) * int(rng.choice([-1, 1]))
         fi_B = fi_A + delta
         if fi_B < 0 or fi_B >= scn.n_frames:
             return None
@@ -652,11 +659,31 @@ class PandaSetCrossFrameDataset(Dataset):
         d_A_hat_of_B = P_QB_in_A_hat[good_qb][inb2, 2].astype(np.float32)
         d_A_gt_of_B  = P_QB_in_A_gt [good_qb][inb2, 2].astype(np.float32)
 
-        # 12. pad/truncate to max_points
+        # 12. spatial-grid stratified subsample → pad to max_points
+        # G×G grid in patch-local space, keep one point per cell (the one
+        # closest to its cell center). Replaces the legacy uniform-random
+        # pick which biased toward dense regions (ground / nearby cars).
+        # img=64,  max_points=256  → G=16, cell=4×4 px
+        # img=128, max_points=256  → G=16, cell=8×8 px
         def _pad(uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt):
             N = len(uv_query)
-            N_use = min(N, self.max_points)
-            pick = self.rng.choice(N, size=N_use, replace=False) if N > N_use else np.arange(N)
+            if N > self.max_points:
+                G = int(np.sqrt(self.max_points))
+                cell = self.img_size / G
+                cj = np.clip((uv_query[:, 0] / cell).astype(np.int32), 0, G - 1)
+                ci = np.clip((uv_query[:, 1] / cell).astype(np.int32), 0, G - 1)
+                cid = ci * G + cj
+                du  = uv_query[:, 0] - (cj + 0.5) * cell
+                dv  = uv_query[:, 1] - (ci + 0.5) * cell
+                d2  = du * du + dv * dv
+                sel = []
+                for u_c in np.unique(cid):
+                    mem = np.where(cid == u_c)[0]
+                    sel.append(int(mem[np.argmin(d2[mem])]))
+                pick = np.array(sorted(set(sel)), dtype=np.int64)
+            else:
+                pick = np.arange(N, dtype=np.int64)
+            N_use = len(pick)
             uv_query = uv_query[pick]; z_query = z_query[pick]
             uv_hat = uv_hat[pick];     uv_gt = uv_gt[pick]
             d_hat = d_hat[pick];       d_gt  = d_gt[pick]
