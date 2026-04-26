@@ -294,6 +294,18 @@ matcher が必要だった「動的物体 → 排除」は要らない。
 - **学習分布外**: 訓練に使ってない sensor 構成や特殊環境 (重雨、雪嵐) で
   σ が大きく出る可能性。 該当データで再学習が必要
 
+### PoC 設定の caveat (報告値の解釈)
+
+- **中間 frame M の pose は訓練時 GT で渡してる**。 v100 の 1.85 px /
+  1.59 nll は M の pose 仮説にノイズなしの状態での値。 production だと
+  pose_AM もノイジー (A↔M baseline が短いので精度は高いはずだが 0 では
+  ない)。 真の汎化は pose_AM にも比例ノイズを乗せた retraining + 評価で
+  確認する必要がある
+- **M に向いた supervision は無い**。 現状 loss は A↔B 双方向のみ、 M は
+  KV としてだけ provide。 6 directions (A↔M, B↔M, M↔A, M↔B 含む) を全部
+  supervise する設計は別途試したが、 stacked-path で σ output 周りが
+  不安定になり今は legacy triplet (M=KV-only) を使ってる。 改善余地
+
 ### 「matcher が必要なのでは」という誤解への反論
 
 長基線 (>100m + 大角差) では matcher が要るのでは、と言われがちだが:
