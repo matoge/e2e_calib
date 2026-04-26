@@ -7,20 +7,15 @@
 
 ## なぜこれが必要か
 
-近年の SfM / SLAM / depth estimation 系論文を読んでいると、複雑なマルチ
-タスク head (pose + 内部パラメータ + depth + segmentation 同時推定など)
-で marginal gain を積み上げてる研究が大半を占める。しかし実用上
-**本当に必要なのは「ある点とある点が、どのくらいの確信度で同じ点か」
-という primitive ひとつだけ** で、これが正確なら calibration / 地図更新 /
-BA / SLAM / loop closure 検証など下流タスクが全部成立する。
+近年の SfM / SLAM / depth estimation 系論文の多くは、pose + 内部パラメータ
++ depth + segmentation を同時に出すマルチタスク head で僅差の改善を積む方向に
+向かっている。しかし実用で本当に欲しいのは
+**「ある点とある点がどのくらいの確信度で同じか」だけ**で、それが正確なら
+calibration、地図更新、BA、SLAM、loop closure 検証は全部その上に乗る。
 
-このプロジェクトはその primitive — **per-point の (対応位置, 不確実性)** —
-を直接ターゲットにする。シーン全体の再構成や pose 回帰のような周辺タスクは
-出力しない。core を尖らせて、それを呼び出す形で各 application を組む方針。
-
-「core が正確なら全て解ける、core が緩いなら何重にも fallback / 例外処理が
-要る」という判断。本手法は core そのものを学習可能にして、緩さを **σ という
-連続値** で表現する。
+本プロジェクトはこれだけを出す。シーン再構成も pose 回帰も出力しない。
+出力は per-point の **対応位置 (Δuv) と不確実性 (Σ)**、終わり。
+信頼度は二値の inlier/outlier ではなく Σ の連続値で扱う。
 
 ### 具体的に何の用途で必要か
 
