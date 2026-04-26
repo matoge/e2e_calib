@@ -25,6 +25,19 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 推定する</strong> ネットワークを学習することにある。本ドキュメントはなぜそれが
 重要か、何ができるか、何ができないかを整理する。</p>
 <h2 id="_1">なぜこれが必要か</h2>
+<p>近年の SfM / SLAM / depth estimation 系論文を読んでいると、複雑なマルチ
+タスク head (pose + 内部パラメータ + depth + segmentation 同時推定など)
+で marginal gain を積み上げてる研究が大半を占める。しかし実用上
+<strong>本当に必要なのは「ある点とある点が、どのくらいの確信度で同じ点か」
+という primitive ひとつだけ</strong> で、これが正確なら calibration / 地図更新 /
+BA / SLAM / loop closure 検証など下流タスクが全部成立する。</p>
+<p>このプロジェクトはその primitive — <strong>per-point の (対応位置, 不確実性)</strong> —
+を直接ターゲットにする。シーン全体の再構成や pose 回帰のような周辺タスクは
+出力しない。core を尖らせて、それを呼び出す形で各 application を組む方針。</p>
+<p>「core が正確なら全て解ける、core が緩いなら何重にも fallback / 例外処理が
+要る」という判断。本手法は core そのものを学習可能にして、緩さを <strong>σ という
+連続値</strong> で表現する。</p>
+<h3 id="_2">具体的に何の用途で必要か</h3>
 <p>自動運転 / robotics の現場で「カメラ – LiDAR の対応関係」が core になる
 タスクは絶え間ない:</p>
 <ul>
@@ -84,7 +97,7 @@ M-estimator など既存の最適化道具が <strong>そのまま</strong> 使�
 <p>つまり同じネットワークが calibration / 地図更新 / SLAM / odometry の
 複数タスクに <strong>共通の安い primitive</strong> として使える。1 個ずつ重い専用システムを
 組まなくて済む。</p>
-<h2 id="_2">解いている問題</h2>
+<h2 id="_3">解いている問題</h2>
 <ul>
 <li>入力: query フレーム A の点 (画像 + LiDAR の組)、target フレーム B、
   両者の <strong>相対 pose 仮説 T_AB_hat</strong> (ノイジーで構わない)</li>
@@ -216,7 +229,7 @@ M-estimator など既存の最適化道具が <strong>そのまま</strong> 使�
 <li><strong>σ は出力の一部</strong>: ハードな inlier/outlier 判定なし、すべての点に重みが
   付く</li>
 </ul>
-<h2 id="_3">「マッチングしない」ことの具体的利点</h2>
+<h2 id="_4">「マッチングしない」ことの具体的利点</h2>
 <h3 id="1">1. 動的物体を壊さず吸収する</h3>
 <p>学習中に「動いている」というラベルを与えていなくても、出力 σ は動的物体に
 対して自動で増える (詳細: <code>docs/dynamic_object_sigma.md</code>)。</p>
@@ -263,7 +276,7 @@ context が一致しなくても geometry で出す、という形になる。</
 <li>descriptor 学習に要する photometric / triplet loss / hard negative mining
   系の非自明な学習スキームに比べて遥かに直接的</li>
 </ul>
-<h2 id="_4">適用先</h2>
+<h2 id="_5">適用先</h2>
 <ul>
 <li>camera–LiDAR calibration 残差推定</li>
 <li>visual / LiDAR odometry residual head (= local pose refinement)</li>
@@ -365,7 +378,7 @@ aleatoric noise を含むけど、平均位置 (Δuv) としては GT noise を�
 本提案の sensor 構成 + chain 合成の組み合わせで解ける。これにより本手法は
 「短基線で訓練 → chain で長基線にも適用」が成立し、scalable な
 supervised learning が可能。</p>
-<h2 id="_5">その他の小さい制約</h2>
+<h2 id="_6">その他の小さい制約</h2>
 <ul>
 <li><strong>完全 visual-only system</strong> (LiDAR なし): 初期 pose を作る手段がないので
   visual matcher か photometric SLAM が要る。本手法は「pose を持ってる側」
@@ -421,7 +434,7 @@ C=4  val_err :  2.29              1.93              ← さらに伸びる
 <p>これが <code>docs/unified_progression.md</code> で観測した「pair で depth 飽和、
 multi で depth 効く、quad で σ-calibration 急進」の現象の解釈であり、
 matcher パイプラインでは構造上不可能な統合を可能にしてる。</p>
-<h2 id="_6">関連ファイル</h2>
+<h2 id="_7">関連ファイル</h2>
 <ul>
 <li><code>models/cross_frame_unified.py</code> — 本手法の実装本体</li>
 <li><code>docs/unified_progression.md</code> — アーキ進化と val_err/nll の改善履歴</li>
