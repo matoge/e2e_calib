@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<title>multi frame attention</title>
+<link rel="stylesheet" href="assets/report.css">
+<style>
+body { max-width: 980px; margin: 24px auto; padding: 0 24px;
+       font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif;
+       line-height: 1.7; color: #222; }
+img { max-width: 100%; height: auto; border-radius: 6px;
+       box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin: 14px 0; }
+table { border-collapse: collapse; margin: 14px 0; }
+th, td { border: 1px solid #ddd; padding: 6px 12px; }
+th { background: #f6f6f6; }
+pre, code { background: #f6f6f6; padding: 2px 6px; border-radius: 3px;
+             font-family: 'JetBrains Mono', Menlo, monospace; font-size: 0.9em; }
+pre { padding: 12px; overflow-x: auto; line-height: 1.4; }
+h1 { border-bottom: 2px solid #444; padding-bottom: 8px; }
+h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
+</style>
+</head><body>
+<h1 id="multi-frame-cross-attention-how-to-integrate-n-frames">Multi-frame cross-attention — how to integrate N frames</h1>
+<p>PoC 設計の核心の問題を整理する。Pair (2-frame) で動いた cross-attention を
+3-frame 以上に拡張すると、どこで失敗しやすいか・文献ではどう解いているかを
+記録しておく。</p>
+<blockquote>
+<p><strong>Note on framing.</strong> 文献は「自分達が解いてる問題」と「我々が解いてる
+問題」が一致しない前提で読むこと。同じキャリブレーションでも sensor
+サイズ / 出力形式 / 教師信号 / scale すべて違う。<strong>問題は問題から演繹的
+に解く</strong> べきで、論文の手法はそのまま使うものではなく素材として扱う。
+このドキュメントも「論文がこうだから真似する」ではなく「我々の問題に
+何が必要か → その必要性に対して文献はどんな例を持っているか」の順で
+書いてある。</p>
+</blockquote>
+<h2 id="1">1. 問題設定</h2>
+<p>我々のタスクは <strong>pose-conditional residual prediction</strong>:</p>
+<ul>
+<li>入力: query フレーム $A$ (画像 + LiDAR点) と target フレーム $B$ (画像 + LiDAR点),
+  ノイジーな相対 pose hypothesis $\hat T_{AB}$</li>
+<li>出力: $A$ の各点に対して, $B$ 画像内での投影位置の補正 $\Delta uv$ + 共分散 $\Sigma$</li>
+<li>pose は <strong>入力条件</strong> (output ではない)</li>
+</ul>
+<p>2-frame で動いている設計:</p>
+<div class="codehilite"><pre><span></span><code>q = pt_A + PoseEmb(T_AB)              # Q を pose-shift
+KV = pt_B (+ img_B as deformable)
+scores = Q @ K^T / √d + b_AB           # b_AB はスカラー bias
+out = softmax(scores) @ V
+</code></pre></div>
+
+<p>3-frame 以上 ($A, M, B$) に拡張するとき、 query は $A$ のままだが
+KV に $M$ と $B$ の両方が入る。 ここで:</p>
+<ul>
+<li><strong>どこに pose 情報をどう入れるか</strong> が大きく性能を左右する。</li>
+<li>単純に <code>KV = concat(pt_M, pt_B)</code> で 1 つの softmax にすると、 sub-pair
+  $(A, M)$ の attention が 2-frame $(A, M)$ で trained したときと <strong>異なる
+  Q,KV 配置になる</strong> ため、 学習の knowledge を再利用できない。</li>
+</ul>
+<h2 id="2-naive-poc">2. 失敗する naive 拡張 (現行 PoC)</h2>
+<div class="codehilite"><pre><span></span><code>q     = pt_A + PoseEmb(T_AB)         # ← どの KV-frame を見ようと同じ Q
+KV    = concat(pt_M, pt_B)
+ref   = [uv_M_hat_of_A, uv_B_hat_of_A]
+bias  = [b_AM, b_AB]  (per-frame, KV 側のみ加算)
+scores = Q @ K^T + bias_per_frame
+softmax over [M ∪ B]
+</code></pre></div>
+
+<p>問題:
+- Q は $A→B$ の pose しか知らない. $M$ を見るときも $A→B$ pose で
+  shift された Q を使う → $A↔M$ sub-attention が 2-frame $(A, M)$ と
+  別物 になる。
+- pose_bias は <strong>scalar offset</strong> しか追加できない. Q の方向 (どこを見るか)
+  には影響しない。
+- Deformable attention の sampling MLP も Q だけから offset を学習する.
+  Q が「$B$ を見たい」と知ってるだけだと, $M$ の image をどこからサンプル
+  すべきかも誤った教師信号になる。</p>
+<p>実証: v55 (M=GT、損失A↔Bのみ) で <strong>+0.5px 改善</strong> はする。
+v64 (M perturbed、6 directions全 supervise) で <strong>逆に劣化</strong> (~3x ま val_err 悪化)。
+M を auxiliary KV にとどめる "おまけ" レベルなら効くが、 きちんと統合すると
+壊れる。</p>
+<h2 id="3-per-kv-frame-q">3. 正しい方法 (per-KV-frame Q)</h2>
+<div class="codehilite"><pre><span></span><code>for each KV frame k <span class="err">∈</span> <span class="p">{</span>M<span class="p">,</span> B<span class="p">}:</span>
+    <span class="ss">Q_k</span> <span class="o">=</span> pt_A <span class="o">+</span> PoseEmb<span class="p">(</span>T_<span class="p">{</span>A<span class="err">→</span>k<span class="p">})</span>       <span class="c1"># ← KV-frame ごとに違う Q</span>
+    <span class="ss">K_k</span> <span class="o">=</span> pt_k
+    scores<span class="p">[</span><span class="o">...</span><span class="p">,</span> k<span class="p">]</span> <span class="o">=</span> Q_k <span class="p">@</span> K_k<span class="err">^</span>T <span class="o">/</span> <span class="err">√</span>d
+<span class="ss">attn</span> <span class="o">=</span> softmax<span class="p">(</span>concat scores over k<span class="p">)</span>
+<span class="ss">out</span>  <span class="o">=</span> attn <span class="p">@</span> V
+</code></pre></div>
+
+<p>これで:
+- $(A, M)$ sub-pair の Q, KV は 2-frame $(A, M)$ と完全一致 ←
+  knowledge re-use できる
+- $(A, B)$ も同様
+- 1 つの softmax で混ぜるので, <strong>各 frame の重要性は scores の大きさ</strong>
+  (= 学習された "どっちを信じるか") で自動調整される
+- pose_bias は scalar 補助として残せる</p>
+<p>img-side の deformable attention でも同じ理屈で, 各 KV-frame の
+reference uv と Q (frame-conditional) の組み合わせで sampling を学習する。</p>
+<h2 id="4-evidence">4. 文献 evidence</h2>
+<p>別途 web 調査 (2024-2025 の主要 multi-view transformer 論文)。</p>
+<h3 id="reference-list">Reference list</h3>
+<table>
+<thead>
+<tr>
+<th>論文</th>
+<th>会議</th>
+<th>arXiv</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DUSt3R (Wang et al.)</td>
+<td>CVPR 2024</td>
+<td><a href="https://arxiv.org/abs/2312.14132">https://arxiv.org/abs/2312.14132</a></td>
+</tr>
+<tr>
+<td>MASt3R (Leroy et al.)</td>
+<td>ECCV 2024</td>
+<td><a href="https://arxiv.org/abs/2406.09756">https://arxiv.org/abs/2406.09756</a></td>
+</tr>
+<tr>
+<td>CroCo (Weinzaepfel et al.)</td>
+<td>NeurIPS 2022</td>
+<td><a href="https://arxiv.org/abs/2210.10716">https://arxiv.org/abs/2210.10716</a></td>
+</tr>
+<tr>
+<td>CroCo-Stereo / CroCo-Flow</td>
+<td>ICCV 2023</td>
+<td><a href="https://arxiv.org/abs/2211.10408">https://arxiv.org/abs/2211.10408</a></td>
+</tr>
+<tr>
+<td>MVSFormer (Cao et al.)</td>
+<td>TMLR 2023</td>
+<td><a href="https://arxiv.org/abs/2208.02541">https://arxiv.org/abs/2208.02541</a></td>
+</tr>
+<tr>
+<td>MVSTER (Wang et al.)</td>
+<td>ECCV 2022</td>
+<td><a href="https://arxiv.org/abs/2204.07346">https://arxiv.org/abs/2204.07346</a></td>
+</tr>
+<tr>
+<td>TransMVSNet (Ding et al.)</td>
+<td>CVPR 2022</td>
+<td><a href="https://arxiv.org/abs/2111.14600">https://arxiv.org/abs/2111.14600</a></td>
+</tr>
+<tr>
+<td>FlowFormer (Huang et al.)</td>
+<td>ECCV 2022</td>
+<td><a href="https://arxiv.org/abs/2203.16194">https://arxiv.org/abs/2203.16194</a></td>
+</tr>
+<tr>
+<td><strong>GTA — Geometric Transform Attention</strong> (Miyato et al.)</td>
+<td>ICLR 2024</td>
+<td><a href="https://arxiv.org/abs/2310.10375">https://arxiv.org/abs/2310.10375</a></td>
+</tr>
+<tr>
+<td>Fast3R (Yang et al.)</td>
+<td>CVPR 2025</td>
+<td><a href="https://arxiv.org/abs/2501.13928">https://arxiv.org/abs/2501.13928</a></td>
+</tr>
+<tr>
+<td>VGGT (Wang et al.)</td>
+<td>CVPR 2025</td>
+<td><a href="https://arxiv.org/abs/2503.11651">https://arxiv.org/abs/2503.11651</a></td>
+</tr>
+<tr>
+<td>Spann3R (Wang &amp; Agapito)</td>
+<td>3DV 2025</td>
+<td><a href="https://arxiv.org/abs/2408.16061">https://arxiv.org/abs/2408.16061</a></td>
+</tr>
+</tbody>
+</table>
+<h3 id="a-dust3r-mast3r-wang-et-al-cvpr-2024-eccv-2024">(a) DUSt3R / MASt3R (Wang et al., CVPR 2024 / ECCV 2024)</h3>
+<p><strong>Pair-only siamese decoder</strong>. View 1 の Q は view 2 の KV にしか
+attend しない。 multi-view (&gt;2) は出力時に pairwise を繋ぎ合わせる。
+"single Q, multi-KV" を <strong>回避する</strong> 方針 — これは我々の (b) を
+"separate forwards" で実現するのに相当。</p>
+<h3 id="b-mvs-transformers-mvsformer-mvster-transmvsnet">(b) MVS Transformers (MVSFormer, MVSTER, TransMVSNet)</h3>
+<p><strong>Plane-sweep / epipolar warping</strong> で source view の特徴を ref view の
+frustum に warp してから attention. 各 (ref, src_k) pair に対して
+<strong>source-specific な warped feature volume</strong> を作る → これは Q (or KV)
+が source view ごとに pose-baked になっている状態で, (b) と機能等価。</p>
+<h3 id="c-gta-geometric-transform-attention-miyato-et-al-iclr-2024">(c) GTA — Geometric Transform Attention (Miyato et al., ICLR 2024)</h3>
+<p><img alt="GTA mechanism" src="https://takerum.github.io/gta/resources/gta_mech.png" /></p>
+<p><strong>Q を per-KV pose rotation で multiplicatively conditioning</strong> する設計。
+論文式 (3):
+$$\text{Attn}(Q, K, V) = \text{softmax}(Q P_q^k K^T / \sqrt d) V$$
+ここで $P_q^k$ は (query, key) ペアごとに違う pose 変換。図の通り、 Q と
+K は <strong>token 自身に紐づく座標フレーム</strong> (それぞれの camera frame) を持って
+おり、 attention 計算の前段で <strong>相対変換</strong>を加えてから dot-product する。
+これが「<strong>Q の bias は KV に依存する</strong>」を最も明示的に実装している例。</p>
+<p><strong>我々の問題との framing 差</strong>:
+- GTA は <strong>NeRF-like view synthesis</strong> (= 与えた viewing pose に対応する
+  pixel を生成する) を想定。Q は "次に出力したい pixel の pose"、 KV は
+  既知 pose の image features。出力は pixel value。
+- 我々は <strong>camera-LiDAR 残差予測</strong>。 Q は anchor frame の点、 KV は別
+  view の image+pt features。出力は per-point Δuv + Σ。
+- pose 入力の役割が "input condition (我々)" vs "rendering target
+  (GTA)" で、用途は違うが <strong>pose-conditional attention をどう作るか</strong>
+  という question は同じ。</p>
+<p>そのため GTA は<strong>手法をそのまま借りる対象ではない</strong> — Q/K の rotation
+multiplicative form は我々の枠組みでは pose embedding additive form の
+方が自然 (PointMLP / image feature が learned representation で、 SE(3)
+rotation を直接掛けるのは意味が薄い)。
+ただし「<strong>Q-K の組ごとに pose 変換を入れる</strong>」という principle は流用
+できる。具体的には我々の (b) — pt + PoseEmb(T_{A→k}) を per-KV-frame_k
+に作る — が GTA の additive 版に相当。</p>
+<h3 id="d-fast3r-yang-et-al-cvpr-2025-vggt-wang-et-al-cvpr-2025">(d) Fast3R (Yang et al., CVPR 2025), VGGT (Wang et al., CVPR 2025)</h3>
+<p><strong>Frame-id learnable embedding</strong> を加えて全 view tokens を 1 sequence に
+concat. shared Q だが frame-id を per-token bias として加える (option c)。
+特徴: pose は <strong>モデルの output</strong> であり, 入力条件にはしない。
+我々の用途と前提が違うので そのまま流用不可。</p>
+<h3 id="e-pose-conditional-baseline-swin-rpe-t5-style">(e) Pose-conditional baseline (Swin RPE, T5-style)</h3>
+<p><strong>scalar bias of relative position</strong>. 我々の現行 pose_bias と同種。
+小さい discrete offset には有効だが, <strong>連続 SE(3) pose では役不足</strong> —
+特に rotation が depth-dependent な pixel shift を起こす場合, scalar
+bias 1 つで補正しきれない。</p>
+<h2 id="5-recommendation">5. 結論 / Recommendation</h2>
+<p>問題から演繹で逆算すると:</p>
+<ol>
+<li>我々のタスクは <strong>2-frame で動いていることが既に証明済み</strong> (v55=2.28)。
+   この時点で per-token attention path は確立されている (Q=pt+pose_emb,
+   KV=他frame, 残差予測 head で Δuv+Σ)。</li>
+<li>3-frame に拡張するとき、 sub-problem としての (A↔M), (A↔B) は
+   それぞれ 2-frame と <strong>同じ問題</strong>である必要がある。 そうでなければ
+   2-frame で学んだ知識が再利用できず、 6 directions の同時最適化を
+   イチから学習することになる (= v64 が失敗した理由)。</li>
+<li>「sub-problem を 2-frame と同一に保つ」とは, <strong>(A, M) sub-attention
+   の Q, K, V が 2-frame (A, M) のときと bit-identical</strong> であること。
+   Q が一つの pose しか持たないと, M を見るときも B 用の Q-shift を
+   被ったまま attend する → 別問題になる。</li>
+</ol>
+<p><strong>我々の問題が要求する形</strong>: per-KV-frame Q (option b)。
+これは GTA の principle と機能的に等価だが, additive pose embedding 版
+で実装する (rotation multiplicative ではなく, 我々の token 表現は
+learned MLP 出力なので additive が自然)。</p>
+<p>他の選択肢の不採用理由:
+- (a) 共有 Q + scalar bias は <strong>sub-problem identity を壊す</strong>ため不可
+  (pose が小さい場合に偶然動くこともあるが, 大角・長 baseline で破綻)。
+- (c) frame-id embedding は pose を <strong>出力</strong>するモデル (Fast3R/VGGT) に
+  特化、我々のように pose を入力条件にする問題には情報量が足りない。</p>
+<p>具体的書き換え:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># cross_blocks の中で:</span>
+<span class="n">scores_blocks</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="p">(</span><span class="n">frame_pt</span><span class="p">,</span> <span class="n">pose_to_k</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="nb">zip</span><span class="p">(</span><span class="n">pt_kv_list</span><span class="p">,</span> <span class="n">poses_to_each_frame</span><span class="p">)):</span>
+    <span class="n">pose_emb_k</span> <span class="o">=</span> <span class="n">pose_mlp</span><span class="p">(</span><span class="n">pose_to_k</span><span class="p">)</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">q_k</span>        <span class="o">=</span> <span class="n">pt_query</span> <span class="o">+</span> <span class="n">pose_emb_k</span>        <span class="c1"># frame-conditional Q</span>
+    <span class="n">Q_k</span>        <span class="o">=</span> <span class="n">q_proj</span><span class="p">(</span><span class="n">norm_q</span><span class="p">(</span><span class="n">q_k</span><span class="p">))</span>
+    <span class="n">K_k</span>        <span class="o">=</span> <span class="n">k_proj</span><span class="p">(</span><span class="n">norm_kv</span><span class="p">(</span><span class="n">frame_pt</span><span class="p">))</span>
+    <span class="n">scores_blocks</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">Q_k</span> <span class="o">@</span> <span class="n">K_k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span><span class="o">-</span><span class="mi">2</span><span class="p">))</span> <span class="o">/</span> <span class="n">sqrt</span><span class="p">(</span><span class="n">d</span><span class="p">))</span>
+<span class="n">scores</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">(</span><span class="n">scores_blocks</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>     <span class="c1"># softmax across all KV</span>
+<span class="n">attn</span>   <span class="o">=</span> <span class="n">softmax</span><span class="p">(</span><span class="n">scores</span><span class="p">)</span> <span class="o">@</span> <span class="n">concat_V</span>
+</code></pre></div>
+
+<p>これで $(A, M)$ sub-pair に注ぐ attention は完全に 2-frame と同じ
+Q,K の組み合わせ → pre-train knowledge that lives in pair model
+(v55 = 2.28) を multi-frame に lossless transfer できる。</p>
+<h2 id="6">6. 次のステップ</h2>
+<ol>
+<li><code>MultiFrameCrossBlockDeform.forward</code> を per-KV-frame Q に書き換え
+   (上記 30 行)</li>
+<li>同じデータ (PandaSet 39 scene, σ_ypr=2.0, σ_t=0.5, lidar dropout) で
+   v65 として走らせ, v55 (2.28), v64 (~10) と比較</li>
+<li>v65 &lt; 2.28 なら multi-frame の本来の効果が出ている証拠</li>
+<li>v65 ≈ v55 なら 3-frame でも 2-frame と同等以上は守れている (悪化しない)
+   ことが確認でき, さらに 6-direction supervised (full P1) に進める</li>
+</ol>
+</body></html>

@@ -260,22 +260,24 @@ def main():
     _summ('σ_pred (px) by moving-disp bucket', sigmas_mv, list(range(len(moving_buckets))), bucket_tags)
     _summ('|Δuv| residual (px) by moving-disp bucket', errs_mv, list(range(len(moving_buckets))), bucket_tags)
 
-    # plot
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-    colors = ['#888', '#3a8', '#d33']
-    for c in (0, 1, 2):
+    # plot — all 4 motion-attr categories
+    fig, ax = plt.subplots(1, 2, figsize=(13, 4.5))
+    colors = ['#888', '#3a8', '#28b', '#d33']     # bg / parked / stopped / moving
+    for c in (0, 1, 2, 3):
         if not sigmas[c]:
             continue
-        ax[0].hist(np.log10(sigmas[c]), bins=40, alpha=0.5,
+        arr_s = np.array(sigmas[c]); arr_s = arr_s[arr_s > 1e-3]
+        arr_e = np.array(errs[c]);   arr_e = arr_e[arr_e > 1e-3]
+        ax[0].hist(np.log10(arr_s), bins=40, alpha=0.45,
                     color=colors[c], label=f'{tags[c]} (n={len(sigmas[c])})', density=True)
-        ax[1].hist(np.log10(errs[c]), bins=40, alpha=0.5,
+        ax[1].hist(np.log10(arr_e), bins=40, alpha=0.45,
                     color=colors[c], label=f'{tags[c]} (n={len(errs[c])})', density=True)
     ax[0].set_xlabel('log10 σ_pred (px)'); ax[0].set_ylabel('density')
-    ax[0].set_title('Predicted σ by category'); ax[0].legend()
+    ax[0].set_title('Predicted σ by motion-attr category'); ax[0].legend(fontsize=9)
     ax[1].set_xlabel('log10 |Δuv| residual (px)'); ax[1].set_ylabel('density')
-    ax[1].set_title('Actual residual by category'); ax[1].legend()
+    ax[1].set_title('Actual residual by motion-attr category'); ax[1].legend(fontsize=9)
     fig.tight_layout()
-    fig.savefig(args.out, dpi=120)
+    fig.savefig(args.out, dpi=130)
     print(f'\nsaved → {args.out}')
 
 

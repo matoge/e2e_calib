@@ -6,6 +6,8 @@
 ただし上昇幅は controlled で、特に「画像 appearance では何とか合わせられる」
 中域の動車に対して σ は inflate せず over-confident になる。
 
+![σ and residual histograms by motion attribute](images/dynamic_object_sigma_v92.png)
+
 ## 設定
 
 - model: `experiments/cross_frame_v92_unified_multi_c4` (val_err=1.93 px, val_nll=1.93)
