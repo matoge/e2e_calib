@@ -1,0 +1,66 @@
+[23:32:50] device = cuda
+[23:32:50] args = {'name': 'v25_log_every_1', 'full': True, 'scene': '/mnt/mininas/datasets/pandaset/015', 'scenes_root': '/mnt/nvme6t/pandaset_39', 'train_frac': 0.8, 'cameras': 'front_camera', 'img_size': 64, 'max_points': 256, 'batch_size': 32, 'lr': 0.001, 'n_overfit': 64, 'epochs': 60, 'log_every': 1, 'baseline_min': 1, 'baseline_max': 20, 'sigma_ypr': 1.0, 'sigma_t': 0.2, 'crop_min': 128, 'crop_max': 256, 'num_workers': 4, 'virtual_epoch': 4000, 'deform_mode': 'sl', 'n_cross_layers': 2, 'n_intra_layers': 2, 'uvd': True, 'dataset': 'pandaset', 'waymo_root': '/mnt/mininas/datasets/waymo/training', 'max_train_scenes': 0, 'mine_val': True, 'val_pool_size': 5000, 'migrate_k': 500, 'overfit_patience': 2, 'overfit_metric': 'nll', 'rewind_back': 3, 'rewind_lr_reset': True}
+[23:33:39] model params: 1.593 M
+[23:34:05] ep   0  loss=8.376  err_AB=15.48px  err_BA=16.01px  (base=15.09px)  val_err=16.88px (base 15.47)  val_nll=5.79  d=1.07m(base 0.20)  val_d=0.36m(base 0.20)  lr=9.99e-04  t=25s
+[23:34:27] ep   1  loss=6.179  err_AB=13.70px  err_BA=14.04px  (base=15.09px)  val_err=9.20px (base 15.47)  val_nll=5.93  d=0.60m(base 0.20)  val_d=0.56m(base 0.20)  lr=9.97e-04  t=47s
+[23:34:49] ep   2  loss=5.470  err_AB=9.92px  err_BA=9.77px  (base=15.10px)  val_err=8.13px (base 15.47)  val_nll=5.42  d=0.62m(base 0.20)  val_d=0.36m(base 0.20)  lr=9.94e-04  t=69s
+[23:35:10] ep   3  loss=3.891  err_AB=6.36px  err_BA=5.96px  (base=15.09px)  val_err=5.54px (base 15.47)  val_nll=4.09  d=0.35m(base 0.20)  val_d=0.43m(base 0.20)  lr=9.89e-04  t=90s
+[23:35:31] ep   4  loss=3.664  err_AB=5.96px  err_BA=5.73px  (base=15.09px)  val_err=5.70px (base 15.47)  val_nll=3.65  d=0.31m(base 0.20)  val_d=0.31m(base 0.20)  lr=9.83e-04  t=112s
+[23:35:54] ep   5  loss=3.480  err_AB=5.62px  err_BA=5.39px  (base=15.09px)  val_err=5.68px (base 15.47)  val_nll=3.89  d=0.30m(base 0.20)  val_d=0.37m(base 0.20)  lr=9.76e-04  t=134s
+[23:36:16] ep   6  loss=3.351  err_AB=5.41px  err_BA=5.11px  (base=15.10px)  val_err=4.58px (base 15.47)  val_nll=3.01  d=0.29m(base 0.20)  val_d=0.25m(base 0.20)  lr=9.67e-04  t=157s
+[23:36:39] ep   7  loss=3.538  err_AB=5.66px  err_BA=5.44px  (base=15.08px)  val_err=6.57px (base 15.47)  val_nll=3.93  d=0.32m(base 0.20)  val_d=0.35m(base 0.20)  lr=9.57e-04  t=179s
+[23:37:03]   [MIGRATE#1] moved 500 val→train (total migrated 500, val pool remaining 4500)
+[23:37:03]   [REWIND] model ← snapshot from ep 5 (current ep 8, rewound by 3 epochs)
+[23:37:03]   [LR-RESET] lr ← 1.0e-03, cosine restart over 52 remaining epochs
+[23:37:03] ep   8  loss=3.043  err_AB=4.94px  err_BA=4.70px  (base=15.09px)  val_err=5.00px (base 15.47)  val_nll=3.25  d=0.26m(base 0.20)  val_d=0.24m(base 0.20)  lr=1.00e-03  t=204s
+[23:37:26] ep   9  loss=3.149  err_AB=5.06px  err_BA=4.73px  (base=15.15px)  val_err=4.54px (base 15.47)  val_nll=2.87  d=0.28m(base 0.20)  val_d=0.25m(base 0.20)  lr=9.99e-04  t=227s
+[23:37:49] ep  10  loss=2.892  err_AB=4.73px  err_BA=4.41px  (base=15.17px)  val_err=4.30px (base 15.47)  val_nll=2.77  d=0.26m(base 0.20)  val_d=0.27m(base 0.20)  lr=9.96e-04  t=250s
+[23:38:11] ep  11  loss=3.094  err_AB=4.97px  err_BA=4.71px  (base=15.17px)  val_err=4.35px (base 15.47)  val_nll=2.92  d=0.28m(base 0.20)  val_d=0.29m(base 0.20)  lr=9.92e-04  t=271s
+[23:38:32] ep  12  loss=2.979  err_AB=4.94px  err_BA=4.57px  (base=15.18px)  val_err=4.33px (base 15.47)  val_nll=2.65  d=0.26m(base 0.20)  val_d=0.23m(base 0.20)  lr=9.86e-04  t=293s
+[23:38:55] ep  13  loss=2.943  err_AB=4.85px  err_BA=4.48px  (base=15.16px)  val_err=5.49px (base 15.47)  val_nll=3.14  d=0.26m(base 0.20)  val_d=0.24m(base 0.20)  lr=9.78e-04  t=316s
+[23:39:20]   [MIGRATE#2] moved 500 val→train (total migrated 1000, val pool remaining 4000)
+[23:39:20]   [REWIND] model ← snapshot from ep 11 (current ep 14, rewound by 3 epochs)
+[23:39:20]   [LR-RESET] lr ← 1.0e-03, cosine restart over 46 remaining epochs
+[23:39:20] ep  14  loss=2.903  err_AB=4.61px  err_BA=4.39px  (base=15.16px)  val_err=4.15px (base 15.47)  val_nll=2.69  d=0.26m(base 0.20)  val_d=0.25m(base 0.20)  lr=1.00e-03  t=341s
+[23:39:43] ep  15  loss=3.020  err_AB=4.88px  err_BA=4.53px  (base=15.19px)  val_err=3.79px (base 15.47)  val_nll=2.41  d=0.27m(base 0.20)  val_d=0.24m(base 0.20)  lr=9.99e-04  t=364s
+[23:40:06] ep  16  loss=2.745  err_AB=4.47px  err_BA=4.17px  (base=15.18px)  val_err=4.02px (base 15.47)  val_nll=2.67  d=0.25m(base 0.20)  val_d=0.27m(base 0.20)  lr=9.95e-04  t=386s
+[23:40:31]   [MIGRATE#3] moved 500 val→train (total migrated 1500, val pool remaining 3500)
+[23:40:31]   [REWIND] model ← snapshot from ep 15 (current ep 17, rewound by 2 epochs)
+[23:40:31]   [LR-RESET] lr ← 1.0e-03, cosine restart over 43 remaining epochs
+[23:40:31] ep  17  loss=2.740  err_AB=4.46px  err_BA=4.10px  (base=15.18px)  val_err=3.71px (base 15.47)  val_nll=2.64  d=0.26m(base 0.20)  val_d=0.31m(base 0.20)  lr=1.00e-03  t=412s
+[23:40:55] ep  18  loss=2.810  err_AB=4.59px  err_BA=4.31px  (base=15.17px)  val_err=3.86px (base 15.47)  val_nll=2.39  d=0.26m(base 0.20)  val_d=0.23m(base 0.20)  lr=9.99e-04  t=436s
+[23:41:18] ep  19  loss=2.693  err_AB=4.40px  err_BA=4.12px  (base=15.17px)  val_err=3.65px (base 15.47)  val_nll=2.37  d=0.25m(base 0.20)  val_d=0.25m(base 0.20)  lr=9.95e-04  t=459s
+[23:41:41] ep  20  loss=2.678  err_AB=4.32px  err_BA=4.03px  (base=15.18px)  val_err=3.67px (base 15.47)  val_nll=2.64  d=0.26m(base 0.20)  val_d=0.31m(base 0.20)  lr=9.88e-04  t=482s
+[23:42:08]   [MIGRATE#4] moved 500 val→train (total migrated 2000, val pool remaining 3000)
+[23:42:08]   [REWIND] model ← snapshot from ep 18 (current ep 21, rewound by 3 epochs)
+[23:42:08]   [LR-RESET] lr ← 1.0e-03, cosine restart over 39 remaining epochs
+[23:42:08] ep  21  loss=2.558  err_AB=4.12px  err_BA=3.82px  (base=15.17px)  val_err=4.69px (base 15.47)  val_nll=2.97  d=0.25m(base 0.20)  val_d=0.28m(base 0.20)  lr=1.00e-03  t=509s
+[23:42:31] ep  22  loss=2.712  err_AB=4.44px  err_BA=4.13px  (base=15.25px)  val_err=3.62px (base 15.47)  val_nll=2.26  d=0.25m(base 0.20)  val_d=0.23m(base 0.20)  lr=9.98e-04  t=532s
+[23:42:55] ep  23  loss=2.707  err_AB=4.44px  err_BA=4.14px  (base=15.23px)  val_err=3.65px (base 15.47)  val_nll=2.33  d=0.25m(base 0.20)  val_d=0.23m(base 0.20)  lr=9.94e-04  t=556s
+[23:43:23]   [MIGRATE#5] moved 500 val→train (total migrated 2500, val pool remaining 2500)
+[23:43:23]   [REWIND] model ← snapshot from ep 22 (current ep 24, rewound by 2 epochs)
+[23:43:23]   [LR-RESET] lr ← 1.0e-03, cosine restart over 36 remaining epochs
+[23:43:23] ep  24  loss=2.527  err_AB=4.17px  err_BA=3.82px  (base=15.25px)  val_err=3.86px (base 15.47)  val_nll=2.41  d=0.25m(base 0.20)  val_d=0.23m(base 0.20)  lr=1.00e-03  t=584s
+[23:43:48] ep  25  loss=2.618  err_AB=4.23px  err_BA=3.95px  (base=15.25px)  val_err=4.06px (base 15.47)  val_nll=2.71  d=0.25m(base 0.20)  val_d=0.28m(base 0.20)  lr=9.98e-04  t=608s
+[23:44:11] ep  26  loss=2.507  err_AB=4.06px  err_BA=3.82px  (base=15.26px)  val_err=3.47px (base 15.47)  val_nll=2.13  d=0.25m(base 0.20)  val_d=0.21m(base 0.20)  lr=9.92e-04  t=632s
+[23:44:35] ep  27  loss=2.439  err_AB=4.01px  err_BA=3.75px  (base=15.26px)  val_err=3.36px (base 15.47)  val_nll=2.21  d=0.24m(base 0.20)  val_d=0.26m(base 0.20)  lr=9.83e-04  t=656s
+[23:45:04]   [MIGRATE#6] moved 500 val→train (total migrated 3000, val pool remaining 2000)
+[23:45:04]   [REWIND] model ← snapshot from ep 25 (current ep 28, rewound by 3 epochs)
+[23:45:04]   [LR-RESET] lr ← 1.0e-03, cosine restart over 32 remaining epochs
+[23:45:04] ep  28  loss=2.436  err_AB=4.01px  err_BA=3.78px  (base=15.25px)  val_err=3.91px (base 15.47)  val_nll=2.90  d=0.24m(base 0.20)  val_d=0.32m(base 0.20)  lr=1.00e-03  t=685s
+[23:45:29] ep  29  loss=2.496  err_AB=4.01px  err_BA=3.74px  (base=15.31px)  val_err=3.58px (base 15.47)  val_nll=2.23  d=0.25m(base 0.20)  val_d=0.23m(base 0.20)  lr=9.98e-04  t=709s
+[23:45:55] ep  30  loss=2.427  err_AB=3.98px  err_BA=3.68px  (base=15.33px)  val_err=4.45px (base 15.47)  val_nll=3.05  d=0.24m(base 0.20)  val_d=0.33m(base 0.20)  lr=9.90e-04  t=735s
+[23:46:19] ep  31  loss=2.491  err_AB=4.04px  err_BA=3.75px  (base=15.32px)  val_err=3.15px (base 15.47)  val_nll=2.02  d=0.25m(base 0.20)  val_d=0.24m(base 0.20)  lr=9.79e-04  t=760s
+[23:46:44] ep  32  loss=2.320  err_AB=3.79px  err_BA=3.53px  (base=15.31px)  val_err=5.14px (base 15.47)  val_nll=2.97  d=0.24m(base 0.20)  val_d=0.26m(base 0.20)  lr=9.62e-04  t=785s
+[23:47:09] ep  33  loss=2.306  err_AB=3.80px  err_BA=3.55px  (base=15.33px)  val_err=3.14px (base 15.47)  val_nll=1.91  d=0.24m(base 0.20)  val_d=0.23m(base 0.20)  lr=9.42e-04  t=810s
+[23:47:33] ep  34  loss=2.132  err_AB=3.58px  err_BA=3.30px  (base=15.32px)  val_err=3.33px (base 15.47)  val_nll=2.04  d=0.24m(base 0.20)  val_d=0.24m(base 0.20)  lr=9.17e-04  t=834s
+[23:47:59] ep  35  loss=2.094  err_AB=3.51px  err_BA=3.23px  (base=15.31px)  val_err=2.86px (base 15.47)  val_nll=1.69  d=0.24m(base 0.20)  val_d=0.23m(base 0.20)  lr=8.88e-04  t=859s
+[23:48:23] ep  36  loss=1.933  err_AB=3.31px  err_BA=3.09px  (base=15.32px)  val_err=2.88px (base 15.47)  val_nll=1.66  d=0.23m(base 0.20)  val_d=0.21m(base 0.20)  lr=8.55e-04  t=884s
+[23:48:49] ep  37  loss=1.822  err_AB=3.19px  err_BA=2.93px  (base=15.33px)  val_err=2.81px (base 15.47)  val_nll=1.70  d=0.23m(base 0.20)  val_d=0.22m(base 0.20)  lr=8.19e-04  t=910s
+[23:49:14] ep  38  loss=1.731  err_AB=3.10px  err_BA=2.84px  (base=15.34px)  val_err=2.45px (base 15.47)  val_nll=1.25  d=0.22m(base 0.20)  val_d=0.20m(base 0.20)  lr=7.80e-04  t=934s
+[23:49:38] ep  39  loss=1.652  err_AB=2.98px  err_BA=2.75px  (base=15.31px)  val_err=2.66px (base 15.47)  val_nll=1.51  d=0.22m(base 0.20)  val_d=0.21m(base 0.20)  lr=7.38e-04  t=959s
+[23:50:03] ep  40  loss=1.465  err_AB=2.77px  err_BA=2.55px  (base=15.32px)  val_err=2.38px (base 15.47)  val_nll=1.20  d=0.22m(base 0.20)  val_d=0.22m(base 0.20)  lr=6.94e-04  t=984s
+[23:50:28] ep  41  loss=1.358  err_AB=2.69px  err_BA=2.49px  (base=15.33px)  val_err=2.34px (base 15.47)  val_nll=0.99  d=0.21m(base 0.20)  val_d=0.18m(base 0.20)  lr=6.49e-04  t=1009s
+[23:50:53] ep  42  loss=1.165  err_AB=2.48px  err_BA=2.32px  (base=15.32px)  val_err=2.39px (base 15.47)  val_nll=1.10  d=0.20m(base 0.20)  val_d=0.19m(base 0.20)  lr=6.02e-04  t=1034s
+[23:51:18] ep  43  loss=1.032  err_AB=2.35px  err_BA=2.19px  (base=15.34px)  val_err=2.16px (base 15.47)  val_nll=0.93  d=0.20m(base 0.20)  val_d=0.20m(base 0.20)  lr=5.54e-04  t=1059s
+[23:51:43] ep  44  loss=0.907  err_AB=2.21px  err_BA=2.12px  (base=15.32px)  val_err=2.07px (base 15.47)  val_nll=1.12  d=0.19m(base 0.20)  val_d=0.23m(base 0.20)  lr=5.05e-04  t=1084s

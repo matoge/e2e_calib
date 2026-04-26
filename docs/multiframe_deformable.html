@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Multi-frame Cross-Attention — 設計ノート</title>
+<style>
+  body {
+    max-width: 880px;
+    margin: 2.5em auto;
+    padding: 0 1.5em;
+    font-family: "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+    color: #1d1d1f;
+    line-height: 1.75;
+    background: #f6f4ed;
+  }
+  h1 { font-size: 1.7em; border-bottom: 3px solid #174734; padding-bottom: 0.3em; }
+  h2 { font-size: 1.25em; color: #174734; margin-top: 2em; border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }
+  h3 { font-size: 1.05em; color: #c13c14; margin-top: 1.5em; }
+  h4 { font-size: 0.98em; color: #4a4a4a; margin-top: 1.2em; }
+  pre, code {
+    font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+    font-size: 0.85em;
+    background: #ebe7da;
+    border-radius: 4px;
+  }
+  pre {
+    padding: 0.9em 1.1em;
+    overflow-x: auto;
+    border-left: 3px solid #174734;
+  }
+  code { padding: 0.1em 0.35em; }
+  pre code { padding: 0; background: none; }
+  .ascii { background: #2a2a2e; color: #e2e0d6; padding: 1em; border-radius: 6px; font-size: 0.78em; line-height: 1.45; }
+  .keypoint { background: #fef6dc; border-left: 4px solid #c1a814; padding: 0.7em 1em; margin: 1em 0; }
+  .bad { background: #fde9e6; border-left: 4px solid #c13c14; padding: 0.7em 1em; margin: 1em 0; }
+  .good { background: #e8f3e8; border-left: 4px solid #174734; padding: 0.7em 1em; margin: 1em 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: 0.92em; }
+  th, td { border: 1px solid #c8c5b8; padding: 0.5em 0.8em; text-align: left; vertical-align: top; }
+  th { background: #ddd9ca; }
+  details { background: #ebe7da; padding: 0.5em 0.9em; border-radius: 4px; margin: 0.6em 0; }
+  summary { cursor: pointer; font-weight: 600; }
+  blockquote { border-left: 3px solid #6b6a63; padding-left: 1em; color: #4a4a4a; margin: 1em 0; }
+  hr { border: none; border-top: 1px dashed #aaa; margin: 2em 0; }
+  .toc { background: #ebe7da; padding: 0.8em 1.2em; border-radius: 6px; margin: 1em 0; font-size: 0.92em; }
+  .toc ol { margin: 0.3em 0 0.3em 1.5em; }
+</style>
+</head>
+<body>
+
+<h1>Multi-frame Cross-Attention — 設計ノート</h1>
+<p style="color:#6b6a63;">2026-04-25 改訂版 — pair-net を最小変更で複数フレームに拡張する設計。
+本稿は <em>商品として動く mapping パイプライン</em> を最短で組むための骨組み議論。
+論文 novelty 追求でなく、 <em>軽量 / 対称的 / 解釈可能</em> な設計の選択。</p>
+
+<div class="toc">
+<strong>目次</strong>
+<ol>
+<li>問題設定: pose 推定と map 商品化</li>
+<li>現状の pair-net とその美しさ</li>
+<li>長距離 baseline での限界</li>
+<li>解決方針 4 つの選択肢</li>
+<li>採用案: 多フレーム同時投入 + 内部 softmax 統合</li>
+<li>位置情報の入れ方 (Q / KV 双方への 3D 宣言)</li>
+<li>depth-optional モード (LiDAR / radar / stereo / mono / none)</li>
+<li>動的物体への拡張</li>
+<li>BA の役割 — 認知でなく統合</li>
+<li>実装スコープと PoC</li>
+<li>商品性・事業観点</li>
+<li>関連先行研究 / References</li>
+</ol>
+</div>
+
+<h2>1. 問題設定: pose 推定と map 商品化</h2>
+
+<p>商業的には 2 階層の deliverable が必要:</p>
+
+<ul>
+<li><strong>per-frame pose</strong> — リアルタイム、 蒸留すれば CPU で動く。 自動運転 /
+ロボット / AR 全部に効く前提機能</li>
+<li><strong>persistent map</strong> — オフラインで cloud 集約、 高精度点群 + 色 + 意味
+タグ。 商品そのもの (HD map, ロボ向け永続 anchor)</li>
+</ul>
+
+<p>両 deliverable の核は <strong>pair-net 由来の (μ, Σ) 対応</strong>。 Pose は外側 BA で
+即時に解け、 Map は (μ, Σ) を world frame に蓄積して polish。 model 側は per-pair
+correspondence prior を提供する役。</p>
+
+<h2>2. 現状の pair-net とその美しさ</h2>
+
+<p>各 query は LiDAR 点 P (3D 既知)、 仮説相対 pose で reference frame B に投影
+→ patch 内 cross-attn → 残差 (Δuv, Σ) を出力:</p>
+
+<pre class="ascii">
+   query frame A                 reference frame B
+   ┌─────────────┐                ┌─────────────┐
+   │  patch_A    │                │  patch_B    │
+   │  • • • • •  │ ── pair-net ─▶ │  ⊕  μ  Σ    │
+   │   queries   │                │  ⊕   ⊕      │
+   └─────────────┘                └─────────────┘
+   pose_AB_hat に perturbation
+</pre>
+
+<div class="good">
+<strong>pair-net の構造的勝利:</strong>
+<ul>
+<li><strong>matching skip</strong> — query は LiDAR 点 = 一意 ID、 「同じ点が向こうのどこか」 探す必要無し。 古典 SfM/SLAM の最大難所を構造で消す</li>
+<li>pose 仮説で投影 → 残差 = 観測。 対応は <em>定義</em> で出る、 探索しない</li>
+<li>per-pair forward は CPU 蒸留可能</li>
+<li>(μ, Σ) は古典 BA に直接渡せる、 Σ-weighted GN が真っ当に動く</li>
+</ul>
+</div>
+
+<h2>3. 長距離 baseline での限界</h2>
+
+<p>pair (frame_A, frame_B) で baseline が 80 m (10 Hz × 80 frame) 級になると:</p>
+
+<ul>
+<li>parallax / occlusion で patch の見た目が大きく違う</li>
+<li>FoV が狭ければ「frame_A で見えてた特徴の半分が frame_B では枠外」</li>
+<li>仮説 pose の誤差が大きく投影 anchor がずれる</li>
+<li>同形物体 (ポール / 街路灯 / ガードレール) で対応 ambiguous</li>
+</ul>
+
+<h3>典型困難例: ポール-樹のシナリオ</h3>
+
+<p>同形ポール 5 本、 背後 5 m に木 (識別可能):</p>
+<ol>
+<li>frame_t1: 右から <strong>2 番目</strong> のポールが木の前</li>
+<li>3 m 進んで frame_t2: 右から <strong>3 番目</strong> のポールが木の前</li>
+<li>ポールは見た目同一、 木との位置関係だけが手がかり</li>
+</ol>
+
+<div class="bad">
+<strong>素朴に pair-only だと:</strong> frame_A と frame_B 単独では「同形ポール」を
+区別できない。 model は「同じポール」と高確信で誤対応 (Σ 小、 mu 間違い)。
+BA は確信高い間違い対応を信じて pose 推定 → drift 増加。
+<strong>BA は認知層を持たないので、 model が disambiguate していない問題は解けない。</strong>
+</div>
+
+<h2>4. 解決方針 4 つの選択肢</h2>
+
+<table>
+<tr><th>案</th><th>機構</th><th>pros</th><th>cons</th></tr>
+<tr><td>(A) pair-only + 短 baseline 鎖</td>
+    <td>短 link で pair-net 多回 → 各 pose 推定 → BA で連結</td>
+    <td>model 変更ゼロ、 短 link で精度高</td>
+    <td>計算量 N×、 dense FoV 前提、 ポール曖昧 case で対応誤りが連鎖</td></tr>
+<tr><td>(B) pair × N + BA で fuse</td>
+    <td>1 anchor から N ref に独立 pair-net → BA で全 pair output 統合</td>
+    <td>対称性保持、 既存 model 流用</td>
+    <td><strong>各 pair が他 frame を見ない → 認知層なし、 ambiguity 残存</strong></td></tr>
+<tr><td>(C) <strong>多 frame 同時投入 + 内部 softmax 統合 (本案)</strong></td>
+    <td>1 transformer に N frame の KV を concat、 RPE bias で frame 間相対 pose 表現、 softmax で全 frame 一括統合</td>
+    <td><strong>model 内部で disambiguation、 ポール-樹解ける</strong></td>
+    <td>KV 量 × N、 attention コスト線形に増える</td></tr>
+<tr><td>(D) DROID-SLAM 系</td>
+    <td>recurrent dense flow + 微分可能 BA、 学習が BA 経由</td>
+    <td>SOTA</td>
+    <td>重い、 real-time 苦しい、 GRU 系で解釈低</td></tr>
+</table>
+
+<p>(A) は wasteful、 (B) は認知層欠如、 (D) は重すぎ。 採用は (C)。</p>
+
+<h2>5. 採用案: 多 frame 同時投入 + 内部 softmax 統合</h2>
+
+<h3>5.1 機構</h3>
+
+<pre class="ascii">
+                    softmax で N frame 統合
+                    ┌──────────────────────┐
+                    ▼                      │
+   Q (anchor 点 P) ───────► attention ─────┤  next layer (繰り返し)
+                              ▲
+                              │
+   KV_all = concat(KV_B, KV_C, KV_D, ...)
+        各 KV token に frame 識別 + 3D 位置情報
+        (Q, K) ペアに per-pair pose bias (RPE)
+</pre>
+
+<h3>5.2 RPE (Relative Position Encoding) で対称性保持</h3>
+
+<p>標準 cross-attention に <strong>per-(Q, K) bias</strong> を加える:</p>
+
+<pre><code># 通常 attention
+scores = Q @ K.T / sqrt(d)              # (N_q, N_kv)
+# multi-frame 拡張: pair pose bias
+bias[q, k] = pose_mlp(pose_{frame(q) → frame(k)})    # スカラー
+scores += bias
+attn = softmax(scores) @ V              # softmax 内で全 frame 統合</code></pre>
+
+<p>これは Shaw+2018, T5 [Raffel+2020], RoFormer 系の RPE と同じ図式。 <strong>Q-shift 不要、
+KV-shift 不要、 frame ID embed も bias に内包</strong>。 各 (i, j) ペアの相対 pose
+情報が attention 計算で動的に注入され、 softmax で fusion 完成。</p>
+
+<h3>5.3 多層化で段階的 disambiguation</h3>
+
+<pre class="ascii">
+   layer 1: 全 frame 独立 sample → softmax fuse → updated Q1
+   layer 2: Q1 から再 attention → softmax fuse → updated Q2
+   layer 3: ...
+</pre>
+
+<p>各層で Q が <strong>「全 frame consensus を反映した特徴」</strong> に進化。 ポール-樹
+ケースは layer 跨いで disambiguate される: layer 1 で「木は安定 anchor」、 layer 2 で
+「木相対のポール位置」、 layer 3 で「frame ごとに違うポール」 と段階的に解像度が上がる。</p>
+
+<h3>5.4 効率版: level=frame deformable</h3>
+
+<p>N が大きい (5+) 場合、 full attention は KV メモリが N 倍に膨らむ。 sample-based の
+deformable [Zhu+2020] を使い、 各 (Q, frame_i) で 4-8 offset だけ sample:</p>
+
+<ul>
+<li>spatial_shapes に N frame の (H, W) を並べる (= 各 frame を level として)</li>
+<li>reference_uv_i = π(pose_A→i, P) で per-frame anchor</li>
+<li>softmax over (frame × n_points) で統合 — 機能的に full attn と同じ、 軽量</li>
+</ul>
+
+<p>計算量 O(N_q × N × n_points) で N に線形、 KV concat の重さなし。
+PETR/PETRv2 [Liu+2022/2023] の temporal warping 方式と違い、 frame を独立 level として
+保持し、 attention が consensus を作る点が key (PETRv2 は pose-warp で時間を消す)。</p>
+
+<h2>6. 位置情報の入れ方 — 相対情報のみ</h2>
+
+<p>絶対 3D 座標は <strong>絶対に入れない</strong>。 入れると model が scene 固有座標
+(東京 / SF / 大阪 etc.) を学習してしまい、 scene 跨ぎの汎化が壊れる。 pair-net の
+美しさは <em>relative pose だけ</em> で動くこと。 multi-frame 化でもこの原則を保つ。</p>
+
+<table>
+<tr><th>側</th><th>位置情報</th><th>絶対? 相対?</th><th>encoding</th></tr>
+<tr><td>Q (frame_i 内の点)</td>
+    <td>frame_i 内のローカル uv (or uvd で正規化 [0,1])</td>
+    <td><strong>frame ローカル</strong> (絶対座標ではない)</td>
+    <td>PointMLP(uvd_in_local)</td></tr>
+<tr><td>KV (frame_j の token)</td>
+    <td>frame_j 内のローカル uv</td>
+    <td><strong>frame ローカル</strong></td>
+    <td>2D PE on image feat</td></tr>
+<tr><td>(Q, K) bias</td>
+    <td>frame_i → frame_j の <strong>相対 6-DoF pose</strong></td>
+    <td><strong>相対のみ</strong></td>
+    <td>pose_mlp(pose_{i→j}) → スカラー bias</td></tr>
+</table>
+
+<p>各 token は「自分は frame ローカル uv X です」 と宣言、 frame 間の橋渡しは
+<strong>(Q, K) ペアごとの相対 pose bias</strong> のみ。 これは NLP の RPE
+(Relative Position Encoding [Shaw+2018, T5 [Raffel+2020]]) を 3D pose に拡張した
+形そのもの。 frame_id の絶対 index も embedding に出てこない、 必要ならば相対 pose の
+magnitude / direction で暗黙区別できる。</p>
+
+<h3>6.1 PETR 系 (絶対 3D) との対比</h3>
+
+<p>PETR / PETRv2 [Liu+2022/2023] 系は逆の哲学:</p>
+
+<ul>
+<li>各 camera image pixel を <strong>ego frame の絶対 3D ray</strong> に逆投影 → position embedding として feature に加算</li>
+<li>multi-camera 統合は absolutized 3D 空間で attention</li>
+<li>temporal は過去 feature を <strong>ego motion で warp</strong> して現 frame の絶対 3D に揃える</li>
+</ul>
+
+<p>これは scene 固有 (per-sample) の絶対座標を毎回計算するため学習は安定するが、
+camera intrinsics calibration の精度依存が高く、 同一 scene 内 detection に最適化された設計。
+mapping のように <strong>scene 横断 (世界中の道路で同じ model)</strong> を求める我々には不向き。</p>
+
+<table>
+<tr><th></th><th>PETR 系 (絶対)</th><th>本案 (相対のみ)</th></tr>
+<tr><td>position embedding</td><td>ego frame 絶対 3D ray</td><td>frame ローカル uv のみ</td></tr>
+<tr><td>frame 間統合</td><td>絶対空間での pose-warp + concat</td><td>相対 pose bias を attention に注入</td></tr>
+<tr><td>scene 跨ぎ汎化</td><td>scene-specific 校正に依存</td><td>scene 不変 (相対のみ)</td></tr>
+<tr><td>主用途</td><td>3D detection (per-scene)</td><td>mapping / SLAM (scene 横断)</td></tr>
+</table>
+
+<h3>6.2 pair (N=1) と multi-frame (N≥2) の統一</h3>
+
+<p>pair-net 現状: <code>q_A = pt_A_fused + pose_emb_AB</code> ← Q を <em>事前 shift</em>
+する形。 これは「Q を K の frame に持ち込む」 操作で、 数学的に attention bias と等価:</p>
+
+<pre><code># 等価変換
+版 A (現 pair-net): score = (Q + pose_emb_AB) @ K.T
+版 B (RPE bias):    score = Q @ K.T + (pose_emb_AB @ K.T) ※ K に依存しない部分は内積に吸収
+                    ≈ Q @ K.T + b(pose_AB)</code></pre>
+
+<p>multi-frame では K が複数 frame に跨ぐので、 K ごとに pose_emb が異なる →
+事前 Q-shift だと K の数だけ Q を複製する羽目になり非効率。 RPE bias 形式
+(<code>score += b(pose_{frame(q) → frame(k)})</code>) なら 1 つの Q で済み、
+N≥2 でも自然に拡張可能。 pair (N=1) はこの bias 形式の特殊ケースで等価。</p>
+
+<p>結論: <strong>絶対座標は token にも attention 計算にも一切入れない、 全ての frame 間
+情報は (i, j) 相対 pose bias 経由でのみ流す</strong>。 これで pair から multi-frame まで
+連続的に同じ機構で扱え、 scene 不変 / 軽量 / 美しい。</p>
+
+<h2>7. depth-optional モード (LiDAR / radar / stereo / mono / none)</h2>
+
+<p>商用展開で sensor 構成は車両ごとに違う。 同一モデルで全部対応:</p>
+
+<table>
+<tr><th>センサ</th><th>depth 精度 (σ_d)</th><th>主な顧客層</th></tr>
+<tr><td>LiDAR (VLS-128 / Luminar)</td><td>±2 cm dense</td><td>自動運転 OEM、 MMS</td></tr>
+<tr><td>radar (4D imaging)</td><td>±10-30 cm sparse、 雨天 robust</td><td>ADAS、 低価格車両</td></tr>
+<tr><td>stereo</td><td>±5 cm 近距離、 距離依存</td><td>ロボット、 中価格車両</td></tr>
+<tr><td>mono + 学習 depth</td><td>±20-50 cm、 scale ambig</td><td>低価格、 過去資産映像</td></tr>
+<tr><td>カメラのみ (depth なし)</td><td>—</td><td>レガシー、 AR</td></tr>
+</table>
+
+<h3>7.1 統一表現</h3>
+
+<p>各 query 点を <code>(uv, μ_d, σ_d, has_d)</code> の 5 値で渡す。 sensor 種別は
+σ_d の値で表現:</p>
+
+<pre><code>σ_d = sensor_sigma(sensor_type, depth)
+    LiDAR  : 0.02 m
+    radar  : 0.20 m
+    stereo : 0.05 m × (depth/30)²
+    mono   : 0.30 × depth
+    none   : ∞ (has_d = 0)</code></pre>
+
+<h3>7.2 学習時の modality dropout</h3>
+
+<p>sample ごとに確率的に depth を抜く / σ_d を変える:</p>
+
+<pre><code>if rng.random() < p_drop_d:
+    σ_d = INF; has_d = 0       # vision-only sample
+else:
+    σ_d = sensor_sigma(...);   has_d = 1
+
+PointMLP は (uv, μ_d, σ_d, has_d) の 5 ch 入力</code></pre>
+
+<p>FrustumLocalEncoder の box filter は has_d=0 のとき depth 軸を無視、 UV 軸のみで
+近傍判定。 depth 不在分 Σ_uv は自然に広がる方向に学習される。</p>
+
+<h3>7.3 多 frame 化との合せ技</h3>
+
+<p>depth 完全に欠ける場合、 reference_uv_i は 1 点でなく <strong>epipolar 線</strong>
+になる (depth の 1 自由度が解けないため)。 実装案: depth prior (例 1-80 m) で 3-5 個
+sample anchor を線上に並べ、 deformable の <code>n_levels</code> を <em>frame × depth_bin</em>
+に拡張。 LiDAR ありなら depth_bin = 1、 なしなら 4-5。</p>
+
+<p>多 frame 観測の triangulation で depth ambiguity が消える → Σ_d 縮む = ベイズ更新が
+attention 内部で起こる。 これは GS 系の view consistency と本質同じ、 ただし
+per-scene 最適化なし、 feed-forward でやり切る点が違う。</p>
+
+<h2>8. 動的物体への拡張</h2>
+
+<p>3D bbox tracks (nuScenes/AV2/Waymo の annotation) を per-LiDAR-point ラベルに展開:</p>
+
+<ul>
+<li>各 query 点に <code>is_dynamic, track_id, box_pose_t1, box_pose_t2</code> を付与</li>
+<li>動的点の reference_uv_i は ego pose ではなく <strong>box pose</strong> で投影</li>
+<li>静的点と動的点で同じモデル、 異なる pose hint だけ与える</li>
+<li>BA 側: 動的点は per-object pose graph factor、 静的点は ego-pose factor → joint 最適化</li>
+</ul>
+
+<p>model 構造は変えない。 reference_uv 計算と BA factor 構築のみ拡張。
+データセット側は box→点 ラベル展開 helper を 100 行程度で書く。</p>
+
+<h2>9. BA の役割 — 認知でなく統合</h2>
+
+<p>BA を model の中に入れない (= DROID 流) 設計の意味:</p>
+
+<ul>
+<li><strong>認知 (disambiguation) = transformer 内部</strong> — softmax fusion + multi-layer 反復で多 frame consensus を構築、 ambiguous な対応は Σ 大で reflect</li>
+<li><strong>統合 (pose 6-DoF 抽出) = 1-step BA</strong> — 既に disambiguated な (μ, Σ) の Σ-weighted Gauss-Newton で全観測を融合、 計算量 O(N_q × N) で軽量</li>
+</ul>
+
+<p>これにより model は 「観測を上手く出す機械」、 BA は「最適推定を引っ張り出す機械」 と
+責務分離。 BA が複雑な対応問題を解こうとしないので失敗パターンが少ない。</p>
+
+<div class="keypoint">
+<strong>なぜ pair-only + iterative BA では駄目か:</strong>
+短 baseline pair を多数連結して BA で stitch する案 (上記 (A)) は理論上動くが、
+(1) 都市環境の繰り返し模様で個々の pair 対応が ambiguous で BA が drift、
+(2) 短 link 多用で計算量 O(N²)、 (3) 狭 FoV / 隠蔽で連鎖切断、 などで品質保証困難。
+multi-frame transformer + 1-step BA はこれら全部を内部 softmax で吸収する。
+</div>
+
+<h2>10. 実装スコープと PoC</h2>
+
+<details>
+<summary>Phase 0 — 既に完了 (pair-net 単体)</summary>
+<ul>
+<li>v42 ckpt: PandaSet 109 scenes、 stratified subsample + dense LiDAR frustum、 best val_err 2.63 px</li>
+<li>commit 8e81d48 で frustum-full 効果確認</li>
+</ul>
+</details>
+
+<details>
+<summary>Phase 1 — multi-frame 対応 (~150 LOC, 2-3 日)</summary>
+<ul>
+<li><code>models/cross_frame.py</code>: forward に N reference frames 受付追加 (現 1 ref を N に拡張)</li>
+<li><code>RPE bias</code>: pose_mlp 出力をスカラー bias、 attention scores に加算</li>
+<li>(efficient mode) deformable の spatial_shapes を N×L に拡張、 reference_uv per-frame</li>
+<li><code>datasets/pandaset_pair.py</code>: triplet/quadruplet sampling 機能追加</li>
+<li>baseline_sweep.py / chain_vs_direct.py で wide-baseline での効果検証</li>
+</ul>
+</details>
+
+<details>
+<summary>Phase 2 — 動的物体 + map polish (~300 LOC, 1 週間)</summary>
+<ul>
+<li>3D bbox annotation parser (nuScenes/AV2)、 per-point track ラベル化</li>
+<li>1-step BA solver (純 torch、 既存 baseline_sweep.py の <code>gn_pose_update</code> 流用)</li>
+<li>累積点群 + rule-based polish (地面 fit / 浮遊 cut / free-space carving)</li>
+<li>map quality 評価 (re-localization accuracy)</li>
+</ul>
+</details>
+
+<details>
+<summary>Phase 3 — 商用化向け仕上げ (~1-2 ヶ月)</summary>
+<ul>
+<li>蒸留 CPU 版 (per-frame pose for edge GPU/CPU)</li>
+<li>cloud polish パイプライン (GS-style 色塗り、 形状固定で軽量)</li>
+<li>顧客車両 calib 支援ツール (我々の e2e_calib 自身)</li>
+<li>map バージョニング / update メカニズム</li>
+</ul>
+</details>
+
+<h2>11. 商品性・事業観点</h2>
+
+<h3>11.1 コスト構造</h3>
+
+<table>
+<tr><th>段階</th><th>計算プロファイル</th><th>商品価値</th></tr>
+<tr><td>per-frame pose (蒸留版)</td><td>CPU リアルタイム、 3-5 ms/frame</td><td>顧客車両に積める = bait</td></tr>
+<tr><td>online incremental map</td><td>edge GPU 数十 ms/frame</td><td>クラウド送信不要、 帯域コスト軽減</td></tr>
+<tr><td>cloud 集約 + polish</td><td>非同期 batch、 H100 で seq あたり数分</td><td>HD map 商品化、 fleet 横断統合</td></tr>
+<tr><td>vehicle 側 localization</td><td>map matching、 5-10 ms/frame</td><td>自動運転 / ロボット商品の核</td></tr>
+</table>
+
+<h3>11.2 精度の事業要件</h3>
+
+<table>
+<tr><th>用途</th><th>必要精度</th><th>本案で達成可?</th></tr>
+<tr><td>HD map (車線レベル)</td><td>10-20 cm</td><td>◎ pose 1 cm 級なら余裕</td></tr>
+<tr><td>自動運転 localization</td><td>横 10 cm / 縦 50 cm</td><td>◎</td></tr>
+<tr><td>AR persistent anchor</td><td>1-5 cm</td><td>○ 短距離 OK、 遠距離は map polish 次第</td></tr>
+<tr><td>建設 / 測量 (mm 級)</td><td>mm</td><td>× LiDAR 単独では届かない、 RTK GNSS 併用必須</td></tr>
+<tr><td>roadway change detection</td><td>10 cm</td><td>◎ map 累積で diff 取れる</td></tr>
+</table>
+
+<h3>11.3 事業可能性 (誰が買うか)</h3>
+
+<ul>
+<li><strong>OEM 自動運転チーム</strong>: HD map 内製、 GS / NeRF より軽量、 fleet 規模で運用しやすい</li>
+<li><strong>ロボティクス (清掃 / 配送 / 警備)</strong>: 室内 / 都市 永続 map + localization、 速度重視</li>
+<li><strong>地図会社 (TomTom / HERE / Mobilemapping)</strong>: HD map 生成パイプライン高速化エンジン</li>
+<li><strong>AR / Metaverse</strong>: persistent anchor、 軽量 GS-like 出力</li>
+</ul>
+
+<h3>11.4 競合との差分</h3>
+
+<table>
+<tr><th>競合</th><th>位置付け</th><th>本案の優位</th></tr>
+<tr><td>古典 SLAM (ORB-SLAM3)</td><td>matching ベース、 点疎</td><td>密点群 + 学習 prior、 wide-baseline robust</td></tr>
+<tr><td>DROID-SLAM</td><td>dense flow + 微分可能 BA、 重い</td><td>LiDAR 起点で軽量、 CPU 動作可</td></tr>
+<tr><td>GS-SLAM</td><td>per-scene 最適化、 光度ロス重</td><td>LiDAR 形状固定 → 学習不要、 fleet スケール OK</td></tr>
+<tr><td>BEVFormer / PETRv2</td><td>3D detection 用、 mapping 専用ではない</td><td>map 商品の deliverable に直結</td></tr>
+<tr><td>RTK-GNSS + IMU</td><td>金額 ¥10-100 万 / 台、 都市キャニオン弱</td><td>センサ既設のみ、 都市環境強</td></tr>
+</table>
+
+<h3>11.5 リスク</h3>
+
+<ul>
+<li>LiDAR 必須前提 → vision-only mode で緩和、 当初は LiDAR 装着車両のみ</li>
+<li>顧客 calib 品質依存 → e2e_calib 自身が入口ツール、 製品同梱</li>
+<li>map バージョニング → update メカニズム要設計</li>
+<li>IP 防御弱 → 仕組み公開しても運用ノウハウで差別化、 SaaS で囲い込み</li>
+</ul>
+
+<h2>12. 関連先行研究 / References</h2>
+
+<ul style="font-size:0.92em; line-height:1.6;">
+<li>[Zhu+2020] Deformable DETR — multi-scale deformable attention の原典</li>
+<li>[Li+2022] BEVFormer — multi-camera deformable attention で BEV 特徴生成、 spatial 多視点を level として扱う先行例</li>
+<li>[Liu+2022] PETR / [Liu+2023] PETRv2 — temporal cross-attention with 3D position encoding。 我々と違い pose-warp で時間統合</li>
+<li>[Yu+2021] PixelNeRF / [Wang+2021] IBRNet / [Johari+2022] GeoNeRF — query-side multi-view feature aggregation の系譜</li>
+<li>[Teed+2021] DROID-SLAM — 微分可能 BA + recurrent dense flow、 我々が <em>軽量に</em> 代替したい対象</li>
+<li>[Sun+2021] LoFTR / [Edstedt+2023] DKM / [Leroy+2024] MASt3R — dense feature matching</li>
+<li>[Beltagy+2020] Longformer / [Zaheer+2020] BigBird — sparse attention、 log(N) anchor 構造</li>
+<li>[Shaw+2018] Self-Attention with Relative Position Representations / [Raffel+2020] T5 — RPE の系譜</li>
+<li>[Watts-Strogatz1998] Small-World Networks — 局所密 + 長距離 shortcut で平均路長 log(N)</li>
+<li>[Cadena+2016] Past, Present, and Future of SLAM — survey、 keyframe / pose graph</li>
+<li>[Strasdat+2010] Scale Drift-Aware Large Scale Monocular SLAM — keyframe-based BA</li>
+<li>[Devlin+2018] BERT — segment embedding、 frame ID embed のアナロジー元</li>
+<li>[Kerbl+2023] 3D Gaussian Splatting — 軽量 view synthesis、 我々の map polish 段階で色塗り役として利用</li>
+</ul>
+
+<hr>
+<p style="color:#9a978a; font-size:0.85em;">関連内部資料: <a href="cross_frame_blog_ja.html">cross-frame blog</a>,
+<a href="technical_overview.html">technical overview</a></p>
+
+</body>
+</html>

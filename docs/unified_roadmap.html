@@ -70,88 +70,88 @@ code { font-family: var(--mono); font-size: 13.5px; background: var(--card);
 </div>
 
 <h1 class="title">
-  一つの残差ヘッドで、<br/>
-  キャリブ / SLAM / ステレオ / ループクロージャを解く
+  One residual head for<br/>
+  calibration / SLAM / stereo / loop closure.
 </h1>
 <p class="subtitle">
-  LiDAR と Camera、任意の2つの観測を ― <em>何の観測か</em>をモデルに
-  教えずに ― 「3D 点が別観測のどこに映るか」を per-point (Δu, Δv, Σ)
-  として返す単一のヘッドで統一する計画。同じ関数、同じ forward、
-  4 つのプロダクト応用。
+  Take two observations — LiDAR, a camera, any pair — and without
+  telling the network which is which, predict <em>where a 3D point lands
+  in the other one</em> as per-point (Δu, Δv, Σ). Same function, same
+  forward pass, four product lines.
 </p>
 
-<h2>共通ヘッド</h2>
+<h2>The shared head</h2>
 
 <div class="eq">f : (image_B patch, 3D point P_A, hypothesis pose T̂_AB) → (Δu, Δv, Σ)</div>
 
 <p>
-  Σ は 2×2 共分散(uv のみ)、または 3×3(uvd、v12 以降)。
-  f は「A と B が何か」を知らない。
-  データローダーが <em>A と B を物理的に何と対応させるか</em>だけで
-  タスクを切り替える。ネットワークのコードは同じ。
+  Σ is either 2×2 (uv only) or 3×3 (uvd, from v12 onward). The function
+  does not know <em>what</em> A and B are. Only the data loader decides
+  that, by choosing what to stuff into patch_A, patch_B, and T̂. The
+  network code never branches on task.
 </p>
 
-<h2>4 つのタスクと応用</h2>
+<h2>The four tasks and their applications</h2>
 
 <figure>
   <img src="images/unified_plan_status.png"
-       alt="Unified head status — 4 tasks A/B/C/D with current best per task">
+       alt="Unified head status — four tasks A/B/C/D with current best per task">
   <figcaption>
-    4 タスク × 現状ベスト × 製品応用。B(cross-frame)が唯一
-    active に学習継続中。A は旧ヘッドでの baseline。
+    Four tasks × current best × product application. B (cross-frame) is
+    the only one actively training. A still runs on the legacy head.
   </figcaption>
 </figure>
 
 <table>
 <thead><tr>
-  <th>Task</th><th>A における入力</th><th>B における入力</th><th>T の意味</th>
+  <th>Task</th><th>side A</th><th>side B</th><th>meaning of T</th>
 </tr></thead>
 <tbody>
 <tr>
   <td><strong>A</strong> intra-frame calibration</td>
   <td>LiDAR(t)</td>
-  <td>Camera(t)  ※ patch_A と patch_B は同じ画像</td>
-  <td>LiDAR → Camera 外部パラメータ</td>
+  <td>Camera(t) — patch_A and patch_B are the same image</td>
+  <td>LiDAR → Camera extrinsic</td>
 </tr>
 <tr class="best">
   <td><strong>B</strong> cross-frame residual</td>
   <td>Cam(t₁) or LiDAR(t₁)</td>
   <td>Cam(t₂)</td>
-  <td>ego-motion × 外部 = 2 フレーム間の相対 pose</td>
+  <td>ego-motion × extrinsic = relative pose between frames</td>
 </tr>
 <tr>
   <td><strong>C</strong> cross-camera stereo</td>
-  <td>Cam_L(t) + LiDAR 深度</td>
+  <td>Cam_L(t) + LiDAR depth</td>
   <td>Cam_R(t)</td>
-  <td>ステレオ baseline</td>
+  <td>stereo baseline</td>
 </tr>
 <tr>
   <td><strong>D</strong> long baseline / loop closure</td>
   <td>Cam(t₁)</td>
-  <td>Cam(t₁ + Δt), Δt 大</td>
-  <td>長距離 ego-motion、scene 変化あり</td>
+  <td>Cam(t₁ + Δt), large Δt</td>
+  <td>long-range ego-motion, scene possibly changed</td>
 </tr>
 </tbody>
 </table>
 
-<h3>応用の割り当て</h3>
+<h3>Where each task lands as a product</h3>
 
 <ul>
-  <li><strong>A → LiDAR↔Camera calibration 製品</strong>:
-    現場で一度キャリブを取る/更新するときに。
-    新しいセンサ組合せでも zero-shot で動くことが本件の勝ち筋。</li>
-  <li><strong>B → 汎用 SLAM フロントエンド</strong>:
-    VO / 短距離 pose tracking の残差源。
-    σ 重みがそのまま BA のマハラノビスとして下流 solver に流れる。</li>
-  <li><strong>C → FCM / TPCM 製品 カメラ間整合</strong>:
-    同時刻の 2 カメラ一貫性チェック。
-    LiDAR を介さずカメラ同士を直接照合する構成も可。</li>
-  <li><strong>D → 超高精度地図の loop closure</strong>:
-    数分〜数時間離れた pass を照合。
-    大きな σ を許容して BA へ流し、地図ドリフトを抑える。</li>
+  <li><strong>A → LiDAR ↔ Camera calibration product</strong>:
+    initial calibration and periodic re-calibration in the field.
+    Zero-shot generalization to an unseen sensor pair is the real win.</li>
+  <li><strong>B → general-purpose SLAM front-end</strong>:
+    residual source for VO and short-range pose tracking. The σ weights
+    feed downstream BA as Mahalanobis info directly.</li>
+  <li><strong>C → FCM / TPCM — inter-camera consistency</strong>:
+    same-time sanity check between two cameras. Can run through LiDAR or
+    camera-to-camera directly, both are the same f.</li>
+  <li><strong>D → HD-map loop closure</strong>:
+    align passes minutes to hours apart. Tolerate large σ, let the BA
+    absorb it, bound map drift.</li>
 </ul>
 
-<h2>アーキテクチャ: forward は同一、データだけが変わる</h2>
+<h2>Architecture: the forward is fixed, the data loader varies</h2>
 
 <div class="ascii">forward (CalibNetCrossFrame — models/cross_frame.py):
 
@@ -163,151 +163,165 @@ code { font-family: var(--mono); font-size: 13.5px; background: var(--card);
                                             ▼
                                  (Δu, Δv, Σ) per query, in B-pixel
 
-  pose_emb(T̂)    → 仮説ポーズを 6-DoF で query に concat
-  intra-block SA → 点間 self-attn
-  dual training  → (A→B) と (B→A) を対称に学習、残差は symmetric</div>
+  pose_emb(T̂)    → 6-DoF hypothesis concat to each query
+  intra-block SA → per-point self-attn across the query set
+  dual training  → (A→B) and (B→A) trained symmetrically</div>
 
 <p>
-  タスク分岐は <strong>Pair Dataset が何を patch_A/patch_B/uvd_A/T̂ に詰めるか</strong>
-  だけ。モデルは分岐を知らない。
-  pose_emb の仮説 pose が意味的に何か(外部パラメータ or ego-motion or ステレオ変換)
-  はネットワーク的には等価。
+  Task branching lives entirely in the Pair Dataset: what it decides to
+  load into patch_A / patch_B / uvd_A / T̂. The network does not care
+  whether T̂ is an extrinsic, ego-motion, or a stereo baseline — the math
+  is the same.
 </p>
 
 <div class="callout">
-  <strong>なぜ統合が成立するか</strong>:
-  幾何公式は共通。画像から特徴を引く処理も共通。
-  唯一タスク固有なのは <em>入力の組み立て方</em> と <em>σ の分布</em>。
-  前者はデータローダーで吸収、後者は必要なら task_id 埋め込みを
-  pose_emb に連結するだけ。重み共有のメリットは大きい:
-  例えば calibration のデータで学んだ「LiDAR 点と画像特徴の対応付け」の
-  能力が、そのまま cross-frame の初期動作を決める。
+  <strong>Why this unifies cleanly</strong>:
+  the geometric formulation is identical. The image-feature extraction is
+  identical. The only task-specific parts are (1) how each sample is
+  assembled, and (2) the σ distribution in practice. (1) is absorbed by
+  the data loader; (2) can be absorbed by an optional task-id embedding
+  concatenated into pose_emb. Weight sharing is a real upside: the
+  calibration task teaches the backbone to bind LiDAR points to image
+  features, which is exactly what cross-frame needs as well.
 </div>
 
-<h2>現状: どこまで動いている</h2>
+<h2>Where we are today</h2>
 
-<h3>タスク別の到達点</h3>
+<h3>Per-task status</h3>
 <ul>
-  <li><strong>A intra-frame calib</strong>: 旧ヘッド <code>CalibNetDepth</code>
-    (<code>experiments/all_v3_mc/</code>) で val NLL 2.07 (obj 1.06 / bg 2.13)。
-    <em>新ヘッドには統合されていない</em> — これが最初の統合対象。</li>
+  <li><strong>A intra-frame calibration</strong>: legacy head
+    <code>CalibNetDepth</code>
+    (<code>experiments/all_v3_mc/</code>) at val NLL 2.07 (obj 1.06, bg 2.13).
+    <em>Not yet ported to the unified head</em> — this is target #1 of
+    the integration work.</li>
   <li><strong>B cross-frame</strong>: <code>CalibNetCrossFrame</code>
-    (<code>experiments/cross_frame_v13_mix/</code> 〜 <code>v18_more_visits/</code>)。
-    PandaSet 39 + Waymo 80 混合、UVD 対応、現在 <strong>v18 が 1.91 px
-    (v13 比 21% 改善)</strong> を叩き出して学習中。train/val gap
-    も 1.40 → 0.74 px に半減。</li>
-  <li><strong>C cross-camera stereo</strong>: 未着手。
-    データ生成スクリプトを書くだけ。</li>
-  <li><strong>D loop closure</strong>: B の拡張で既にカバー
-    (baseline 1-60 frame まで eval 済み)。
-    真の loop closure(別 drive 間)は未テスト。</li>
+    (<code>experiments/cross_frame_v13_mix/</code> through
+    <code>v18_more_visits/</code>). Mixed PandaSet 39 + Waymo 80 scenes,
+    UVD enabled. <strong>v18 currently at 1.91 px (21% better than v13's
+    2.42)</strong>, with the train/val mean gap cut from 1.40 to 0.74 px.</li>
+  <li><strong>C cross-camera stereo</strong>: not started. Only needs a
+    pair-generation script.</li>
+  <li><strong>D loop closure</strong>: inherited via B (baselines 1–60
+    frames already swept at eval time). True cross-drive loop closure has
+    not been tested.</li>
 </ul>
 
-<h3>B の v18 結果が示したこと</h3>
+<h3>What v18 on B showed</h3>
 
 <ul>
-  <li><strong>1 フレームあたりの訪問回数を 25 → 125 に増やした</strong>
-    (virtual_epoch 4000 → 20000)だけで、val err 2.42 → 1.91 (21% 改善)。</li>
-  <li>過学習(train/val gap)は <strong>半減</strong>。
-    「scene memorization で σ が overconfident」だった状態が緩和された。</li>
-  <li>つまり v13/v15/v16/v17 の段階で overfit が主要ボトルネックで、
-    データをもっと見せれば mean も σ も揃って改善する余地があった。</li>
-  <li>σ キャリブレーション(z = err/σ)は学習完了後に再測定。
-    σ 絶対値も縮まっているかは要確認。</li>
+  <li>Raising <em>per-frame visits</em> from ~25 to ~125
+    (<code>virtual_epoch</code> 4000 → 20000) dropped val err from 2.42
+    to 1.91 px (21%).</li>
+  <li>Train/val <em>mean</em> gap was halved. That says the mean head
+    generalizes better with more varied exposure; σ head is still TBD.</li>
+  <li>In other words, at v13–v17 the bottleneck was a kind of scene-level
+    overfit. More data exposure per-scene buys real accuracy, not just
+    epoch-count inflation.</li>
+  <li>The σ calibration question (val NLL trend, z = err/σ) is <em>not
+    yet confirmed</em> — we only looked at val err so far. Checking the
+    NLL curve is the next diagnostic.</li>
 </ul>
 
-<h2>ロードマップ</h2>
+<h2>Roadmap</h2>
 
 <div class="callout">
-  前提: <em>手法の独自性</em>は moat にならない。
-  Moat は自社データを流し込んで cm 級 pose と密 3D 地図を毎日更新する
-  <em>パイプライン</em>。以下はそのパイプラインを 4 タスクで回すための
-  最短工程。
+  Premise: methodological novelty is not the moat. The moat is the
+  in-house pipeline that keeps producing cm-accurate poses and dense 3D
+  maps every day. The milestones below are the shortest path to getting
+  that pipeline covering all four tasks.
 </div>
 
 <table>
 <thead><tr>
-  <th>Milestone</th><th>内容</th><th>見積</th>
+  <th>Milestone</th><th>Content</th><th>Estimate</th>
 </tr></thead>
 <tbody>
 <tr>
   <td><strong>M0</strong></td>
-  <td>v18 完走、σ-distribution 測定、BA 3D の再評価(現在進行中)</td>
-  <td>今日</td>
+  <td>Finish v18, inspect σ distribution and val NLL, re-run 3D BA eval
+      (in progress today).</td>
+  <td>today</td>
 </tr>
 <tr>
   <td><strong>M1</strong></td>
-  <td><code>PandaSetCalibPair</code> 新規 — A タスクを CalibNetCrossFrame の
-      入力形式に合わせる。sample dict 共通化。</td>
+  <td>New <code>PandaSetCalibPair</code> — emits the same sample dict as
+      cross-frame, but for the A task (LiDAR vs same-time camera,
+      perturbed extrinsic).</td>
   <td>1 day</td>
 </tr>
 <tr>
   <td><strong>M2</strong></td>
-  <td><code>MixedPairDataset</code> + <code>--mix-spec</code> — 複数タスクを
-      重み付きでサンプル。</td>
+  <td><code>MixedPairDataset</code> + <code>--mix-spec</code> CLI flag for
+      weighted sampling across per-task datasets.</td>
   <td>½ day</td>
 </tr>
 <tr>
   <td><strong>M3</strong></td>
-  <td>A + B 混合学習(<code>v19_ab_mix</code>)、per-task val err / σ 測定。
-      A の旧ヘッド結果と直接比較。</td>
+  <td>Train <code>v19_ab_mix</code> on A + B together; measure per-task
+      val err / σ. Direct comparison against the old <code>all_v3_mc</code>
+      baseline.</td>
   <td>½ day</td>
 </tr>
 <tr>
   <td><strong>M4</strong></td>
-  <td>C stereo pair の実装、3 タスク混合(<code>v20_abc_mix</code>)。
-      task_id 埋め込みの有無で ablation。</td>
+  <td>Implement C stereo pair dataset; train <code>v20_abc_mix</code>. Run
+      an ablation with/without the task-id embedding.</td>
   <td>1 day</td>
 </tr>
 <tr>
   <td><strong>M5</strong></td>
-  <td>会社データ adapter (<code>CompanyCalibPair</code>)。
-      GICP-refined pose で sub-px 評価、ここで初めて真の精度が見える。</td>
-  <td>2-3 days</td>
+  <td>Company data adapter (<code>CompanyCalibPair</code>). Sub-pixel
+      evaluation against GICP-refined pose — first time we see the
+      actual precision ceiling.</td>
+  <td>2–3 days</td>
 </tr>
 <tr>
   <td><strong>M6</strong></td>
-  <td>D loop closure の専用評価 — 同じ街・別 drive のペアで pose 復元。</td>
+  <td>Dedicated D loop-closure evaluation — same street, different drive
+      (and different day if available) pose recovery.</td>
   <td>1 day</td>
 </tr>
 </tbody>
 </table>
 
 <p style="color: var(--ink-dim); font-size: 13.5px;">
-  合計 5-6 営業日。M5 が済んだ時点で、プロダクト側(calibration 製品・
-  SLAM フロントエンド・FCM/TPCM・地図 loop closure)が
-  <em>単一の学習済みヘッド</em>を共有する体制に入る。
+  Total: 5–6 working days. Once M5 lands, every product line (calibration
+  product, SLAM front-end, FCM/TPCM, HD-map loop closure) shares a
+  <em>single trained head</em>.
 </p>
 
-<h2>懸念とリスク</h2>
+<h2>Risks and open questions</h2>
 
 <ul>
-  <li><strong>σ overfit</strong>: v18 で大きく緩和したが z = err/σ はまだ
-    要再測定。混合学習で再燃する可能性あり。
-    軽い対策は σ post-hoc rescale (10 行)、重い対策は σ ヘッドの
-    Dropout / weight decay。</li>
-  <li><strong>pose GT 品質</strong>: PandaSet / Waymo の公開 GT は
-    系統誤差 sub-px 〜 0.5°。サブピクセル精度の評価が pose GT で頭打ち。
-    M5 で会社 GICP データに乗り換えないと真の精度は測れない。</li>
-  <li><strong>task 間の σ 分布差</strong>: calib の σ と cross-frame の σ
-    は実運用条件が違うので分布が違う。task_id 埋め込みで吸収可能だが
-    試していない。</li>
-  <li><strong>NuScenes の再投入</strong>: 2 Hz で baseline 解像度が
-    合わないため保留中。sweep データ(20 Hz LiDAR / 12 Hz Cam)を使って
-    10 Hz 相当に再サンプルすれば統合可能。</li>
+  <li><strong>σ overfit</strong>: v18 softened the mean-side gap, but z =
+    err/σ has to be re-measured. Mixing tasks may re-expose the issue.
+    Light mitigation is post-hoc σ rescaling (~10 LOC). Heavier
+    mitigation is dropout / weight decay on the σ head specifically.</li>
+  <li><strong>Pose-GT ceiling</strong>: public datasets (PandaSet, Waymo)
+    carry systematic errors at sub-pixel to 0.5° levels. Our
+    sub-pixel-accuracy claims will be capped by their GT until we swap to
+    the company GICP-refined cache in M5.</li>
+  <li><strong>Per-task σ distribution</strong>: calibration and
+    cross-frame see different real-world noise profiles. A task-id
+    embedding in pose_emb should let the head learn one σ scale per
+    task. Not yet tested.</li>
+  <li><strong>NuScenes</strong>: currently shelved because its 2 Hz
+    keyframe rate makes <code>baseline_max</code> a 10 sec physical gap,
+    outside the Waymo / PandaSet regime. Re-integratable via the 20 Hz
+    LiDAR / 12 Hz camera sweep data.</li>
 </ul>
 
-<h2>関連レポート</h2>
+<h2>Related reports</h2>
 
 <div class="callout">
   <a href="cross_frame_report.html">05. Cross-frame residual net</a> —
-  B タスクの詳報、σ 楕円可視化、BA+LLN 評価。<br/>
-  <a href="report.html">02. Bilingual writeup</a> —
-  A タスク (旧ヘッド CalibNetDepth) の初報。<br/>
-  <a href="ba_report.html">03. Multi-frame BA sweep</a> —
-  下流 BA の感度解析。<br/>
-  <a href="deform_report.html">04. Deformable cross-attn</a> —
-  attention 機構の効率化、現ヘッドの内部。
+  task B writeup, σ ellipse vis, BA + LLN eval.<br/>
+  <a href="report.html">02. Bilingual writeup</a> — task A (legacy head
+  CalibNetDepth) original report.<br/>
+  <a href="ba_report.html">03. Multi-frame BA sweep</a> — downstream BA
+  sensitivity.<br/>
+  <a href="deform_report.html">04. Deformable cross-attn</a> — attention
+  mechanism inside the current head.
 </div>
 
 </main>

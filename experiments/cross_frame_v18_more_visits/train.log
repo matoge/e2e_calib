@@ -1,2 +1,17 @@
 [18:05:56] device = cuda
 [18:05:56] args = {'name': 'v18_more_visits', 'full': True, 'scene': '/mnt/mininas/datasets/pandaset/015', 'scenes_root': '/mnt/mininas/datasets/pandaset,/mnt/nvme6t/waymo_ps', 'train_frac': 0.8, 'img_size': 64, 'max_points': 256, 'batch_size': 32, 'lr': 0.001, 'n_overfit': 64, 'epochs': 60, 'log_every': 4, 'baseline_min': 1, 'baseline_max': 20, 'sigma_ypr': 1.0, 'sigma_t': 0.2, 'crop_min': 128, 'crop_max': 256, 'num_workers': 8, 'virtual_epoch': 20000, 'deform_mode': 'sl', 'n_cross_layers': 2, 'n_intra_layers': 2, 'uvd': True, 'dataset': 'pandaset', 'waymo_root': '/mnt/mininas/datasets/waymo/training', 'max_train_scenes': 0}
+[18:12:21] model params: 1.593 M
+[18:12:59] ep   0  loss=5.430  err_AB=9.72px  err_BA=9.52px  (base=16.14px)  val_err=5.68px (base 16.35)  d=0.60m(base 0.19)  val_d=0.22m(base 0.19)  lr=9.99e-04  t=37s
+[18:14:43] ep   4  loss=2.217  err_AB=3.73px  err_BA=3.50px  (base=16.14px)  val_err=3.36px (base 16.34)  d=0.23m(base 0.19)  val_d=0.22m(base 0.19)  lr=9.83e-04  t=141s
+[18:16:26] ep   8  loss=1.666  err_AB=3.04px  err_BA=2.80px  (base=16.13px)  val_err=2.73px (base 16.34)  d=0.22m(base 0.19)  val_d=0.21m(base 0.19)  lr=9.46e-04  t=244s
+[18:18:09] ep  12  loss=1.358  err_AB=2.72px  err_BA=2.51px  (base=16.13px)  val_err=2.57px (base 16.34)  d=0.21m(base 0.19)  val_d=0.22m(base 0.19)  lr=8.90e-04  t=348s
+[18:19:53] ep  16  loss=1.116  err_AB=2.42px  err_BA=2.26px  (base=16.14px)  val_err=2.50px (base 16.34)  d=0.21m(base 0.19)  val_d=0.21m(base 0.19)  lr=8.17e-04  t=451s
+[18:21:39] ep  20  loss=0.876  err_AB=2.22px  err_BA=2.06px  (base=16.13px)  val_err=2.54px (base 16.34)  d=0.20m(base 0.19)  val_d=0.21m(base 0.19)  lr=7.30e-04  t=557s
+[18:23:22] ep  24  loss=0.637  err_AB=2.02px  err_BA=1.90px  (base=16.14px)  val_err=2.31px (base 16.35)  d=0.19m(base 0.19)  val_d=0.21m(base 0.19)  lr=6.33e-04  t=660s
+[18:25:10] ep  28  loss=0.248  err_AB=1.76px  err_BA=1.67px  (base=16.13px)  val_err=2.28px (base 16.33)  d=0.17m(base 0.19)  val_d=0.21m(base 0.19)  lr=5.31e-04  t=768s
+[18:26:55] ep  32  loss=-0.163  err_AB=1.57px  err_BA=1.53px  (base=16.14px)  val_err=2.05px (base 16.34)  d=0.13m(base 0.19)  val_d=0.20m(base 0.19)  lr=4.28e-04  t=873s
+[18:28:40] ep  36  loss=-0.561  err_AB=1.41px  err_BA=1.39px  (base=16.14px)  val_err=2.01px (base 16.35)  d=0.11m(base 0.19)  val_d=0.20m(base 0.19)  lr=3.28e-04  t=978s
+[18:30:27] ep  40  loss=-0.960  err_AB=1.28px  err_BA=1.28px  (base=16.14px)  val_err=1.92px (base 16.35)  d=0.09m(base 0.19)  val_d=0.20m(base 0.19)  lr=2.35e-04  t=1085s
+[18:32:11] ep  44  loss=-1.334  err_AB=1.17px  err_BA=1.18px  (base=16.14px)  val_err=1.91px (base 16.34)  d=0.07m(base 0.19)  val_d=0.20m(base 0.19)  lr=1.55e-04  t=1189s
+[18:33:57] ep  48  loss=-1.662  err_AB=1.08px  err_BA=1.10px  (base=16.14px)  val_err=1.85px (base 16.35)  d=0.06m(base 0.19)  val_d=0.19m(base 0.19)  lr=8.99e-05  t=1295s
+[18:35:43] ep  52  loss=-1.896  err_AB=1.02px  err_BA=1.05px  (base=16.13px)  val_err=1.87px (base 16.34)  d=0.05m(base 0.19)  val_d=0.19m(base 0.19)  lr=4.29e-05  t=1401s

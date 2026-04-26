@@ -1,0 +1,28 @@
+[00:30:57] device = cuda
+[00:30:57] args = {'name': 'v29_back_only', 'full': True, 'scene': '/mnt/mininas/datasets/pandaset/015', 'scenes_root': '/mnt/nvme6t/pandaset', 'train_frac': 0.8, 'cameras': 'back_camera', 'img_size': 64, 'max_points': 256, 'batch_size': 32, 'lr': 0.001, 'n_overfit': 64, 'epochs': 100, 'log_every': 1, 'baseline_min': 1, 'baseline_max': 20, 'sigma_ypr': 1.0, 'sigma_t': 0.2, 'crop_min': 128, 'crop_max': 256, 'num_workers': 4, 'virtual_epoch': 4000, 'deform_mode': 'sl', 'n_cross_layers': 2, 'n_intra_layers': 2, 'uvd': True, 'dataset': 'pandaset', 'waymo_root': '/mnt/mininas/datasets/waymo/training', 'max_train_scenes': 0, 'mine_val': True, 'val_pool_size': 1000, 'migrate_k': 500, 'overfit_patience': 3, 'overfit_metric': 'nll', 'rewind_back': 3, 'rewind_lr_reset': True, 'sentinel_size': 1000, 'stop_no_improve_migrations': 3}
+[00:33:15] model params: 1.593 M
+[00:33:29] ep   0  loss=6.897  err_AB=9.32px  err_BA=10.29px  (base=8.13px)  val_err=7.28px (base 8.33)  val_nll=4.38  d=1.17m(base 0.25)  val_d=0.35m(base 0.25)  lr=1.00e-03  t=14s
+[00:33:38] ep   1  loss=4.401  err_AB=6.71px  err_BA=6.99px  (base=8.14px)  val_err=6.00px (base 8.33)  val_nll=3.84  d=0.47m(base 0.25)  val_d=0.36m(base 0.25)  lr=9.99e-04  t=23s
+[00:33:47] ep   2  loss=3.907  err_AB=5.67px  err_BA=5.81px  (base=8.14px)  val_err=4.80px (base 8.33)  val_nll=3.39  d=0.40m(base 0.25)  val_d=0.37m(base 0.25)  lr=9.98e-04  t=31s
+[00:33:56] ep   3  loss=3.305  err_AB=4.72px  err_BA=4.88px  (base=8.14px)  val_err=4.40px (base 8.33)  val_nll=3.14  d=0.34m(base 0.25)  val_d=0.34m(base 0.25)  lr=9.96e-04  t=41s
+[00:34:06] ep   4  loss=3.172  err_AB=4.48px  err_BA=4.54px  (base=8.16px)  val_err=4.78px (base 8.33)  val_nll=4.01  d=0.34m(base 0.25)  val_d=0.54m(base 0.25)  lr=9.94e-04  t=50s
+[00:34:14] ep   5  loss=3.122  err_AB=4.43px  err_BA=4.54px  (base=8.15px)  val_err=4.14px (base 8.33)  val_nll=2.77  d=0.33m(base 0.25)  val_d=0.29m(base 0.25)  lr=9.91e-04  t=59s
+[00:34:30] ep   6  loss=2.900  err_AB=4.20px  err_BA=4.23px  (base=8.15px)  val_err=4.05px (base 8.33)  val_nll=2.70  d=0.31m(base 0.25)  val_d=0.29m(base 0.25)  lr=9.88e-04  t=75s
+[00:34:49] ep   7  loss=2.898  err_AB=4.17px  err_BA=4.26px  (base=8.16px)  val_err=4.23px (base 8.33)  val_nll=3.27  d=0.32m(base 0.25)  val_d=0.43m(base 0.25)  lr=9.84e-04  t=93s
+[00:35:05] ep   8  loss=2.811  err_AB=4.05px  err_BA=4.13px  (base=8.14px)  val_err=4.10px (base 8.33)  val_nll=2.73  d=0.31m(base 0.25)  val_d=0.29m(base 0.25)  lr=9.80e-04  t=109s
+[00:36:16]   [MIGRATE#1] moved 500 val→train (total migrated 500, next_mining_idx=1500 (sentinel+∞ mode))
+[00:36:16]   [REWIND] model ← snapshot from ep 6 (current ep 9, rewound by 3 epochs)
+[00:36:16]   [LR-RESET] lr ← 1.0e-03, cosine restart over 91 remaining epochs
+[00:36:16] ep   9  loss=2.744  err_AB=3.87px  err_BA=4.08px  (base=8.16px)  val_err=4.46px (base 8.34)  val_nll=3.07  d=0.30m(base 0.25)  val_d=0.32m(base 0.25)  lr=1.00e-03  t=181s
+[00:36:49] ep  10  loss=2.835  err_AB=4.04px  err_BA=4.14px  (base=8.11px)  val_err=4.21px (base 8.33)  val_nll=2.84  d=0.31m(base 0.24)  val_d=0.30m(base 0.25)  lr=1.00e-03  t=213s
+[00:37:11] ep  11  loss=2.772  err_AB=4.03px  err_BA=4.10px  (base=8.13px)  val_err=3.87px (base 8.33)  val_nll=2.60  d=0.30m(base 0.24)  val_d=0.28m(base 0.25)  lr=9.99e-04  t=235s
+[00:37:37] ep  12  loss=2.697  err_AB=3.92px  err_BA=4.07px  (base=8.11px)  val_err=3.77px (base 8.34)  val_nll=2.40  d=0.29m(base 0.24)  val_d=0.27m(base 0.25)  lr=9.97e-04  t=262s
+[00:38:10] ep  13  loss=2.528  err_AB=3.72px  err_BA=3.82px  (base=8.12px)  val_err=4.08px (base 8.33)  val_nll=2.57  d=0.29m(base 0.24)  val_d=0.27m(base 0.25)  lr=9.95e-04  t=294s
+[00:38:30] ep  14  loss=2.513  err_AB=3.64px  err_BA=3.71px  (base=8.12px)  val_err=4.26px (base 8.33)  val_nll=2.93  d=0.30m(base 0.24)  val_d=0.32m(base 0.25)  lr=9.93e-04  t=314s
+[00:38:58] ep  15  loss=2.426  err_AB=3.58px  err_BA=3.71px  (base=8.13px)  val_err=3.65px (base 8.33)  val_nll=2.36  d=0.28m(base 0.24)  val_d=0.26m(base 0.25)  lr=9.89e-04  t=343s
+[00:39:25] ep  16  loss=2.394  err_AB=3.50px  err_BA=3.61px  (base=8.13px)  val_err=3.49px (base 8.33)  val_nll=2.39  d=0.28m(base 0.24)  val_d=0.29m(base 0.25)  lr=9.86e-04  t=369s
+[00:40:36] ep  17  loss=2.379  err_AB=3.48px  err_BA=3.58px  (base=8.12px)  val_err=3.93px (base 8.33)  val_nll=3.29  d=0.28m(base 0.24)  val_d=0.43m(base 0.25)  lr=9.81e-04  t=441s
+[00:50:28]   [MIGRATE#2] moved 500 val→train (total migrated 1000, next_mining_idx=2000 (sentinel+∞ mode))
+[00:50:30]   [REWIND] model ← snapshot from ep 15 (current ep 18, rewound by 3 epochs)
+[00:50:30]   [LR-RESET] lr ← 1.0e-03, cosine restart over 82 remaining epochs
+[00:50:30] ep  18  loss=2.387  err_AB=3.55px  err_BA=3.62px  (base=8.12px)  val_err=3.73px (base 8.33)  val_nll=2.48  d=0.28m(base 0.24)  val_d=0.28m(base 0.25)  lr=1.00e-03  t=1034s

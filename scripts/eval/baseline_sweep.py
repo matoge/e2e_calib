@@ -70,6 +70,10 @@ def main():
     baselines = [int(b) for b in args.baselines.split(',')]
     rows = []
     for B in baselines:
+        # Relax to ±2 so _try_one can find a valid fi_A / direction within
+        # PandaSet's 80-frame scenes (otherwise B≥70 nearly always rejects).
+        bw = max(1, B - 2)
+        bh = B + 2
         ds = PandaSetCrossFrameDataset(
             split='val',
             scenes_root=args.scenes_root,
@@ -77,12 +81,18 @@ def main():
             cameras=args.cameras,
             img_size=cfg['img_size'],
             max_points=cfg['max_points'],
-            baseline_range=(B, B),
+            baseline_range=(bw, bh),
+            # the line below this dict construction disables is_fb override
+            # so the requested baseline range is honored exactly.
+            # (see _try_one: is_fb cam → eff_max=room ignoring bmax)
             sigma_ypr=cfg['sigma_ypr'], sigma_t=cfg['sigma_t'],
             crop_range=(cfg['crop_min'], cfg['crop_max']),
             virtual_epoch_len=args.n_samples,
             seed=B + 100,
         )
+        # disable is_fb extension so eff_max honors baseline_range exactly
+        for scn in ds.scenes:
+            scn.camera_name = '_eval_side'
         loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                              num_workers=args.num_workers, pin_memory=True)
         errs, nlls, base_errs = [], [], []
