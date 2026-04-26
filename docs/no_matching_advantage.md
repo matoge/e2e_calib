@@ -112,6 +112,26 @@ per-point の (Δuv, Σ) が出ていれば、 数百点の **sparse な Σ-weig
 重視の設計。タスク 1 個ずつに専用 SLAM システムを組むより、 1 つの
 primitive を維持する方が運用コストが低い。
 
+#### 補足: 時間軸の扱い (GRU vs cross-attention)
+
+ネットワークアーキテクチャの観点でも DROID と本提案は対比できる:
+
+- DROID は **GRU で時間軸を recurrent に積む**。 t = 0, 1, 2, ... と
+  順次 flow + pose を update していく
+- 本提案は **transformer cross-attention で複数 KV フレーム (M1, M2, ..., B) を
+  並列に統合**。 時間軸を recurrent じゃなく attention の KV 軸に乗せる
+
+ざっくり「DROID の GRU を transformer + sparse 化したもの」と捉えても
+近い。共通: 時間方向の情報を集約して per-frame 出力を refine する目的。
+
+trade-off:
+
+- transformer + parallel KV: GPU で並列化が効く。 N フレームまとめて 1 forward
+- GRU recurrent: 時間軸が無制限に伸ばせる (理論上)。 ただし long sequence で
+  vanishing/exploding 傾向、 並列化困難
+- 本提案で長時間軸は **chain composition** (N=4 windows を sliding) で
+  扱う。 windowed transformer の標準パターン
+
 #### B. 出力は「シーン再構成」じゃなく「残差 + 不確実性」
 
 DUSt3R は 3D 点群、VGGT は scene 全体を出す。本手法は **pose 仮説に対する
