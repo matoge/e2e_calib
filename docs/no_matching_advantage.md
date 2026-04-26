@@ -163,9 +163,7 @@ pose を入力にすることで:
 - descriptor 学習に要する photometric / triplet loss / hard negative mining
   系の非自明な学習スキームに比べて遥かに直接的
 
-## どこまで効くか / 限界
-
-### 効く
+## 適用先
 
 - camera–LiDAR calibration 残差推定
 - visual / LiDAR odometry residual head (= local pose refinement)
@@ -174,19 +172,45 @@ pose を入力にすることで:
 - 動的物体 down-weighting (副次的)
 - 動的物体 GT 書き換え訓練 (cuboid 動きで warp; 進行中)
 
-### マッチングがやはり要る (出来ないことの正直な開示)
+## 「matcher は必要なんじゃ」よくある誤解への反論
 
-- **絶対 pose 初期化** (= bootstrap):
-  - 何もない状態から pose を作るには結局 keypoint matcher 必要
-  - 提案手法は **「pose 仮説を refine する」** 機能であって「pose を作る」
-    機能ではない
-- **長基線 loop closure**:
-  - A↔B の baseline が長すぎる (例: 100m 以上 + 大角差) と、
-    モデルが「同じ点が両画像のどこに対応するか」の自信を持てない
-  - こちらは matcher で初期 pose 候補出してから refine、の順番
+**初期 pose (bootstrap):**
+本提案は visual-only system 用ではなく LiDAR + camera を持つ車両 / robot 向け。
+こういう環境では matcher を呼ばずに初期 pose が出る:
+- IMU + wheel odometry の dead-reckoning (cm 精度、数秒なら誤差小)
+- LiDAR ICP / GICP / NDT (descriptor 不要、点群直接 align)
+- センサスタックの工場出荷 calibration (固定値で十分な精度)
 
-つまり提案手法は **「pose を持ってる側」の問題を解く** ものであって、
-matcher と互換ではなく **後段** にある。
+matcher を呼ぶ必要があるのは「単眼カメラ + 何の事前情報もない」極限ケースで、
+実用的なロボットアプリケーションではほぼ発生しない。
+
+**長基線 loop closure:**
+A↔B が 100m 以上 + 大角差で直接 (A, B) ペアでは推論しづらい場合 →
+**中間フレームを増やせばいい**。A → M1 → M2 → ... → M_k → B のように
+chain で繋ぐ。各 (Mi, Mi+1) は短基線なので本ネットワークでカバーできる、
+k 個の chained residual を BA で集約する。
+
+v100 (N=4 quad) で既に検証済み: M フレームを 2 つ追加すると val_err 0.45 px
+改善、N=5 (quint) でさらに改善。**chain 長を増やせば任意の baseline が
+扱える** ことが示唆される。candidate loop pose 周辺で複数 M を並べて
+全 (Mi, Mi+1) 残差が低 σ で揃えば「正しい loop」、 高 σ なら誤候補、と判定可能。
+
+つまり matcher は **構造的に不要**。「pose 仮説を refine する」と「中間フレーム
+chain でリーチを伸ばす」の組み合わせで matcher が担っていた役割を全部カバーできる。
+
+## 真の制約 (正直な開示)
+
+逆に **本手法が解決しない / 苦手な** ケース:
+
+- **完全 visual-only system** (LiDAR / IMU / odometry なし): 初期 pose を作る
+  手段がないので、結局 matcher か photometric SLAM が要る。本手法は「pose
+  を持ってる側」を refine する後段にいる
+- **学習データ分布外**: 訓練に使ってない sensor 構成 (異なる FOV / 光学系) や
+  天候 (重雨, 雪嵐) では σ が大きく出る可能性。 matcher は手作業で頑健性を
+  入れられるが、本手法は再学習が必要
+- **計算コスト trade-off**: matcher は 1 ペアの対応取得が安い。本手法は
+  pose hypothesis ごとに forward 必要 (BA 内部 iteration で頻繁に呼ぶと重い)。
+  ただ unified arch では batch で並列化可能、現代 GPU では問題にならない
 
 ## なぜこれが可能なのか — Transformer の多層構造で実現される「思考」
 
