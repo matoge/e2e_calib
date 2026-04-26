@@ -32,6 +32,7 @@ from matplotlib.patches import ConnectionPatch
 
 from datasets.pandaset_pair import _SceneData, _ypr_t_to_mat
 from models.cross_frame_multi import CalibNetMultiFrame
+from models.cross_frame_unified import CalibNetUnifiedFrame
 from scripts.eval.cross_frame_lln import make_pair, infer_batch, ba_recover
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -39,15 +40,25 @@ IMG_SIZE = 64
 
 
 def load_model(ckpt_dir, ckpt_name='best_model.pt'):
+    """Auto-detect unified vs legacy multi from state_dict layout."""
     sd = torch.load(ckpt_dir / ckpt_name, map_location=DEVICE, weights_only=True)
-    deform = 'sl' if any('deform_img' in k for k in sd) else 'none'
+    is_unified = any(k.startswith('encoder.cnn.') for k in sd)
     n_cross = sum(1 for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight'))
-    n_intra = max(1, sum(1 for k in sd if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
     proj_w = [sd[k] for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight')]
     out_dim = proj_w[0].shape[0] if proj_w else 5
-    m = CalibNetMultiFrame(img_size=IMG_SIZE, deform_mode=deform,
-                            n_cross_layers=n_cross, n_intra_layers=n_intra,
-                            out_dim=out_dim).to(DEVICE)
+    if is_unified:
+        n_intra = max(1, sum(1 for k in sd if k.startswith('encoder.intra.') and k.endswith('.norm_sa.weight')))
+        so_w = sd.get('cross_blocks.0.deform.sampling_offsets.weight')
+        n_levels = max(1, so_w.shape[0] // (4 * 4 * 2)) if so_w is not None else 2
+        m = CalibNetUnifiedFrame(img_size=IMG_SIZE,
+                                  n_cross_layers=n_cross, n_intra_layers=n_intra,
+                                  max_kv_frames=n_levels, out_dim=out_dim).to(DEVICE)
+    else:
+        deform = 'sl' if any('deform_img' in k for k in sd) else 'none'
+        n_intra = max(1, sum(1 for k in sd if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
+        m = CalibNetMultiFrame(img_size=IMG_SIZE, deform_mode=deform,
+                                n_cross_layers=n_cross, n_intra_layers=n_intra,
+                                out_dim=out_dim).to(DEVICE)
     m.load_state_dict(sd); m.eval()
     return m, out_dim
 
@@ -77,13 +88,8 @@ def run_pair(model, scn, fi_A, fi_B, rng, out_dim, sigma_ypr, sigma_t):
     Sigma[:, 0, 0] = sx * sx; Sigma[:, 1, 1] = sy * sy
     Sigma[:, 0, 1] = Sigma[:, 1, 0] = rho * sx * sy
 
-    res = ba_recover(s, mu, Sigma, delta_d_pred=delta_d, sigma_d_pred=sigma_d)
-    if res is None: return None
-    theta, _ = res
-    dT = _ypr_t_to_mat(theta[:3], theta[3:6])
-    T_rec = dT @ s['T_AB_hat']
-
-    # Compute patch-local uv for hyp / gt / rec, using the same box_B-to-local scale
+    # Direct model prediction in patch-local coords: uv_hat_local + Δμ
+    # (NOT BA-aligned — that's what train/val err_AB measures).
     pts_A_cam = s['P_A_cam'][:N]
     homo = np.concatenate([pts_A_cam, np.ones((N, 1))], axis=1)
     K = s['K']
@@ -94,13 +100,15 @@ def run_pair(model, scn, fi_A, fi_B, rng, out_dim, sigma_ypr, sigma_t):
         return uv.T, Q[:, 2]
 
     uv_hat_full, _ = proj_full(s['T_AB_hat'])
-    uv_rec_full, _ = proj_full(T_rec)
     uv_gt_full,  _ = proj_full(s['T_AB_gt'])
 
     box_B = s['box_B']
     uv_hat_l = full_to_local_B(uv_hat_full, box_B)
-    uv_rec_l = full_to_local_B(uv_rec_full, box_B)
     uv_gt_l  = full_to_local_B(uv_gt_full,  box_B)
+    # raw model prediction in local px: hyp + per-point Δμ
+    uv_rec_l = uv_hat_l + mu                  # (N, 2) — KEEP variable name `rec`
+                                              # so downstream code is unchanged;
+                                              # semantically now = model pred
 
     uv_A_l = s['uvd_A'][:N, :2].numpy()
 
@@ -164,8 +172,8 @@ def draw_pair_panel(fig, ax_A, ax_B, r, tag, k_show=8):
     err_hyp = np.linalg.norm(r['uv_hat_l'][idx] - r['uv_gt_l'][idx], axis=-1).mean()
     err_rec = np.linalg.norm(r['uv_rec_l'][idx] - r['uv_gt_l'][idx], axis=-1).mean()
     ax_A.set_title(f'A  {tag}', fontsize=9, loc='left')
-    ax_B.set_title(f'B  hyp {err_hyp:.2f} → rec {err_rec:.2f} px   '
-                   f'(× hyp, ○ GT, + BA-rec)', fontsize=9, loc='left')
+    ax_B.set_title(f'B  hyp {err_hyp:.2f} → pred {err_rec:.2f} px   '
+                   f'(× hyp, ○ GT, + model pred)', fontsize=9, loc='left')
 
 
 def main(args):

@@ -211,15 +211,27 @@ class MultiFrameCrossBlockDeform(nn.Module):
     def forward(self, q, img_2d_list, ref_uv_01_list,
                 pt_kv_list, pt_pad_list,
                 kv_biases, uv_hat_01,
-                q_pad_mask=None):
+                q_pad_mask=None,
+                target_shift=None, kv_pose_shifts=None):
         """
-        q                : (B, N_q, D)
+        q                : (B, N_q, D) — query frame's tokens, ALREADY shifted
+                            by `target_shift`. Used as the residual stream.
         img_2d_list      : list of (B, D, H, W) — one per KV frame
         ref_uv_01_list   : list of (B, N_q, 2) — reference uv per query per frame
         pt_kv_list       : list of (B, N_pt_i, D) — pt KV per frame
         pt_pad_list      : list of (B, N_pt_i) bool — pad masks per frame
         kv_biases        : list of (B, n_heads) per-frame bias (same for img & pt of that frame)
-        uv_hat_01        : (B, N_q, 2) — A→B hypothesis (for output head)
+        uv_hat_01        : (B, N_q, 2) — A→target hypothesis (for output head)
+        target_shift     : (B, 1, D) — the pose embedding already baked into
+                            `q`. Used to "rebase" q for per-KV-frame Q
+                            (option-b cross-attn, see docs/multi_frame_attention.md).
+        kv_pose_shifts   : list of (B, 1, D) — pose embedding for the
+                            (Q-frame, KV-frame_k) pair. If provided, the
+                            Q used in cross-attn for each KV-frame_k becomes
+                            `(q - target_shift) + kv_pose_shifts[k]`, so each
+                            (Q_k, KV_k) sub-attention matches the 2-frame
+                            baseline. If None / target_shift=None: legacy
+                            behaviour (single Q for all KV).
         """
         B, N_q, D = q.shape
         L = len(img_2d_list)
@@ -227,40 +239,25 @@ class MultiFrameCrossBlockDeform(nn.Module):
         H, W = img_2d_list[0].shape[2], img_2d_list[0].shape[3]
         device = q.device
 
-        # ── deformable image side ────────────────────────────────────────────
-        # flatten and concat all frames' image features
-        flats = [feat.flatten(2).permute(0, 2, 1) for feat in img_2d_list]   # each (B, HW, D)
-        kv_img_flat = torch.cat(flats, dim=1)                                 # (B, L*HW, D)
+        # ── deformable image side: legacy concat single call ────────────────
+        # Multi-level integration via softmax over (level × points) inside
+        # MSDeformAttn. Frame discrimination on img-side is handled by the
+        # per-level reference uv (where to sample) — frame-conditional Q on
+        # img-side previously hurt because per-frame deformable splits then
+        # averages, breaking the natural softmax mixing across levels.
+        flats = [feat.flatten(2).permute(0, 2, 1) for feat in img_2d_list]
+        kv_img_flat = torch.cat(flats, dim=1)
         spatial_shapes = torch.as_tensor([[H, W]] * L, dtype=torch.long, device=device)
         level_start_index = torch.as_tensor(
             [0] + [H * W * (i + 1) for i in range(L - 1)],
             dtype=torch.long, device=device,
         )
-        # reference points (B, N_q, L, 2) — clamp to [0, 1]
-        ref = torch.stack(ref_uv_01_list, dim=2).clamp(0.0, 1.0)              # (B, N_q, L, 2)
-        # If L < max_levels, pad ref + spatial_shapes with copies of the last
-        # so MSDeformAttn's sampling_offsets shape (sized for max_levels) sees
-        # consistent input. Mask out the padded levels' attention weights to 0.
+        ref = torch.stack(ref_uv_01_list, dim=2).clamp(0.0, 1.0)
         if L < self.max_levels:
             pad_L = self.max_levels - L
-            # repeat the LAST level's ref + shape; duplicated levels point
-            # back into the LAST real level's flat region so MSDeformAttn
-            # samples valid memory (same content twice — harmless redundancy).
             ref = torch.cat([ref, ref[:, :, -1:].expand(-1, -1, pad_L, -1)], dim=2)
-            shape_pad = spatial_shapes[-1:].expand(pad_L, -1)
-            spatial_shapes = torch.cat([spatial_shapes, shape_pad], dim=0)
-            # all extra levels reuse the LAST real level's start index
-            last_start = level_start_index[-1:]
-            extra = last_start.expand(pad_L)
-            level_start_index = torch.cat([level_start_index, extra], dim=0)
-
-        # call the kernel (built-in attention weights MLP); we'll inject bias
-        # POST-MLP, PRE-softmax by patching forward inline. The cleanest way
-        # is to compute the standard call AND then add a residual bias term —
-        # mathematically equivalent to a scalar multiplier on each level's
-        # contribution. We approximate by SCALING the deformable output by
-        # frame-bias gates (per-head softmax over levels), which is similar
-        # in spirit and much simpler to implement.
+            spatial_shapes = torch.cat([spatial_shapes, spatial_shapes[-1:].expand(pad_L, -1)], dim=0)
+            level_start_index = torch.cat([level_start_index, level_start_index[-1:].expand(pad_L)], dim=0)
         ca_img_full = self.deform_img(self.norm_q_img(q), ref,
                                        self.norm_kv_img(kv_img_flat),
                                        spatial_shapes, level_start_index,
@@ -270,25 +267,63 @@ class MultiFrameCrossBlockDeform(nn.Module):
         # the pt-side plain cross-attn (where it can be cleanly injected).
 
         # ── plain cross-attn on pt KV side, with per-frame bias ──────────────
+        # Per-KV-frame Q (option b in docs/multi_frame_attention.md): the same
+        # pt tokens are re-projected with a frame-conditional pose shift for
+        # every KV frame, so each (Q_k, KV_k) sub-attention matches the
+        # 2-frame baseline pattern. When kv_pose_shifts is None, falls back
+        # to the legacy single-Q-for-all-KV behaviour.
         kv_pt = torch.cat(pt_kv_list, dim=1)                  # (B, Σ N_pt_i, D)
-        Qn = self.norm_q_pt(q)
-        Kn = self.norm_kv_pt(kv_pt)
         Hh = self.n_heads; Dh = D // Hh
-        Qp = self.q_proj(Qn).view(B, N_q,           Hh, Dh).transpose(1, 2)
-        Kp = self.k_proj(Kn).view(B, kv_pt.shape[1], Hh, Dh).transpose(1, 2)
-        Vp = self.v_proj(Kn).view(B, kv_pt.shape[1], Hh, Dh).transpose(1, 2)
         scale = Dh ** -0.5
-        scores = torch.matmul(Qp, Kp.transpose(-1, -2)) * scale   # (B, Hh, N_q, Σ N_pt_i)
+        # In the per-frame-Q path the convention is: kv_pose_shifts[0] is the
+        # *target* pose shift (already baked into `q` by the caller). Other
+        # entries are the (anchor → KV-frame_k) shifts; the residual we add
+        # to q is (kv_pose_shifts[k] - kv_pose_shifts[0]).
+        if kv_pose_shifts is None or target_shift is None:
+            # legacy: single Q (= q already includes the target pose shift)
+            Qn = self.norm_q_pt(q)
+            Qp = self.q_proj(Qn).view(B, N_q, Hh, Dh).transpose(1, 2)
+            Kn = self.norm_kv_pt(kv_pt)
+            Kp = self.k_proj(Kn).view(B, kv_pt.shape[1], Hh, Dh).transpose(1, 2)
+            Vp = self.v_proj(Kn).view(B, kv_pt.shape[1], Hh, Dh).transpose(1, 2)
+            scores = torch.matmul(Qp, Kp.transpose(-1, -2)) * scale
+        else:
+            # per-frame Q (option b): rebase q from `target_shift` to each
+            # KV-frame_k's shift, recompute Q for each segment.
+            assert len(kv_pose_shifts) == len(pt_kv_list), (
+                f'kv_pose_shifts len {len(kv_pose_shifts)} != pt_kv_list '
+                f'len {len(pt_kv_list)}')
+            # K, V projections (one shot over concat KV — no Q dependence)
+            Kn = self.norm_kv_pt(kv_pt)
+            Kp = self.k_proj(Kn).view(B, kv_pt.shape[1], Hh, Dh).transpose(1, 2)
+            Vp = self.v_proj(Kn).view(B, kv_pt.shape[1], Hh, Dh).transpose(1, 2)
+            score_blocks = []
+            off = 0
+            for seg, ps in zip(pt_kv_list, kv_pose_shifts):
+                Lpt = seg.shape[1]
+                q_k = q - target_shift + ps              # rebase to frame_k
+                Qn_k = self.norm_q_pt(q_k)
+                Qp_k = self.q_proj(Qn_k).view(B, N_q, Hh, Dh).transpose(1, 2)
+                Kp_k = Kp[:, :, off:off + Lpt]
+                scores_k = torch.matmul(Qp_k, Kp_k.transpose(-1, -2)) * scale
+                score_blocks.append(scores_k)
+                off += Lpt
+            scores = torch.cat(score_blocks, dim=-1)
 
-        # per-frame bias on attention scores (segment-wise constant)
+        # per-frame bias on attention scores (segment-wise constant).
+        # Skipped when per-KV-frame Q is enabled — the D-dim Q-rebase already
+        # provides full frame discrimination, so the 4-scalar bias becomes
+        # redundant (and competing) signal.
+        if kv_pose_shifts is None or target_shift is None:
+            N_kv = kv_pt.shape[1]
+            bias_kv = torch.zeros(B, Hh, N_kv, device=device, dtype=scores.dtype)
+            off = 0
+            for seg, b in zip(pt_kv_list, kv_biases):
+                Lpt = seg.shape[1]
+                bias_kv[:, :, off:off + Lpt] = b.unsqueeze(-1)
+                off += Lpt
+            scores = scores + bias_kv.unsqueeze(2)
         N_kv = kv_pt.shape[1]
-        bias_kv = torch.zeros(B, Hh, N_kv, device=device, dtype=scores.dtype)
-        off = 0
-        for seg, b in zip(pt_kv_list, kv_biases):
-            Lpt = seg.shape[1]
-            bias_kv[:, :, off:off + Lpt] = b.unsqueeze(-1)
-            off += Lpt
-        scores = scores + bias_kv.unsqueeze(2)
 
         # padding mask
         pt_pad = torch.zeros(B, N_kv, dtype=torch.bool, device=device)
@@ -346,13 +381,16 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
 
     def _multi_forward(self, q, img_2d_list, ref_uv_01_list,
                         pt_kv_list, pt_pad_list, kv_biases, uv_hat_01,
-                        q_pad=None):
+                        q_pad=None,
+                        target_shift=None, kv_pose_shifts=None):
         raw_cum = None
         for blk in self.cross_blocks:
             q, raw = blk(q, img_2d_list, ref_uv_01_list,
                           pt_kv_list, pt_pad_list,
                           kv_biases, uv_hat_01,
-                          q_pad_mask=q_pad)
+                          q_pad_mask=q_pad,
+                          target_shift=target_shift,
+                          kv_pose_shifts=kv_pose_shifts)
             raw_cum = raw if raw_cum is None else raw_cum + raw
         return raw_cum
 
@@ -366,7 +404,8 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
                 patch_M=None, uvd_M=None, pad_M=None,
                 uvd_M_full=None, pad_M_full=None,
                 pose_AM_6dof=None,
-                uv_M_hat_of_A=None, uv_M_hat_of_B=None):
+                uv_M_hat_of_A=None, uv_M_hat_of_B=None,
+                per_frame_emb=False):
         """Unified forward. Pair mode: M args = None, KV = single B frame
         with bias = pose_bias(pose_AB). Multi-frame mode: KV = M ‖ B with
         per-frame biases. RPE-style — no Q-shift, no absolute 3D leak.
@@ -388,6 +427,30 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
         q_A = pt_A + pose_emb_AB
         q_B = pt_B + pose_emb_BA
 
+        # Per-frame absolute embedding mode: anchor at A, every frame's
+        # tokens carry their own pose (broadcast). Each (Q, K, V) ends up
+        # with emb_X added before attention. No relative Q-shift used.
+        if per_frame_emb:
+            zero_pose   = torch.zeros_like(pose_AB_6dof)
+            emb_A       = self.pose_mlp(zero_pose).unsqueeze(1)         # (B, 1, D)
+            emb_B_in_A  = self.pose_mlp(pose_AB_6dof).unsqueeze(1)
+            # broadcast over spatial axes for img features
+            emb_A_img   = emb_A.permute(0, 2, 1).unsqueeze(-1)            # (B, D, 1, 1)
+            emb_B_img   = emb_B_in_A.permute(0, 2, 1).unsqueeze(-1)
+            # Pre-shift pt and img features per frame
+            pt_A   = pt_A   + emb_A
+            pt_B   = pt_B   + emb_B_in_A
+            img_A_2d = img_A_2d + emb_A_img
+            img_B_2d = img_B_2d + emb_B_img
+            if has_M:
+                emb_M_in_A = self.pose_mlp(pose_AM_6dof).unsqueeze(1)
+                emb_M_img  = emb_M_in_A.permute(0, 2, 1).unsqueeze(-1)
+                pt_M     = pt_M     + emb_M_in_A
+                img_M_2d = img_M_2d + emb_M_img
+            # No additional Q-shift in this mode — Q already carries its frame's emb
+            q_A = pt_A
+            q_B = pt_B
+
         # per-frame KV bias (per-head scalars). Constant in pair mode (single
         # frame on K axis), so cancels in softmax. In multi-frame mode it
         # gates between M and B according to relative pose distance.
@@ -399,6 +462,14 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
             b_AM = self.pose_bias(pose_AM_6dof)
             b_BM = self.pose_bias(pose_BM_6dof)
 
+        # pose embeddings — used both as Q-shift and (when has_M) as the
+        # per-KV-frame shift for option-b cross-attention.
+        pose_emb_AM = self.pose_mlp(pose_AM_6dof).unsqueeze(1) if has_M else None
+        pose_emb_MB = self.pose_mlp(pose_MB_6dof).unsqueeze(1) if has_M else None
+        pose_emb_BM = self.pose_mlp(pose_BM_6dof).unsqueeze(1) if has_M else None
+        # MA = inverse of AM, but we don't have it precomputed; cheap to recompute:
+        pose_emb_MA = self.pose_mlp(_invert_6dof(pose_AM_6dof)).unsqueeze(1) if has_M else None
+
         # A → B  (deformable img KV per frame, plain pt KV per frame)
         if has_M:
             img_2d_list_AB = [img_M_2d, img_B_2d]
@@ -407,16 +478,20 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
             pt_kv_AB       = [pt_M, pt_B]
             pt_pad_AB      = [pad_M, pad_B]
             bias_AB        = [b_AM, b_AB]
+            kv_shifts_AB   = [pose_emb_AM, pose_emb_AB]
         else:
             img_2d_list_AB = [img_B_2d]
             ref_AB         = [uv_B_hat_of_A / self.img_size]
             pt_kv_AB       = [pt_B]
             pt_pad_AB      = [pad_B]
             bias_AB        = [b_AB]
+            kv_shifts_AB   = None
         raw_AtoB = self._multi_forward(
             q_A, img_2d_list_AB, ref_AB,
             pt_kv_AB, pt_pad_AB, bias_AB,
-            uv_B_hat_of_A / self.img_size, q_pad=pad_A)
+            uv_B_hat_of_A / self.img_size, q_pad=pad_A,
+            target_shift=pose_emb_AB if has_M else None,
+            kv_pose_shifts=kv_shifts_AB)
 
         # B → A
         if has_M:
@@ -426,16 +501,20 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
             pt_kv_BA       = [pt_M, pt_A]
             pt_pad_BA      = [pad_M, pad_A]
             bias_BA        = [b_BM, b_BA]
+            kv_shifts_BA   = [pose_emb_BM, pose_emb_BA]
         else:
             img_2d_list_BA = [img_A_2d]
             ref_BA         = [uv_A_hat_of_B / self.img_size]
             pt_kv_BA       = [pt_A]
             pt_pad_BA      = [pad_A]
             bias_BA        = [b_BA]
+            kv_shifts_BA   = None
         raw_BtoA = self._multi_forward(
             q_B, img_2d_list_BA, ref_BA,
             pt_kv_BA, pt_pad_BA, bias_BA,
-            uv_A_hat_of_B / self.img_size, q_pad=pad_B)
+            uv_A_hat_of_B / self.img_size, q_pad=pad_B,
+            target_shift=pose_emb_BA if has_M else None,
+            kv_pose_shifts=kv_shifts_BA)
 
         clamp_fn = clamp_params if self._out_dim == 5 else clamp_params_uvd
         return (clamp_fn(raw_AtoB, self.img_size),
@@ -457,6 +536,12 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
                   pad_full: torch.Tensor,       # (B, N, N_FULL) bool
                   pose_hat_6dof: torch.Tensor,  # (B, N, N, 6)
                   uv_hat: torch.Tensor,         # (B, N, N, max_pts, 2) — local patch coords
+                  mix_mode: str = 'mix',        # 'mix' = full N-frame KV (legacy);
+                                                # 'pair' = each (i, j) sees only frame j as KV
+                                                #          (= 6× independent pair forwards,
+                                                #            equivalent to batch×6 of 2-frame
+                                                #            calls; baseline before any
+                                                #            multi-frame fusion is added).
                   ) -> torch.Tensor:
         B, N = patches.shape[0], patches.shape[1]
         assert N - 1 <= self.max_kv_frames, (
@@ -483,19 +568,33 @@ class CalibNetMultiFrame(CalibNetCrossFrame):
                     continue
                 pose_emb_ij = self.pose_mlp(pose_hat_6dof[:, i, j]).unsqueeze(1)
                 q = pt_list[i] + pose_emb_ij
-                # KV order: target j first (so its uv_hat lives at level 0
-                # which is what the deformable head's bias-via-Q-conditioned
-                # weight MLP can favour). Aux frames follow.
-                kv_order = [j] + [k for k in range(N) if k != i and k != j]
+                if mix_mode == 'pair':
+                    # KV = target j only → identical setup to 2-frame pair.
+                    # 6 directions = 6 independent pair forwards. No internal
+                    # multi-frame fusion. Each call gets v55-pair's behaviour.
+                    kv_order = [j]
+                else:
+                    # KV order: target j first (so its uv_hat lives at level 0
+                    # which is what the deformable head's bias-via-Q-conditioned
+                    # weight MLP can favour). Aux frames follow.
+                    kv_order = [j] + [k for k in range(N) if k != i and k != j]
                 img_2d_list = [img_list[k]                   for k in kv_order]
                 ref_list    = [uv_hat[:, i, k] / self.img_size for k in kv_order]
                 pt_kv_list  = [pt_list[k]                    for k in kv_order]
                 pt_pad_list = [pad[:, k]                     for k in kv_order]
                 bias_list   = [self.pose_bias(pose_hat_6dof[:, i, k]) for k in kv_order]
+                # per-KV-frame pose shifts (option-b cross-attn)
+                kv_shifts   = [self.pose_mlp(pose_hat_6dof[:, i, k]).unsqueeze(1)
+                               for k in kv_order]
+                # In 'pair' mode KV is single → kv_shifts is single → per-frame
+                # Q rebase reduces to identity, equivalent to legacy single-Q.
+                use_pf_q   = (mix_mode != 'pair') and len(kv_order) > 1
                 raw_ij = self._multi_forward(
                     q, img_2d_list, ref_list,
                     pt_kv_list, pt_pad_list, bias_list,
-                    uv_hat[:, i, j] / self.img_size, q_pad=pad[:, i])
+                    uv_hat[:, i, j] / self.img_size, q_pad=pad[:, i],
+                    target_shift=pose_emb_ij if use_pf_q else None,
+                    kv_pose_shifts=kv_shifts if use_pf_q else None)
                 raws[:, i, j] = clamp_fn(raw_ij, self.img_size)
         return raws
 

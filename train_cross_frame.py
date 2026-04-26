@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 from datasets.pandaset_pair import PandaSetCrossFrameDataset
 from models.cross_frame import CalibNetCrossFrame
 from models.cross_frame_multi import CalibNetMultiFrame
+from models.cross_frame_unified import CalibNetUnifiedFrame
 from models.model_cov import gaussian2d_nll, gaussian_uvd_nll
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -149,7 +150,7 @@ def _apply_lidar_dropout(batch, max_rate, p_zero, multi_frame):
 
 
 def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
-         lidar_dropout=0.0, lidar_dropout_zero=0.0):
+         lidar_dropout=0.0, lidar_dropout_zero=0.0, per_frame_emb=False):
     batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
     if model.training and (lidar_dropout > 0 or lidar_dropout_zero > 0):
         _apply_lidar_dropout(batch, lidar_dropout, lidar_dropout_zero, multi_frame)
@@ -168,6 +169,7 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
         kw['pose_AM_6dof']   = batch['pose_AM_6dof']
         kw['uv_M_hat_of_A']  = batch['uv_M_hat_of_A']
         kw['uv_M_hat_of_B']  = batch['uv_M_hat_of_B']
+    kw['per_frame_emb'] = per_frame_emb
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
         patch_B=batch['patch_B'], uvd_B=batch['uvd_B'],
@@ -208,7 +210,7 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
 # fields, run model.forward_n once and compute NLL on every (i, j) with i ≠ j,
 # masked by pad_dir[i, j].
 
-def step_n(model, batch):
+def step_n(model, batch, loss_ab_only=False, mix_mode='mix'):
     batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
     raws = model.forward_n(
         patches       = batch['patches'],
@@ -218,21 +220,29 @@ def step_n(model, batch):
         pad_full      = batch['pad_full'],
         pose_hat_6dof = batch['pose_hat_6dof'],
         uv_hat        = batch['uv_hat'],
+        mix_mode      = mix_mode,
     )
     B, N = batch['patches'].shape[0], batch['patches'].shape[1]
     losses, errs, bases = [], [], []
     pair_metrics = {}
+    far = N - 1
     for i in range(N):
         for j in range(N):
             if i == j:
                 continue
+            # `loss_ab_only` ablation: keep model's forward + diagnostic
+            # err for every direction, but drop loss term for non-AB pairs
+            # → isolates "M as KV (forward)" effect from "M as supervised
+            # query (loss)" effect.
+            include_in_loss = (not loss_ab_only) or (i == 0 and j == far) or (i == far and j == 0)
             raw_ij = raws[:, i, j]
             uv_hat_ij = batch['uv_hat'][:, i, j]
             uv_gt_ij  = batch['uv_gt' ][:, i, j]
             pad_ij    = batch['pad_dir'][:, i, j]
             loss_ij, m_ij = residual_nll_and_metrics(
                 raw_ij, uv_hat_ij, uv_gt_ij, pad_ij, 64)
-            losses.append(loss_ij)
+            if include_in_loss:
+                losses.append(loss_ij)
             errs.append(m_ij['err_px'])
             bases.append(m_ij['base_px'])
             pair_metrics[f'err_{i}{j}']  = m_ij['err_px']
@@ -360,6 +370,30 @@ def main():
                          '`clearml-init` to be set up once with your creds.')
     ap.add_argument('--clearml-project', default='e2e_calib/cross-frame',
                     help='ClearML project name.')
+    ap.add_argument('--loss-ab-only', action='store_true',
+                    help='[stacked path only] supervise only A↔B (i.e. (0, N-1) '
+                         'and (N-1, 0) directions); skip M-related directions. '
+                         'Use to isolate "M as KV" benefit from "M as supervised '
+                         'query" cost.')
+    ap.add_argument('--mix-mode', default='mix', choices=['mix', 'pair'],
+                    help='[stacked path only] "mix" = full N-frame KV (default); '
+                         '"pair" = each (i, j) sees only frame j as KV — i.e. 6× '
+                         'independent pair forwards, no internal multi-frame '
+                         'fusion. Use as a clean baseline before adding any '
+                         'mixing logic on top.')
+    ap.add_argument('--model', default='multi', choices=['multi', 'unified'],
+                    help='"multi" = legacy CalibNetMultiFrame (separate pt/img '
+                         'KV, per-frame bias). "unified" = CalibNetUnifiedFrame '
+                         '(img+pt scattered to same 16x16 frame_token grid; '
+                         'cross-attn is single MSDeformAttn over multi-level '
+                         'frame_token KV; per-point Q bilinear-sampled from '
+                         'anchor frame_token).')
+    ap.add_argument('--per-frame-emb', action='store_true',
+                    help='Anchor-at-A absolute pose embedding: each frame\'s '
+                         'tokens (Q, K, V both) carry their own pose-relative-'
+                         'to-A embedding (broadcast across all tokens of that '
+                         'frame). No Q-shift via target pose. Tested with pair '
+                         'first; extends naturally to N frames.')
     args = ap.parse_args()
 
     out_dir = Path('experiments/cross_frame_' + args.name)
@@ -474,27 +508,37 @@ def main():
                      if not isinstance(batch_list[0][k], (int, str))]
         return {k: torch.stack([b[k] for b in batch_list]) for k in keep_keys}
 
-    # model — always CalibNetMultiFrame.
-    # Pair mode (no --multi-frame): N_kv_frames=1, MSDeformAttn level=B alone,
-    # per-frame bias degenerate (cancels). Multi-frame: N_kv_frames=2, level
-    # per frame (M, B), per-level reference uv from pose projection. Q-shift
-    # via pose_mlp gives explicit pose channel in pair mode.
-    model = CalibNetMultiFrame(
-        img_size=args.img_size,
-        n_intra_layers=args.n_intra_layers,
-        n_cross_layers=args.n_cross_layers,
-        deform_mode=args.deform_mode,
-        out_dim=(7 if args.uvd else 5),
-        max_kv_frames=max(2, n_frames_path - 1),
-    ).to(DEVICE)
+    # model — multi (legacy) or unified (frame_token, single MSDeformAttn).
+    if args.model == 'unified':
+        model = CalibNetUnifiedFrame(
+            img_size=args.img_size,
+            n_intra_layers=args.n_intra_layers,
+            n_cross_layers=args.n_cross_layers,
+            out_dim=(7 if args.uvd else 5),
+            max_kv_frames=max(2, n_frames_path - 1),
+        ).to(DEVICE)
+    else:
+        model = CalibNetMultiFrame(
+            img_size=args.img_size,
+            n_intra_layers=args.n_intra_layers,
+            n_cross_layers=args.n_cross_layers,
+            deform_mode=args.deform_mode,
+            out_dim=(7 if args.uvd else 5),
+            max_kv_frames=max(2, n_frames_path - 1),
+        ).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f'model params: {n_params/1e6:.3f} M')
 
     # ─── fine-tune mode: load matching keys + freeze frame encoder ─────────
     # Frame-encoder modules (data-dependent) get frozen; only the new
     # cross-frame pieces train. See docs/experiment_progression.html.
-    FREEZE_PREFIXES = ('cnn.', 'point_mlp.', 'frustum_enc.',
-                       'intra_blocks.', 'pose_mlp.')
+    if args.model == 'unified':
+        FREEZE_PREFIXES = ('encoder.cnn.', 'encoder.point_mlp.',
+                            'encoder.frustum_enc.', 'encoder.intra.',
+                            'pose_mlp.')
+    else:
+        FREEZE_PREFIXES = ('cnn.', 'point_mlp.', 'frustum_enc.',
+                            'intra_blocks.', 'pose_mlp.')
     if args.init_from:
         ckpt_path = Path(args.init_from)
         if ckpt_path.is_dir():
@@ -540,9 +584,9 @@ def main():
         # (≤ migrated/pool frac). Accept the bias for 50-100× eval speedup.
         for batch in val_loader:
             if use_stacked:
-                _, m = step_n(model, batch)
+                _, m = step_n(model, batch, loss_ab_only=args.loss_ab_only, mix_mode=args.mix_mode)
             else:
-                _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero)
+                _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero, per_frame_emb=args.per_frame_emb)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
             if args.uvd:
@@ -578,9 +622,9 @@ def main():
         def _do_step(batch):
             opt.zero_grad(set_to_none=True)
             if use_stacked:
-                loss, m = step_n(model, batch)
+                loss, m = step_n(model, batch, loss_ab_only=args.loss_ab_only, mix_mode=args.mix_mode)
             else:
-                loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero)
+                loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero, per_frame_emb=args.per_frame_emb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
@@ -719,16 +763,21 @@ def main():
                 f't={time.time()-t0:.0f}s')
 
             if cml_logger is not None:
-                cml_logger.report_scalar('train', 'loss', value=curves['loss'][-1], iteration=ep)
-                cml_logger.report_scalar('train', 'err_AB', value=curves['err_AB'][-1], iteration=ep)
-                cml_logger.report_scalar('train', 'err_BA', value=curves['err_BA'][-1], iteration=ep)
-                cml_logger.report_scalar('train', 'base', value=curves['base_AB'][-1], iteration=ep)
-                cml_logger.report_scalar('lr', 'lr', value=opt.param_groups[0]['lr'], iteration=ep)
+                # Each metric gets its OWN plot title — ClearML splits same-title
+                # different-series across subplots, which hid val_nll behind val_err.
+                cml_logger.report_scalar('nll',     'train',  value=curves['loss'][-1], iteration=ep)
+                cml_logger.report_scalar('err',     'train_AB', value=curves['err_AB'][-1], iteration=ep)
+                cml_logger.report_scalar('err',     'train_BA', value=curves['err_BA'][-1], iteration=ep)
+                cml_logger.report_scalar('err',     'base',   value=curves['base_AB'][-1], iteration=ep)
+                cml_logger.report_scalar('lr',      'lr',     value=opt.param_groups[0]['lr'], iteration=ep)
                 if do_val:
-                    cml_logger.report_scalar('val', 'err', value=0.5*(v['err_AB']+v['err_BA']), iteration=ep)
-                    cml_logger.report_scalar('val', 'nll', value=v['loss'], iteration=ep)
-                    cml_logger.report_scalar('overfit', 'val/train_err', value=(0.5*(v['err_AB']+v['err_BA']))/max(curves['err_AB'][-1], 1e-6), iteration=ep)
-                    cml_logger.report_scalar('overfit', 'val_nll - train_loss', value=v['loss'] - curves['loss'][-1], iteration=ep)
+                    val_err = 0.5*(v['err_AB']+v['err_BA'])
+                    cml_logger.report_scalar('err', 'val',  value=val_err, iteration=ep)
+                    cml_logger.report_scalar('nll', 'val',  value=v['loss'], iteration=ep)
+                    cml_logger.report_scalar('overfit', 'val_err / train_err',
+                                              value=val_err/max(curves['err_AB'][-1], 1e-6), iteration=ep)
+                    cml_logger.report_scalar('overfit', 'val_nll - train_nll',
+                                              value=v['loss'] - curves['loss'][-1], iteration=ep)
 
         # save best by train (overfit) or val (full) mean err
         if overfit:
@@ -780,7 +829,7 @@ def main():
                    '--ckpt-name', 'last_model.pt',
                    '--split', split,
                    '--out', str(viz_out),
-                   '--n-pairs', '8',
+                   '--n-pairs', '24',
                    '--scenes-root', args.scenes_root or str(Path(args.scene).parent),
                    '--cameras', args.cameras,
                    '--baseline-min', str(args.baseline_min),
