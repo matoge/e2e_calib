@@ -261,18 +261,21 @@ class CalibNetUnifiedFrame(nn.Module):
                 uvd_M_full=None, pad_M_full=None,
                 pose_AM_6dof=None,
                 uv_M_hat_of_A=None, uv_M_hat_of_B=None,
+                # M2 (quad mode) — second mid-frame
+                patch_M2=None, uvd_M2=None, pad_M2=None,
+                uvd_M2_full=None, pad_M2_full=None,
+                pose_AM2_6dof=None,
+                uv_M2_hat_of_A=None, uv_M2_hat_of_B=None,
                 **_ignored):
-        """Pair mode: M args = None. Multi-frame: M args provided.
-
-        `_ignored` swallows leftover kwargs (e.g. `per_frame_emb`) the legacy
-        trainer might still pass — the unified design always uses per-frame
-        absolute embedding on KV grids, so the flag is a no-op here.
-        """
+        """Pair / triplet (M) / quad (M+M2) modes via optional kwargs."""
         ft_A, _ = self.encoder(patch_A, uvd_A, pad_A, uvd_A_full, pad_A_full)
         ft_B, _ = self.encoder(patch_B, uvd_B, pad_B, uvd_B_full, pad_B_full)
         has_M = patch_M is not None
+        has_M2 = patch_M2 is not None
         if has_M:
             ft_M, _ = self.encoder(patch_M, uvd_M, pad_M, uvd_M_full, pad_M_full)
+        if has_M2:
+            ft_M2, _ = self.encoder(patch_M2, uvd_M2, pad_M2, uvd_M2_full, pad_M2_full)
 
         Hg, Wg = ft_A.shape[2], ft_A.shape[3]
         emb_AB = self.pose_mlp(pose_AB_6dof).unsqueeze(1)
@@ -287,27 +290,36 @@ class CalibNetUnifiedFrame(nn.Module):
             emb_BM = self.pose_mlp(pose_BM_6dof).unsqueeze(1)
             kv_M_for_A = ft_M + self._emb_to_grid(emb_AM, Hg, Wg)
             kv_M_for_B = ft_M + self._emb_to_grid(emb_BM, Hg, Wg)
+        if has_M2:
+            pose_M2B_6dof = _compose_pose_MB(pose_AB_6dof, pose_AM2_6dof)
+            pose_BM2_6dof = _invert_6dof(pose_M2B_6dof)
+            emb_AM2 = self.pose_mlp(pose_AM2_6dof).unsqueeze(1)
+            emb_BM2 = self.pose_mlp(pose_BM2_6dof).unsqueeze(1)
+            kv_M2_for_A = ft_M2 + self._emb_to_grid(emb_AM2, Hg, Wg)
+            kv_M2_for_B = ft_M2 + self._emb_to_grid(emb_BM2, Hg, Wg)
 
         q_A = self._build_query(ft_A, uvd_A, emb_AB)
+        kv_AB  = [kv_B_for_A]
+        ref_AB = [uv_B_hat_of_A / self.img_size]
         if has_M:
-            kv_AB  = [kv_B_for_A, kv_M_for_A]
-            ref_AB = [uv_B_hat_of_A / self.img_size,
-                      uv_M_hat_of_A / self.img_size]
-        else:
-            kv_AB  = [kv_B_for_A]
-            ref_AB = [uv_B_hat_of_A / self.img_size]
+            kv_AB.append(kv_M_for_A)
+            ref_AB.append(uv_M_hat_of_A / self.img_size)
+        if has_M2:
+            kv_AB.append(kv_M2_for_A)
+            ref_AB.append(uv_M2_hat_of_A / self.img_size)
         raw_AtoB = self._multi_forward(
             q_A, kv_AB, ref_AB,
             uv_B_hat_of_A / self.img_size, q_pad=pad_A)
 
         q_B = self._build_query(ft_B, uvd_B, emb_BA)
+        kv_BA  = [kv_A_for_B]
+        ref_BA = [uv_A_hat_of_B / self.img_size]
         if has_M:
-            kv_BA  = [kv_A_for_B, kv_M_for_B]
-            ref_BA = [uv_A_hat_of_B / self.img_size,
-                      uv_M_hat_of_B / self.img_size]
-        else:
-            kv_BA  = [kv_A_for_B]
-            ref_BA = [uv_A_hat_of_B / self.img_size]
+            kv_BA.append(kv_M_for_B)
+            ref_BA.append(uv_M_hat_of_B / self.img_size)
+        if has_M2:
+            kv_BA.append(kv_M2_for_B)
+            ref_BA.append(uv_M2_hat_of_B / self.img_size)
         raw_BtoA = self._multi_forward(
             q_B, kv_BA, ref_BA,
             uv_A_hat_of_B / self.img_size, q_pad=pad_B)

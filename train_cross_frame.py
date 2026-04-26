@@ -169,6 +169,15 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
         kw['pose_AM_6dof']   = batch['pose_AM_6dof']
         kw['uv_M_hat_of_A']  = batch['uv_M_hat_of_A']
         kw['uv_M_hat_of_B']  = batch['uv_M_hat_of_B']
+        if 'patch_M2' in batch:
+            kw['patch_M2']       = batch['patch_M2']
+            kw['uvd_M2']         = batch['uvd_M2']
+            kw['pad_M2']         = batch['pad_M2']
+            kw['uvd_M2_full']    = batch.get('uvd_M2_full')
+            kw['pad_M2_full']    = batch.get('pad_M2_full')
+            kw['pose_AM2_6dof']  = batch['pose_AM2_6dof']
+            kw['uv_M2_hat_of_A'] = batch['uv_M2_hat_of_A']
+            kw['uv_M2_hat_of_B'] = batch['uv_M2_hat_of_B']
     kw['per_frame_emb'] = per_frame_emb
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
@@ -346,6 +355,10 @@ def main():
                     help='with --init-from, skip freezing the frame encoder so all '
                          'params train (full fine-tune). Useful for ablation: did freeze '
                          'matter, or does the multi-frame head need encoder co-training?')
+    ap.add_argument('--quad-frame', action='store_true',
+                    help='extends --multi-frame to quad: A, M1, M2, B (M1 at 1/3 and '
+                         'M2 at 2/3 between A and B). Requires --multi-frame and a '
+                         'unified model with max_kv_frames>=3.')
     ap.add_argument('--multi-frame', action='store_true',
                     help='enable triplet dataset (A,M,B) + CalibNetMultiFrame model. '
                          'M is the middle frame; KV concatenates {M, B} with per-frame '
@@ -429,6 +442,7 @@ def main():
         crop_range=(args.crop_min, args.crop_max),
         cameras=args.cameras,
         triplet=args.multi_frame and not use_stacked,   # legacy aux-KV only
+        quad=args.quad_frame,                            # adds M2 (forces triplet=True)
         n_frames=n_frames_path,
         use_stacked=use_stacked,
     )
@@ -515,7 +529,7 @@ def main():
             n_intra_layers=args.n_intra_layers,
             n_cross_layers=args.n_cross_layers,
             out_dim=(7 if args.uvd else 5),
-            max_kv_frames=max(2, n_frames_path - 1),
+            max_kv_frames=max(2, n_frames_path - 1, 3 if args.quad_frame else 0),
         ).to(DEVICE)
     else:
         model = CalibNetMultiFrame(
@@ -524,7 +538,7 @@ def main():
             n_cross_layers=args.n_cross_layers,
             deform_mode=args.deform_mode,
             out_dim=(7 if args.uvd else 5),
-            max_kv_frames=max(2, n_frames_path - 1),
+            max_kv_frames=max(2, n_frames_path - 1, 3 if args.quad_frame else 0),
         ).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f'model params: {n_params/1e6:.3f} M')

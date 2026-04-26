@@ -316,6 +316,7 @@ class PandaSetCrossFrameDataset(Dataset):
                  n_frames: int = 2,        # how many frames the stacked path emits
                  use_stacked: bool = False, # True → _try_one_nframe (new path).
                                            # False → legacy _try_one (v51-v55 path).
+                 quad: bool = False,       # extends triplet with M2: A, M1, M2, B
                  triplet: bool = False,    # legacy: append M as aux KV in the
                                            # named-field pair output (used by v51-v55)
                  seed: int = 42):
@@ -333,7 +334,8 @@ class PandaSetCrossFrameDataset(Dataset):
         self.n_frames = n_frames
         # `triplet` keeps the legacy v51-v55 behaviour (named fields + M aux KV).
         # `use_stacked` opts into the new stacked-array path (any N >= 2).
-        self.triplet = triplet
+        self.triplet = triplet or quad
+        self.quad = quad
         self.use_stacked = use_stacked
         self.rng = np.random.default_rng(seed)
 
@@ -1039,36 +1041,59 @@ class PandaSetCrossFrameDataset(Dataset):
         patch_A, box_A = pa
         patch_B, box_B = pb
 
-        # 9b. triplet — pick fi_M between fi_A and fi_B, project pivot into M
+        # 9b. triplet/quad — pick mid frames; project pivot into each mid frame.
+        # triplet: 1 mid frame at midpoint. quad: 2 mid frames at 1/3 and 2/3.
         if self.triplet:
-            fi_M = int(round(0.5 * (fi_A + fi_B)))
-            if fi_M == fi_A or fi_M == fi_B:
-                return None
-            T_w2M = scn.T_w2c[fi_M]
-            P_center_M = (T_w2M @ np.append(P_center_w, 1.0))[:3]
-            if P_center_M[2] < 1.0:
-                return None
-            uc_M_arr = _proj_cam(P_center_M, K, scn.dist).astype(np.float32)
-            uc_M, vc_M = float(uc_M_arr[0]), float(uc_M_arr[1])
-            if not (0 <= uc_M < IW and 0 <= vc_M < IH):
-                return None
-            u0_M = uc_M - half
-            v0_M = vc_M - half
-            patch_M_img = scn.load_patch(fi_M, u0_M, v0_M, CROP)
-            pm = self._resize_patch(patch_M_img, u0_M, v0_M, CROP)
-            if pm is None:
-                return None
-            patch_M, box_M = pm
-            T_A_to_M_gt = T_w2M @ T_A2w  # auxiliary; treated as exact in PoC
-            ypr_AM_gt, t_AM_gt = _mat_to_ypr_t(T_A_to_M_gt)
-            pts_w_M, uv_Mf, z_Mf, in_M = scn.frame_data(fi_M)
-            in_box_M = ((uv_Mf[:, 0] >= box_M[0]) & (uv_Mf[:, 0] < box_M[0] + box_M[2]) &
-                        (uv_Mf[:, 1] >= box_M[1]) & (uv_Mf[:, 1] < box_M[1] + box_M[3]) &
-                        (z_Mf > 1.0))
-            if in_box_M.sum() < 4:
-                return None
-            uv_M_patch = self._uv_to_patch_local(uv_Mf[in_box_M], box_M)
-            z_M_patch  = z_Mf[in_box_M].astype(np.float32)
+            if self.quad:
+                fi_mids = [int(round(fi_A + (fi_B - fi_A) / 3.0)),
+                            int(round(fi_A + 2.0 * (fi_B - fi_A) / 3.0))]
+                if (fi_mids[0] == fi_A or fi_mids[0] == fi_B or
+                    fi_mids[1] == fi_A or fi_mids[1] == fi_B or
+                    fi_mids[0] == fi_mids[1]):
+                    return None
+            else:
+                fi_mids = [int(round(0.5 * (fi_A + fi_B)))]
+                if fi_mids[0] == fi_A or fi_mids[0] == fi_B:
+                    return None
+            mids = []  # list of dicts with patch, box, T_A_to_M, uv_M_patch, z_M_patch
+            for fi_M in fi_mids:
+                T_w2M = scn.T_w2c[fi_M]
+                P_center_M = (T_w2M @ np.append(P_center_w, 1.0))[:3]
+                if P_center_M[2] < 1.0:
+                    return None
+                uc_M_arr = _proj_cam(P_center_M, K, scn.dist).astype(np.float32)
+                uc_M, vc_M = float(uc_M_arr[0]), float(uc_M_arr[1])
+                if not (0 <= uc_M < IW and 0 <= vc_M < IH):
+                    return None
+                u0_M = uc_M - half
+                v0_M = vc_M - half
+                patch_M_img = scn.load_patch(fi_M, u0_M, v0_M, CROP)
+                pm = self._resize_patch(patch_M_img, u0_M, v0_M, CROP)
+                if pm is None:
+                    return None
+                patch_M, box_M = pm
+                T_A_to_M_gt = T_w2M @ T_A2w  # treated exact in PoC
+                ypr_AM_gt, t_AM_gt = _mat_to_ypr_t(T_A_to_M_gt)
+                pts_w_M, uv_Mf, z_Mf, in_M = scn.frame_data(fi_M)
+                in_box_M = ((uv_Mf[:, 0] >= box_M[0]) & (uv_Mf[:, 0] < box_M[0] + box_M[2]) &
+                            (uv_Mf[:, 1] >= box_M[1]) & (uv_Mf[:, 1] < box_M[1] + box_M[3]) &
+                            (z_Mf > 1.0))
+                if in_box_M.sum() < 4:
+                    return None
+                uv_M_patch_loc = self._uv_to_patch_local(uv_Mf[in_box_M], box_M)
+                z_M_patch_loc  = z_Mf[in_box_M].astype(np.float32)
+                mids.append(dict(fi=fi_M, patch=patch_M, box=box_M,
+                                  T_A_to_M=T_A_to_M_gt, ypr=ypr_AM_gt, t=t_AM_gt,
+                                  uv_patch=uv_M_patch_loc, z_patch=z_M_patch_loc))
+            # Back-compat aliases for existing code (M1 = mids[0]):
+            fi_M = mids[0]['fi']
+            patch_M = mids[0]['patch']
+            box_M = mids[0]['box']
+            T_A_to_M_gt = mids[0]['T_A_to_M']
+            ypr_AM_gt = mids[0]['ypr']
+            t_AM_gt = mids[0]['t']
+            uv_M_patch = mids[0]['uv_patch']
+            z_M_patch = mids[0]['z_patch']
 
         # 10. A-query points = A's in-patch LiDAR
         u0, v0, cw, ch = box_A
@@ -1150,22 +1175,26 @@ class PandaSetCrossFrameDataset(Dataset):
         d_A_hat_of_B = P_QB_in_A_hat[good_qb][inb2, 2].astype(np.float32)
         d_A_gt_of_B  = P_QB_in_A_gt [good_qb][inb2, 2].astype(np.float32)
 
-        # 11b. triplet — project filtered A/B query points into M frame
+        # 11b. triplet/quad — project filtered A/B query points into each mid frame
         # (treated as exact pose: uv_M_hat == uv_M_gt in PoC)
         if self.triplet:
-            # A-query → M
-            P_QA_filt = P_QA_in_A[good_qa][inb]              # (N_A, 3) in A-cam
-            P_QA_in_M = (np.column_stack([P_QA_filt, np.ones(len(P_QA_filt))]) @ T_A_to_M_gt.T)[:, :3]
-            uv_M_full_A  = _proj_cam(P_QA_in_M, K, scn.dist)
-            uv_M_local_A = self._uv_to_patch_local(uv_M_full_A, box_M)
-            d_M_of_A     = P_QA_in_M[:, 2].astype(np.float32)
-            # B-query → M (via T_B→A → T_A→M)
-            T_B_to_M_gt  = T_A_to_M_gt @ _invert_mat(T_A_to_B_gt)
+            P_QA_filt = P_QA_in_A[good_qa][inb]
             P_QB_filt = P_QB_in_B[good_qb][inb2]
-            P_QB_in_M = (np.column_stack([P_QB_filt, np.ones(len(P_QB_filt))]) @ T_B_to_M_gt.T)[:, :3]
-            uv_M_full_B  = _proj_cam(P_QB_in_M, K, scn.dist)
-            uv_M_local_B = self._uv_to_patch_local(uv_M_full_B, box_M)
-            d_M_of_B     = P_QB_in_M[:, 2].astype(np.float32)
+            for mid in mids:
+                T_A_to_M_g = mid['T_A_to_M']
+                box_M_g    = mid['box']
+                P_QA_in_M  = (np.column_stack([P_QA_filt, np.ones(len(P_QA_filt))]) @ T_A_to_M_g.T)[:, :3]
+                mid['uv_local_A'] = self._uv_to_patch_local(_proj_cam(P_QA_in_M, K, scn.dist), box_M_g)
+                mid['d_of_A']     = P_QA_in_M[:, 2].astype(np.float32)
+                T_B_to_M_g = T_A_to_M_g @ _invert_mat(T_A_to_B_gt)
+                P_QB_in_M  = (np.column_stack([P_QB_filt, np.ones(len(P_QB_filt))]) @ T_B_to_M_g.T)[:, :3]
+                mid['uv_local_B'] = self._uv_to_patch_local(_proj_cam(P_QB_in_M, K, scn.dist), box_M_g)
+                mid['d_of_B']     = P_QB_in_M[:, 2].astype(np.float32)
+            # back-compat
+            uv_M_local_A = mids[0]['uv_local_A']
+            uv_M_local_B = mids[0]['uv_local_B']
+            d_M_of_A     = mids[0]['d_of_A']
+            d_M_of_B     = mids[0]['d_of_B']
 
         # 12. spatial-grid stratified subsample → pad to max_points
         # G×G grid in patch-local space, keep one point per cell (the one
@@ -1276,6 +1305,11 @@ class PandaSetCrossFrameDataset(Dataset):
                     z_q  = np.concatenate([z_q,  np.zeros(pad_n, np.float32)])
                 return uv_q, z_q, pad
             uv_M_patch, z_M_patch, pad_M = _pad_m(uv_M_patch, z_M_patch)
+            if self.quad:
+                uvd_M2_full, pad_M2_full = _pack_full(mids[1]['uv_patch'],
+                                                       mids[1]['z_patch'])
+                uv_M2_patch, z_M2_patch, pad_M2 = _pad_m(mids[1]['uv_patch'],
+                                                          mids[1]['z_patch'])
 
         if self.triplet:
             # extend _pad to also stratify uv_M_local_*; share the same pick.
@@ -1342,10 +1376,46 @@ class PandaSetCrossFrameDataset(Dataset):
                 pts_w_A_query_padded = np.concatenate(
                     [pts_w_A_query_padded,
                      np.zeros((pad_n, 3), dtype=np.float32)], axis=0)
+            uv_B_pre = uv_B_patch.copy()
             (uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B,
              d_A_gt_of_B, uv_M_local_B, d_M_of_B, pad_B) = _pad8(
                 uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B,
                 d_A_hat_of_B, d_A_gt_of_B, uv_M_local_B, d_M_of_B)
+
+            # Quad: prepare M2 fields (M2 = mids[1]). Use the same pick logic
+            # as _pad8 on uv_A_pre / uv_B_pre to keep M2 query indices aligned.
+            if self.quad:
+                def _pick_idx(uvq):
+                    Nu = len(uvq)
+                    if Nu <= self.max_points:
+                        return np.arange(Nu, dtype=np.int64)
+                    G = int(np.sqrt(self.max_points))
+                    cell = self.img_size / G
+                    cj = np.clip((uvq[:, 0] / cell).astype(np.int32), 0, G - 1)
+                    ci = np.clip((uvq[:, 1] / cell).astype(np.int32), 0, G - 1)
+                    cid = ci * G + cj
+                    du = uvq[:, 0] - (cj + 0.5) * cell
+                    dv = uvq[:, 1] - (ci + 0.5) * cell
+                    d2 = du * du + dv * dv
+                    sel = []
+                    for u_c in np.unique(cid):
+                        mem = np.where(cid == u_c)[0]
+                        sel.append(int(mem[np.argmin(d2[mem])]))
+                    return np.array(sorted(set(sel)), dtype=np.int64)
+                pick_a_q = _pick_idx(uv_A_pre)
+                pick_b_q = _pick_idx(uv_B_pre)
+                def _apply_pick_pad(arr, pick, fill_extra):
+                    arr = arr[pick]
+                    pad_n = self.max_points - len(arr)
+                    if pad_n > 0:
+                        if arr.ndim == 1:
+                            tail = np.zeros(pad_n, dtype=arr.dtype)
+                        else:
+                            tail = np.zeros((pad_n,) + arr.shape[1:], dtype=arr.dtype)
+                        arr = np.concatenate([arr, tail], axis=0)
+                    return arr
+                uv_M2_local_A = _apply_pick_pad(mids[1]['uv_local_A'], pick_a_q, ())
+                uv_M2_local_B = _apply_pick_pad(mids[1]['uv_local_B'], pick_b_q, ())
         else:
             # World-coord pick MUST be computed against the SAME uv_A_patch
             # that _pad sees (i.e. before _pad mutates it). Snapshot first.
@@ -1433,6 +1503,19 @@ class PandaSetCrossFrameDataset(Dataset):
             out['uv_M_hat_of_A'] = torch.from_numpy(uv_M_local_A).float()
             out['uv_M_hat_of_B'] = torch.from_numpy(uv_M_local_B).float()
             out['fi_M']         = fi_M
+            if self.quad:
+                z_M2_norm = z_M2_patch / 50.0
+                out['patch_M2']      = mids[1]['patch'].float()
+                out['uvd_M2']        = torch.from_numpy(
+                    np.concatenate([uv_M2_patch, z_M2_norm[:, None]], axis=1)).float()
+                out['pad_M2']        = torch.from_numpy(pad_M2)
+                out['uvd_M2_full']   = torch.from_numpy(uvd_M2_full)
+                out['pad_M2_full']   = torch.from_numpy(pad_M2_full)
+                out['pose_AM2_6dof'] = torch.from_numpy(
+                    np.concatenate([mids[1]['ypr'], mids[1]['t']]).astype(np.float32))
+                out['uv_M2_hat_of_A'] = torch.from_numpy(uv_M2_local_A).float()
+                out['uv_M2_hat_of_B'] = torch.from_numpy(uv_M2_local_B).float()
+                out['fi_M2']         = mids[1]['fi']
         return out
 
 
