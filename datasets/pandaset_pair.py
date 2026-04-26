@@ -109,6 +109,22 @@ def _invert_mat(M):
     return Minv
 
 
+def _argmin_per_cell(cid: np.ndarray, d2: np.ndarray) -> np.ndarray:
+    """Per-cell argmin of d2, vectorized via lexsort. Returns sorted unique
+    indices (one per occupied cell). Drop-in for the
+    `for u_c in np.unique(cid): mem[np.argmin(d2[mem])]` Python loop that
+    used to be the dataloader hot spot.
+    """
+    if len(cid) == 0:
+        return np.empty(0, dtype=np.int64)
+    order = np.lexsort((d2, cid))           # primary: cid asc, tiebreak: d2 asc
+    cid_s = cid[order]
+    first = np.empty(len(cid_s), dtype=bool)
+    first[0] = True
+    first[1:] = cid_s[1:] != cid_s[:-1]
+    return np.sort(order[first])
+
+
 # ─── per-scene container ─────────────────────────────────────────────────────
 
 class _SceneData:
@@ -644,11 +660,7 @@ class PandaSetCrossFrameDataset(Dataset):
             du = uv_local[:, 0] - (cj + 0.5) * cell
             dv = uv_local[:, 1] - (ck + 0.5) * cell
             d2 = du * du + dv * dv
-            sel = []
-            for u_c in np.unique(cid):
-                mem = np.where(cid == u_c)[0]
-                sel.append(int(mem[np.argmin(d2[mem])]))
-            kept = np.array(sorted(set(sel)), dtype=np.int64)
+            kept = _argmin_per_cell(cid, d2)
             if len(kept) < n_full:
                 rest = np.setdiff1d(np.arange(n), kept, assume_unique=False)
                 if len(rest):
@@ -881,11 +893,7 @@ class PandaSetCrossFrameDataset(Dataset):
                 du = uv_q_local_self[kept_idx, 0] - (cj + 0.5) * cell
                 dv = uv_q_local_self[kept_idx, 1] - (ck + 0.5) * cell
                 d2 = du * du + dv * dv
-                sel = []
-                for u_c in np.unique(cid):
-                    mem = np.where(cid == u_c)[0]
-                    sel.append(int(mem[np.argmin(d2[mem])]))
-                pick_local = np.array(sorted(set(sel)), dtype=np.int64)
+                pick_local = _argmin_per_cell(cid, d2)
                 pick = kept_idx[pick_local]
             else:
                 pick = kept_idx
@@ -1335,11 +1343,7 @@ class PandaSetCrossFrameDataset(Dataset):
                 du  = uv_query[:, 0] - (cj + 0.5) * cell
                 dv  = uv_query[:, 1] - (ci + 0.5) * cell
                 d2  = du * du + dv * dv
-                sel = []
-                for u_c in np.unique(cid):
-                    mem = np.where(cid == u_c)[0]
-                    sel.append(int(mem[np.argmin(d2[mem])]))
-                pick = np.array(sorted(set(sel)), dtype=np.int64)
+                pick = _argmin_per_cell(cid, d2)
             else:
                 pick = np.arange(N, dtype=np.int64)
             N_use = len(pick)
@@ -1375,12 +1379,15 @@ class PandaSetCrossFrameDataset(Dataset):
                 du = uv[:, 0] - (cj + 0.5) * cell_full
                 dv = uv[:, 1] - (ci + 0.5) * cell_full
                 d2 = du * du + dv * dv
-                sel = []
-                for u_c in np.unique(cid):
-                    mem = np.where(cid == u_c)[0]
-                    sel.append(int(mem[np.argmin(d2[mem])]))
-                # if grid yields fewer than N_FULL (sparse cells), fill rest randomly
-                kept = np.array(sorted(set(sel)), dtype=np.int64)
+                # Vectorized argmin-per-cell: lexsort by (cid, d2) so the first
+                # occurrence of each unique cid is its argmin. Replaces the
+                # slow Python `for u_c in np.unique(cid)` loop.
+                order = np.lexsort((d2, cid))
+                cid_s = cid[order]
+                first_mask = np.empty(len(cid_s), dtype=bool)
+                first_mask[0] = True
+                first_mask[1:] = cid_s[1:] != cid_s[:-1]
+                kept = np.sort(order[first_mask])
                 if len(kept) < N_FULL:
                     rest = np.setdiff1d(np.arange(N), kept, assume_unique=False)
                     fill = self.rng.choice(rest, size=min(N_FULL - len(kept), len(rest)),
@@ -1410,11 +1417,7 @@ class PandaSetCrossFrameDataset(Dataset):
                     du  = uv_q[:, 0] - (cj + 0.5) * cell
                     dv  = uv_q[:, 1] - (ci + 0.5) * cell
                     d2  = du * du + dv * dv
-                    sel = []
-                    for u_c in np.unique(cid):
-                        mem = np.where(cid == u_c)[0]
-                        sel.append(int(mem[np.argmin(d2[mem])]))
-                    pick = np.array(sorted(set(sel)), dtype=np.int64)
+                    pick = _argmin_per_cell(cid, d2)
                 else:
                     pick = np.arange(N, dtype=np.int64)
                 N_use = len(pick)
@@ -1451,11 +1454,7 @@ class PandaSetCrossFrameDataset(Dataset):
                     du  = uv_q[:, 0] - (cj + 0.5) * cell
                     dv  = uv_q[:, 1] - (ci + 0.5) * cell
                     d2  = du * du + dv * dv
-                    sel = []
-                    for u_c in np.unique(cid):
-                        mem = np.where(cid == u_c)[0]
-                        sel.append(int(mem[np.argmin(d2[mem])]))
-                    pick = np.array(sorted(set(sel)), dtype=np.int64)
+                    pick = _argmin_per_cell(cid, d2)
                 else:
                     pick = np.arange(N, dtype=np.int64)
                 arrs = [uv_q[pick], z_q[pick], uv_hat[pick], uv_gt[pick],
@@ -1490,11 +1489,7 @@ class PandaSetCrossFrameDataset(Dataset):
                 du  = uv_A_pre[:, 0] - (cj + 0.5) * cell
                 dv  = uv_A_pre[:, 1] - (ci + 0.5) * cell
                 d2  = du * du + dv * dv
-                sel = []
-                for u_c in np.unique(cid):
-                    mem = np.where(cid == u_c)[0]
-                    sel.append(int(mem[np.argmin(d2[mem])]))
-                pick_a = np.array(sorted(set(sel)), dtype=np.int64)
+                pick_a = _argmin_per_cell(cid, d2)
             else:
                 pick_a = np.arange(N, dtype=np.int64)
             pts_w_A_query_padded = pts_w_QA_filt[pick_a]
@@ -1524,11 +1519,7 @@ class PandaSetCrossFrameDataset(Dataset):
                     du = uvq[:, 0] - (cj + 0.5) * cell
                     dv = uvq[:, 1] - (ci + 0.5) * cell
                     d2 = du * du + dv * dv
-                    sel = []
-                    for u_c in np.unique(cid):
-                        mem = np.where(cid == u_c)[0]
-                        sel.append(int(mem[np.argmin(d2[mem])]))
-                    return np.array(sorted(set(sel)), dtype=np.int64)
+                    return _argmin_per_cell(cid, d2)
                 pick_a_q = _pick_idx(uv_A_pre)
                 pick_b_q = _pick_idx(uv_B_pre)
                 def _apply_pick_pad(arr, pick, fill_extra):
@@ -1566,11 +1557,7 @@ class PandaSetCrossFrameDataset(Dataset):
                 du  = uv_A_pre[:, 0] - (cj + 0.5) * cell
                 dv  = uv_A_pre[:, 1] - (ci + 0.5) * cell
                 d2  = du * du + dv * dv
-                sel = []
-                for u_c in np.unique(cid):
-                    mem = np.where(cid == u_c)[0]
-                    sel.append(int(mem[np.argmin(d2[mem])]))
-                pick_a = np.array(sorted(set(sel)), dtype=np.int64)
+                pick_a = _argmin_per_cell(cid, d2)
             else:
                 pick_a = np.arange(N, dtype=np.int64)
             pts_w_A_query_padded = pts_w_QA_filt[pick_a]
