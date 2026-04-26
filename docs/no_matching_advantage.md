@@ -150,24 +150,24 @@ GS は「描画のための表現」、本手法は「マッチングのため�
 
 これに先行があるか正直に整理:
 
-**部分的に近いもの**:
-- **probabilistic optical flow** (ProbFlow, BayesFlow 系): 同一カメラの
-  連続フレームに対し per-pixel の flow + Gaussian 分散を出す。違うのは
-  (1) pose 入力じゃなく flow 自体を当てる (2) cross-modal LiDAR を持たない
-  (3) 大角度 / 大基線で破綻
-- **RAFT/RAFT-3D + uncertainty**: per-pixel flow + scalar confidence は出すが、
-  full 2D 共分散ではない。pose は介在しない
-- **DROID-SLAM**: dense flow に per-pixel weight が付く、BA に流す。ただ
-  weight はスカラー、pose は出力で、本手法と逆向き
-- **probabilistic depth estimation** (AdaBins 系): per-pixel depth + variance、
-  単眼 → depth、cross-frame でも pose 条件でもない
-- **scene-coord regression** (DSAC*, KFNet): per-pixel 3D scene coord +
-  uncertainty。pose は出力、世界座標を直接当てるので representation が違う
-- **probabilistic camera–LiDAR calib** 産業系論文: per-correspondence の
-  scalar weight (= 寿命) を出すが 2D 共分散は稀。多くは matcher 後段の
-  weighting
+部分的に近いもの:
 
-**ど真ん中で同じ問題を解いてる先行**: 知る限り見当たらない。
+- probabilistic optical flow (ProbFlow, BayesFlow 系): 同一カメラの
+  連続フレームに対し per-pixel の flow + Gaussian 分散を出す。違うのは
+  (1) pose 入力じゃなく flow 自体を当てる、(2) cross-modal LiDAR を持たない、
+  (3) 大角度 / 大基線で破綻
+- RAFT / RAFT-3D + uncertainty: per-pixel flow + scalar confidence は出すが、
+  full 2D 共分散ではない。pose は介在しない
+- DROID-SLAM: dense flow に per-pixel weight が付き BA に流れるが、
+  weight は scalar、pose は出力。本手法と逆向き
+- probabilistic depth estimation (AdaBins 系): per-pixel depth + variance、
+  単眼 → depth。cross-frame でも pose 条件でもない
+- scene-coord regression (DSAC star, KFNet): per-pixel 3D scene coord +
+  uncertainty。pose は出力、世界座標を直接当てる
+- probabilistic camera–LiDAR calib 産業系: per-correspondence の scalar
+  weight を出すが 2D 共分散は稀。多くは matcher 後段の weighting
+
+ど真ん中で同じ問題を解いてる先行: 知る限り見当たらない。
 「pose 入力 + per-point 2D Gaussian 出力 + cross-frame supervised on
 synced LiDAR+camera + chain composable for long baseline」という組合せは、
 論文発表されてる中では恐らく未開拓。理由は推測:

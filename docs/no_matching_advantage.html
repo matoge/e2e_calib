@@ -137,23 +137,24 @@ covariance (形状)」 を持つ Gaussian primitive の集合で表現する。
 <p>出力は per-point の (Δuv, Σ)。pose 自体は出力しない (= <strong>入力条件</strong>)。</p>
 <h2 id="per-point-uv">「per-point の (Δuv, Σ) を陽に出す手法」って他にあるのか</h2>
 <p>これに先行があるか正直に整理:</p>
-<p><strong>部分的に近いもの</strong>:
-- <strong>probabilistic optical flow</strong> (ProbFlow, BayesFlow 系): 同一カメラの
+<p>部分的に近いもの:</p>
+<ul>
+<li>probabilistic optical flow (ProbFlow, BayesFlow 系): 同一カメラの
   連続フレームに対し per-pixel の flow + Gaussian 分散を出す。違うのは
-  (1) pose 入力じゃなく flow 自体を当てる (2) cross-modal LiDAR を持たない
-  (3) 大角度 / 大基線で破綻
-- <strong>RAFT/RAFT-3D + uncertainty</strong>: per-pixel flow + scalar confidence は出すが、
-  full 2D 共分散ではない。pose は介在しない
-- <strong>DROID-SLAM</strong>: dense flow に per-pixel weight が付く、BA に流す。ただ
-  weight はスカラー、pose は出力で、本手法と逆向き
-- <strong>probabilistic depth estimation</strong> (AdaBins 系): per-pixel depth + variance、
-  単眼 → depth、cross-frame でも pose 条件でもない
-- <strong>scene-coord regression</strong> (DSAC<em>, KFNet): per-pixel 3D scene coord +
-  uncertainty。pose は出力、世界座標を直接当てるので representation が違う
-- </em><em>probabilistic camera–LiDAR calib</em>* 産業系論文: per-correspondence の
-  scalar weight (= 寿命) を出すが 2D 共分散は稀。多くは matcher 後段の
-  weighting</p>
-<p><strong>ど真ん中で同じ問題を解いてる先行</strong>: 知る限り見当たらない。
+  (1) pose 入力じゃなく flow 自体を当てる、(2) cross-modal LiDAR を持たない、
+  (3) 大角度 / 大基線で破綻</li>
+<li>RAFT / RAFT-3D + uncertainty: per-pixel flow + scalar confidence は出すが、
+  full 2D 共分散ではない。pose は介在しない</li>
+<li>DROID-SLAM: dense flow に per-pixel weight が付き BA に流れるが、
+  weight は scalar、pose は出力。本手法と逆向き</li>
+<li>probabilistic depth estimation (AdaBins 系): per-pixel depth + variance、
+  単眼 → depth。cross-frame でも pose 条件でもない</li>
+<li>scene-coord regression (DSAC star, KFNet): per-pixel 3D scene coord +
+  uncertainty。pose は出力、世界座標を直接当てる</li>
+<li>probabilistic camera–LiDAR calib 産業系: per-correspondence の scalar
+  weight を出すが 2D 共分散は稀。多くは matcher 後段の weighting</li>
+</ul>
+<p>ど真ん中で同じ問題を解いてる先行: 知る限り見当たらない。
 「pose 入力 + per-point 2D Gaussian 出力 + cross-frame supervised on
 synced LiDAR+camera + chain composable for long baseline」という組合せは、
 論文発表されてる中では恐らく未開拓。理由は推測:</p>

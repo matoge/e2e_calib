@@ -38,7 +38,8 @@ def main():
     args = ap.parse_args()
 
     md = markdown.Markdown(
-        extensions=['fenced_code', 'tables', 'codehilite', 'toc'])
+        extensions=['fenced_code', 'tables', 'codehilite', 'toc',
+                    'sane_lists', 'extra'])
 
     for p in args.paths:
         src = pathlib.Path(p)
