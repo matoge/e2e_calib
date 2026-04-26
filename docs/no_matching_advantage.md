@@ -83,17 +83,32 @@ val 出力。 各サンプルは 1 つの A→B 投影ペアを示す:
 
 つまり「pose 入力で refine」は DROID 系だけ似た構造で、 他は構造的にできない。
 
-DROID との違いは出力形式:
+DROID との本質的な違いは設計思想:
 
-- DROID: per-pixel **dense flow + scalar 信頼度** (u, v shift と 1 channel weight)
-- 本手法: per-point **2D Gaussian (Δuv, full 2x2 Σ)**
+- DROID は **end-to-end SLAM システム**として完結している。 dense flow ネット +
+  BA solver を 1 個に統合し、 入力画像列 → 出力 SLAM 結果を一発で得る
+- 本手法は **primitive (= per-point の (Δuv, Σ) を出すだけ)** に絞って、
+  その後段の solver は任意。 calibration なら closed-form least squares、
+  map update なら patch BA、 loop verify なら scoring、 と用途別に組み替える
 
-scalar 信頼度では「どっち方向に / どのくらい不確かか」が表現できないので
-独立な x, y を仮定した isotropic 重み付けに留まる。 共分散を出すと例えば
-「縦方向だけは確信あるが横方向は当てにできない」(= 細長い物体の境界
-近くで頻発) が陽に表現可能で、 BA solver にそのまま流し込める。 DROID は
-完結した SLAM システムなので、 BA solver も込みで設計されてるが、 本手法は
-**任意の Σ-weighted solver に挿せる primitive** として独立してる。
+この立ち位置の違いは可逆: 本手法に DROID 風の dense BA layer を後段に
+くっつければ end-to-end SLAM システムになる。逆に DROID から BA を切り離して
+flow 出力だけ取れば residual primitive として使える。 つまり「能力の差」と
+いうより **モジュール境界をどこに引くか** の選択。
+
+本提案でモジュール境界を切ったのは、 同じ primitive が複数の下流タスク
+(calibration, map update, SLAM, odometry, loop verify) で再利用できる方が
+deployment が安いから。 タスク 1 個ずつに専用 SLAM システムを組むより、
+1 つの primitive を維持する方が運用コストが低い。
+
+出力形式の違いも記しておく:
+
+- DROID: per-pixel **dense flow + scalar 信頼度** → BA に流すとき isotropic 重み付け
+- 本手法: per-point **2D Gaussian (Δuv, full 2x2 Σ)** → 異方性を陽に保つ
+  (例: 細長い物体の境界では「縦は確信、横は不確か」)
+
+これは primitive の表現力差で、 anisotropic Σ が必要な用途では本手法、
+isotropic で十分なら DROID flow でも成立する。
 
 #### B. 出力は「シーン再構成」じゃなく「残差 + 不確実性」
 
