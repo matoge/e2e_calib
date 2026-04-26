@@ -355,6 +355,11 @@ def main():
                     help='with --init-from, skip freezing the frame encoder so all '
                          'params train (full fine-tune). Useful for ablation: did freeze '
                          'matter, or does the multi-frame head need encoder co-training?')
+    ap.add_argument('--motion-warp-gt', action='store_true',
+                    help='dataset rewrites uv_gt for query points inside cuboids '
+                         'flagged Moving by annotators, using the box A→B rigid '
+                         'transform. Behind-camera warps drop; view-out warps '
+                         'kept (model learns large Δuv). Trains motion-aware net.')
     ap.add_argument('--quad-frame', action='store_true',
                     help='extends --multi-frame to quad: A, M1, M2, B (M1 at 1/3 and '
                          'M2 at 2/3 between A and B). Requires --multi-frame and a '
@@ -443,6 +448,7 @@ def main():
         cameras=args.cameras,
         triplet=args.multi_frame and not use_stacked,   # legacy aux-KV only
         quad=args.quad_frame,                            # adds M2 (forces triplet=True)
+        motion_warp_gt=args.motion_warp_gt,
         n_frames=n_frames_path,
         use_stacked=use_stacked,
     )

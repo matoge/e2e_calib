@@ -316,6 +316,11 @@ class PandaSetCrossFrameDataset(Dataset):
                  n_frames: int = 2,        # how many frames the stacked path emits
                  use_stacked: bool = False, # True → _try_one_nframe (new path).
                                            # False → legacy _try_one (v51-v55 path).
+                 motion_warp_gt: bool = False,  # rewrite uv_gt for points inside
+                                            # moving 3D cuboids using box's rigid
+                                            # A→B transform; behind-camera → drop;
+                                            # view-out (z>0 still) → kept with
+                                            # warped uv (model learns big shifts).
                  quad: bool = False,       # extends triplet with M2: A, M1, M2, B
                  triplet: bool = False,    # legacy: append M as aux KV in the
                                            # named-field pair output (used by v51-v55)
@@ -337,6 +342,8 @@ class PandaSetCrossFrameDataset(Dataset):
         self.triplet = triplet or quad
         self.quad = quad
         self.use_stacked = use_stacked
+        self.motion_warp_gt = motion_warp_gt
+        self._cuboid_cache = {}                       # (scene_root_str, fi) → list of box dicts
         self.rng = np.random.default_rng(seed)
 
         # cameras: single str, comma-separated str, list, or None (→ front_camera).
@@ -1041,6 +1048,59 @@ class PandaSetCrossFrameDataset(Dataset):
         patch_A, box_A = pa
         patch_B, box_B = pb
 
+        # 9a. motion-warp setup: pre-load cuboids for fi_A and fi_B if active.
+        # Annotator's `attributes.object_motion=='Moving'` flag, with same uuid
+        # present in both frames, is the criterion. Box rigid transform A→B is
+        # applied to query points inside such boxes; behind-camera drops happen
+        # naturally via good_qa (z>0.5) check downstream.
+        moving_a_uuids_to_box = None
+        moving_b_uuids_to_box = None
+        if self.motion_warp_gt:
+            import gzip as _gz, pickle as _pk, math as _math
+            def _load_cb(fi):
+                key = (str(scn.root), int(fi))
+                if key not in self._cuboid_cache:
+                    pcb = scn.root / 'annotations' / 'cuboids' / f'{int(fi):02d}.pkl.gz'
+                    with _gz.open(pcb, 'rb') as f:
+                        df = _pk.load(f)
+                    out = []
+                    for _, row in df.iterrows():
+                        cy, sy = _math.cos(row['yaw']), _math.sin(row['yaw'])
+                        R = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]],
+                                      dtype=np.float64)
+                        out.append(dict(
+                            uuid=row['uuid'],
+                            c=np.array([row['position.x'], row['position.y'], row['position.z']],
+                                        dtype=np.float64),
+                            s=np.array([row['dimensions.x'], row['dimensions.y'], row['dimensions.z']],
+                                        dtype=np.float64),
+                            R=R,
+                            motion=str(row.get('attributes.object_motion', '')),
+                        ))
+                    self._cuboid_cache[key] = out
+                return self._cuboid_cache[key]
+            boxes_a_all = _load_cb(fi_A)
+            boxes_b_all = _load_cb(fi_B)
+            b_by_u = {b['uuid']: b for b in boxes_b_all}
+            a_by_u = {b['uuid']: b for b in boxes_a_all}
+            moving_a_uuids_to_box = {b['uuid']: b for b in boxes_a_all
+                                      if b['motion'] == 'Moving' and b['uuid'] in b_by_u}
+            moving_b_uuids_to_box = {b['uuid']: b for b in boxes_b_all
+                                      if b['motion'] == 'Moving' and b['uuid'] in a_by_u}
+
+        def _warp_world_by_box(p_w, box_src, box_tgt):
+            rel = p_w - box_src['c']
+            local = rel @ box_src['R']
+            return (local @ box_tgt['R'].T + box_tgt['c']).astype(np.float32)
+
+        def _is_in_box_world(p_w, box):
+            rel = p_w - box['c']
+            local = rel @ box['R']
+            half = box['s'] * 0.5
+            return ((np.abs(local[:, 0]) < half[0]) &
+                    (np.abs(local[:, 1]) < half[1]) &
+                    (np.abs(local[:, 2]) < half[2]))
+
         # 9b. triplet/quad — pick mid frames; project pivot into each mid frame.
         # triplet: 1 mid frame at midpoint. quad: 2 mid frames at 1/3 and 2/3.
         if self.triplet:
@@ -1109,6 +1169,23 @@ class PandaSetCrossFrameDataset(Dataset):
         P_QA_in_A     = (T_w2A @ homo.T)[:3].T
         P_QA_in_B_gt  = (np.column_stack([P_QA_in_A, np.ones(len(P_QA_in_A))]) @ T_A_to_B_gt.T)[:, :3]
         P_QA_in_B_hat = (np.column_stack([P_QA_in_A, np.ones(len(P_QA_in_A))]) @ T_A_to_B_hat.T)[:, :3]
+
+        # Motion warp: replace static GT B-cam coords for points inside moving
+        # cuboids with the rigid-warped target. uv_hat untouched (model still
+        # gets the static-pose hypothesis as its starting point).
+        is_warped_A = np.zeros(len(pts_w_QA), dtype=bool)
+        if self.motion_warp_gt and moving_a_uuids_to_box:
+            for uu, box in moving_a_uuids_to_box.items():
+                in_b = _is_in_box_world(pts_w_QA, box)
+                if not in_b.any():
+                    continue
+                box_b = b_by_u[uu]
+                p_w_warp = _warp_world_by_box(pts_w_QA[in_b], box, box_b)
+                homo_w = np.concatenate(
+                    [p_w_warp, np.ones((len(p_w_warp), 1), dtype=np.float32)], axis=1)
+                P_QA_in_B_gt[in_b] = (T_w2B @ homo_w.T)[:3].T
+                is_warped_A[in_b] = True
+
         good_qa = (P_QA_in_B_gt[:, 2] > 0.5) & (P_QA_in_B_hat[:, 2] > 0.5)
         if good_qa.sum() < 4:
             return None
@@ -1119,10 +1196,15 @@ class PandaSetCrossFrameDataset(Dataset):
 
         uv_A_patch    = uv_A_patch[good_qa]
         z_A_patch     = z_A_patch[good_qa]
-        inb = ((uv_B_hat_local_A[:, 0] >= 0) & (uv_B_hat_local_A[:, 0] < self.img_size) &
-               (uv_B_hat_local_A[:, 1] >= 0) & (uv_B_hat_local_A[:, 1] < self.img_size) &
-               (uv_B_gt_local_A[:, 0]  >= 0) & (uv_B_gt_local_A[:, 0]  < self.img_size) &
-               (uv_B_gt_local_A[:, 1]  >= 0) & (uv_B_gt_local_A[:, 1]  < self.img_size))
+        is_warped_A_filt = is_warped_A[good_qa]
+        inb_hat = ((uv_B_hat_local_A[:, 0] >= 0) & (uv_B_hat_local_A[:, 0] < self.img_size) &
+                   (uv_B_hat_local_A[:, 1] >= 0) & (uv_B_hat_local_A[:, 1] < self.img_size))
+        inb_gt  = ((uv_B_gt_local_A[:, 0]  >= 0) & (uv_B_gt_local_A[:, 0]  < self.img_size) &
+                   (uv_B_gt_local_A[:, 1]  >= 0) & (uv_B_gt_local_A[:, 1]  < self.img_size))
+        # Warped GT may legitimately fall outside the patch (object moved away
+        # in image plane) — keep those, model learns large Δuv values. Static
+        # GT must stay in-patch for the loss to make sense.
+        inb = inb_hat & (is_warped_A_filt | inb_gt)
         if inb.sum() < 4:
             return None
         uv_A_patch       = uv_A_patch[inb]
@@ -1149,6 +1231,22 @@ class PandaSetCrossFrameDataset(Dataset):
         T_B_to_A_hat = _invert_mat(T_A_to_B_hat)
         P_QB_in_A_gt  = (np.column_stack([P_QB_in_B, np.ones(len(P_QB_in_B))]) @ T_B_to_A_gt.T)[:, :3]
         P_QB_in_A_hat = (np.column_stack([P_QB_in_B, np.ones(len(P_QB_in_B))]) @ T_B_to_A_hat.T)[:, :3]
+
+        # Motion warp: B-query points inside moving cuboids → warp to A using
+        # the box's reverse rigid transform (B→A). Same logic as A-side.
+        is_warped_B = np.zeros(len(pts_w_QB), dtype=bool)
+        if self.motion_warp_gt and moving_b_uuids_to_box:
+            for uu, box in moving_b_uuids_to_box.items():
+                in_b = _is_in_box_world(pts_w_QB, box)
+                if not in_b.any():
+                    continue
+                box_a = a_by_u[uu]
+                p_w_warp = _warp_world_by_box(pts_w_QB[in_b], box, box_a)
+                homo_w = np.concatenate(
+                    [p_w_warp, np.ones((len(p_w_warp), 1), dtype=np.float32)], axis=1)
+                P_QB_in_A_gt[in_b] = (T_w2A @ homo_w.T)[:3].T
+                is_warped_B[in_b] = True
+
         good_qb = (P_QB_in_A_gt[:, 2] > 0.5) & (P_QB_in_A_hat[:, 2] > 0.5)
         if good_qb.sum() < 4:
             return None
@@ -1158,10 +1256,12 @@ class PandaSetCrossFrameDataset(Dataset):
         uv_A_hat_local_B = self._uv_to_patch_local(uv_A_hat_full_B, box_A)
         uv_B_patch = uv_B_patch[good_qb]
         z_B_patch  = z_B_patch[good_qb]
-        inb2 = ((uv_A_hat_local_B[:, 0] >= 0) & (uv_A_hat_local_B[:, 0] < self.img_size) &
-                (uv_A_hat_local_B[:, 1] >= 0) & (uv_A_hat_local_B[:, 1] < self.img_size) &
-                (uv_A_gt_local_B[:, 0]  >= 0) & (uv_A_gt_local_B[:, 0]  < self.img_size) &
-                (uv_A_gt_local_B[:, 1]  >= 0) & (uv_A_gt_local_B[:, 1]  < self.img_size))
+        is_warped_B_filt = is_warped_B[good_qb]
+        inb2_hat = ((uv_A_hat_local_B[:, 0] >= 0) & (uv_A_hat_local_B[:, 0] < self.img_size) &
+                    (uv_A_hat_local_B[:, 1] >= 0) & (uv_A_hat_local_B[:, 1] < self.img_size))
+        inb2_gt  = ((uv_A_gt_local_B[:, 0]  >= 0) & (uv_A_gt_local_B[:, 0]  < self.img_size) &
+                    (uv_A_gt_local_B[:, 1]  >= 0) & (uv_A_gt_local_B[:, 1]  < self.img_size))
+        inb2 = inb2_hat & (is_warped_B_filt | inb2_gt)
         if inb2.sum() < 4:
             return None
         uv_B_patch       = uv_B_patch[inb2]
@@ -1484,6 +1584,12 @@ class PandaSetCrossFrameDataset(Dataset):
             fi_A = fi_A, fi_B = fi_B,
             scene = scn.scene_id,
             scene_root = str(scn.root),
+            # Geometry side-channel for analysis (motion-warp eval etc.).
+            # Constant cost regardless of feature; cheap.
+            box_B = torch.tensor(box_B, dtype=torch.float32),       # (4,) u0,v0,cw,ch
+            K = torch.from_numpy(K).float(),                         # (3, 3)
+            dist = torch.from_numpy(scn.dist).float(),               # (k,) distortion
+            T_w2c_B = torch.from_numpy(scn.T_w2c[fi_B]).float(),     # (4, 4)
         )
         # Optional side-channel for analysis: world-coord query points (A side)
         # padded to max_points, ordered same as uvd_A. Computed in both pair
