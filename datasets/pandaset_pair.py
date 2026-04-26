@@ -1201,10 +1201,16 @@ class PandaSetCrossFrameDataset(Dataset):
                    (uv_B_hat_local_A[:, 1] >= 0) & (uv_B_hat_local_A[:, 1] < self.img_size))
         inb_gt  = ((uv_B_gt_local_A[:, 0]  >= 0) & (uv_B_gt_local_A[:, 0]  < self.img_size) &
                    (uv_B_gt_local_A[:, 1]  >= 0) & (uv_B_gt_local_A[:, 1]  < self.img_size))
-        # Warped GT may legitimately fall outside the patch (object moved away
-        # in image plane) — keep those, model learns large Δuv values. Static
-        # GT must stay in-patch for the loss to make sense.
-        inb = inb_hat & (is_warped_A_filt | inb_gt)
+        # Warped GT may fall outside the patch (object moved away in image
+        # plane) — keep those WITHIN one patch's slack border, drop further.
+        # Without bound, fast cars project hundreds of px away and the
+        # squared-error loss explodes (the model can never reach there).
+        WARP_SLACK = self.img_size                     # 1-patch margin
+        inb_warp_bound = ((uv_B_gt_local_A[:, 0] >= -WARP_SLACK) &
+                           (uv_B_gt_local_A[:, 0] <  self.img_size + WARP_SLACK) &
+                           (uv_B_gt_local_A[:, 1] >= -WARP_SLACK) &
+                           (uv_B_gt_local_A[:, 1] <  self.img_size + WARP_SLACK))
+        inb = inb_hat & (inb_gt | (is_warped_A_filt & inb_warp_bound))
         if inb.sum() < 4:
             return None
         uv_A_patch       = uv_A_patch[inb]
@@ -1261,7 +1267,12 @@ class PandaSetCrossFrameDataset(Dataset):
                     (uv_A_hat_local_B[:, 1] >= 0) & (uv_A_hat_local_B[:, 1] < self.img_size))
         inb2_gt  = ((uv_A_gt_local_B[:, 0]  >= 0) & (uv_A_gt_local_B[:, 0]  < self.img_size) &
                     (uv_A_gt_local_B[:, 1]  >= 0) & (uv_A_gt_local_B[:, 1]  < self.img_size))
-        inb2 = inb2_hat & (is_warped_B_filt | inb2_gt)
+        WARP_SLACK = self.img_size
+        inb2_warp_bound = ((uv_A_gt_local_B[:, 0] >= -WARP_SLACK) &
+                            (uv_A_gt_local_B[:, 0] <  self.img_size + WARP_SLACK) &
+                            (uv_A_gt_local_B[:, 1] >= -WARP_SLACK) &
+                            (uv_A_gt_local_B[:, 1] <  self.img_size + WARP_SLACK))
+        inb2 = inb2_hat & (inb2_gt | (is_warped_B_filt & inb2_warp_bound))
         if inb2.sum() < 4:
             return None
         uv_B_patch       = uv_B_patch[inb2]
