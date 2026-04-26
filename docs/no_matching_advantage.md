@@ -146,6 +146,45 @@ GS は「描画のための表現」、本手法は「マッチングのため�
 
 出力は per-point の (Δuv, Σ)。pose 自体は出力しない (= **入力条件**)。
 
+## 「per-point の (Δuv, Σ) を陽に出す手法」って他にあるのか
+
+これに先行があるか正直に整理:
+
+**部分的に近いもの**:
+- **probabilistic optical flow** (ProbFlow, BayesFlow 系): 同一カメラの
+  連続フレームに対し per-pixel の flow + Gaussian 分散を出す。違うのは
+  (1) pose 入力じゃなく flow 自体を当てる (2) cross-modal LiDAR を持たない
+  (3) 大角度 / 大基線で破綻
+- **RAFT/RAFT-3D + uncertainty**: per-pixel flow + scalar confidence は出すが、
+  full 2D 共分散ではない。pose は介在しない
+- **DROID-SLAM**: dense flow に per-pixel weight が付く、BA に流す。ただ
+  weight はスカラー、pose は出力で、本手法と逆向き
+- **probabilistic depth estimation** (AdaBins 系): per-pixel depth + variance、
+  単眼 → depth、cross-frame でも pose 条件でもない
+- **scene-coord regression** (DSAC*, KFNet): per-pixel 3D scene coord +
+  uncertainty。pose は出力、世界座標を直接当てるので representation が違う
+- **probabilistic camera–LiDAR calib** 産業系論文: per-correspondence の
+  scalar weight (= 寿命) を出すが 2D 共分散は稀。多くは matcher 後段の
+  weighting
+
+**ど真ん中で同じ問題を解いてる先行**: 知る限り見当たらない。
+「pose 入力 + per-point 2D Gaussian 出力 + cross-frame supervised on
+synced LiDAR+camera + chain composable for long baseline」という組合せは、
+論文発表されてる中では恐らく未開拓。理由は推測:
+
+- visual-only research community (CVPR / ICCV メイン) は LiDAR を持ってない、
+  cross-modal supervised setup が組めない
+- LiDAR-heavy 産業 (Waymo / Cruise / Aurora) は internal にこの種類の network を
+  持っている可能性高いが、 publish されてない
+- public dataset で「短基線 GICP-refined pose + 動的物体 box tracking」が
+  揃って利用可能になったのが比較的最近 (Waymo v2、PandaSet、AV2)、
+  community がこの組合せに気付くタイミングだった
+
+つまり「組み合わせとして untouched で、組んでみたら実用的に効く」
+という pragmatic discovery 寄り。理論的に深いブレイクスルーではなく、
+**現代の sensor stack + 公開データの状況に合わせた具体的な engineering
+choice** が新規。
+
 ## 既存の E2E 系手法と何が違うのか
 
 過去 5 年で「特徴量マッチングを学習可能にする」「マッチング自体を回避する」
