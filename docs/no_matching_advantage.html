@@ -119,9 +119,15 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 <p>LightGlue / LoFTR / DUSt3R も含めて、対応学習型は基本的に
 「両画像に同じ点が見えている」前提で設計されている。片方にだけ写って
 いる点は noise (= 学習で penalty / 切り捨て)。</p>
-<p>本手法は片側 (A) の query 点だけを起点にし、B への射影予測 + σ を出す。
-<strong>B に写ってなくても点は捨てない</strong>。σ が大きい状態で残る → 動的物体・
-遮蔽・視野外移動を「不確実」として保持する。</p>
+<p>本手法は片側 (A) の query 点だけを起点にし、<strong>pose 仮説下の射影位置 +
+不確実性</strong> を出す。これは画像での可視性を要求しない:
+- 静的シーンであれば遮蔽されていても geometry で uv が出る → σ 小、点は残る
+- 視野外に静的物体が出ても、射影 uv は patch 外でも計算可能 (= 「ここから
+  X px ずれた所に映るはず」を出力)
+- 動的物体だけが本質的に「静的シーン仮定が破れる」ので σ inflate</p>
+<p>ハードな対応関係に依存しない設計なので、点を捨てるか否かは matcher の
+ように 0/1 で決まらず、σ という連続値で表現される。downstream で σ で
+重み付けすれば自然に inlier/outlier の <strong>連続版</strong> になる。</p>
 <h3 id="d-invariance">D. 視点変化を invariance で吸収しない</h3>
 <p>descriptor / 学習型 matcher は「同じ 3D 点は視点が変わっても似た特徴量を
 出す」invariance を学習タスクで内製してきた。これは大角度で破綻しやすい
@@ -160,10 +166,24 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 <p>伝統的な matcher は移動車を <strong>不一致</strong> とみなして排除し、その点群が消える。
 本手法はその点を <strong>「不確実」</strong> として残す。Σ-weighted BA に直接渡せば、
 信頼度に応じた寄与で扱える。</p>
-<h3 id="2">2. 遮蔽・反射・繰り返しテクスチャを「σ 大」として残す</h3>
-<p>descriptor 系は「マッチに失敗したのでこの点は使えない」と捨てるが、
-本手法は「この点はあるべき位置に近づけたが自信ない」を出す。
-点を捨てない = 密度の高い再投影誤差マップが手に入る。</p>
+<h3 id="2">2. 静的シーンであれば遮蔽されていても点は失われない</h3>
+<p>ここは正確を期す:
+- 静的物体が前景物 (太いポール、車など) の <strong>裏に隠れる場合</strong>、本手法でも
+  σ は <strong>必ずしも上がらない</strong>。静的シーン仮定下では 3D 点 + pose から
+  uv は幾何で正しく計算でき、Δuv ≈ 0、σ も小さいまま、という出力で正しい
+- 「画像で見えるか」は出力には直接関係せず、「pose 仮説下の射影位置と
+  実際のずれ」だけを学習している
+- → 遮蔽点も <strong>「正しい位置 + 低 σ」</strong> で残る = 落ちない</p>
+<p>伝統的 matcher は遮蔽点を <strong>「対応なし、descriptor 一致なし」で捨てる</strong>。
+情報量が消える。本手法は静的シーンで予測できるところは予測する、image
+context が一致しなくても geometry で出す、という形になる。</p>
+<p>逆に <strong>σ が大きくなるのは「静的シーン射影仮説そのものが破綻する場合」</strong>:
+- LiDAR が捉えた点が <strong>移動した物体上</strong> にあった (= world 座標が A→B で変わる)
+- pose 仮説自体がノイジーで射影位置が大幅にズレる
+- 学習データ分布外の状況 (極端な明るさ・反射・天候)</p>
+<p>つまり σ は本質的に <strong>「motion / 学習分布外」検出器</strong>であって、
+「視覚的に見えるか」検出器ではない。これは内部でも区別したい性質:
+σ inflation を観察したら原因のほとんどは「物体が動いた」か「pose 仮説が悪い」。</p>
 <h3 id="3">3. ハイパラがほぼない</h3>
 <ul>
 <li>threshold, ratio test, RANSAC iterations, inlier ratio: <strong>全てない</strong></li>
