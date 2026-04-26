@@ -79,6 +79,19 @@ matcher 系で必要だった photometric augmentation や hard negative mining
   処理が完結</p>
 <p>統計的に閉じてる構造なので、 Gauss-Newton / Levenberg-Marquardt / robust
 M-estimator など既存の最適化道具が <strong>そのまま</strong> 使える。</p>
+<p><strong>Gaussian Splatting (3DGS) との対応</strong>: GS は 3D シーンを 「mean (位置) +
+covariance (形状)」 を持つ Gaussian primitive の集合で表現する。
+本手法は 2D 画像残差を per-point の Gaussian で表現する。
+<strong>「シーンを Gaussian で表す GS」と「対応関係を Gaussian で表す本手法」</strong>
+で適用領域は違うが、共通する設計原理:
+- 各要素を <strong>point ではなく分布</strong> として持つことで局所的な不確実性が陽に乗る
+- 解析的微分可能 → optimization-based 学習や down-stream BA に直結
+- 集合演算 (重み付け平均、product, marginalization) が Gaussian の閉性を
+  使ってきれいに書ける</p>
+<p>GS は「描画のための表現」、本手法は「マッチングのための表現」だが、
+どちらも <strong>「点を分布に格上げした方が世界はうまく扱える」</strong> という同じ
+直感に立っている。共分散の出力は、現代的な scene representation の流れと
+方向性が一致している。</p>
 <h3 id="4-slam-patch-based">4. 巨大 SLAM じゃなく「patch-based 最適化」で広範囲応用が成立する</h3>
 <p>伝統的 SfM / SLAM は scene 全体を 1 つの大きな BA 問題として解く =
 シーン規模で計算量がスケール、deployment 負担が大きい。</p>
