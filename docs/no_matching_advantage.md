@@ -188,6 +188,63 @@ pose を入力にすることで:
 つまり提案手法は **「pose を持ってる側」の問題を解く** ものであって、
 matcher と互換ではなく **後段** にある。
 
+## なぜこれが可能なのか — Transformer の多層構造で実現される「思考」
+
+「pose 仮説を入力にもらって、per-point の Δuv + σ を一発で当てる」は
+本来かなり非自明なタスクで、なぜ単一ネットワークで解けるのか説明が要る。
+
+### 仮説: cross-attention の depth = thinking steps
+
+Transformer の cross-attention は本質的に「Q が KV から証拠を集める」操作。
+1 段だけだと:
+- Q (= A の query 点) が KV (= B または M) を見て一発で答えを出すしかない
+- 「同じ点が複数視点で一貫しているか」のような **多段推論** は出来ない
+
+cross-attn を C 段重ねると、各段で別の役割を分業できる:
+- 段 1: 「pose 仮説で射影した位置の周辺に何があるか?」 (= 候補 sampling)
+- 段 2: 「別フレーム M でも整合するか?」 (= consistency check)
+- 段 3: 「pose 仮説のどこをどれくらい補正するか?」 (= residual refinement)
+- 段 4: 「最終 σ を確信度として出力」 (= calibration)
+
+これは LLM の「reasoning depth」 と同じ構造で、
+一発出しでは無理なタスクを段階的合成で解いている。
+
+### v100 の実験結果が仮説を裏付ける
+
+`docs/unified_progression.md` の depth × multi-frame ablation:
+
+```
+                pair (KV=B のみ)    multi (KV=M+B)
+C=2  val_err :  2.35              2.38              ← 同じ
+C=3  val_err :  2.36              2.09              ← multi が効き始め
+C=4  val_err :  2.29              1.93              ← さらに伸びる
+```
+
+これが意味する:
+
+- **pair 系では depth flat** (C=2 → C=4 で -0.06 px)。 KV が 1 つしかなく
+  「思考材料」がない。各段が同じ KV を見るだけで分業のしようがない。
+  → multi-step reasoning が成立しない構造
+- **multi-frame では depth が monotonic に効く** (C=2 → C=4 で -0.45 px)。
+  M frame という第 2 の証拠源があると、段ごとに「B と M の整合確認」
+  「主仮説の refinement」のような分業が成立する → 思考容量として depth が機能
+
+さらに **N=4 (quad、M1 + M2 + B)** の v100 では NLL が劇的に下がる
+(2.04 → 1.59):
+- 中間フレーム M1, M2 の独立観測が 2 つあることで、各点について
+  「3 frame 全部で観測一貫している = static (σ 小)」 vs
+  「フレームによって位置が変わる = 動的 / OOD (σ 大)」の判別が可能
+- これは matcher 系では構造的にできない (matcher は pair 単位の
+  対応しか出さない、3 視点一貫性は外側で集約する別問題)
+
+つまり transformer の depth と multi-frame KV が組み合わさることで、
+「複数視点での consistency 確認 → 残差予測 → σ 出力」という一連の
+推論が **一つのネットワーク内で end-to-end に完結する**。
+
+これが `docs/unified_progression.md` で観測した「pair で depth 飽和、
+multi で depth 効く、quad で σ-calibration 急進」の現象の解釈であり、
+matcher パイプラインでは構造上不可能な統合を可能にしてる。
+
 ## 関連ファイル
 
 - `models/cross_frame_unified.py` — 本手法の実装本体
