@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<title>no matching advantage</title>
+<link rel="stylesheet" href="assets/report.css">
+<style>
+body { max-width: 980px; margin: 24px auto; padding: 0 24px;
+       font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif;
+       line-height: 1.7; color: #222; }
+img { max-width: 100%; height: auto; border-radius: 6px;
+       box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin: 14px 0; }
+table { border-collapse: collapse; margin: 14px 0; }
+th, td { border: 1px solid #ddd; padding: 6px 12px; }
+th { background: #f6f6f6; }
+pre, code { background: #f6f6f6; padding: 2px 6px; border-radius: 3px;
+             font-family: 'JetBrains Mono', Menlo, monospace; font-size: 0.9em; }
+pre { padding: 12px; overflow-x: auto; line-height: 1.4; }
+h1 { border-bottom: 2px solid #444; padding-bottom: 8px; }
+h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
+</style>
+</head><body>
+<h1 id="pose-conditioned-residual">Pose-conditioned residual ネット — 「マッチングしない」設計の意義</h1>
+<p>このプロジェクトの中核アイデアは、<strong>特徴量マッチングを一切経由せず、
+画像と LiDAR から直接「ここに射影されるべき位置」と「その不確実性 σ」を
+推定する</strong> ネットワークを学習することにある。本ドキュメントはなぜそれが
+重要か、何ができるか、何ができないかを整理する。</p>
+<h2 id="_1">解いている問題</h2>
+<ul>
+<li>入力: query フレーム A の点 (画像 + LiDAR の組)、target フレーム B、
+  両者の <strong>相対 pose 仮説 T_AB_hat</strong> (ノイジーで構わない)</li>
+<li>出力: 各 query 点について</li>
+<li><strong>Δuv</strong>: B 画像内での投影誤差補正</li>
+<li><strong>Σ</strong>: その補正の 2D 共分散 (確信度)</li>
+</ul>
+<p>出力は per-point の (Δuv, Σ)。pose 自体は出力しない (= <strong>入力条件</strong>)。</p>
+<h2 id="_2">従来手法の構造とその痛み</h2>
+<div class="codehilite"><pre><span></span><code>画像 ─→ keypoint detector ─→ descriptor ─→ matching ─→ outlier rejection ─→ BA
+                              (SIFT/ORB/SuperPoint)    (RANSAC)
+</code></pre></div>
+
+<p>各ステップに固有の壊れ方がある:</p>
+<ol>
+<li><strong>descriptor が誤対応を出す</strong>: 繰り返しテクスチャ、明度変化、視点差大で破綻</li>
+<li><strong>matching threshold は手動</strong>: 真に正しいか分からない、保守的にすると密度落ちる</li>
+<li><strong>outlier rejection 後 inlier しか残らない</strong>: 動的物体・遮蔽・反射は <strong>完全捨て</strong> (情報損失)</li>
+<li><strong>σ は事後推定</strong>: residual 残差から共分散を逆算するが、
+   スパースサンプル + 仮定 (重み付き Gaussian) のずれで大幅にバイアス</li>
+<li><strong>学習可能性が薄い</strong>: descriptor は self-supervision (Photometric loss) で
+   学べるが、threshold / RANSAC / BA solver は離散的・非微分</li>
+</ol>
+<p>要するに <strong>「対応はあるかないか」を 0/1 でハードに切る</strong> 設計のため、
+中間状態 (= 動いている、半遮蔽、視差大) の情報がパイプライン途中で切り捨てられる。</p>
+<h2 id="pose-conditioned-residual_1">提案: pose-conditioned residual ネット</h2>
+<div class="codehilite"><pre><span></span><code>query 点 + image_A + LiDAR_A + image_B + LiDAR_B + T_AB_hat
+                    │
+                    ▼
+              (cross-frame attention)
+                    │
+                    ▼
+         per-point (Δuv, Σ) 予測
+</code></pre></div>
+
+<p>特徴:</p>
+<ul>
+<li><strong>descriptor も matching も介在しない</strong>。モデルはローカル context (画像 +
+  LiDAR pt grid) を見て、「pose 仮説を信じてここを見たが、本当の位置は Δuv
+  ずれる、確信度はこの程度」を直接出す</li>
+<li><strong>pose は入力</strong>: 1 ピクセル単位の絶対位置を当てる学習ではなく、相対補正
+  という小さい量を推定するから収束が速い</li>
+<li><strong>σ は出力の一部</strong>: ハードな inlier/outlier 判定なし、すべての点に重みが
+  付く</li>
+</ul>
+<h2 id="_3">「マッチングしない」ことの具体的利点</h2>
+<h3 id="1">1. 動的物体を壊さず吸収する</h3>
+<p>学習中に「動いている」というラベルを与えていなくても、出力 σ は動的物体に
+対して自動で増える (詳細: <code>docs/dynamic_object_sigma.md</code>)。</p>
+<div class="codehilite"><pre><span></span><code>σ_pred (px):    bg=0.87  parked=0.75  stopped=0.87  moving=1.30
+</code></pre></div>
+
+<p>伝統的な matcher は移動車を <strong>不一致</strong> とみなして排除し、その点群が消える。
+本手法はその点を <strong>「不確実」</strong> として残す。Σ-weighted BA に直接渡せば、
+信頼度に応じた寄与で扱える。</p>
+<h3 id="2">2. 遮蔽・反射・繰り返しテクスチャを「σ 大」として残す</h3>
+<p>descriptor 系は「マッチに失敗したのでこの点は使えない」と捨てるが、
+本手法は「この点はあるべき位置に近づけたが自信ない」を出す。
+点を捨てない = 密度の高い再投影誤差マップが手に入る。</p>
+<h3 id="3">3. ハイパラがほぼない</h3>
+<ul>
+<li>threshold, ratio test, RANSAC iterations, inlier ratio: <strong>全てない</strong></li>
+<li>唯一: σ_pred を信頼するかどうかの downstream 重み付け (= softmin / Mahalanobis 距離) のみ</li>
+</ul>
+<h3 id="4-pose">4. 任意の pose 仮説に対して評価できる</h3>
+<p>pose を入力にすることで:
+- BA の中で pose を更新するたびにモデル再評価 → コスト関数の値が出る
+- calibration: noisy initial pose をモデルに通す → どれくらい外れてるか σ が示す
+- SLAM front-end / loop closure 検証: candidate pose に対して全点 σ を見れば
+  「まともな pose か」即判定可能</p>
+<h3 id="5-supervised-on-cheap-data">5. supervised on <strong>cheap</strong> data</h3>
+<ul>
+<li>学習データは「synced multi-sensor sequence + 高精度 GICP-refined pose」</li>
+<li>アノテーション要らず。company-internal data で daily-scale でラベル無しに
+  集まり続ける形態で大量に学習可能</li>
+<li>descriptor 学習に要する photometric / triplet loss / hard negative mining
+  系の非自明な学習スキームに比べて遥かに直接的</li>
+</ul>
+<h2 id="_4">どこまで効くか / 限界</h2>
+<h3 id="_5">効く</h3>
+<ul>
+<li>camera–LiDAR calibration 残差推定</li>
+<li>visual / LiDAR odometry residual head (= local pose refinement)</li>
+<li>dense BA: σ-weighted reprojection error</li>
+<li>loop closure 検証 (candidate pose 評価)</li>
+<li>動的物体 down-weighting (副次的)</li>
+<li>動的物体 GT 書き換え訓練 (cuboid 動きで warp; 進行中)</li>
+</ul>
+<h3 id="_6">マッチングがやはり要る (出来ないことの正直な開示)</h3>
+<ul>
+<li><strong>絶対 pose 初期化</strong> (= bootstrap):</li>
+<li>何もない状態から pose を作るには結局 keypoint matcher 必要</li>
+<li>提案手法は <strong>「pose 仮説を refine する」</strong> 機能であって「pose を作る」
+    機能ではない</li>
+<li><strong>長基線 loop closure</strong>:</li>
+<li>A↔B の baseline が長すぎる (例: 100m 以上 + 大角差) と、
+    モデルが「同じ点が両画像のどこに対応するか」の自信を持てない</li>
+<li>こちらは matcher で初期 pose 候補出してから refine、の順番</li>
+</ul>
+<p>つまり提案手法は <strong>「pose を持ってる側」の問題を解く</strong> ものであって、
+matcher と互換ではなく <strong>後段</strong> にある。</p>
+<h2 id="_7">関連ファイル</h2>
+<ul>
+<li><code>models/cross_frame_unified.py</code> — 本手法の実装本体</li>
+<li><code>docs/unified_progression.md</code> — アーキ進化と val_err/nll の改善履歴</li>
+<li><code>docs/dynamic_object_sigma.md</code> — σ が動的物体を勝手に分離する解析</li>
+<li><code>docs/multi_frame_attention.md</code> — 複数フレーム統合の設計議論</li>
+</ul>
+</body></html>
