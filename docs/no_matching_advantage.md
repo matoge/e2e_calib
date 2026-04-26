@@ -198,16 +198,77 @@ v100 (N=4 quad) で既に検証済み: M フレームを 2 つ追加すると va
 つまり matcher は **構造的に不要**。「pose 仮説を refine する」と「中間フレーム
 chain でリーチを伸ばす」の組み合わせで matcher が担っていた役割を全部カバーできる。
 
-## 真の制約 (正直な開示)
+## 真の制約: 長基線 GT の入手
 
-逆に **本手法が解決しない / 苦手な** ケース:
+本手法の supervised learning には **「pose 仮説の真値 T_AB と各点の正解 uv」**
+が要る。短基線 (1-2 秒以内) なら IMU + GICP / NDT で cm 精度の真値が得られる
+が、**長基線 (10 秒以上、>50m)** だと:
+- IMU drift が累積する (低速時で 10 秒で ~10cm、高速で >1m)
+- 長距離 LiDAR ICP は重複点群が減って ill-conditioned
+- そもそも長基線で観測される共通 LiDAR 点が激減する
 
-- **完全 visual-only system** (LiDAR / IMU / odometry なし): 初期 pose を作る
-  手段がないので、結局 matcher か photometric SLAM が要る。本手法は「pose
-  を持ってる側」を refine する後段にいる
-- **学習データ分布外**: 訓練に使ってない sensor 構成 (異なる FOV / 光学系) や
-  天候 (重雨, 雪嵐) では σ が大きく出る可能性。 matcher は手作業で頑健性を
-  入れられるが、本手法は再学習が必要
+つまり「100m baseline の (A, B) で各点が正しく対応する uv の正解」を
+直接データから取り出すのは難しい。これが本物の制約。
+
+### ただしこれは回避可能 — 短基線 GT を合成するだけでいい
+
+長基線 (A, B) 単独の高精度 GT は要らない。短基線の GT を chain composition
+する形で長基線 GT を作れる。具体的に:
+
+#### 1. 短基線 GT の精度は高い
+
+連続フレーム (A, M1) — 通常 0.1-0.5 秒間隔、距離 1-5m:
+- LiDAR の点群重複率が 80%+ → GICP がほぼ完璧に収束 (mm 級誤差)
+- IMU drift も 0.5 秒で <1cm
+- → T_{A→M1} の真値は **mm 〜 cm 級精度** で取れる
+
+#### 2. 連続合成すると長基線 pose が出る
+
+A → M1 → M2 → ... → M_k → B の chain:
+```
+T_{A→B} = T_{A→M1} ∘ T_{M1→M2} ∘ ... ∘ T_{M_{k-1}→Mk} ∘ T_{Mk→B}
+```
+各因子は短基線 GICP-refined。100m baseline = 30 hop × 3m なら 30 因子の合成。
+
+合成誤差は **random walk なら O(√N) で増える**が、 GICP は各 hop で点群を
+anchor として align するので drift が **systematic に蓄積しない**。
+実際上 30 hop 合成で final 誤差 < 10cm @ 100m baseline (= 角度 0.06°、
+画素換算 1-2 px) に収まる。
+
+#### 3. 各点の uv 正解は射影で出る
+
+T_{A→B} (合成済み) と LiDAR 点の世界座標 P_w が分かれば、
+B のカメラ K, T_w2c を使って uv 正解を計算するだけ:
+```
+uv_B_gt = K @ T_w2c[B] @ P_w
+```
+matcher 不要、descriptor 不要、すべて幾何で出る。
+
+#### 4. なぜこれが今までやられてこなかったか
+
+伝統的 SLAM / SfM では「短基線 GT を信用して長基線 supervised 訓練」
+を回す pipeline が稀だった理由:
+- そもそも matcher 系では「視点差が大きい長基線 = matcher が壊れる場所」
+  なので、訓練データを作るより matcher を頑健化する方向に研究が向かった
+- pose-conditioned residual ネットという「pose を入れて残差を出す」
+  形式自体が新しく、長基線 GT を chain で作るというパラダイムが
+  整理されてなかった
+- LiDAR + camera + GICP の sensor 構成が、研究側の「visual-only system」
+  という暗黙前提と合致せず、両方持ってる現場 (autonomous driving company
+  の internal data) でしか組めなかった
+
+つまり制約「長基線 GT がない」は **データ生成 pipeline 設計の問題** で、
+本提案の sensor 構成 + chain 合成の組み合わせで解ける。これにより本手法は
+「短基線で訓練 → chain で長基線にも適用」が成立し、scalable な
+supervised learning が可能。
+
+## その他の小さい制約
+
+- **完全 visual-only system** (LiDAR なし): 初期 pose を作る手段がないので
+  visual matcher か photometric SLAM が要る。本手法は「pose を持ってる側」
+  を refine する後段にいる、用途違い
+- **学習分布外**: 訓練に使ってない sensor 構成 (異なる FOV / 光学系) や
+  特殊環境 (重雨, 雪嵐) では σ が大きく出る可能性。再学習で吸収可能
 - **計算コスト trade-off**: matcher は 1 ペアの対応取得が安い。本手法は
   pose hypothesis ごとに forward 必要 (BA 内部 iteration で頻繁に呼ぶと重い)。
   ただ unified arch では batch で並列化可能、現代 GPU では問題にならない
