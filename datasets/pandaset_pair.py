@@ -728,16 +728,24 @@ class PandaSetCrossFrameDataset(Dataset):
             for j in range(N):
                 T_gt[i, j] = T_w2[j] @ T_w2inv[i]
 
-        # 3. iid per-pair perturbation (full sigma per pair, no scaling)
+        # 3. composition-consistent perturbation: noise lives on each frame's
+        # ABSOLUTE pose (T_w2c), all relative T_hat[i,j] then derive from these.
+        # Guarantees T_hat[i,j] ∘ T_hat[j,k] = T_hat[i,k] (= no logical
+        # contradictions across the supervised directions).
+        # Per-frame σ scaled by 1/√2 so adjacent pair's relative noise matches
+        # the legacy single-pair σ (random walk: var of difference ≈ 2 var).
+        sigma_y_per = self.sigma_ypr / np.sqrt(2.0)
+        sigma_t_per = self.sigma_t   / np.sqrt(2.0)
+        T_w2_hat = []
+        for i in range(N):
+            ypr = rng.standard_normal(3).astype(np.float32) * sigma_y_per
+            t   = rng.standard_normal(3).astype(np.float32) * sigma_t_per
+            T_w2_hat.append((T_w2[i] @ _ypr_t_to_mat(ypr, t)).astype(np.float32))
+        T_w2_hat_inv = [_invert_mat(T) for T in T_w2_hat]
         T_hat = np.zeros_like(T_gt)
         for i in range(N):
-            T_hat[i, i] = np.eye(4, dtype=np.float32)
-        for i in range(N):
-            for j in range(i + 1, N):
-                ypr = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
-                t   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
-                T_hat[i, j] = T_gt[i, j] @ _ypr_t_to_mat(ypr, t)
-                T_hat[j, i] = _invert_mat(T_hat[i, j])
+            for j in range(N):
+                T_hat[i, j] = (T_w2_hat[j] @ T_w2_hat_inv[i]).astype(np.float32)
 
         # 4. anchor pivot from frame 0 LiDAR (stratified spatial sampling)
         pts_w_0, uv_0_full, z_0_full, in_0 = scn.frame_data(fis[0])
