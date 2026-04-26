@@ -69,11 +69,31 @@ val 出力。 各サンプルは 1 つの A→B 投影ペアを示す:
 
 #### A. pose は入力 (条件)、出力じゃない
 
-DUSt3R / VGGT / DROID 系は最終的に pose を回帰する。これは強力だが、
-**「ノイジーな初期 pose があってそれを refine したい」シナリオに使えない**
-(自分で出した pose で上書きしてしまう)。 本手法は pose を入力に
-取り、「この pose で正しいか? どれくらいズレてるか?」を per-point で
-答える。BA / SLAM の iter ごとに pose 仮説を評価する用途と相性が良い。
+ここは整理が要る:
+
+- **DUSt3R / VGGT / Fast3R**: pose を入力に取らない、画像群から
+  pointmap または pose を直接回帰する。 「ノイジーな初期 pose を
+  refine したい」用途には使えない (そもそも入力チャネルがない)
+- **DROID-SLAM**: 例外的に init pose を条件にして dense flow + BA layer で
+  iterative に refine する。 設計思想は近い
+- **学習型 matcher (LightGlue / LoFTR)**: pose を入出力どちらにも持たない、
+  画像ペアから対応関係を出すだけ
+- **学習型 PnP (PixLoc / DSAC*)**: 画像 → pose の direct regression、
+  refine 用途じゃない
+
+つまり「pose 入力で refine」は DROID 系だけ似た構造で、 他は構造的にできない。
+
+DROID との違いは出力形式:
+
+- DROID: per-pixel **dense flow + scalar 信頼度** (u, v shift と 1 channel weight)
+- 本手法: per-point **2D Gaussian (Δuv, full 2x2 Σ)**
+
+scalar 信頼度では「どっち方向に / どのくらい不確かか」が表現できないので
+独立な x, y を仮定した isotropic 重み付けに留まる。 共分散を出すと例えば
+「縦方向だけは確信あるが横方向は当てにできない」(= 細長い物体の境界
+近くで頻発) が陽に表現可能で、 BA solver にそのまま流し込める。 DROID は
+完結した SLAM システムなので、 BA solver も込みで設計されてるが、 本手法は
+**任意の Σ-weighted solver に挿せる primitive** として独立してる。
 
 #### B. 出力は「シーン再構成」じゃなく「残差 + 不確実性」
 
