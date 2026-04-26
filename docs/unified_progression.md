@@ -1,10 +1,15 @@
 # Unified frame-token 架構 — val_err 2.27 → 1.85 px、val_nll 2.27 → 1.59
 
 PandaSet 39-scene front_camera を使った cross-frame residual prediction (= 隣接フレーム間で
-LiDAR 点が画像のどこに写るかを補正する小タスク) で、過去のベストだった
-**val_err 2.27 px / val_nll 2.27** (v55, legacy multi-frame モデル) を、
-**フレームトークン統合 + cross-attn 深さスケーリング + multi-frame KV 拡張** の 3 段階で
-**val_err 1.85 px / val_nll 1.59** まで押し下げた。
+LiDAR 点が画像のどこに写るかを補正する小タスク) で、cross-frame 系統内の前ベストだった
+**val_err 2.27 px / val_nll 2.27** (v55, legacy multi-frame モデル、cross-frame 開始直後の
+旧アーキ) を、**フレームトークン統合 + cross-attn 深さスケーリング + multi-frame
+KV 拡張** の 3 段階で **val_err 1.85 px / val_nll 1.59** まで押し下げた。
+
+タイムライン:
+- リポジトリ初コミット: 2026-04-10
+- cross-frame タスク開始: 2026-04-24 (金) — v55 など旧 multi モデル
+- unified frame-token への一気の改善: 2026-04-25 (土) ~ 2026-04-27 (月) 早朝
 
 ![progression](images/leaderboard_curves.png)
 
@@ -35,7 +40,7 @@ LiDAR 点が画像のどこに写るかを補正する小タスク) で、過去
   - 画像: `(D, 8, 8)` の coarse feature grid + MSDeformAttn
   - LiDAR: 疎な点トークン list (~256 個) + plain attention
 - 1 つの cross-block 内に q/k/v/o projection が **2 系統**: 画像用と LiDAR 用が別。
-- val_err 2.27 px / val_nll 2.27 で、ここ何ヶ月か頭打ちだった。
+- val_err 2.27 px / val_nll 2.27 で頭打ちだった (cross-frame タスク開始 (4/24金) 直後の最高記録)。
 
 ## 新アーキテクチャ (unified frame-token、v70 以降)
 

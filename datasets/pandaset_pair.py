@@ -321,6 +321,7 @@ class PandaSetCrossFrameDataset(Dataset):
                                             # A→B transform; behind-camera → drop;
                                             # view-out (z>0 still) → kept with
                                             # warped uv (model learns big shifts).
+                 quint: bool = False,      # extends quad with M3: A, M1, M2, M3, B
                  quad: bool = False,       # extends triplet with M2: A, M1, M2, B
                  triplet: bool = False,    # legacy: append M as aux KV in the
                                            # named-field pair output (used by v51-v55)
@@ -339,8 +340,9 @@ class PandaSetCrossFrameDataset(Dataset):
         self.n_frames = n_frames
         # `triplet` keeps the legacy v51-v55 behaviour (named fields + M aux KV).
         # `use_stacked` opts into the new stacked-array path (any N >= 2).
-        self.triplet = triplet or quad
-        self.quad = quad
+        self.triplet = triplet or quad or quint
+        self.quad = quad or quint
+        self.quint = quint
         self.use_stacked = use_stacked
         self.motion_warp_gt = motion_warp_gt
         self._cuboid_cache = {}                       # (scene_root_str, fi) → list of box dicts
@@ -1104,17 +1106,16 @@ class PandaSetCrossFrameDataset(Dataset):
         # 9b. triplet/quad — pick mid frames; project pivot into each mid frame.
         # triplet: 1 mid frame at midpoint. quad: 2 mid frames at 1/3 and 2/3.
         if self.triplet:
-            if self.quad:
+            if self.quint:
+                fi_mids = [int(round(fi_A + k * (fi_B - fi_A) / 4.0)) for k in (1, 2, 3)]
+            elif self.quad:
                 fi_mids = [int(round(fi_A + (fi_B - fi_A) / 3.0)),
                             int(round(fi_A + 2.0 * (fi_B - fi_A) / 3.0))]
-                if (fi_mids[0] == fi_A or fi_mids[0] == fi_B or
-                    fi_mids[1] == fi_A or fi_mids[1] == fi_B or
-                    fi_mids[0] == fi_mids[1]):
-                    return None
             else:
                 fi_mids = [int(round(0.5 * (fi_A + fi_B)))]
-                if fi_mids[0] == fi_A or fi_mids[0] == fi_B:
-                    return None
+            # all mids must be distinct, in (fi_A, fi_B) open interval
+            if len(set(fi_mids + [fi_A, fi_B])) != 2 + len(fi_mids):
+                return None
             mids = []  # list of dicts with patch, box, T_A_to_M, uv_M_patch, z_M_patch
             for fi_M in fi_mids:
                 T_w2M = scn.T_w2c[fi_M]
@@ -1421,6 +1422,11 @@ class PandaSetCrossFrameDataset(Dataset):
                                                        mids[1]['z_patch'])
                 uv_M2_patch, z_M2_patch, pad_M2 = _pad_m(mids[1]['uv_patch'],
                                                           mids[1]['z_patch'])
+                if self.quint:
+                    uvd_M3_full, pad_M3_full = _pack_full(mids[2]['uv_patch'],
+                                                           mids[2]['z_patch'])
+                    uv_M3_patch, z_M3_patch, pad_M3 = _pad_m(mids[2]['uv_patch'],
+                                                              mids[2]['z_patch'])
 
         if self.triplet:
             # extend _pad to also stratify uv_M_local_*; share the same pick.
@@ -1527,6 +1533,9 @@ class PandaSetCrossFrameDataset(Dataset):
                     return arr
                 uv_M2_local_A = _apply_pick_pad(mids[1]['uv_local_A'], pick_a_q, ())
                 uv_M2_local_B = _apply_pick_pad(mids[1]['uv_local_B'], pick_b_q, ())
+                if self.quint:
+                    uv_M3_local_A = _apply_pick_pad(mids[2]['uv_local_A'], pick_a_q, ())
+                    uv_M3_local_B = _apply_pick_pad(mids[2]['uv_local_B'], pick_b_q, ())
         else:
             # World-coord pick MUST be computed against the SAME uv_A_patch
             # that _pad sees (i.e. before _pad mutates it). Snapshot first.
@@ -1633,6 +1642,19 @@ class PandaSetCrossFrameDataset(Dataset):
                 out['uv_M2_hat_of_A'] = torch.from_numpy(uv_M2_local_A).float()
                 out['uv_M2_hat_of_B'] = torch.from_numpy(uv_M2_local_B).float()
                 out['fi_M2']         = mids[1]['fi']
+                if self.quint:
+                    z_M3_norm = z_M3_patch / 50.0
+                    out['patch_M3']      = mids[2]['patch'].float()
+                    out['uvd_M3']        = torch.from_numpy(
+                        np.concatenate([uv_M3_patch, z_M3_norm[:, None]], axis=1)).float()
+                    out['pad_M3']        = torch.from_numpy(pad_M3)
+                    out['uvd_M3_full']   = torch.from_numpy(uvd_M3_full)
+                    out['pad_M3_full']   = torch.from_numpy(pad_M3_full)
+                    out['pose_AM3_6dof'] = torch.from_numpy(
+                        np.concatenate([mids[2]['ypr'], mids[2]['t']]).astype(np.float32))
+                    out['uv_M3_hat_of_A'] = torch.from_numpy(uv_M3_local_A).float()
+                    out['uv_M3_hat_of_B'] = torch.from_numpy(uv_M3_local_B).float()
+                    out['fi_M3']         = mids[2]['fi']
         return out
 
 

@@ -266,6 +266,11 @@ class CalibNetUnifiedFrame(nn.Module):
                 uvd_M2_full=None, pad_M2_full=None,
                 pose_AM2_6dof=None,
                 uv_M2_hat_of_A=None, uv_M2_hat_of_B=None,
+                # M3 (quint mode) — third mid-frame
+                patch_M3=None, uvd_M3=None, pad_M3=None,
+                uvd_M3_full=None, pad_M3_full=None,
+                pose_AM3_6dof=None,
+                uv_M3_hat_of_A=None, uv_M3_hat_of_B=None,
                 **_ignored):
         """Pair / triplet (M) / quad (M+M2) modes via optional kwargs."""
         ft_A, _ = self.encoder(patch_A, uvd_A, pad_A, uvd_A_full, pad_A_full)
@@ -276,6 +281,9 @@ class CalibNetUnifiedFrame(nn.Module):
             ft_M, _ = self.encoder(patch_M, uvd_M, pad_M, uvd_M_full, pad_M_full)
         if has_M2:
             ft_M2, _ = self.encoder(patch_M2, uvd_M2, pad_M2, uvd_M2_full, pad_M2_full)
+        has_M3 = patch_M3 is not None
+        if has_M3:
+            ft_M3, _ = self.encoder(patch_M3, uvd_M3, pad_M3, uvd_M3_full, pad_M3_full)
 
         Hg, Wg = ft_A.shape[2], ft_A.shape[3]
         emb_AB = self.pose_mlp(pose_AB_6dof).unsqueeze(1)
@@ -297,6 +305,13 @@ class CalibNetUnifiedFrame(nn.Module):
             emb_BM2 = self.pose_mlp(pose_BM2_6dof).unsqueeze(1)
             kv_M2_for_A = ft_M2 + self._emb_to_grid(emb_AM2, Hg, Wg)
             kv_M2_for_B = ft_M2 + self._emb_to_grid(emb_BM2, Hg, Wg)
+        if has_M3:
+            pose_M3B_6dof = _compose_pose_MB(pose_AB_6dof, pose_AM3_6dof)
+            pose_BM3_6dof = _invert_6dof(pose_M3B_6dof)
+            emb_AM3 = self.pose_mlp(pose_AM3_6dof).unsqueeze(1)
+            emb_BM3 = self.pose_mlp(pose_BM3_6dof).unsqueeze(1)
+            kv_M3_for_A = ft_M3 + self._emb_to_grid(emb_AM3, Hg, Wg)
+            kv_M3_for_B = ft_M3 + self._emb_to_grid(emb_BM3, Hg, Wg)
 
         q_A = self._build_query(ft_A, uvd_A, emb_AB)
         kv_AB  = [kv_B_for_A]
@@ -307,6 +322,9 @@ class CalibNetUnifiedFrame(nn.Module):
         if has_M2:
             kv_AB.append(kv_M2_for_A)
             ref_AB.append(uv_M2_hat_of_A / self.img_size)
+        if has_M3:
+            kv_AB.append(kv_M3_for_A)
+            ref_AB.append(uv_M3_hat_of_A / self.img_size)
         raw_AtoB = self._multi_forward(
             q_A, kv_AB, ref_AB,
             uv_B_hat_of_A / self.img_size, q_pad=pad_A)
@@ -320,6 +338,9 @@ class CalibNetUnifiedFrame(nn.Module):
         if has_M2:
             kv_BA.append(kv_M2_for_B)
             ref_BA.append(uv_M2_hat_of_B / self.img_size)
+        if has_M3:
+            kv_BA.append(kv_M3_for_B)
+            ref_BA.append(uv_M3_hat_of_B / self.img_size)
         raw_BtoA = self._multi_forward(
             q_B, kv_BA, ref_BA,
             uv_A_hat_of_B / self.img_size, q_pad=pad_B)
