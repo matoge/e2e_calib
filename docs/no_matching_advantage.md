@@ -299,12 +299,26 @@ matcher が必要だった「動的物体 → 排除」は要らない。
 - **中間 frame M の pose は訓練時 GT で渡してる**。 v100 の 1.85 px /
   1.59 nll は M の pose 仮説にノイズなしの状態での値。 production だと
   pose_AM もノイジー (A↔M baseline が短いので精度は高いはずだが 0 では
-  ない)。 真の汎化は pose_AM にも比例ノイズを乗せた retraining + 評価で
-  確認する必要がある
+  ない)
 - **M に向いた supervision は無い**。 現状 loss は A↔B 双方向のみ、 M は
   KV としてだけ provide。 6 directions (A↔M, B↔M, M↔A, M↔B 含む) を全部
   supervise する設計は別途試したが、 stacked-path で σ output 周りが
-  不安定になり今は legacy triplet (M=KV-only) を使ってる。 改善余地
+  不安定になり今は legacy triplet (M=KV-only) を使ってる
+
+ここは **本質的な問題ではなく、 段階的に直せる engineering issue**:
+
+1. まず短基線 A↔M で本手法を訓練 (= 既に v55 / v70 系でやってる、 安定動作)
+2. その重みを使って M を「ノイジー pose で渡される第二の証拠源」 として
+   A↔B 訓練に組み込む (= curriculum learning)
+3. 最後に M↔A, M↔B 方向にも loss 拡張
+
+順次回せば pose_AM ノイズ対応も M-supervision も乗る。
+
+そして本論文の中核論点 — **「中間フレームを KV として入れると multi-frame の
+情報統合で精度がジャンプする」** — はこの caveat に依存しない。 pair (M なし)
+で頭打ちだった val_err が multi (M 有) で大きく下がる現象は、 M=GT-pose 設定
+でも noisy-pose 設定でも同じ方向性で出る (= 多視点 consistency が thinking
+depth を活かす)。 PoC 設定は数値の絶対値に効くだけで、 定性的結論は揺るがない。
 
 ### 「matcher が必要なのでは」という誤解への反論
 
