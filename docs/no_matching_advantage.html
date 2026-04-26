@@ -156,28 +156,57 @@ val 出力。 各サンプルは 1 つの A→B 投影ペアを示す:</p>
 <p>つまり「pose 入力で refine」は DROID 系だけ似た構造で、 他は構造的にできない。</p>
 <p>DROID との本質的な違いは設計思想:</p>
 <ul>
-<li>DROID は <strong>end-to-end SLAM システム</strong>として完結している。 dense flow ネット +
-  BA solver を 1 個に統合し、 入力画像列 → 出力 SLAM 結果を一発で得る</li>
-<li>本手法は <strong>primitive (= per-point の (Δuv, Σ) を出すだけ)</strong> に絞って、
-  その後段の solver は任意。 calibration なら closed-form least squares、
-  map update なら patch BA、 loop verify なら scoring、 と用途別に組み替える</li>
+<li>DROID は <strong>end-to-end SLAM システム</strong> として完結。 dense flow ネット +
+  dense BA solver を 1 個に統合</li>
+<li>本手法は <strong>primitive 出すだけ</strong>。 後段の solver は別レイヤ</li>
 </ul>
-<p>この立ち位置の違いは可逆: 本手法に DROID 風の dense BA layer を後段に
-くっつければ end-to-end SLAM システムになる。逆に DROID から BA を切り離して
-flow 出力だけ取れば residual primitive として使える。 つまり「能力の差」と
-いうより <strong>モジュール境界をどこに引くか</strong> の選択。</p>
-<p>本提案でモジュール境界を切ったのは、 同じ primitive が複数の下流タスク
-(calibration, map update, SLAM, odometry, loop verify) で再利用できる方が
-deployment が安いから。 タスク 1 個ずつに専用 SLAM システムを組むより、
-1 つの primitive を維持する方が運用コストが低い。</p>
-<p>出力形式の違いも記しておく:</p>
-<ul>
-<li>DROID: per-pixel <strong>dense flow + scalar 信頼度</strong> → BA に流すとき isotropic 重み付け</li>
-<li>本手法: per-point <strong>2D Gaussian (Δuv, full 2x2 Σ)</strong> → 異方性を陽に保つ
-  (例: 細長い物体の境界では「縦は確信、横は不確か」)</li>
-</ul>
-<p>これは primitive の表現力差で、 anisotropic Σ が必要な用途では本手法、
-isotropic で十分なら DROID flow でも成立する。</p>
+<p>ここで重要なのは、本手法の場合 <strong>dense BA は要らない</strong>:</p>
+<p>per-point の (Δuv, Σ) が出ていれば、 数百点の <strong>sparse な Σ-weighted
+最小二乗</strong> を 1 回解くだけで pose が出る。 反復 dense BA を回す必要はなく、
+これは calibration や per-frame pose refinement の <strong>closed-form 一発</strong>
+解析解 (Σ-weighted PnP / extrinsic 推定) として機能する。 dense BA は
+シーン全体の bundle 整合を取りに行く重い問題で、本提案のスコープ外。</p>
+<p>両者の違いを並べると:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>DROID</th>
+<th>本手法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>出力</td>
+<td>per-pixel dense flow + scalar 信頼度</td>
+<td>per-point (Δuv, 2x2 Σ)</td>
+</tr>
+<tr>
+<td>solver</td>
+<td>dense BA layer を内蔵</td>
+<td>用途別 — sparse 一発、 patch BA、 等</td>
+</tr>
+<tr>
+<td>表現力</td>
+<td>isotropic 重み付けに帰着</td>
+<td>異方性 Σ を保つ</td>
+</tr>
+<tr>
+<td>結合度</td>
+<td>flow ネット + BA layer 一体</td>
+<td>primitive 単独、 solver は外部</td>
+</tr>
+<tr>
+<td>用途</td>
+<td>SLAM 専用</td>
+<td>calibration / map / SLAM / loop verify 共用</td>
+</tr>
+</tbody>
+</table>
+<p>「<strong>モジュール境界をどこに引くか</strong>」の選択。本提案は primitive を 1 個に
+切り出して、 task ごとに solver を組み替える deployment economics
+重視の設計。タスク 1 個ずつに専用 SLAM システムを組むより、 1 つの
+primitive を維持する方が運用コストが低い。</p>
 <h4 id="b">B. 出力は「シーン再構成」じゃなく「残差 + 不確実性」</h4>
 <p>DUSt3R は 3D 点群、VGGT は scene 全体を出す。本手法は <strong>pose 仮説に対する
 局所残差</strong>だけを出す。シーン構造の再構築は別タスクとして上に乗せる構造。
