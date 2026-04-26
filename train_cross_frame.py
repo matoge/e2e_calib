@@ -117,8 +117,42 @@ def residual_uvd_nll_and_metrics(raw, uv_hat, uv_gt, d_hat, d_gt, pad_mask, img_
 
 # ─── one step ─────────────────────────────────────────────────────────────────
 
-def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False):
+_LIDAR_SENTINEL_Z = -9999.0 / 50.0   # uvd[..., 2] is z/50 in normalised units
+
+
+def _apply_lidar_dropout(batch, max_rate, p_zero, multi_frame):
+    """Hierarchical LiDAR dropout. Per sample:
+        - with probability `p_zero` → drop ALL depth (rate = 1.0, image-only mode)
+        - else                       → drop rate ~ U(0, max_rate) (partial)
+
+    Even one surviving depth-anchored pt is a strong cue, so partial drop alone
+    isn't enough to break the LiDAR-dependence — `p_zero` forces a fraction of
+    samples to image-only so the encoder learns to handle no-depth regions.
+    `uvd[..., 2]` is set to a sentinel; (u, v) coords stay intact so model can
+    still attend; loss/pad unchanged so per-point residual still supervised.
+    """
+    if max_rate <= 0 and p_zero <= 0:
+        return
+    sentinel = torch.tensor(_LIDAR_SENTINEL_Z, device=DEVICE)
+    for tag in (['A', 'B', 'M'] if multi_frame else ['A', 'B']):
+        for full in ('', '_full'):
+            key = f'uvd_{tag}{full}'
+            if key not in batch:
+                continue
+            t = batch[key]                                       # (B, N, 3)
+            B, N, _ = t.shape
+            zero_mode = torch.rand(B, 1, device=t.device) < p_zero
+            partial   = torch.rand(B, 1, device=t.device) * max_rate
+            rate      = torch.where(zero_mode, torch.ones_like(partial), partial)
+            mask      = torch.rand(B, N, device=t.device) < rate
+            t[..., 2] = torch.where(mask, sentinel, t[..., 2])
+
+
+def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
+         lidar_dropout=0.0, lidar_dropout_zero=0.0):
     batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
+    if model.training and (lidar_dropout > 0 or lidar_dropout_zero > 0):
+        _apply_lidar_dropout(batch, lidar_dropout, lidar_dropout_zero, multi_frame)
     kw = {}
     if frustum_full:
         kw['uvd_A_full'] = batch.get('uvd_A_full')
@@ -314,12 +348,33 @@ def main():
     ap.add_argument('--stop-no-improve-migrations', type=int, default=0,
                     help='stop training if this many consecutive migrations fail to '
                          'improve global-best val_nll. 0 = no early stop (run full epochs).')
+    ap.add_argument('--lidar-dropout', type=float, default=0.0,
+                    help='max per-sample LiDAR dropout rate (uvd[...,2] sentinel). '
+                         'Per-sample rate ~ U(0, this). 0 = off.')
+    ap.add_argument('--lidar-dropout-zero', type=float, default=0.0,
+                    help='probability per sample of full-zero LiDAR dropout (image-only '
+                         'mode). Combined with --lidar-dropout: zero-mode samples ignore '
+                         'partial-rate. 0 = off.')
+    ap.add_argument('--clearml', action='store_true',
+                    help='upload metrics + curves to ClearML dashboard. Requires '
+                         '`clearml-init` to be set up once with your creds.')
+    ap.add_argument('--clearml-project', default='e2e_calib/cross-frame',
+                    help='ClearML project name.')
     args = ap.parse_args()
 
     out_dir = Path('experiments/cross_frame_' + args.name)
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / 'train.log'
     (out_dir / 'config.txt').write_text(json.dumps(vars(args), indent=2))
+
+    # ─── ClearML hookup (opt-in) ─────────────────────────────────────────────
+    cml_logger = None
+    if args.clearml:
+        from clearml import Task
+        cml_task = Task.init(project_name=args.clearml_project, task_name=args.name,
+                              auto_connect_frameworks={'pytorch': False})
+        cml_task.connect(vars(args), name='args')
+        cml_logger = cml_task.get_logger()
 
     def log(msg):
         line = f'[{time.strftime("%H:%M:%S")}] {msg}'
@@ -487,7 +542,7 @@ def main():
             if use_stacked:
                 _, m = step_n(model, batch)
             else:
-                _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
+                _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
             if args.uvd:
@@ -525,7 +580,7 @@ def main():
             if use_stacked:
                 loss, m = step_n(model, batch)
             else:
-                loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
+                loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
@@ -663,6 +718,18 @@ def main():
                 f'lr={opt.param_groups[0]["lr"]:.2e}  '
                 f't={time.time()-t0:.0f}s')
 
+            if cml_logger is not None:
+                cml_logger.report_scalar('train', 'loss', value=curves['loss'][-1], iteration=ep)
+                cml_logger.report_scalar('train', 'err_AB', value=curves['err_AB'][-1], iteration=ep)
+                cml_logger.report_scalar('train', 'err_BA', value=curves['err_BA'][-1], iteration=ep)
+                cml_logger.report_scalar('train', 'base', value=curves['base_AB'][-1], iteration=ep)
+                cml_logger.report_scalar('lr', 'lr', value=opt.param_groups[0]['lr'], iteration=ep)
+                if do_val:
+                    cml_logger.report_scalar('val', 'err', value=0.5*(v['err_AB']+v['err_BA']), iteration=ep)
+                    cml_logger.report_scalar('val', 'nll', value=v['loss'], iteration=ep)
+                    cml_logger.report_scalar('overfit', 'val/train_err', value=(0.5*(v['err_AB']+v['err_BA']))/max(curves['err_AB'][-1], 1e-6), iteration=ep)
+                    cml_logger.report_scalar('overfit', 'val_nll - train_loss', value=v['loss'] - curves['loss'][-1], iteration=ep)
+
         # save best by train (overfit) or val (full) mean err
         if overfit:
             score = 0.5 * (curves['err_AB'][-1] + curves['err_BA'][-1])
@@ -702,9 +769,40 @@ def main():
     log(f'saved curve → {out_dir}/curve.png')
     log(f'best {"val" if not overfit else "train"} err = {best_err:.2f} px')
 
-    # auto-run BA reprojection visualization on best_model.pt
+    # auto-run train+val viz on last_model.pt (overfit weights so geometry is
+    # easiest to read; train fit should be tight, val gap reveals σ collapse).
+    try:
+        import subprocess
+        for split in ('train', 'val'):
+            viz_out = out_dir / f'viz_{split.upper()}.png'
+            cmd = ['python', 'scripts/visualization/vis_pred_check.py',
+                   '--ckpt', str(out_dir),
+                   '--ckpt-name', 'last_model.pt',
+                   '--split', split,
+                   '--out', str(viz_out),
+                   '--n-pairs', '8',
+                   '--scenes-root', args.scenes_root or str(Path(args.scene).parent),
+                   '--cameras', args.cameras,
+                   '--baseline-min', str(args.baseline_min),
+                   '--baseline-max', str(args.baseline_max),
+                   '--sigma-ypr', str(args.sigma_ypr),
+                   '--sigma-t', str(args.sigma_t),
+                   '--seed', '42']
+            if args.multi_frame:
+                cmd.append('--multi-frame')
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if r.returncode == 0 and viz_out.exists():
+                log(f'saved viz → {viz_out}')
+                if cml_logger is not None:
+                    cml_logger.report_image('viz', split.upper(), iteration=args.epochs - 1,
+                                             local_path=str(viz_out))
+            else:
+                log(f'[viz {split}] failed: {r.stderr.strip().splitlines()[-3:] if r.stderr else ""}')
+    except Exception as e:
+        log(f'[viz] error: {e}')
+
+    # legacy BA-reproject viz (pair-only) — preserved for back-compat
     if args.multi_frame:
-        log('[viz] skipped: multi-frame model not yet supported by vis_ba_reproject')
         return
     try:
         import subprocess
