@@ -5,6 +5,80 @@
 推定する** ネットワークを学習することにある。本ドキュメントはなぜそれが
 重要か、何ができるか、何ができないかを整理する。
 
+## なぜこれが必要か
+
+自動運転 / robotics の現場で「カメラ – LiDAR の対応関係」が core になる
+タスクは絶え間ない:
+
+- 工場出荷 calibration が経年で drift する → 残差推定で再 calibration
+- LiDAR-camera 融合の認識タスクで「どの pixel がどの 3D 点か」の信頼度が要る
+- 高精度地図を運用中に更新する (= 既存マップに新しい走行データを align)
+- visual / LiDAR odometry と SLAM の中で per-frame 残差を出す
+
+これらすべてに対して、伝統的には「特徴点マッチング → outlier rejection →
+BA で pose 推定」の重い pipeline が組まれてきた。本提案はこれを **pose 仮説
+を入力にもらって per-point の (Δuv, Σ) を一発で出すシンプルなネットワーク**
+で代替する設計。なぜ重要か理由 4 つ:
+
+### 1. 教師データを作る pipeline が既に存在する
+
+supervised learning には pose 正解と per-point uv 正解が要る。これは
+専用アノテーションが要らない:
+
+- **公開データセット (Waymo, nuScenes, AV2 等) の pose 補正が想像以上に良い**:
+  GICP-refined ego-pose は 80 frame シーケンスでも mm-cm 級精度で、 LiDAR 点群を
+  warp しても破綻しない
+- **動的物体は 3D bounding box tracking** で uuid 管理されてる → 動車内点を
+  box の rigid 変換で warp 可能 ( `docs/dynamic_object_sigma.md` 参照)
+- 残るは静的シーンの点群を chain composition で長基線まで extends する話
+  (本 doc 後半参照)
+
+つまり「pose を作るために matcher を呼ぶ」という従来の鶏と卵問題が、
+**現代の sensor stack + 公開データの GT 品質では解けてる**。
+
+### 2. データの偏りは複数 dataset で担保可能
+
+1 つの dataset (例 PandaSet) は scene 数限定 + 環境偏り (路上の車が少ない、
+天候バリエーション少) があり、画像 appearance の網羅性が低い。
+
+これは複数 dataset (Waymo, nuScenes, AV2, DDAD, ZOD, ...) を統合訓練で
+担保できる。各 dataset で pose 補正の品質はある程度高く、合計で 1500+ scenes
+の多様な appearance + LiDAR sensor variation が確保できる。
+matcher 系で必要だった photometric augmentation や hard negative mining
+を回避し、自然な data diversity で十分。
+
+### 3. per-point の (mean Δuv, variance Σ) という美しい数学的構造
+
+出力が 「平均 + 分散」 という Gaussian distribution の自然な
+パラメータ化になっている:
+- **平均 Δuv** は射影誤差の最良点推定
+- **共分散 Σ** は信頼区間 = downstream で重み付け可能
+- per-point に独立な (Δuv_i, Σ_i) → BA / 地図最適化に **そのまま** Σ-weighted
+  least squares として接続できる
+- ハードな inlier/outlier 判定や RANSAC を介在させず、すべて連続的な値で
+  処理が完結
+
+統計的に閉じてる構造なので、 Gauss-Newton / Levenberg-Marquardt / robust
+M-estimator など既存の最適化道具が **そのまま** 使える。
+
+### 4. 巨大 SLAM じゃなく「patch-based 最適化」で広範囲応用が成立する
+
+伝統的 SfM / SLAM は scene 全体を 1 つの大きな BA 問題として解く =
+シーン規模で計算量がスケール、deployment 負担が大きい。
+
+本提案は per-point で independent な (Δuv, Σ) を出す → **patch 単位で
+独立最適化可能**:
+- 地図更新タスクなら、変更があった地理領域の周辺 patch だけ Σ-weighted BA
+  → 全体 SLAM 解き直し不要、毎日の差分更新が安価
+- calibration なら 1 patch 内の数百点で十分 → 数秒の inference + 解析的
+  closed form で再 calibration
+- SLAM front-end の loop verification も candidate pose 周辺の patch を
+  評価するだけで判定可能
+
+つまり同じネットワークが calibration / 地図更新 / SLAM / odometry の
+複数タスクに **共通の安い primitive** として使える。1 個ずつ重い専用システムを
+組まなくて済む。
+
 ## 解いている問題
 
 - 入力: query フレーム A の点 (画像 + LiDAR の組)、target フレーム B、

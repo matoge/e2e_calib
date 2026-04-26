@@ -24,7 +24,67 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 画像と LiDAR から直接「ここに射影されるべき位置」と「その不確実性 σ」を
 推定する</strong> ネットワークを学習することにある。本ドキュメントはなぜそれが
 重要か、何ができるか、何ができないかを整理する。</p>
-<h2 id="_1">解いている問題</h2>
+<h2 id="_1">なぜこれが必要か</h2>
+<p>自動運転 / robotics の現場で「カメラ – LiDAR の対応関係」が core になる
+タスクは絶え間ない:</p>
+<ul>
+<li>工場出荷 calibration が経年で drift する → 残差推定で再 calibration</li>
+<li>LiDAR-camera 融合の認識タスクで「どの pixel がどの 3D 点か」の信頼度が要る</li>
+<li>高精度地図を運用中に更新する (= 既存マップに新しい走行データを align)</li>
+<li>visual / LiDAR odometry と SLAM の中で per-frame 残差を出す</li>
+</ul>
+<p>これらすべてに対して、伝統的には「特徴点マッチング → outlier rejection →
+BA で pose 推定」の重い pipeline が組まれてきた。本提案はこれを <strong>pose 仮説
+を入力にもらって per-point の (Δuv, Σ) を一発で出すシンプルなネットワーク</strong>
+で代替する設計。なぜ重要か理由 4 つ:</p>
+<h3 id="1-pipeline">1. 教師データを作る pipeline が既に存在する</h3>
+<p>supervised learning には pose 正解と per-point uv 正解が要る。これは
+専用アノテーションが要らない:</p>
+<ul>
+<li><strong>公開データセット (Waymo, nuScenes, AV2 等) の pose 補正が想像以上に良い</strong>:
+  GICP-refined ego-pose は 80 frame シーケンスでも mm-cm 級精度で、 LiDAR 点群を
+  warp しても破綻しない</li>
+<li><strong>動的物体は 3D bounding box tracking</strong> で uuid 管理されてる → 動車内点を
+  box の rigid 変換で warp 可能 ( <code>docs/dynamic_object_sigma.md</code> 参照)</li>
+<li>残るは静的シーンの点群を chain composition で長基線まで extends する話
+  (本 doc 後半参照)</li>
+</ul>
+<p>つまり「pose を作るために matcher を呼ぶ」という従来の鶏と卵問題が、
+<strong>現代の sensor stack + 公開データの GT 品質では解けてる</strong>。</p>
+<h3 id="2-dataset">2. データの偏りは複数 dataset で担保可能</h3>
+<p>1 つの dataset (例 PandaSet) は scene 数限定 + 環境偏り (路上の車が少ない、
+天候バリエーション少) があり、画像 appearance の網羅性が低い。</p>
+<p>これは複数 dataset (Waymo, nuScenes, AV2, DDAD, ZOD, ...) を統合訓練で
+担保できる。各 dataset で pose 補正の品質はある程度高く、合計で 1500+ scenes
+の多様な appearance + LiDAR sensor variation が確保できる。
+matcher 系で必要だった photometric augmentation や hard negative mining
+を回避し、自然な data diversity で十分。</p>
+<h3 id="3-per-point-mean-uv-variance">3. per-point の (mean Δuv, variance Σ) という美しい数学的構造</h3>
+<p>出力が 「平均 + 分散」 という Gaussian distribution の自然な
+パラメータ化になっている:
+- <strong>平均 Δuv</strong> は射影誤差の最良点推定
+- <strong>共分散 Σ</strong> は信頼区間 = downstream で重み付け可能
+- per-point に独立な (Δuv_i, Σ_i) → BA / 地図最適化に <strong>そのまま</strong> Σ-weighted
+  least squares として接続できる
+- ハードな inlier/outlier 判定や RANSAC を介在させず、すべて連続的な値で
+  処理が完結</p>
+<p>統計的に閉じてる構造なので、 Gauss-Newton / Levenberg-Marquardt / robust
+M-estimator など既存の最適化道具が <strong>そのまま</strong> 使える。</p>
+<h3 id="4-slam-patch-based">4. 巨大 SLAM じゃなく「patch-based 最適化」で広範囲応用が成立する</h3>
+<p>伝統的 SfM / SLAM は scene 全体を 1 つの大きな BA 問題として解く =
+シーン規模で計算量がスケール、deployment 負担が大きい。</p>
+<p>本提案は per-point で independent な (Δuv, Σ) を出す → <strong>patch 単位で
+独立最適化可能</strong>:
+- 地図更新タスクなら、変更があった地理領域の周辺 patch だけ Σ-weighted BA
+  → 全体 SLAM 解き直し不要、毎日の差分更新が安価
+- calibration なら 1 patch 内の数百点で十分 → 数秒の inference + 解析的
+  closed form で再 calibration
+- SLAM front-end の loop verification も candidate pose 周辺の patch を
+  評価するだけで判定可能</p>
+<p>つまり同じネットワークが calibration / 地図更新 / SLAM / odometry の
+複数タスクに <strong>共通の安い primitive</strong> として使える。1 個ずつ重い専用システムを
+組まなくて済む。</p>
+<h2 id="_2">解いている問題</h2>
 <ul>
 <li>入力: query フレーム A の点 (画像 + LiDAR の組)、target フレーム B、
   両者の <strong>相対 pose 仮説 T_AB_hat</strong> (ノイジーで構わない)</li>
@@ -156,7 +216,7 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 <li><strong>σ は出力の一部</strong>: ハードな inlier/outlier 判定なし、すべての点に重みが
   付く</li>
 </ul>
-<h2 id="_2">「マッチングしない」ことの具体的利点</h2>
+<h2 id="_3">「マッチングしない」ことの具体的利点</h2>
 <h3 id="1">1. 動的物体を壊さず吸収する</h3>
 <p>学習中に「動いている」というラベルを与えていなくても、出力 σ は動的物体に
 対して自動で増える (詳細: <code>docs/dynamic_object_sigma.md</code>)。</p>
@@ -203,7 +263,7 @@ context が一致しなくても geometry で出す、という形になる。</
 <li>descriptor 学習に要する photometric / triplet loss / hard negative mining
   系の非自明な学習スキームに比べて遥かに直接的</li>
 </ul>
-<h2 id="_3">適用先</h2>
+<h2 id="_4">適用先</h2>
 <ul>
 <li>camera–LiDAR calibration 残差推定</li>
 <li>visual / LiDAR odometry residual head (= local pose refinement)</li>
@@ -305,7 +365,7 @@ aleatoric noise を含むけど、平均位置 (Δuv) としては GT noise を�
 本提案の sensor 構成 + chain 合成の組み合わせで解ける。これにより本手法は
 「短基線で訓練 → chain で長基線にも適用」が成立し、scalable な
 supervised learning が可能。</p>
-<h2 id="_4">その他の小さい制約</h2>
+<h2 id="_5">その他の小さい制約</h2>
 <ul>
 <li><strong>完全 visual-only system</strong> (LiDAR なし): 初期 pose を作る手段がないので
   visual matcher か photometric SLAM が要る。本手法は「pose を持ってる側」
@@ -361,7 +421,7 @@ C=4  val_err :  2.29              1.93              ← さらに伸びる
 <p>これが <code>docs/unified_progression.md</code> で観測した「pair で depth 飽和、
 multi で depth 効く、quad で σ-calibration 急進」の現象の解釈であり、
 matcher パイプラインでは構造上不可能な統合を可能にしてる。</p>
-<h2 id="_5">関連ファイル</h2>
+<h2 id="_6">関連ファイル</h2>
 <ul>
 <li><code>models/cross_frame_unified.py</code> — 本手法の実装本体</li>
 <li><code>docs/unified_progression.md</code> — アーキ進化と val_err/nll の改善履歴</li>
