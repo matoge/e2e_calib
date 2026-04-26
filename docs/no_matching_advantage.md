@@ -15,25 +15,65 @@
 
 出力は per-point の (Δuv, Σ)。pose 自体は出力しない (= **入力条件**)。
 
-## 従来手法の構造とその痛み
+## 既存の E2E 系手法と何が違うのか
 
-```
-画像 ─→ keypoint detector ─→ descriptor ─→ matching ─→ outlier rejection ─→ BA
-                              (SIFT/ORB/SuperPoint)    (RANSAC)
-```
+過去 5 年で「特徴量マッチングを学習可能にする」「マッチング自体を回避する」
+という方向の研究が大量に出ている。代表例:
 
-各ステップに固有の壊れ方がある:
+| 系統 | 代表手法 | 出力 | pose の扱い | 残差/σ |
+|---|---|---|---|---|
+| 学習型 matcher | LightGlue, RoMa, DKM | 対応点ペア + 信頼度 | 出力 (RANSAC) | 暗黙 |
+| Detector-free matcher | LoFTR, ASpanFormer | dense correspondences | 出力 | 暗黙 |
+| Differentiable SfM/SLAM | DROID-SLAM, ACE | 密 flow + dense BA | **出力** (推定) | flow 信頼度として |
+| Pair → pointmap | DUSt3R, MASt3R | 3D point map (両視点) | **出力** (pointmap から逆算) | per-point depth conf |
+| Multi-view → all | VGGT, Fast3R, Spann3R | poses + intrinsics + 3D | **全部出力** | per-token confidence |
+| 学習型 PnP | PixLoc, DSAC* | pose 直接回帰 | **出力** | scene-coord 残差 |
+| **本手法** | (this) | **per-point (Δuv, Σ)** | **入力** (条件) | 直接出力 |
 
-1. **descriptor が誤対応を出す**: 繰り返しテクスチャ、明度変化、視点差大で破綻
-2. **matching threshold は手動**: 真に正しいか分からない、保守的にすると密度落ちる
-3. **outlier rejection 後 inlier しか残らない**: 動的物体・遮蔽・反射は **完全捨て** (情報損失)
-4. **σ は事後推定**: residual 残差から共分散を逆算するが、
-   スパースサンプル + 仮定 (重み付き Gaussian) のずれで大幅にバイアス
-5. **学習可能性が薄い**: descriptor は self-supervision (Photometric loss) で
-   学べるが、threshold / RANSAC / BA solver は離散的・非微分
+決定的な違い:
 
-要するに **「対応はあるかないか」を 0/1 でハードに切る** 設計のため、
-中間状態 (= 動いている、半遮蔽、視差大) の情報がパイプライン途中で切り捨てられる。
+### A. pose を「出力」ではなく「入力 (条件)」にする
+
+DUSt3R/VGGT/DROID 系は最終的に pose を **回帰** する。学習はラベル付き pose
+で supervised、推論時は入力画像群から pose を「当てる」。これは強力だが:
+- ノイジーな初期 pose があるシナリオで使えない (= 自分で出した pose で
+  上書きしてしまう)
+- BA / SLAM の **iter ごとの pose 仮説評価** に使えない (毎回別 pose を
+  出力しちゃう)
+
+本手法は **pose 仮説を入力**。「この pose で正しいか? どれくらいズレてるか?」
+を per-point で answer する。downstream solver (BA, calibration, SLAM front-end)
+が pose を更新するたびに評価できる、汎用 residual head として使える。
+
+### B. 出力が「シーン再構成」ではなく「残差 + 不確実性」
+
+DUSt3R / VGGT は 3D 点群 / 深度マップを出す → そこから downstream で BA
+する。これは **シーン全体を再構成する** 重い問題を解いている。
+
+本手法は **pose 仮説に対する局所残差** だけ出す。シーン構造の再構築は不要。
+代わりに「同じシーンの別 pose 仮説」「同じ点の別フレーム評価」が高速で
+回せる、軽量で再利用しやすい layer。
+
+### C. matcher 系全般の前提「両方見えてる」を外せる
+
+LightGlue / LoFTR / DUSt3R も含めて、対応学習型は基本的に
+「両画像に同じ点が見えている」前提で設計されている。片方にだけ写って
+いる点は noise (= 学習で penalty / 切り捨て)。
+
+本手法は片側 (A) の query 点だけを起点にし、B への射影予測 + σ を出す。
+**B に写ってなくても点は捨てない**。σ が大きい状態で残る → 動的物体・
+遮蔽・視野外移動を「不確実」として保持する。
+
+### D. 視点変化を invariance で吸収しない
+
+descriptor / 学習型 matcher は「同じ 3D 点は視点が変わっても似た特徴量を
+出す」invariance を学習タスクで内製してきた。これは大角度で破綻しやすい
+(>45° 視差、近景 → 遠景の急変)。
+
+本手法は **pose を入力にもらう** ので「視点が変わる」を invariance で
+解決する必要がない。射影位置を計算で出して、その周辺 context を見る。
+角度差が大きくても σ がそれを反映するだけ、descriptor invariance のような
+学習困難な不変量を要求しない。
 
 ## 提案: pose-conditioned residual ネット
 

@@ -33,23 +33,103 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 <li><strong>Σ</strong>: その補正の 2D 共分散 (確信度)</li>
 </ul>
 <p>出力は per-point の (Δuv, Σ)。pose 自体は出力しない (= <strong>入力条件</strong>)。</p>
-<h2 id="_2">従来手法の構造とその痛み</h2>
-<div class="codehilite"><pre><span></span><code>画像 ─→ keypoint detector ─→ descriptor ─→ matching ─→ outlier rejection ─→ BA
-                              (SIFT/ORB/SuperPoint)    (RANSAC)
-</code></pre></div>
-
-<p>各ステップに固有の壊れ方がある:</p>
-<ol>
-<li><strong>descriptor が誤対応を出す</strong>: 繰り返しテクスチャ、明度変化、視点差大で破綻</li>
-<li><strong>matching threshold は手動</strong>: 真に正しいか分からない、保守的にすると密度落ちる</li>
-<li><strong>outlier rejection 後 inlier しか残らない</strong>: 動的物体・遮蔽・反射は <strong>完全捨て</strong> (情報損失)</li>
-<li><strong>σ は事後推定</strong>: residual 残差から共分散を逆算するが、
-   スパースサンプル + 仮定 (重み付き Gaussian) のずれで大幅にバイアス</li>
-<li><strong>学習可能性が薄い</strong>: descriptor は self-supervision (Photometric loss) で
-   学べるが、threshold / RANSAC / BA solver は離散的・非微分</li>
-</ol>
-<p>要するに <strong>「対応はあるかないか」を 0/1 でハードに切る</strong> 設計のため、
-中間状態 (= 動いている、半遮蔽、視差大) の情報がパイプライン途中で切り捨てられる。</p>
+<h2 id="e2e">既存の E2E 系手法と何が違うのか</h2>
+<p>過去 5 年で「特徴量マッチングを学習可能にする」「マッチング自体を回避する」
+という方向の研究が大量に出ている。代表例:</p>
+<table>
+<thead>
+<tr>
+<th>系統</th>
+<th>代表手法</th>
+<th>出力</th>
+<th>pose の扱い</th>
+<th>残差/σ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>学習型 matcher</td>
+<td>LightGlue, RoMa, DKM</td>
+<td>対応点ペア + 信頼度</td>
+<td>出力 (RANSAC)</td>
+<td>暗黙</td>
+</tr>
+<tr>
+<td>Detector-free matcher</td>
+<td>LoFTR, ASpanFormer</td>
+<td>dense correspondences</td>
+<td>出力</td>
+<td>暗黙</td>
+</tr>
+<tr>
+<td>Differentiable SfM/SLAM</td>
+<td>DROID-SLAM, ACE</td>
+<td>密 flow + dense BA</td>
+<td><strong>出力</strong> (推定)</td>
+<td>flow 信頼度として</td>
+</tr>
+<tr>
+<td>Pair → pointmap</td>
+<td>DUSt3R, MASt3R</td>
+<td>3D point map (両視点)</td>
+<td><strong>出力</strong> (pointmap から逆算)</td>
+<td>per-point depth conf</td>
+</tr>
+<tr>
+<td>Multi-view → all</td>
+<td>VGGT, Fast3R, Spann3R</td>
+<td>poses + intrinsics + 3D</td>
+<td><strong>全部出力</strong></td>
+<td>per-token confidence</td>
+</tr>
+<tr>
+<td>学習型 PnP</td>
+<td>PixLoc, DSAC*</td>
+<td>pose 直接回帰</td>
+<td><strong>出力</strong></td>
+<td>scene-coord 残差</td>
+</tr>
+<tr>
+<td><strong>本手法</strong></td>
+<td>(this)</td>
+<td><strong>per-point (Δuv, Σ)</strong></td>
+<td><strong>入力</strong> (条件)</td>
+<td>直接出力</td>
+</tr>
+</tbody>
+</table>
+<p>決定的な違い:</p>
+<h3 id="a-pose">A. pose を「出力」ではなく「入力 (条件)」にする</h3>
+<p>DUSt3R/VGGT/DROID 系は最終的に pose を <strong>回帰</strong> する。学習はラベル付き pose
+で supervised、推論時は入力画像群から pose を「当てる」。これは強力だが:
+- ノイジーな初期 pose があるシナリオで使えない (= 自分で出した pose で
+  上書きしてしまう)
+- BA / SLAM の <strong>iter ごとの pose 仮説評価</strong> に使えない (毎回別 pose を
+  出力しちゃう)</p>
+<p>本手法は <strong>pose 仮説を入力</strong>。「この pose で正しいか? どれくらいズレてるか?」
+を per-point で answer する。downstream solver (BA, calibration, SLAM front-end)
+が pose を更新するたびに評価できる、汎用 residual head として使える。</p>
+<h3 id="b">B. 出力が「シーン再構成」ではなく「残差 + 不確実性」</h3>
+<p>DUSt3R / VGGT は 3D 点群 / 深度マップを出す → そこから downstream で BA
+する。これは <strong>シーン全体を再構成する</strong> 重い問題を解いている。</p>
+<p>本手法は <strong>pose 仮説に対する局所残差</strong> だけ出す。シーン構造の再構築は不要。
+代わりに「同じシーンの別 pose 仮説」「同じ点の別フレーム評価」が高速で
+回せる、軽量で再利用しやすい layer。</p>
+<h3 id="c-matcher">C. matcher 系全般の前提「両方見えてる」を外せる</h3>
+<p>LightGlue / LoFTR / DUSt3R も含めて、対応学習型は基本的に
+「両画像に同じ点が見えている」前提で設計されている。片方にだけ写って
+いる点は noise (= 学習で penalty / 切り捨て)。</p>
+<p>本手法は片側 (A) の query 点だけを起点にし、B への射影予測 + σ を出す。
+<strong>B に写ってなくても点は捨てない</strong>。σ が大きい状態で残る → 動的物体・
+遮蔽・視野外移動を「不確実」として保持する。</p>
+<h3 id="d-invariance">D. 視点変化を invariance で吸収しない</h3>
+<p>descriptor / 学習型 matcher は「同じ 3D 点は視点が変わっても似た特徴量を
+出す」invariance を学習タスクで内製してきた。これは大角度で破綻しやすい
+(&gt;45° 視差、近景 → 遠景の急変)。</p>
+<p>本手法は <strong>pose を入力にもらう</strong> ので「視点が変わる」を invariance で
+解決する必要がない。射影位置を計算で出して、その周辺 context を見る。
+角度差が大きくても σ がそれを反映するだけ、descriptor invariance のような
+学習困難な不変量を要求しない。</p>
 <h2 id="pose-conditioned-residual_1">提案: pose-conditioned residual ネット</h2>
 <div class="codehilite"><pre><span></span><code>query 点 + image_A + LiDAR_A + image_B + LiDAR_B + T_AB_hat
                     │
@@ -70,7 +150,7 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 <li><strong>σ は出力の一部</strong>: ハードな inlier/outlier 判定なし、すべての点に重みが
   付く</li>
 </ul>
-<h2 id="_3">「マッチングしない」ことの具体的利点</h2>
+<h2 id="_2">「マッチングしない」ことの具体的利点</h2>
 <h3 id="1">1. 動的物体を壊さず吸収する</h3>
 <p>学習中に「動いている」というラベルを与えていなくても、出力 σ は動的物体に
 対して自動で増える (詳細: <code>docs/dynamic_object_sigma.md</code>)。</p>
@@ -103,8 +183,8 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 <li>descriptor 学習に要する photometric / triplet loss / hard negative mining
   系の非自明な学習スキームに比べて遥かに直接的</li>
 </ul>
-<h2 id="_4">どこまで効くか / 限界</h2>
-<h3 id="_5">効く</h3>
+<h2 id="_3">どこまで効くか / 限界</h2>
+<h3 id="_4">効く</h3>
 <ul>
 <li>camera–LiDAR calibration 残差推定</li>
 <li>visual / LiDAR odometry residual head (= local pose refinement)</li>
@@ -113,7 +193,7 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 <li>動的物体 down-weighting (副次的)</li>
 <li>動的物体 GT 書き換え訓練 (cuboid 動きで warp; 進行中)</li>
 </ul>
-<h3 id="_6">マッチングがやはり要る (出来ないことの正直な開示)</h3>
+<h3 id="_5">マッチングがやはり要る (出来ないことの正直な開示)</h3>
 <ul>
 <li><strong>絶対 pose 初期化</strong> (= bootstrap):</li>
 <li>何もない状態から pose を作るには結局 keypoint matcher 必要</li>
@@ -126,7 +206,7 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 </ul>
 <p>つまり提案手法は <strong>「pose を持ってる側」の問題を解く</strong> ものであって、
 matcher と互換ではなく <strong>後段</strong> にある。</p>
-<h2 id="_7">関連ファイル</h2>
+<h2 id="_6">関連ファイル</h2>
 <ul>
 <li><code>models/cross_frame_unified.py</code> — 本手法の実装本体</li>
 <li><code>docs/unified_progression.md</code> — アーキ進化と val_err/nll の改善履歴</li>
