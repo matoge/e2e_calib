@@ -313,7 +313,9 @@ class PandaSetCrossFrameDataset(Dataset):
                  virtual_epoch_len: int = 2000,
                  frame_train_frac: float = 1.0,
                  cameras: Union[List[str], str, None] = None,
-                 n_frames: int = 2,        # 2 = pair (legacy), 3+ = stacked-array path
+                 n_frames: int = 2,        # how many frames the stacked path emits
+                 use_stacked: bool = False, # True → _try_one_nframe (new path).
+                                           # False → legacy _try_one (v51-v55 path).
                  triplet: bool = False,    # legacy: append M as aux KV in the
                                            # named-field pair output (used by v51-v55)
                  seed: int = 42):
@@ -329,9 +331,10 @@ class PandaSetCrossFrameDataset(Dataset):
         self.virtual_epoch_len = virtual_epoch_len
         self.split = split
         self.n_frames = n_frames
-        # `triplet` keeps the legacy v51-v55 behaviour (named fields + M aux KV);
-        # the new stacked-array path is gated by n_frames >= 3 and is independent.
+        # `triplet` keeps the legacy v51-v55 behaviour (named fields + M aux KV).
+        # `use_stacked` opts into the new stacked-array path (any N >= 2).
         self.triplet = triplet
+        self.use_stacked = use_stacked
         self.rng = np.random.default_rng(seed)
 
         # cameras: single str, comma-separated str, list, or None (→ front_camera).
@@ -491,280 +494,120 @@ class PandaSetCrossFrameDataset(Dataset):
 
     def __getitem__(self, idx):
         for retry in range(30):
-            if self.n_frames == 2:
-                sample = self._try_one(idx + retry * 9973)
-            else:
+            if self.use_stacked:
                 sample = self._try_one_nframe(idx + retry * 9973)
+            else:
+                sample = self._try_one(idx + retry * 9973)
             if sample is not None:
                 return sample
         raise RuntimeError(
             f'could not form a valid {self.n_frames}-frame sample in 30 tries')
 
-    # ─────────────────────── N-frame stacked-tensor path ────────────────────
-    # Outputs are (N, ...) for per-frame fields and (N, N, ...) for per-pair
-    # fields, so going N=3 → N=4+ is just a loop bound. Random-walk
-    # perturbation per adjacent segment, AB total σ matches the legacy iid
-    # case so pair vs multi-frame stay apples-to-apples.
+    # ─────────────────────── stacked-tensor reformatter ────────────────────
+    # Wraps `_try_one()` and repacks its named-field output into per-frame
+    # `(N, ...)` and per-pair `(N, N, ...)` tensors so the model's stacked
+    # forward path can consume any N >= 2. For N=2 this is byte-equivalent
+    # to the legacy pair output (no semantic divergence) — the data path is
+    # the same physical sample, just reshaped. For N=3 we additionally
+    # add M-as-query directions (M->A, M->B) on top of legacy triplet.
 
     def _try_one_nframe(self, idx):
         N = self.n_frames
-        rng = np.random.default_rng((idx + 1) * 2654435761 & 0xFFFFFFFF)
-        scn: _SceneData = self.scenes[int(rng.integers(len(self.scenes)))]
-        IW, IH, K = scn.IW, scn.IH, scn.K
+        # N=3 stacked → full P1: 3 frames as queries, iid per-pair pose
+        # perturbation, all 6 directions supervised. Built from scratch
+        # (not via legacy reformat) because legacy treats pose_AM as GT.
+        if N >= 3:
+            return self._try_one_p1(idx)
 
-        # 1. pick fi list (anchor + N-1 nearby frames around it)
-        if not scn.fi_pool:
+        prev_triplet = self.triplet
+        self.triplet = False               # N=2: pure pair from legacy
+        try:
+            s = self._try_one(idx)
+        finally:
+            self.triplet = prev_triplet
+        if s is None:
             return None
-        fi_anchor = int(rng.choice(scn.fi_pool))
-        bmin, bmax = self.baseline_range
-        cn = scn.camera_name.lower()
-        is_fb = (('front' in cn or 'back' in cn or 'rear' in cn)
-                 and 'left' not in cn and 'right' not in cn and 'side' not in cn)
-        direction = int(rng.choice([-1, 1]))
-        if direction > 0:
-            room = scn.n_frames - 1 - fi_anchor
-        else:
-            room = fi_anchor
-        eff_max = room if is_fb else min(bmax, room)
-        if eff_max < bmin:
-            direction = -direction
-            room = scn.n_frames - 1 - fi_anchor if direction > 0 else fi_anchor
-            eff_max = room if is_fb else min(bmax, room)
-            if eff_max < bmin:
-                return None
-        delta_total = int(rng.integers(bmin, eff_max + 1)) * direction
-        fi_far = fi_anchor + delta_total
-        if fi_far < 0 or fi_far >= scn.n_frames:
-            return None
-        # Place N frames evenly along [fi_anchor, fi_far]; keep monotonic order.
-        fis_lin = np.linspace(fi_anchor, fi_far, N).round().astype(int)
-        fis = [int(x) for x in fis_lin]
-        if len(set(fis)) < N:
-            return None  # degenerate spacing for this baseline
 
-        # 2. GT poses T_w2[i] and T_gt[i, j] = T_w2[j] @ T_w2[i]^{-1}
-        T_w2 = [scn.T_w2c[fi].astype(np.float32) for fi in fis]
-        T_w2inv = [_invert_mat(T) for T in T_w2]
-        T_gt = np.zeros((N, N, 4, 4), dtype=np.float32)
-        for i in range(N):
-            for j in range(N):
-                T_gt[i, j] = T_w2[j] @ T_w2inv[i]
-
-        # 3. random-walk perturbation per adjacent segment.
-        # σ_seg / σ_total = √(d_seg / d_total) so var(δ_total) = sum(var(δ_seg))
-        # = σ²_total ⇒ AB total σ unchanged from the legacy iid case.
-        d_seg = [abs(fis[i + 1] - fis[i]) for i in range(N - 1)]
-        d_total = sum(d_seg)
-        if d_total == 0:
-            return None
-        delta_seg = []                                          # 4×4 each
-        for d in d_seg:
-            s = float(np.sqrt(d / d_total))
-            ypr = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr * s
-            t   = rng.standard_normal(3).astype(np.float32) * self.sigma_t   * s
-            delta_seg.append(_ypr_t_to_mat(ypr, t))
-
-        # 4. compose hat poses along chain. T_hat[i, i+1] = T_gt[i, i+1] @ δ_seg[i]
-        T_hat = np.zeros_like(T_gt)
-        for i in range(N):
-            T_hat[i, i] = np.eye(4, dtype=np.float32)
-        for i in range(N - 1):
-            T_hat[i, i + 1] = T_gt[i, i + 1] @ delta_seg[i]
-            T_hat[i + 1, i] = _invert_mat(T_hat[i, i + 1])
-        # non-adjacent: chain along sorted axis
-        # for N=3: T_hat[0,2] = T_hat[1,2] @ T_hat[0,1]
-        for span in range(2, N):
-            for i in range(N - span):
-                j = i + span
-                T_hat[i, j] = T_hat[j - 1, j] @ T_hat[i, j - 1]
-                T_hat[j, i] = _invert_mat(T_hat[i, j])
-
-        # 5. anchor pivot in frame 0 via stratified spatial sampling
-        pts_w_0, uv_0_full, z_0_full, in_0 = scn.frame_data(fis[0])
-        if in_0.sum() < 50:
-            return None
-        pts_w_0_in = pts_w_0[in_0]
-        uv_0_all   = uv_0_full[in_0]
-        H_BINS, W_BINS = 4, 6
-        u_bin = np.clip((uv_0_all[:, 0] * W_BINS / IW).astype(int), 0, W_BINS - 1)
-        v_bin = np.clip((uv_0_all[:, 1] * H_BINS / IH).astype(int), 0, H_BINS - 1)
-        flat_bin = v_bin * W_BINS + u_bin
-        occupied = np.unique(flat_bin)
-        b = int(rng.choice(occupied))
-        in_bin = np.where(flat_bin == b)[0]
-        ci = int(rng.choice(in_bin))
-        P_center_w = pts_w_0_in[ci]
-        uc_full = np.zeros((N, 2), dtype=np.float32)
-        uc_full[0] = uv_0_all[ci]
-        # 6. project pivot into each other frame using HAT pose
-        P_center_in0 = (T_w2[0] @ np.append(P_center_w, 1.0))[:3].astype(np.float32)
-        for i in range(1, N):
-            P_in_i = (T_hat[0, i] @ np.append(P_center_in0, 1.0))[:3]
-            if P_in_i[2] < 1.0:
-                return None
-            uvi = _proj_cam(P_in_i, K, scn.dist).astype(np.float32)
-            if not (0 <= uvi[0] < IW and 0 <= uvi[1] < IH):
-                return None
-            uc_full[i] = uvi
-        # also gate on GT projection in-image (same constraint as legacy code)
-        for i in range(1, N):
-            P_in_i_gt = (T_gt[0, i] @ np.append(P_center_in0, 1.0))[:3]
-            if P_in_i_gt[2] < 1.0:
-                return None
-            uv_gt_i = _proj_cam(P_in_i_gt, K, scn.dist)
-            if not (0 <= uv_gt_i[0] < IW and 0 <= uv_gt_i[1] < IH):
-                return None
-
-        # 7. crop patches with shared random size, centered on hat projection
-        CROP = int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
-        if CROP < 2:
-            return None
-        half = CROP / 2
-        boxes = []
-        patches = []
-        for i in range(N):
-            u0_i = float(uc_full[i, 0]) - half
-            v0_i = float(uc_full[i, 1]) - half
-            patch_img = scn.load_patch(fis[i], u0_i, v0_i, CROP)
-            pi = self._resize_patch(patch_img, u0_i, v0_i, CROP)
-            if pi is None:
-                return None
-            patch_i, box_i = pi
-            patches.append(patch_i)
-            boxes.append(box_i)
-
-        # 8. per-frame query points: in-patch LiDAR
         max_pts = self.max_points
-        N_FULL = 2048
-        IMG = self.img_size
+        N_FULL  = s['uvd_A_full'].shape[0]
+        IMG     = self.img_size
 
-        pts_3d_in_cam = np.zeros((N, max_pts, 3), dtype=np.float32)
-        uvd_arr       = np.zeros((N, max_pts, 3), dtype=np.float32)
-        pad_arr       = np.ones((N, max_pts), dtype=bool)
-        uvd_full_arr  = np.zeros((N, N_FULL, 3), dtype=np.float32)
-        pad_full_arr  = np.ones((N, N_FULL), dtype=bool)
+        # --- per-frame stacked tensors ---
+        if N == 2:
+            patches  = torch.stack([s['patch_A'].float(), s['patch_B'].float()], dim=0)
+            uvd      = torch.stack([s['uvd_A'],          s['uvd_B']         ], dim=0)
+            pad      = torch.stack([s['pad_A'],          s['pad_B']         ], dim=0)
+            uvd_full = torch.stack([s['uvd_A_full'],     s['uvd_B_full']    ], dim=0)
+            pad_full = torch.stack([s['pad_A_full'],     s['pad_B_full']    ], dim=0)
+            fis      = torch.tensor([s['fi_A'], s['fi_B']], dtype=torch.long)
+        elif N == 3:
+            patches  = torch.stack([s['patch_A'].float(), s['patch_M'].float(),
+                                    s['patch_B'].float()], dim=0)
+            uvd      = torch.stack([s['uvd_A'],     s['uvd_M'],     s['uvd_B']    ], dim=0)
+            pad      = torch.stack([s['pad_A'],     s['pad_M'],     s['pad_B']    ], dim=0)
+            uvd_full = torch.stack([s['uvd_A_full'], s['uvd_M_full'], s['uvd_B_full']], dim=0)
+            pad_full = torch.stack([s['pad_A_full'], s['pad_M_full'], s['pad_B_full']], dim=0)
+            fis      = torch.tensor([s['fi_A'], s['fi_M'], s['fi_B']], dtype=torch.long)
+        else:
+            raise NotImplementedError(N)
 
-        for i in range(N):
-            box_i = boxes[i]
-            if i == 0:
-                pts_w_i, uv_i_full, z_i_full, in_i = pts_w_0, uv_0_full, z_0_full, in_0
-            else:
-                pts_w_i, uv_i_full, z_i_full, in_i = scn.frame_data(fis[i])
-                if in_i.sum() < 4:
-                    return None
-            uv_in = uv_i_full[in_i]
-            z_in  = z_i_full[in_i]
-            pts_w_in = pts_w_i[in_i]
-            in_box = ((uv_in[:, 0] >= box_i[0]) & (uv_in[:, 0] < box_i[0] + box_i[2]) &
-                      (uv_in[:, 1] >= box_i[1]) & (uv_in[:, 1] < box_i[1] + box_i[3]) &
-                      (z_in > 1.0))
-            if in_box.sum() < 4:
-                return None
-            pts_w_q   = pts_w_in[in_box]
-            uv_q_full = uv_in[in_box]
-            z_q       = z_in[in_box].astype(np.float32)
-            uv_q_local = self._uv_to_patch_local(uv_q_full, box_i)
-            # 3D points in cam_i frame
-            homo = np.column_stack([pts_w_q, np.ones(len(pts_w_q), dtype=np.float32)])
-            P_in_i = (T_w2[i] @ homo.T)[:3].T.astype(np.float32)
+        # --- per-pair (N, N) tensors ---
+        pose_hat = torch.zeros(N, N, 6, dtype=torch.float32)
+        uv_hat_arr = torch.zeros(N, N, max_pts, 2, dtype=torch.float32)
+        uv_gt_arr  = torch.zeros(N, N, max_pts, 2, dtype=torch.float32)
+        pad_dir    = torch.ones (N, N, max_pts,    dtype=torch.bool)
+        # depth fields are diagnostic only when not in --uvd mode
+        d_hat_arr  = torch.zeros(N, N, max_pts, dtype=torch.float32)
+        d_gt_arr   = torch.zeros(N, N, max_pts, dtype=torch.float32)
 
-            # full frustum context (N_FULL pts, stratified)
-            uvd_full_arr[i], pad_full_arr[i] = self._pack_full_local(
-                uv_q_local, z_q, N_FULL, IMG, rng)
+        # A↔B (always present)
+        pose_hat[0, N - 1] = s['pose_AB_6dof']
+        pose_hat[N - 1, 0] = s['pose_BA_6dof']
+        uv_hat_arr[0, N - 1] = s['uv_B_hat_of_A']
+        uv_gt_arr [0, N - 1] = s['uv_B_gt_of_A']
+        pad_dir   [0, N - 1] = s['pad_A']            # legacy filter already in/out checked
+        uv_hat_arr[N - 1, 0] = s['uv_A_hat_of_B']
+        uv_gt_arr [N - 1, 0] = s['uv_A_gt_of_B']
+        pad_dir   [N - 1, 0] = s['pad_B']
+        if 'd_B_hat_of_A' in s:
+            d_hat_arr[0, N - 1] = s['d_B_hat_of_A']
+            d_gt_arr [0, N - 1] = s['d_B_gt_of_A']
+            d_hat_arr[N - 1, 0] = s['d_A_hat_of_B']
+            d_gt_arr [N - 1, 0] = s['d_A_gt_of_B']
 
-            # subsample to max_points (stratified spatial-grid pick)
-            n = len(uv_q_local)
-            if n > max_pts:
-                G = int(np.sqrt(max_pts))
-                cell = IMG / G
-                cj = np.clip((uv_q_local[:, 0] / cell).astype(np.int32), 0, G - 1)
-                ck = np.clip((uv_q_local[:, 1] / cell).astype(np.int32), 0, G - 1)
-                cid = ck * G + cj
-                du = uv_q_local[:, 0] - (cj + 0.5) * cell
-                dv = uv_q_local[:, 1] - (ck + 0.5) * cell
-                d2 = du * du + dv * dv
-                sel = []
-                for u_c in np.unique(cid):
-                    mem = np.where(cid == u_c)[0]
-                    sel.append(int(mem[np.argmin(d2[mem])]))
-                pick = np.array(sorted(set(sel)), dtype=np.int64)
-            else:
-                pick = np.arange(n, dtype=np.int64)
-            n_use = len(pick)
-            uvd_arr[i, :n_use, 0] = uv_q_local[pick, 0]
-            uvd_arr[i, :n_use, 1] = uv_q_local[pick, 1]
-            uvd_arr[i, :n_use, 2] = z_q[pick] / 50.0
-            pts_3d_in_cam[i, :n_use] = P_in_i[pick]
-            pad_arr[i, :n_use] = False
+        if N == 3:
+            # A↔M (legacy: pose_AM treated GT, so uv_M_hat_of_A == uv_M_gt_of_A.
+            # A→M residual is structurally zero in PoC; loss masks would still
+            # push σ→0. Mark pad_dir all True for these directions so step_n
+            # skips them entirely until pose_AM perturbation is added.)
+            pose_hat[0, 1] = s['pose_AM_6dof']
+            pose_hat[1, 0] = -s['pose_AM_6dof']     # approx inverse; unused for loss
+            uv_hat_arr[0, 1] = s['uv_M_hat_of_A']
+            uv_gt_arr [0, 1] = s['uv_M_hat_of_A']   # = GT in PoC
+            pad_dir   [0, 1] = True                 # skip loss (zero-residual trap)
+            pad_dir   [1, 0] = True
+            # B↔M analogous — pose_BM derived from pose_AB perturbation, so
+            # the residual IS non-trivial here. But legacy doesn\'t store
+            # M-as-query data, so we'd need to recompute. Defer: mark skipped.
+            pad_dir[1, 2] = True
+            pad_dir[2, 1] = True
 
-        # 9. per-direction projection of pts_3d[i] → frame j
-        uv_hat_arr = np.zeros((N, N, max_pts, 2), dtype=np.float32)
-        uv_gt_arr  = np.zeros((N, N, max_pts, 2), dtype=np.float32)
-        d_hat_arr  = np.zeros((N, N, max_pts),    dtype=np.float32)
-        d_gt_arr   = np.zeros((N, N, max_pts),    dtype=np.float32)
-        pad_dir_arr = np.ones((N, N, max_pts),    dtype=bool)
-        for i in range(N):
-            valid_i_pts = ~pad_arr[i]                          # (max_pts,)
-            for j in range(N):
-                if i == j:
-                    continue
-                box_j = boxes[j]
-                P_i = pts_3d_in_cam[i]                          # (max_pts, 3)
-                homo = np.concatenate([P_i, np.ones((max_pts, 1), dtype=np.float32)],
-                                       axis=1)
-                P_j_hat = (T_hat[i, j] @ homo.T)[:3].T          # (max_pts, 3)
-                P_j_gt  = (T_gt [i, j] @ homo.T)[:3].T
-                d_hat_arr[i, j] = P_j_hat[:, 2]
-                d_gt_arr [i, j] = P_j_gt [:, 2]
-                # only project rows whose depth is positive (avoid log/divide by zero
-                # in _proj_cam internals); junk rows get pad_dir True below.
-                valid_depth = (P_j_hat[:, 2] > 0.5) & (P_j_gt[:, 2] > 0.5) & valid_i_pts
-                if valid_depth.any():
-                    uv_full_hat = _proj_cam(P_j_hat[valid_depth], K, scn.dist).astype(np.float32)
-                    uv_full_gt  = _proj_cam(P_j_gt [valid_depth], K, scn.dist).astype(np.float32)
-                    uv_local_hat = self._uv_to_patch_local(uv_full_hat, box_j)
-                    uv_local_gt  = self._uv_to_patch_local(uv_full_gt,  box_j)
-                    uv_hat_arr[i, j, valid_depth] = uv_local_hat
-                    uv_gt_arr [i, j, valid_depth] = uv_local_gt
-                    in_patch_hat = ((uv_local_hat[:, 0] >= 0) & (uv_local_hat[:, 0] < IMG) &
-                                    (uv_local_hat[:, 1] >= 0) & (uv_local_hat[:, 1] < IMG))
-                    in_patch_gt  = ((uv_local_gt [:, 0] >= 0) & (uv_local_gt [:, 0] < IMG) &
-                                    (uv_local_gt [:, 1] >= 0) & (uv_local_gt [:, 1] < IMG))
-                    valid_idx = np.where(valid_depth)[0]
-                    valid_full = np.zeros(max_pts, dtype=bool)
-                    valid_full[valid_idx[in_patch_hat & in_patch_gt]] = True
-                    pad_dir_arr[i, j] = ~valid_full
-
-        # 10. assemble pose (N, N, 6) ypr+t in degrees
-        pose_hat_arr = np.zeros((N, N, 6), dtype=np.float32)
-        pose_gt_arr  = np.zeros((N, N, 6), dtype=np.float32)
-        for i in range(N):
-            for j in range(N):
-                if i == j:
-                    continue
-                ypr_h, t_h = _mat_to_ypr_t(T_hat[i, j])
-                ypr_g, t_g = _mat_to_ypr_t(T_gt [i, j])
-                pose_hat_arr[i, j] = np.concatenate([ypr_h, t_h])
-                pose_gt_arr [i, j] = np.concatenate([ypr_g, t_g])
-
-        # 11. tensorize
-        out = dict(
-            patches      = torch.stack(patches, dim=0).float(),    # (N, 3, H, W)
-            uvd          = torch.from_numpy(uvd_arr),
-            pad          = torch.from_numpy(pad_arr),
-            uvd_full     = torch.from_numpy(uvd_full_arr),
-            pad_full     = torch.from_numpy(pad_full_arr),
-            pose_hat_6dof= torch.from_numpy(pose_hat_arr),
-            pose_gt_6dof = torch.from_numpy(pose_gt_arr),
-            uv_hat       = torch.from_numpy(uv_hat_arr),
-            uv_gt        = torch.from_numpy(uv_gt_arr),
-            d_hat        = torch.from_numpy(d_hat_arr),
-            d_gt         = torch.from_numpy(d_gt_arr),
-            pad_dir      = torch.from_numpy(pad_dir_arr),
-            fi           = torch.tensor(fis, dtype=torch.long),
-            scene        = scn.scene_id,
+        return dict(
+            patches      = patches,
+            uvd          = uvd,
+            pad          = pad,
+            uvd_full     = uvd_full,
+            pad_full     = pad_full,
+            pose_hat_6dof= pose_hat,
+            pose_gt_6dof = pose_hat.clone(),        # we only store hat; gt unused for loss
+            uv_hat       = uv_hat_arr,
+            uv_gt        = uv_gt_arr,
+            d_hat        = d_hat_arr,
+            d_gt         = d_gt_arr,
+            pad_dir      = pad_dir,
+            fi           = fis,
+            scene        = s['scene'],
         )
-        return out
 
     @staticmethod
     def _pack_full_local(uv_local, z, n_full, img_size, rng):
@@ -799,6 +642,286 @@ class PandaSetCrossFrameDataset(Dataset):
             uvd = np.concatenate([uvd, np.zeros((n_full - n, 3), dtype=np.float32)],
                                  axis=0)
         return uvd, pad
+
+    # ─────────────────────── full P1: 3 frames, 6 directions ────────────────
+    # Independent iid perturbation per pair (i, j). Patches centered on HAT
+    # projection of the anchor pivot. Per-frame query points = LiDAR in box_i.
+    # Per-direction (i, j): project frame_i's 3D points to frame_j with
+    # both T_hat[i,j] and T_gt[i,j], pad_dir = (~in_box_j_under_both).
+    # Loss runs on every (i, j) with i != j → all 3 frames get gradient as Q.
+
+    def _try_one_p1(self, idx):
+        N = self.n_frames
+        if N != 3:
+            raise NotImplementedError(f'_try_one_p1 currently N=3 only, got {N}')
+        rng = np.random.default_rng((idx + 1) * 2654435761 & 0xFFFFFFFF)
+        scn: _SceneData = self.scenes[int(rng.integers(len(self.scenes)))]
+        IW, IH, K = scn.IW, scn.IH, scn.K
+
+        # 1. fi_anchor + fi_far (legacy direction-first)
+        if not scn.fi_pool:
+            return None
+        fi_A = int(rng.choice(scn.fi_pool))
+        bmin, bmax = self.baseline_range
+        cn = scn.camera_name.lower()
+        is_fb = (('front' in cn or 'back' in cn or 'rear' in cn)
+                 and 'left' not in cn and 'right' not in cn and 'side' not in cn)
+        direction = int(rng.choice([-1, 1]))
+        if direction > 0:
+            room = scn.n_frames - 1 - fi_A
+        else:
+            room = fi_A
+        eff_max = room if is_fb else min(bmax, room)
+        if eff_max < bmin:
+            direction = -direction
+            room = scn.n_frames - 1 - fi_A if direction > 0 else fi_A
+            eff_max = room if is_fb else min(bmax, room)
+            if eff_max < bmin:
+                return None
+        delta = int(rng.integers(bmin, eff_max + 1)) * direction
+        fi_B = fi_A + delta
+        if fi_B < 0 or fi_B >= scn.n_frames:
+            return None
+        fi_M = int(round(0.5 * (fi_A + fi_B)))
+        if fi_M == fi_A or fi_M == fi_B:
+            return None
+        fis = [fi_A, fi_M, fi_B]
+
+        # 2. GT relative poses
+        T_w2 = [scn.T_w2c[fi].astype(np.float32) for fi in fis]
+        T_w2inv = [_invert_mat(T) for T in T_w2]
+        T_gt = np.zeros((N, N, 4, 4), dtype=np.float32)
+        for i in range(N):
+            for j in range(N):
+                T_gt[i, j] = T_w2[j] @ T_w2inv[i]
+
+        # 3. iid per-pair perturbation (full sigma per pair, no scaling)
+        T_hat = np.zeros_like(T_gt)
+        for i in range(N):
+            T_hat[i, i] = np.eye(4, dtype=np.float32)
+        for i in range(N):
+            for j in range(i + 1, N):
+                ypr = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
+                t   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
+                T_hat[i, j] = T_gt[i, j] @ _ypr_t_to_mat(ypr, t)
+                T_hat[j, i] = _invert_mat(T_hat[i, j])
+
+        # 4. anchor pivot from frame 0 LiDAR (stratified spatial sampling)
+        pts_w_0, uv_0_full, z_0_full, in_0 = scn.frame_data(fis[0])
+        if in_0.sum() < 50:
+            return None
+        pts_w_0_in = pts_w_0[in_0]
+        uv_0_all   = uv_0_full[in_0]
+        H_BINS, W_BINS = 4, 6
+        u_bin = np.clip((uv_0_all[:, 0] * W_BINS / IW).astype(int), 0, W_BINS - 1)
+        v_bin = np.clip((uv_0_all[:, 1] * H_BINS / IH).astype(int), 0, H_BINS - 1)
+        flat_bin = v_bin * W_BINS + u_bin
+        occupied = np.unique(flat_bin)
+        b = int(rng.choice(occupied))
+        in_bin = np.where(flat_bin == b)[0]
+        ci = int(rng.choice(in_bin))
+        P_center_w = pts_w_0_in[ci]
+        uc_full = np.zeros((N, 2), dtype=np.float32)
+        uc_full[0] = uv_0_all[ci]
+
+        # 5. project pivot to each other frame using HAT pose
+        P_center_in0 = (T_w2[0] @ np.append(P_center_w, 1.0))[:3].astype(np.float32)
+        for i in range(1, N):
+            P_in_i = (T_hat[0, i] @ np.append(P_center_in0, 1.0))[:3]
+            if P_in_i[2] < 1.0:
+                return None
+            uvi = _proj_cam(P_in_i, K, scn.dist).astype(np.float32)
+            if not (0 <= uvi[0] < IW and 0 <= uvi[1] < IH):
+                return None
+            uc_full[i] = uvi
+            # also gate on GT projection in-image
+            P_in_i_gt = (T_gt[0, i] @ np.append(P_center_in0, 1.0))[:3]
+            if P_in_i_gt[2] < 1.0:
+                return None
+            uv_gt_i = _proj_cam(P_in_i_gt, K, scn.dist)
+            if not (0 <= uv_gt_i[0] < IW and 0 <= uv_gt_i[1] < IH):
+                return None
+
+        # 6. crop patches with shared random size, centered on hat projection
+        CROP = int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
+        if CROP < 2:
+            return None
+        half = CROP / 2
+        boxes = []
+        patches = []
+        for i in range(N):
+            u0_i = float(uc_full[i, 0]) - half
+            v0_i = float(uc_full[i, 1]) - half
+            patch_img = scn.load_patch(fis[i], u0_i, v0_i, CROP)
+            pi = self._resize_patch(patch_img, u0_i, v0_i, CROP)
+            if pi is None:
+                return None
+            patch_i, box_i = pi
+            patches.append(patch_i)
+            boxes.append(box_i)
+
+        max_pts = self.max_points
+        N_FULL  = 2048
+        IMG     = self.img_size
+
+        # 7. per-frame query points: in-patch LiDAR, intersected with
+        # "projects to ALL other frames under both hat & gt" — so the same
+        # padded set works for every (i, j) loss direction. Same intersection
+        # discipline as legacy A↔B (good_qa + inb), generalised to N targets.
+        pts_3d_in_cam = np.zeros((N, max_pts, 3), dtype=np.float32)
+        uvd_arr       = np.zeros((N, max_pts, 3), dtype=np.float32)
+        pad_arr       = np.ones((N, max_pts), dtype=bool)
+        uvd_full_arr  = np.zeros((N, N_FULL, 3), dtype=np.float32)
+        pad_full_arr  = np.ones((N, N_FULL), dtype=bool)
+        # per-direction projection results; padded inputs project to junk but
+        # we mask them via pad_dir below.
+        uv_hat_arr = np.zeros((N, N, max_pts, 2), dtype=np.float32)
+        uv_gt_arr  = np.zeros((N, N, max_pts, 2), dtype=np.float32)
+        d_hat_arr  = np.zeros((N, N, max_pts),    dtype=np.float32)
+        d_gt_arr   = np.zeros((N, N, max_pts),    dtype=np.float32)
+        pad_dir_arr= np.ones ((N, N, max_pts),    dtype=bool)
+
+        for i in range(N):
+            box_i = boxes[i]
+            if i == 0:
+                pts_w_i, uv_i_full, z_i_full, in_i = pts_w_0, uv_0_full, z_0_full, in_0
+            else:
+                pts_w_i, uv_i_full, z_i_full, in_i = scn.frame_data(fis[i])
+                if in_i.sum() < 4:
+                    return None
+            uv_in    = uv_i_full[in_i]
+            z_in     = z_i_full[in_i]
+            pts_w_in = pts_w_i[in_i]
+            in_box = ((uv_in[:, 0] >= box_i[0]) & (uv_in[:, 0] < box_i[0] + box_i[2]) &
+                      (uv_in[:, 1] >= box_i[1]) & (uv_in[:, 1] < box_i[1] + box_i[3]) &
+                      (z_in > 1.0))
+            if in_box.sum() < 4:
+                return None
+            pts_w_q   = pts_w_in[in_box]
+            uv_q_full = uv_in[in_box]
+            z_q       = z_in[in_box].astype(np.float32)
+            uv_q_local_self = self._uv_to_patch_local(uv_q_full, box_i)
+
+            # 3D in cam_i frame, homogeneous for downstream T_hat[i, j] @ P_in_i
+            homo_w = np.column_stack([pts_w_q, np.ones(len(pts_w_q), dtype=np.float32)])
+            P_in_i = (T_w2[i] @ homo_w.T)[:3].T.astype(np.float32)
+            homo_i = np.column_stack([P_in_i, np.ones(len(P_in_i), dtype=np.float32)])
+            n_raw = len(P_in_i)
+
+            # Per-direction projection + per-direction validity mask.
+            # Query points are filtered ONLY by in-box_i (no intersection
+            # across targets — too restrictive for 3+ frames). Each (i, j)
+            # direction has its own pad_dir marking points whose projection
+            # lands outside box_j or behind the camera; loss masks those out.
+            per_target_uv_hat_local = {}
+            per_target_uv_gt_local  = {}
+            per_target_d_hat        = {}
+            per_target_d_gt         = {}
+            per_target_ok           = {}
+            keep = np.ones(n_raw, dtype=bool)            # accept all in-box_i pts
+            for j in range(N):
+                if j == i:
+                    continue
+                P_j_hat = (T_hat[i, j] @ homo_i.T)[:3].T
+                P_j_gt  = (T_gt [i, j] @ homo_i.T)[:3].T
+                d_hat = P_j_hat[:, 2]
+                d_gt  = P_j_gt [:, 2]
+                ok_d = (d_hat > 0.5) & (d_gt > 0.5)
+                uv_full_hat = np.zeros((n_raw, 2), dtype=np.float32)
+                uv_full_gt  = np.zeros((n_raw, 2), dtype=np.float32)
+                if ok_d.any():
+                    uv_full_hat[ok_d] = _proj_cam(P_j_hat[ok_d], K, scn.dist).astype(np.float32)
+                    uv_full_gt [ok_d] = _proj_cam(P_j_gt [ok_d], K, scn.dist).astype(np.float32)
+                uv_local_hat = self._uv_to_patch_local(uv_full_hat, boxes[j])
+                uv_local_gt  = self._uv_to_patch_local(uv_full_gt,  boxes[j])
+                in_patch_hat = ((uv_local_hat[:, 0] >= 0) & (uv_local_hat[:, 0] < IMG) &
+                                (uv_local_hat[:, 1] >= 0) & (uv_local_hat[:, 1] < IMG))
+                in_patch_gt  = ((uv_local_gt [:, 0] >= 0) & (uv_local_gt [:, 0] < IMG) &
+                                (uv_local_gt [:, 1] >= 0) & (uv_local_gt [:, 1] < IMG))
+                per_target_uv_hat_local[j] = uv_local_hat
+                per_target_uv_gt_local [j] = uv_local_gt
+                per_target_d_hat       [j] = d_hat
+                per_target_d_gt        [j] = d_gt
+                per_target_ok          [j] = ok_d & in_patch_hat & in_patch_gt
+            kept_idx = np.where(keep)[0]
+            n_kept = len(kept_idx)
+
+            # full frustum context (use ALL in-box points, before keep filter)
+            uvd_full_arr[i], pad_full_arr[i] = self._pack_full_local(
+                uv_q_local_self, z_q, N_FULL, IMG, rng)
+
+            # subsample kept points to max_pts (stratified spatial-grid pick)
+            if n_kept > max_pts:
+                G = int(np.sqrt(max_pts))
+                cell = IMG / G
+                cj = np.clip((uv_q_local_self[kept_idx, 0] / cell).astype(np.int32), 0, G - 1)
+                ck = np.clip((uv_q_local_self[kept_idx, 1] / cell).astype(np.int32), 0, G - 1)
+                cid = ck * G + cj
+                du = uv_q_local_self[kept_idx, 0] - (cj + 0.5) * cell
+                dv = uv_q_local_self[kept_idx, 1] - (ck + 0.5) * cell
+                d2 = du * du + dv * dv
+                sel = []
+                for u_c in np.unique(cid):
+                    mem = np.where(cid == u_c)[0]
+                    sel.append(int(mem[np.argmin(d2[mem])]))
+                pick_local = np.array(sorted(set(sel)), dtype=np.int64)
+                pick = kept_idx[pick_local]
+            else:
+                pick = kept_idx
+            n_use = len(pick)
+
+            # populate per-frame fields
+            uvd_arr[i, :n_use, 0] = uv_q_local_self[pick, 0]
+            uvd_arr[i, :n_use, 1] = uv_q_local_self[pick, 1]
+            uvd_arr[i, :n_use, 2] = z_q[pick] / 50.0
+            pts_3d_in_cam[i, :n_use] = P_in_i[pick]
+            pad_arr[i, :n_use] = False
+
+            # populate per-direction projections + per-direction pads.
+            # Each direction (i, j) marks pad_dir True for pts that don't
+            # project into box_j or fall behind cam_j; loss masks them out.
+            # A↔B (= 0↔N-1) almost always has valid pts (pivot anchored
+            # there) → that's the always-supervised "pair baseline" inside
+            # the 6-dir loss. M-related directions only contribute where
+            # geometry permits → natural curriculum.
+            for j in range(N):
+                if j == i:
+                    continue
+                uv_hat_arr[i, j, :n_use] = per_target_uv_hat_local[j][pick]
+                uv_gt_arr [i, j, :n_use] = per_target_uv_gt_local [j][pick]
+                d_hat_arr [i, j, :n_use] = per_target_d_hat       [j][pick]
+                d_gt_arr  [i, j, :n_use] = per_target_d_gt        [j][pick]
+                pad_dir_arr[i, j, :n_use] = ~per_target_ok[j][pick]
+
+        # 8. assemble pose (N, N, 6) ypr+t
+        pose_hat_arr = np.zeros((N, N, 6), dtype=np.float32)
+        pose_gt_arr  = np.zeros((N, N, 6), dtype=np.float32)
+        for i in range(N):
+            for j in range(N):
+                if i == j:
+                    continue
+                ypr_h, t_h = _mat_to_ypr_t(T_hat[i, j])
+                ypr_g, t_g = _mat_to_ypr_t(T_gt [i, j])
+                pose_hat_arr[i, j] = np.concatenate([ypr_h, t_h])
+                pose_gt_arr [i, j] = np.concatenate([ypr_g, t_g])
+
+        return dict(
+            patches      = torch.stack(patches, dim=0).float(),
+            uvd          = torch.from_numpy(uvd_arr),
+            pad          = torch.from_numpy(pad_arr),
+            uvd_full     = torch.from_numpy(uvd_full_arr),
+            pad_full     = torch.from_numpy(pad_full_arr),
+            pose_hat_6dof= torch.from_numpy(pose_hat_arr),
+            pose_gt_6dof = torch.from_numpy(pose_gt_arr),
+            uv_hat       = torch.from_numpy(uv_hat_arr),
+            uv_gt        = torch.from_numpy(uv_gt_arr),
+            d_hat        = torch.from_numpy(d_hat_arr),
+            d_gt         = torch.from_numpy(d_gt_arr),
+            pad_dir      = torch.from_numpy(pad_dir_arr),
+            fi           = torch.tensor(fis, dtype=torch.long),
+            scene        = scn.scene_id,
+        )
+
 
     def _try_one(self, idx):
         rng = np.random.default_rng((idx + 1) * 2654435761 & 0xFFFFFFFF)

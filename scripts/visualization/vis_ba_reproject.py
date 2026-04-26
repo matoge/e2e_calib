@@ -38,8 +38,8 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 IMG_SIZE = 64
 
 
-def load_model(ckpt_dir):
-    sd = torch.load(ckpt_dir / 'best_model.pt', map_location=DEVICE, weights_only=True)
+def load_model(ckpt_dir, ckpt_name='best_model.pt'):
+    sd = torch.load(ckpt_dir / ckpt_name, map_location=DEVICE, weights_only=True)
     deform = 'sl' if any('deform_img' in k for k in sd) else 'none'
     n_cross = sum(1 for k in sd if k.startswith('cross_blocks.') and k.endswith('.proj.weight'))
     n_intra = max(1, sum(1 for k in sd if k.startswith('intra_blocks.') and k.endswith('.norm_sa.weight')))
@@ -170,11 +170,11 @@ def draw_pair_panel(fig, ax_A, ax_B, r, tag, k_show=8):
 
 def main(args):
     ckpt = Path(args.ckpt)
-    model, out_dim = load_model(ckpt)
-    print(f'loaded {ckpt.name}  out_dim={out_dim}')
+    model, out_dim = load_model(ckpt, ckpt_name=args.ckpt_name)
+    print(f'loaded {ckpt.name}/{args.ckpt_name}  out_dim={out_dim}')
 
     import random as _r
-    # build (scene, camera) pair pool from --scenes-root; use val split (last 20%).
+    # build (scene, camera) pair pool from --scenes-root; pick split.
     scene_roots = []
     for root_str in str(args.scenes_root).split(','):
         root = Path(root_str.strip())
@@ -183,7 +183,10 @@ def main(args):
                 scene_roots.append(str(p))
     _r.Random(42).shuffle(scene_roots)
     cutoff = int(len(scene_roots) * 0.8)
-    val_roots = scene_roots[cutoff:] if len(scene_roots) > 5 else scene_roots
+    if args.split == 'train':
+        val_roots = scene_roots[:cutoff] if len(scene_roots) > 5 else scene_roots
+    else:
+        val_roots = scene_roots[cutoff:] if len(scene_roots) > 5 else scene_roots
     if args.cameras.lower() == 'all':
         def cams_of(sr):
             d = Path(sr) / 'camera'
@@ -259,5 +262,9 @@ if __name__ == '__main__':
                     help='comma-separated dataset roots to sample val scenes from')
     ap.add_argument('--cameras', default='all',
                     help='"all" or comma-separated camera names')
+    ap.add_argument('--split', default='val', choices=['val', 'train'],
+                    help='which scene split to sample from (default val).')
+    ap.add_argument('--ckpt-name', default='best_model.pt',
+                    help='checkpoint filename inside ckpt dir (best_model.pt or last_model.pt).')
     args = ap.parse_args()
     main(args)

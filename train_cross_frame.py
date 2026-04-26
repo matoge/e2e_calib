@@ -203,13 +203,22 @@ def step_n(model, batch):
             bases.append(m_ij['base_px'])
             pair_metrics[f'err_{i}{j}']  = m_ij['err_px']
             pair_metrics[f'base_{i}{j}'] = m_ij['base_px']
-    loss = torch.stack(losses).mean()
+    # Per-direction weight matches pair-mode (loss_AB + loss_BA)/2 → 0.5 each
+    # so the A↔B gradient magnitude doesn't shrink as we add more directions.
+    # Equivalent to sum(losses)/2; the extra directions add as bonus terms
+    # rather than diluting AB.
+    loss = torch.stack(losses).sum() * 0.5
+    # Surface the legacy A↔B direction (frame 0 = anchor, N-1 = far frame)
+    # via the err_AB / err_BA / base_AB keys so the trainer's existing logger
+    # is directly comparable to pair runs. Other directions are kept as
+    # err_ij / base_ij in pair_metrics for inspection.
+    far = N - 1
     metrics = dict(
         loss=loss.item(),
-        err_AB=float(np.mean(errs)),       # mean across all directions
-        base_AB=float(np.mean(bases)),     # (reuse legacy key for plotter compat)
-        err_BA=float(np.mean(errs)),
-        base_BA=float(np.mean(bases)),
+        err_AB =pair_metrics[f'err_0{far}'],
+        err_BA =pair_metrics[f'err_{far}0'],
+        base_AB=pair_metrics[f'base_0{far}'],
+        err_all=float(np.mean(errs)),       # diagnostic: mean across all dirs
         **pair_metrics,
     )
     return loss, metrics
@@ -297,11 +306,11 @@ def main():
                     help='enable triplet dataset (A,M,B) + CalibNetMultiFrame model. '
                          'M is the middle frame; KV concatenates {M, B} with per-frame '
                          'pose-bias added to attention scores (relative-only, RPE-style).')
-    ap.add_argument('--n-frames', type=int, default=2,
-                    help='2 = legacy pair / triplet-as-aux-KV path (default). '
-                         '3+ = stacked-array N-frame path: dataset emits (N, ...) and '
-                         '(N, N, ...) tensors, model.forward_n() supervises every (i, j) '
-                         'direction. Random-walk perturbation per adjacent segment.')
+    ap.add_argument('--n-frames', type=int, default=0,
+                    help='0 = legacy paths (default). 2/3 = new stacked-array path '
+                         'with iid per-pair perturbation; dataset emits (N, ...) '
+                         'per-frame and (N, N, ...) per-pair tensors, model.forward_n() '
+                         'supervises every (i, j) direction.')
     ap.add_argument('--stop-no-improve-migrations', type=int, default=0,
                     help='stop training if this many consecutive migrations fail to '
                          'improve global-best val_nll. 0 = no early stop (run full epochs).')
@@ -322,6 +331,7 @@ def main():
     log(f'args = {vars(args)}')
 
     # dataset
+    use_stacked = args.n_frames > 0
     n_frames_path = max(args.n_frames, 2)
     ds_kwargs = dict(
         img_size=args.img_size, max_points=args.max_points,
@@ -329,8 +339,9 @@ def main():
         sigma_ypr=args.sigma_ypr, sigma_t=args.sigma_t,
         crop_range=(args.crop_min, args.crop_max),
         cameras=args.cameras,
-        triplet=args.multi_frame and n_frames_path == 2,   # legacy aux-KV
+        triplet=args.multi_frame and not use_stacked,   # legacy aux-KV only
         n_frames=n_frames_path,
+        use_stacked=use_stacked,
     )
     if args.scenes_root:
         ds_kwargs['scenes_root'] = args.scenes_root
@@ -473,7 +484,7 @@ def main():
         # migrated ∈ train now, their residuals are near 0 → they inflate val slightly
         # (≤ migrated/pool frac). Accept the bias for 50-100× eval speedup.
         for batch in val_loader:
-            if n_frames_path >= 3:
+            if use_stacked:
                 _, m = step_n(model, batch)
             else:
                 _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
@@ -511,7 +522,7 @@ def main():
 
         def _do_step(batch):
             opt.zero_grad(set_to_none=True)
-            if n_frames_path >= 3:
+            if use_stacked:
                 loss, m = step_n(model, batch)
             else:
                 loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame)
@@ -660,6 +671,10 @@ def main():
         if score < best_err:
             best_err = score
             torch.save(model.state_dict(), out_dir / 'best_model.pt')
+
+    # save final (most-overfit) weights too — useful for inspecting whether
+    # the train-time over-confidence is geometric memorisation or σ collapse.
+    torch.save(model.state_dict(), out_dir / 'last_model.pt')
 
     # final plot
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), dpi=120)
