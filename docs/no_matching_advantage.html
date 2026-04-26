@@ -266,7 +266,31 @@ B のカメラ K, T_w2c を使って uv 正解を計算するだけ:</p>
 </code></pre></div>
 
 <p>matcher 不要、descriptor 不要、すべて幾何で出る。</p>
-<h4 id="4">4. なぜこれが今までやられてこなかったか</h4>
+<h4 id="4-gt">4. それでも長基線 GT ノイズが残る → 大数の法則で平均化される</h4>
+<p>Chain composition の合成誤差を 0 にすることはできない。30 hop で残る
+~10cm のノイズは確かにあり、これが long baseline 訓練データの GT に
+混入する。</p>
+<p>ただし supervised learning の観点ではこれは深刻な問題ではない:</p>
+<ul>
+<li>1 個の (A, B) サンプルの GT には誤差 e_i (mean 0、bounded variance) が乗る</li>
+<li>N 個のサンプルで訓練すると、SGD は E[loss(model, e_i)] を最小化する
+  方向に動く</li>
+<li>e_i が zero-mean かつ独立 (各 chain hop の GICP 残差は独立に近い) なら
+  <strong>N → ∞ で平均誤差は O(1/√N) → 0 に収束する</strong></li>
+<li>結果、学習されるネットワークは「真の対応関係」に limit converge する、
+  <strong>個々の GT サンプルの noise level よりも有意に正確になる</strong></li>
+</ul>
+<p>数値的に: 100m baseline の 1 sample あたり GT 誤差 σ_GT ~ 1-2 px 相当、
+1M サンプル訓練すると mean error は √(σ_GT² / N) ~ 1-2 px / 1000 ~
+<strong>0.001-0.002 px</strong> まで原理上下がる。学習後モデルの出力 σ はこの irreducible
+aleatoric noise を含むけど、平均位置 (Δuv) としては GT noise を遥かに超える
+精度を獲得する。</p>
+<p>つまり <strong>「データ量で GT noise が消える」</strong>。短基線 chain で GT を作って、
+量を稼げば、長基線でも実用精度。</p>
+<p>これが本手法が <strong>scalable</strong> な理由でもある: GT が完璧である必要がなく、
+大量 + 統計的に zero-mean なら OK。company-internal の daily 走行データを
+回し続ければ自然に長基線精度も上がる構造。</p>
+<h4 id="5">5. なぜこれが今までやられてこなかったか</h4>
 <p>伝統的 SLAM / SfM では「短基線 GT を信用して長基線 supervised 訓練」
 を回す pipeline が稀だった理由:
 - そもそも matcher 系では「視点差が大きい長基線 = matcher が壊れる場所」
