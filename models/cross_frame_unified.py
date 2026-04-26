@@ -123,7 +123,12 @@ class UnifiedCrossBlock(nn.Module):
     """Cross-frame deformable attention over multi-level frame_token KV."""
 
     def __init__(self, d=D_DIM, n_heads=4, n_points=4,
-                 max_levels=2, out_dim=5):
+                 max_levels=2, out_dim=5, sigma_bias_share=1.0):
+        """`sigma_bias_share` ∈ (0, 1]: each block contributes
+        `sigma_bias_share * log(2)` to the cumulative log_σ output. The parent
+        model passes `1/n_cross_layers` so the C blocks sum to log(2) ⇒ initial
+        σ = 2 px regardless of depth. Without this, C=5 starts σ at ~31 px =
+        the MAX_SIGMA clamp ceiling, killing gradients on σ permanently."""
         super().__init__()
         self.deform = MSDeformAttn(d_model=d, n_levels=max_levels,
                                     n_heads=n_heads, n_points=n_points)
@@ -138,13 +143,14 @@ class UnifiedCrossBlock(nn.Module):
         self.drop = nn.Dropout(0.1)
         self.proj = nn.Linear(d + 2, out_dim)
         nn.init.zeros_(self.proj.weight); nn.init.zeros_(self.proj.bias)
+        sb = 0.69 * sigma_bias_share
         with torch.no_grad():
             if out_dim == 5:
-                self.proj.bias[2] = 0.69
-                self.proj.bias[3] = 0.69
+                self.proj.bias[2] = sb
+                self.proj.bias[3] = sb
             elif out_dim == 7:
-                self.proj.bias[3] = 0.69
-                self.proj.bias[4] = 0.69
+                self.proj.bias[3] = sb
+                self.proj.bias[4] = sb
                 self.proj.bias[5] = 0.0
         self.max_levels = max_levels
 
@@ -221,7 +227,8 @@ class CalibNetUnifiedFrame(nn.Module):
         self.pose_mlp = PoseMLP(d)
         self.cross_blocks = nn.ModuleList([
             UnifiedCrossBlock(d, n_heads=n_heads, n_points=deform_n_points,
-                              max_levels=max_kv_frames, out_dim=out_dim)
+                              max_levels=max_kv_frames, out_dim=out_dim,
+                              sigma_bias_share=1.0 / n_cross_layers)
             for _ in range(n_cross_layers)
         ])
 
