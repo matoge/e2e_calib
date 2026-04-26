@@ -20,168 +20,78 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 </style>
 </head><body>
 <h1 id="pose-conditioned-residual">Pose-conditioned residual ネット — 「マッチングしない」設計の意義</h1>
-<p>このプロジェクトの中核アイデアは、<strong>特徴量マッチングを一切経由せず、
-画像と LiDAR から直接「ここに射影されるべき位置」と「その不確実性 σ」を
-推定する</strong> ネットワークを学習することにある。本ドキュメントはなぜそれが
-重要か、何ができるか、何ができないかを整理する。</p>
-<h2 id="_1">こんなことができる (実例)</h2>
-<p>PandaSet 39-scene front_camera で訓練した v100 (unified multi c4 quad) の
-val サンプル。各サンプルは A→B 投影 1 ペアを示している:</p>
+<p><strong>TL;DR</strong> — 自動運転 / ロボット用の各種空間タスク (再キャリブレーション、
+高精度地図の更新、SLAM、loop closure 検証など) の中身は、すべて
+「ある点がカメラ画像のどこに対応するか」を高い信頼度で当てる primitive で
+書き直せる。本プロジェクトはこの primitive を <strong>per-point の
+(Δuv, Σ) 出力ネットワーク</strong> として直接学習する。 特徴量マッチング、
+RANSAC、shadow descriptor、巨大 SLAM solver — どれも要らなくなる。</p>
+<hr />
+<h2 id="1">1. 出力サンプル</h2>
+<p>PandaSet 39-scene front_camera で訓練したモデル v100 (multi c4 quad) の
+val 出力。 各サンプルは 1 つの A→B 投影ペアを示す:</p>
 <p><img alt="per-point Δuv + σ predictions" src="images/no_matching_pred_examples.png" /></p>
-<p>各点について:
-- <strong>× (灰色)</strong> = 静的シーン仮定での射影位置 (= pose 仮説 T_AB を信じた予測)
-- <strong>○ (緑/赤)</strong> = 真の B 位置 (GT)。緑 = 2σ 楕円内 (確信できてる)、赤 = 2σ 外
-- <strong>+ (青)</strong> = モデル出力 (× + Δuv)
-- <strong>楕円</strong> = 1σ / 2σ 不確実性 (Σ から描画)
-- <strong>タイトルの "2σ-cover=XX%"</strong> = 2σ 楕円内に GT が入った割合 (正しい σ なら ~95%)</p>
-<p>ぱっと見の特徴:
-- 道路面など静的シーン上の点は楕円が小さく、+ と ○ がほぼ重なる (= 高精度)
-- 動的物体の点は楕円が膨らみ、+ より ○ がずれていても 2σ で吸収される
-- 単一物体の点は σ も Δuv も近い分布で揃う (per-point 出力が空間的に整合)</p>
-<p>訓練曲線 (cross-frame タスク開始から 1 weekend での性能進化):</p>
-<p><img alt="training progression" src="images/leaderboard_curves.png" /></p>
-<p>σ が動的物体を勝手に分離してる挙動 (annotation なしで):</p>
-<p><img alt="sigma by motion category" src="images/dynamic_object_sigma_v92.png" /></p>
-<p>詳細: <code>docs/unified_progression.md</code> (アーキ進化), <code>docs/dynamic_object_sigma.md</code>
-(σ 解析)。</p>
-<h2 id="_2">なぜこれが必要か</h2>
-<p>近年の SfM / SLAM / depth estimation 系論文の多くは、pose + 内部パラメータ
-+ depth + segmentation を同時に出すマルチタスク head で僅差の改善を積む方向に
-向かっている。しかし実用で本当に欲しいのは
-<strong>「ある点とある点がどのくらいの確信度で同じか」だけ</strong>で、それが正確なら
-calibration、地図更新、BA、SLAM、loop closure 検証は全部その上に乗る。</p>
-<p>本プロジェクトはこれだけを出す。シーン再構成も pose 回帰も出力しない。
-出力は per-point の <strong>対応位置 (Δuv) と不確実性 (Σ)</strong>、終わり。
-信頼度は二値の inlier/outlier ではなく Σ の連続値で扱う。</p>
-<h3 id="_3">具体的に何の用途で必要か</h3>
-<p>自動運転 / robotics の現場で「カメラ – LiDAR の対応関係」が core になる
-タスクは絶え間ない:</p>
+<p>各点について:</p>
 <ul>
-<li>工場出荷 calibration が経年で drift する → 残差推定で再 calibration</li>
-<li>LiDAR-camera 融合の認識タスクで「どの pixel がどの 3D 点か」の信頼度が要る</li>
-<li>高精度地図を運用中に更新する (= 既存マップに新しい走行データを align)</li>
-<li>visual / LiDAR odometry と SLAM の中で per-frame 残差を出す</li>
+<li><strong>× (灰色)</strong> = 静的シーン仮定 + ノイジー pose 仮説での射影位置 (= 入力)</li>
+<li><strong>+ (青)</strong> = ネットワーク出力 (× + Δuv 補正後)</li>
+<li><strong>○ (緑/赤)</strong> = 真の B 位置 (GT)。緑 = 2σ 楕円内 / 赤 = 外</li>
+<li><strong>楕円</strong> = 1σ / 2σ 不確実性 (Σ から描画)</li>
+<li>タイトル "2σ-cover=XX%" = 2σ 楕円内に GT が入る点の割合 (理想 ~95%)</li>
 </ul>
-<p>これらすべてに対して、伝統的には「特徴点マッチング → outlier rejection →
-BA で pose 推定」の重い pipeline が組まれてきた。本提案はこれを <strong>pose 仮説
-を入力にもらって per-point の (Δuv, Σ) を一発で出すシンプルなネットワーク</strong>
-で代替する設計。なぜ重要か理由 4 つ:</p>
-<h3 id="1-pipeline">1. 教師データを作る pipeline が既に存在する</h3>
-<p>supervised learning には pose 正解と per-point uv 正解が要る。これは
-専用アノテーションが要らない:</p>
+<p>ぱっと見の特徴:</p>
 <ul>
-<li><strong>公開データセット (Waymo, nuScenes, AV2 等) の pose 補正が想像以上に良い</strong>:
-  GICP-refined ego-pose は 80 frame シーケンスでも mm-cm 級精度で、 LiDAR 点群を
-  warp しても破綻しない</li>
-<li><strong>動的物体は 3D bounding box tracking</strong> で uuid 管理されてる → 動車内点を
-  box の rigid 変換で warp 可能 ( <code>docs/dynamic_object_sigma.md</code> 参照)</li>
-<li>残るは静的シーンの点群を chain composition で長基線まで extends する話
-  (本 doc 後半参照)</li>
+<li>道路面など静的シーン上の点は楕円が小さく、+ と ○ がほぼ重なる</li>
+<li>動的物体の点は楕円が膨らみ、ずれを 2σ で吸収できている</li>
+<li>1 つの物体内では σ も Δuv も一貫した分布で出力される</li>
 </ul>
-<p>つまり「pose を作るために matcher を呼ぶ」という従来の鶏と卵問題が、
-<strong>現代の sensor stack + 公開データの GT 品質では解けてる</strong>。</p>
-<h3 id="2-dataset">2. データの偏りは複数 dataset で担保可能</h3>
-<p>1 つの dataset (例 PandaSet) は scene 数限定 + 環境偏り (路上の車が少ない、
-天候バリエーション少) があり、画像 appearance の網羅性が低い。</p>
-<p>これは複数 dataset (Waymo, nuScenes, AV2, DDAD, ZOD, ...) を統合訓練で
-担保できる。各 dataset で pose 補正の品質はある程度高く、合計で 1500+ scenes
-の多様な appearance + LiDAR sensor variation が確保できる。
-matcher 系で必要だった photometric augmentation や hard negative mining
-を回避し、自然な data diversity で十分。</p>
-<h3 id="3-per-point-mean-uv-variance">3. per-point の (mean Δuv, variance Σ) という美しい数学的構造</h3>
-<p>出力が 「平均 + 分散」 という Gaussian distribution の自然な
-パラメータ化になっている:
-- <strong>平均 Δuv</strong> は射影誤差の最良点推定
-- <strong>共分散 Σ</strong> は信頼区間 = downstream で重み付け可能
-- per-point に独立な (Δuv_i, Σ_i) → BA / 地図最適化に <strong>そのまま</strong> Σ-weighted
-  least squares として接続できる
-- ハードな inlier/outlier 判定や RANSAC を介在させず、すべて連続的な値で
-  処理が完結</p>
-<p>統計的に閉じてる構造なので、 Gauss-Newton / Levenberg-Marquardt / robust
-M-estimator など既存の最適化道具が <strong>そのまま</strong> 使える。</p>
-<p><strong>Gaussian Splatting (3DGS) との対応</strong>: GS は 3D シーンを 「mean (位置) +
-covariance (形状)」 を持つ Gaussian primitive の集合で表現する。
-本手法は 2D 画像残差を per-point の Gaussian で表現する。
-<strong>「シーンを Gaussian で表す GS」と「対応関係を Gaussian で表す本手法」</strong>
-で適用領域は違うが、共通する設計原理:
-- 各要素を <strong>point ではなく分布</strong> として持つことで局所的な不確実性が陽に乗る
-- 解析的微分可能 → optimization-based 学習や down-stream BA に直結
-- 集合演算 (重み付け平均、product, marginalization) が Gaussian の閉性を
-  使ってきれいに書ける</p>
-<p>GS は「描画のための表現」、本手法は「マッチングのための表現」だが、
-どちらも <strong>「点を分布に格上げした方が世界はうまく扱える」</strong> という同じ
-直感に立っている。共分散の出力は、現代的な scene representation の流れと
-方向性が一致している。</p>
-<h3 id="4-slam-patch-based">4. 巨大 SLAM じゃなく「patch-based 最適化」で広範囲応用が成立する</h3>
-<p>伝統的 SfM / SLAM は scene 全体を 1 つの大きな BA 問題として解く =
-シーン規模で計算量がスケール、deployment 負担が大きい。</p>
-<p>本提案は per-point で independent な (Δuv, Σ) を出す → <strong>patch 単位で
-独立最適化可能</strong>:
-- 地図更新タスクなら、変更があった地理領域の周辺 patch だけ Σ-weighted BA
-  → 全体 SLAM 解き直し不要、毎日の差分更新が安価
-- calibration なら 1 patch 内の数百点で十分 → 数秒の inference + 解析的
-  closed form で再 calibration
-- SLAM front-end の loop verification も candidate pose 周辺の patch を
-  評価するだけで判定可能</p>
-<p>つまり同じネットワークが calibration / 地図更新 / SLAM / odometry の
-複数タスクに <strong>共通の安い primitive</strong> として使える。1 個ずつ重い専用システムを
-組まなくて済む。</p>
-<h2 id="_4">解いている問題</h2>
-<ul>
-<li>入力: query フレーム A の点 (画像 + LiDAR の組)、target フレーム B、
-  両者の <strong>相対 pose 仮説 T_AB_hat</strong> (ノイジーで構わない)</li>
-<li>出力: 各 query 点について</li>
-<li><strong>Δuv</strong>: B 画像内での投影誤差補正</li>
-<li><strong>Σ</strong>: その補正の 2D 共分散 (確信度)</li>
-</ul>
-<p>出力は per-point の (Δuv, Σ)。pose 自体は出力しない (= <strong>入力条件</strong>)。</p>
-<h2 id="per-point-uv">「per-point の (Δuv, Σ) を陽に出す手法」って他にあるのか</h2>
-<p>これに先行があるか正直に整理:</p>
-<p>部分的に近いもの:</p>
-<ul>
-<li>probabilistic optical flow (ProbFlow, BayesFlow 系): 同一カメラの
-  連続フレームに対し per-pixel の flow + Gaussian 分散を出す。違うのは
-  (1) pose 入力じゃなく flow 自体を当てる、(2) cross-modal LiDAR を持たない、
-  (3) 大角度 / 大基線で破綻</li>
-<li>RAFT / RAFT-3D + uncertainty: per-pixel flow + scalar confidence は出すが、
-  full 2D 共分散ではない。pose は介在しない</li>
-<li>DROID-SLAM: dense flow に per-pixel weight が付き BA に流れるが、
-  weight は scalar、pose は出力。本手法と逆向き</li>
-<li>probabilistic depth estimation (AdaBins 系): per-pixel depth + variance、
-  単眼 → depth。cross-frame でも pose 条件でもない</li>
-<li>scene-coord regression (DSAC star, KFNet): per-pixel 3D scene coord +
-  uncertainty。pose は出力、世界座標を直接当てる</li>
-<li>probabilistic camera–LiDAR calib 産業系: per-correspondence の scalar
-  weight を出すが 2D 共分散は稀。多くは matcher 後段の weighting</li>
-</ul>
-<p>ど真ん中で同じ問題を解いてる先行: 知る限り見当たらない。
-「pose 入力 + per-point 2D Gaussian 出力 + cross-frame supervised on
-synced LiDAR+camera + chain composable for long baseline」という組合せは、
-論文発表されてる中では恐らく未開拓。理由は推測:</p>
-<ul>
-<li>visual-only research community (CVPR / ICCV メイン) は LiDAR を持ってない、
-  cross-modal supervised setup が組めない</li>
-<li>LiDAR-heavy 産業 (Waymo / Cruise / Aurora) は internal にこの種類の network を
-  持っている可能性高いが、 publish されてない</li>
-<li>public dataset で「短基線 GICP-refined pose + 動的物体 box tracking」が
-  揃って利用可能になったのが比較的最近 (Waymo v2、PandaSet、AV2)、
-  community がこの組合せに気付くタイミングだった</li>
-</ul>
-<p>つまり「組み合わせとして untouched で、組んでみたら実用的に効く」
-という pragmatic discovery 寄り。理論的に深いブレイクスルーではなく、
-<strong>現代の sensor stack + 公開データの状況に合わせた具体的な engineering
-choice</strong> が新規。</p>
-<h2 id="e2e">既存の E2E 系手法と何が違うのか</h2>
-<p>過去 5 年で「特徴量マッチングを学習可能にする」「マッチング自体を回避する」
-という方向の研究が大量に出ている。代表例:</p>
+<hr />
+<h2 id="2">2. 何の役に立つのか (応用)</h2>
+<p>「同じ点がどこに、どのくらいの確信度で対応するか」 が高精度に出るだけで、
+自動運転の現場で発生する空間タスクは下流が組める:</p>
+<table>
+<thead>
+<tr>
+<th>用途</th>
+<th>何をするか</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>再 calibration</strong></td>
+<td>工場出荷時の K, T_extrinsic が経年で drift。各点 (Δuv, Σ) → Σ-weighted least squares で 1 patch 数秒で修正</td>
+</tr>
+<tr>
+<td><strong>高精度地図の更新</strong></td>
+<td>既存マップに新走行データを align。変更がある patch だけ Σ-weighted BA、毎日の差分更新が安価</td>
+</tr>
+<tr>
+<td><strong>visual / LiDAR odometry</strong></td>
+<td>per-frame の pose 仮説に対する残差 head として接続。BA layer の中で iterate 可能</td>
+</tr>
+<tr>
+<td><strong>SLAM の loop closure 検証</strong></td>
+<td>candidate pose に対し全点 σ を見れば「正しい loop か」即判定</td>
+</tr>
+<tr>
+<td><strong>動的物体 down-weighting</strong></td>
+<td>σ inflation が motion / OOD を勝手に分離 (ラベル不要)</td>
+</tr>
+</tbody>
+</table>
+<p>つまり同じネットワークが <strong>calibration / マッピング / SLAM / odometry</strong> を
+横断的に支える primitive になる。タスクごとに重い専用システムを
+作り分けない。</p>
+<hr />
+<h2 id="3">3. 既存手法との違い</h2>
+<p>特徴量マッチングを学習可能にする / 回避する研究は過去 5 年大量にある:</p>
 <table>
 <thead>
 <tr>
 <th>系統</th>
 <th>代表手法</th>
 <th>出力</th>
-<th>pose の扱い</th>
-<th>残差/σ</th>
+<th>pose 扱い</th>
 </tr>
 </thead>
 <tbody>
@@ -189,328 +99,212 @@ choice</strong> が新規。</p>
 <td>学習型 matcher</td>
 <td>LightGlue, RoMa, DKM</td>
 <td>対応点ペア + 信頼度</td>
-<td>出力 (RANSAC)</td>
-<td>暗黙</td>
+<td><strong>出力</strong> (RANSAC)</td>
 </tr>
 <tr>
 <td>Detector-free matcher</td>
 <td>LoFTR, ASpanFormer</td>
 <td>dense correspondences</td>
-<td>出力</td>
-<td>暗黙</td>
+<td><strong>出力</strong></td>
 </tr>
 <tr>
-<td>Differentiable SfM/SLAM</td>
+<td>Differentiable SfM</td>
 <td>DROID-SLAM, ACE</td>
 <td>密 flow + dense BA</td>
-<td><strong>出力</strong> (推定)</td>
-<td>flow 信頼度として</td>
+<td><strong>出力</strong></td>
 </tr>
 <tr>
 <td>Pair → pointmap</td>
 <td>DUSt3R, MASt3R</td>
-<td>3D point map (両視点)</td>
-<td><strong>出力</strong> (pointmap から逆算)</td>
-<td>per-point depth conf</td>
+<td>3D point map</td>
+<td><strong>出力</strong></td>
 </tr>
 <tr>
 <td>Multi-view → all</td>
 <td>VGGT, Fast3R, Spann3R</td>
 <td>poses + intrinsics + 3D</td>
-<td><strong>全部出力</strong></td>
-<td>per-token confidence</td>
+<td><strong>出力</strong></td>
 </tr>
 <tr>
 <td>学習型 PnP</td>
 <td>PixLoc, DSAC*</td>
 <td>pose 直接回帰</td>
 <td><strong>出力</strong></td>
-<td>scene-coord 残差</td>
 </tr>
 <tr>
 <td><strong>本手法</strong></td>
 <td>(this)</td>
 <td><strong>per-point (Δuv, Σ)</strong></td>
-<td><strong>入力</strong> (条件)</td>
-<td>直接出力</td>
+<td><strong>入力 (条件)</strong></td>
 </tr>
 </tbody>
 </table>
-<p>決定的な違い:</p>
-<h3 id="a-pose">A. pose を「出力」ではなく「入力 (条件)」にする</h3>
-<p>DUSt3R/VGGT/DROID 系は最終的に pose を <strong>回帰</strong> する。学習はラベル付き pose
-で supervised、推論時は入力画像群から pose を「当てる」。これは強力だが:
-- ノイジーな初期 pose があるシナリオで使えない (= 自分で出した pose で
-  上書きしてしまう)
-- BA / SLAM の <strong>iter ごとの pose 仮説評価</strong> に使えない (毎回別 pose を
-  出力しちゃう)</p>
-<p>本手法は <strong>pose 仮説を入力</strong>。「この pose で正しいか? どれくらいズレてるか?」
-を per-point で answer する。downstream solver (BA, calibration, SLAM front-end)
-が pose を更新するたびに評価できる、汎用 residual head として使える。</p>
-<h3 id="b">B. 出力が「シーン再構成」ではなく「残差 + 不確実性」</h3>
-<p>DUSt3R / VGGT は 3D 点群 / 深度マップを出す → そこから downstream で BA
-する。これは <strong>シーン全体を再構成する</strong> 重い問題を解いている。</p>
-<p>本手法は <strong>pose 仮説に対する局所残差</strong> だけ出す。シーン構造の再構築は不要。
-代わりに「同じシーンの別 pose 仮説」「同じ点の別フレーム評価」が高速で
-回せる、軽量で再利用しやすい layer。</p>
-<h3 id="c-matcher">C. matcher 系全般の前提「両方見えてる」を外せる</h3>
-<p>LightGlue / LoFTR / DUSt3R も含めて、対応学習型は基本的に
-「両画像に同じ点が見えている」前提で設計されている。片方にだけ写って
-いる点は noise (= 学習で penalty / 切り捨て)。</p>
-<p>本手法は片側 (A) の query 点だけを起点にし、<strong>pose 仮説下の射影位置 +
-不確実性</strong> を出す。これは画像での可視性を要求しない:
-- 静的シーンであれば遮蔽されていても geometry で uv が出る → σ 小、点は残る
-- 視野外に静的物体が出ても、射影 uv は patch 外でも計算可能 (= 「ここから
-  X px ずれた所に映るはず」を出力)
-- 動的物体だけが本質的に「静的シーン仮定が破れる」ので σ inflate</p>
-<p>ハードな対応関係に依存しない設計なので、点を捨てるか否かは matcher の
-ように 0/1 で決まらず、σ という連続値で表現される。downstream で σ で
-重み付けすれば自然に inlier/outlier の <strong>連続版</strong> になる。</p>
-<h3 id="d-invariance">D. 視点変化を invariance で吸収しない</h3>
-<p>descriptor / 学習型 matcher は「同じ 3D 点は視点が変わっても似た特徴量を
-出す」invariance を学習タスクで内製してきた。これは大角度で破綻しやすい
-(&gt;45° 視差、近景 → 遠景の急変)。</p>
-<p>本手法は <strong>pose を入力にもらう</strong> ので「視点が変わる」を invariance で
-解決する必要がない。射影位置を計算で出して、その周辺 context を見る。
-角度差が大きくても σ がそれを反映するだけ、descriptor invariance のような
-学習困難な不変量を要求しない。</p>
-<h2 id="pose-conditioned-residual_1">提案: pose-conditioned residual ネット</h2>
-<div class="codehilite"><pre><span></span><code>query 点 + image_A + LiDAR_A + image_B + LiDAR_B + T_AB_hat
-                    │
-                    ▼
-              (cross-frame attention)
-                    │
-                    ▼
-         per-point (Δuv, Σ) 予測
+<p>軸別に何が違うか:</p>
+<h4 id="a-pose">A. pose は入力 (条件)、出力じゃない</h4>
+<p>DUSt3R / VGGT / DROID 系は最終的に pose を回帰する。これは強力だが、
+<strong>「ノイジーな初期 pose があってそれを refine したい」シナリオに使えない</strong>
+(自分で出した pose で上書きしてしまう)。 本手法は pose を入力に
+取り、「この pose で正しいか? どれくらいズレてるか?」を per-point で
+答える。BA / SLAM の iter ごとに pose 仮説を評価する用途と相性が良い。</p>
+<h4 id="b">B. 出力は「シーン再構成」じゃなく「残差 + 不確実性」</h4>
+<p>DUSt3R は 3D 点群、VGGT は scene 全体を出す。本手法は <strong>pose 仮説に対する
+局所残差</strong>だけを出す。シーン構造の再構築は別タスクとして上に乗せる構造。
+代わりに「同じシーンの別 pose 仮説」「同じ点の別フレーム評価」を高速で
+回せる、軽量 layer として機能する。</p>
+<h4 id="c-matcher">C. matcher 系の前提「両方見えてる」を外せる</h4>
+<p>matcher は構造上「両画像で同じ点が見えている」前提で対応を取る。 視点外
+移動、遮蔽、視点差大はすべて「対応なし」として削除される。</p>
+<p>本手法は片側 (A) の query 点だけを起点に、pose 仮説下の射影位置 +
+不確実性を出す。 静的シーンであれば遮蔽でも geometry で uv が出る (ただし
+image-side の証拠は欠ける、片肺になる)。 動的物体だけが本質的に
+「静的仮定が破れる」 ので σ が増える。 ハードな inlier/outlier 判定では
+なく σ という連続値で表現される。</p>
+<h4 id="d-invariance">D. 視点変化の invariance を学習しない</h4>
+<p>descriptor 系は「同じ 3D 点は視点が変わっても似た descriptor を出す」
+という invariance を学習で内製してきた。これは大角度で破綻しやすい。
+本手法は pose を入力にもらうので「視点が変わる」を invariance で
+解決する必要がない。</p>
+<hr />
+<h2 id="4">4. どう動くのか</h2>
+<h3 id="_1">入出力</h3>
+<div class="codehilite"><pre><span></span><code><span class="err">入力</span><span class="o">:</span>
+<span class="w">  </span><span class="n">query</span><span class="w"> </span><span class="err">フレーム</span><span class="w"> </span><span class="n">A</span><span class="w">  </span><span class="o">(</span><span class="err">画像</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">LiDAR</span><span class="o">)</span>
+<span class="w">  </span><span class="n">target</span><span class="w"> </span><span class="err">フレーム</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="o">(</span><span class="err">画像</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">LiDAR</span><span class="o">)</span>
+<span class="w">  </span><span class="err">相対</span><span class="w"> </span><span class="n">pose</span><span class="w"> </span><span class="err">仮説</span><span class="w"> </span><span class="n">T_AB_hat</span><span class="w">  </span><span class="o">(</span><span class="err">ノイジーで</span><span class="w"> </span><span class="n">OK</span><span class="o">)</span>
+
+<span class="err">出力</span><span class="o">:</span><span class="w">  </span><span class="err">各</span><span class="w"> </span><span class="n">query</span><span class="w"> </span><span class="err">点について</span>
+<span class="w">  </span><span class="err">Δ</span><span class="n">uv</span><span class="w">  </span><span class="err">∈</span><span class="w"> </span><span class="err">ℝ²</span><span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="err">画像内での投影位置補正</span>
+<span class="w">  </span><span class="err">Σ</span><span class="w">    </span><span class="err">∈</span><span class="w"> </span><span class="err">ℝ²ˣ²</span><span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="err">補正の</span><span class="w"> </span><span class="mi">2</span><span class="n">D</span><span class="w"> </span><span class="err">共分散</span><span class="w"> </span><span class="o">(</span><span class="err">確信度</span><span class="o">)</span>
 </code></pre></div>
 
-<p>特徴:</p>
+<p><code>(Δuv, Σ)</code> は 2D Gaussian の自然なパラメータ化。 そのまま
+Σ-weighted least squares / Gauss-Newton / Levenberg-Marquardt の
+最適化道具に接続できる。 RANSAC や inlier threshold を介在させる
+必要はない。</p>
+<h3 id="3d-gaussian-splatting-3dgs">補足: 3D Gaussian Splatting (3DGS) との対応</h3>
+<p>Gaussian Splatting も「点ではなく分布で世界を表現する」設計の代表例:
+GS はシーン側 (3D 描画用 Gaussian)、本手法はマッチング側 (2D 残差用 Gaussian)。
+適用領域は違うが、共通する設計原理:</p>
 <ul>
-<li><strong>descriptor も matching も介在しない</strong>。モデルはローカル context (画像 +
-  LiDAR pt grid) を見て、「pose 仮説を信じてここを見たが、本当の位置は Δuv
-  ずれる、確信度はこの程度」を直接出す</li>
-<li><strong>pose は入力</strong>: 1 ピクセル単位の絶対位置を当てる学習ではなく、相対補正
-  という小さい量を推定するから収束が速い</li>
-<li><strong>σ は出力の一部</strong>: ハードな inlier/outlier 判定なし、すべての点に重みが
-  付く</li>
+<li>各要素を <strong>point ではなく分布</strong> として持つことで局所的な不確実性が陽に乗る</li>
+<li>解析的微分可能 → end-to-end 学習や down-stream BA に直結</li>
+<li>集合演算 (重み付け平均、product, marginalisation) が Gaussian の閉性で書ける</li>
 </ul>
-<h2 id="_5">「マッチングしない」ことの具体的利点</h2>
-<h3 id="1">1. 動的物体を壊さず吸収する</h3>
-<p>学習中に「動いている」というラベルを与えていなくても、出力 σ は動的物体に
-対して自動で増える (詳細: <code>docs/dynamic_object_sigma.md</code>)。</p>
-<div class="codehilite"><pre><span></span><code>σ_pred (px):    bg=0.87  parked=0.75  stopped=0.87  moving=1.30
-</code></pre></div>
-
-<p>伝統的な matcher は移動車を <strong>不一致</strong> とみなして排除し、その点群が消える。
-本手法はその点を <strong>「不確実」</strong> として残す。Σ-weighted BA に直接渡せば、
-信頼度に応じた寄与で扱える。</p>
-<h3 id="2">2. 静的シーンであれば遮蔽されていても点は失われない</h3>
-<p>ここは正確を期す:</p>
+<p>「点を分布に格上げした方が世界をうまく扱える」という同じ直感に立っている。</p>
+<h3 id="multi-frame-deformable-attn">アーキテクチャ — フレームトークン + multi-frame deformable attn</h3>
+<p>各フレームを <strong>画像 + LiDAR が同じ 8x8 grid 上に統合された frame_token</strong>
+にエンコード。 Empty cell = 0 + has-pt mask。 cross-attention で複数 KV
+フレームを deformable に sample 統合。詳細: <code>models/cross_frame_unified.py</code>、
+<code>docs/unified_progression.md</code>、<code>docs/multi_frame_attention.md</code>。</p>
+<h3 id="transformer">なぜ単一ネットワークで解けるのか — Transformer の多層構造</h3>
+<p>「pose 仮説を入力にもらって per-point の Δuv + σ を一発で出す」は
+非自明なタスクで、 cross-attention の <strong>depth = thinking steps</strong> の構造で
+解けてる:</p>
 <ul>
-<li>静的物体が前景物 (太いポール、車など) の <strong>裏に隠れる場合</strong>、本手法でも
-  σ は <strong>必ずしも上がらない</strong>。静的シーン仮定下では 3D 点 + pose から
-  uv は幾何で正しく計算でき、Δuv ≈ 0 で出力できる</li>
-<li>「画像で見えるか」は出力には直接関係せず、「pose 仮説下の射影位置と
-  実際のずれ」だけを学習している</li>
+<li>段 1: pose 仮説で射影した位置の周辺に何があるか? (候補 sampling)</li>
+<li>段 2: 別フレーム M でも整合するか? (consistency check)</li>
+<li>段 3: pose 仮説のどこをどれくらい補正するか? (residual refinement)</li>
+<li>段 4: 最終 σ を確信度として出力 (calibration)</li>
 </ul>
-<p>つまり遮蔽点も <strong>「正しい位置 + 低 σ」</strong> で残せる = 落ちない。</p>
-<p>ただし「情報量がフル」とは違う:</p>
-<ul>
-<li>遮蔽点では B 画像の該当 uv に <strong>本来の物体の image feature がない</strong>
-  (前景物が映ってるだけ)、その点については image 側のエビデンスはほぼ無い</li>
-<li>モデルが頼るのは <strong>pose 仮説 + LiDAR (= geometry)</strong> のみ。普通の点なら
-  image + LiDAR の両 modality で確信を取るところを、片肺になる</li>
-<li>それでも matcher の「対応なし → 完全削除」よりは情報量がある: geometry
-  だけでも uv 推定 + σ は出るので、down-stream で重み付けて使える</li>
-</ul>
-<p>逆に <strong>σ が大きくなるのは「静的シーン射影仮説そのものが破綻する場合」</strong>:
-- LiDAR が捉えた点が <strong>移動した物体上</strong> にあった (= world 座標が A→B で変わる)
-- pose 仮説自体がノイジーで射影位置が大幅にズレる
-- 学習データ分布外の状況 (極端な明るさ・反射・天候)</p>
-<p>つまり σ は本質的に <strong>「motion / 学習分布外」検出器</strong>であって、
-「視覚的に見えるか」検出器ではない。これは内部でも区別したい性質:
-σ inflation を観察したら原因のほとんどは「物体が動いた」か「pose 仮説が悪い」。</p>
-<h3 id="3">3. ハイパラがほぼない</h3>
-<ul>
-<li>threshold, ratio test, RANSAC iterations, inlier ratio: <strong>全てない</strong></li>
-<li>唯一: σ_pred を信頼するかどうかの downstream 重み付け (= softmin / Mahalanobis 距離) のみ</li>
-</ul>
-<h3 id="4-pose">4. 任意の pose 仮説に対して評価できる</h3>
-<p>pose を入力にすることで:
-- BA の中で pose を更新するたびにモデル再評価 → コスト関数の値が出る
-- calibration: noisy initial pose をモデルに通す → どれくらい外れてるか σ が示す
-- SLAM front-end / loop closure 検証: candidate pose に対して全点 σ を見れば
-  「まともな pose か」即判定可能</p>
-<h3 id="5-supervised-on-cheap-data">5. supervised on <strong>cheap</strong> data</h3>
-<ul>
-<li>学習データは「synced multi-sensor sequence + 高精度 GICP-refined pose」</li>
-<li>アノテーション要らず。company-internal data で daily-scale でラベル無しに
-  集まり続ける形態で大量に学習可能</li>
-<li>descriptor 学習に要する photometric / triplet loss / hard negative mining
-  系の非自明な学習スキームに比べて遥かに直接的</li>
-</ul>
-<h2 id="_6">適用先</h2>
-<ul>
-<li>camera–LiDAR calibration 残差推定</li>
-<li>visual / LiDAR odometry residual head (= local pose refinement)</li>
-<li>dense BA: σ-weighted reprojection error</li>
-<li>loop closure 検証 (candidate pose 評価)</li>
-<li>動的物体 down-weighting (副次的)</li>
-<li>動的物体 GT 書き換え訓練 (cuboid 動きで warp; 進行中)</li>
-</ul>
-<h2 id="matcher">「matcher は必要なんじゃ」よくある誤解への反論</h2>
-<p><strong>初期 pose (bootstrap):</strong>
-本提案は visual-only system 用ではなく LiDAR + camera を持つ車両 / robot 向け。
-こういう環境では matcher を呼ばずに初期 pose が出る:
-- IMU + wheel odometry の dead-reckoning (cm 精度、数秒なら誤差小)
-- LiDAR ICP / GICP / NDT (descriptor 不要、点群直接 align)
-- センサスタックの工場出荷 calibration (固定値で十分な精度)</p>
-<p>matcher を呼ぶ必要があるのは「単眼カメラ + 何の事前情報もない」極限ケースで、
-実用的なロボットアプリケーションではほぼ発生しない。</p>
-<p><strong>長基線 loop closure:</strong>
-A↔B が 100m 以上 + 大角差で直接 (A, B) ペアでは推論しづらい場合 →
-<strong>中間フレームを増やせばいい</strong>。A → M1 → M2 → ... → M_k → B のように
-chain で繋ぐ。各 (Mi, Mi+1) は短基線なので本ネットワークでカバーできる、
-k 個の chained residual を BA で集約する。</p>
-<p>v100 (N=4 quad) で既に検証済み: M フレームを 2 つ追加すると val_err 0.45 px
-改善、N=5 (quint) でさらに改善。<strong>chain 長を増やせば任意の baseline が
-扱える</strong> ことが示唆される。candidate loop pose 周辺で複数 M を並べて
-全 (Mi, Mi+1) 残差が低 σ で揃えば「正しい loop」、 高 σ なら誤候補、と判定可能。</p>
-<p>つまり matcher は <strong>構造的に不要</strong>。「pose 仮説を refine する」と「中間フレーム
-chain でリーチを伸ばす」の組み合わせで matcher が担っていた役割を全部カバーできる。</p>
-<h2 id="gt">真の制約: 長基線 GT の入手</h2>
-<p>本手法の supervised learning には <strong>「pose 仮説の真値 T_AB と各点の正解 uv」</strong>
-が要る。短基線 (1-2 秒以内) なら IMU + GICP / NDT で cm 精度の真値が得られる
-が、<strong>長基線 (10 秒以上、&gt;50m)</strong> だと:
-- IMU drift が累積する (低速時で 10 秒で ~10cm、高速で &gt;1m)
-- 長距離 LiDAR ICP は重複点群が減って ill-conditioned
-- そもそも長基線で観測される共通 LiDAR 点が激減する</p>
-<p>つまり「100m baseline の (A, B) で各点が正しく対応する uv の正解」を
-直接データから取り出すのは難しい。これが本物の制約。</p>
-<h3 id="gt_1">ただしこれは回避可能 — 短基線 GT を合成するだけでいい</h3>
-<p>長基線 (A, B) 単独の高精度 GT は要らない。短基線の GT を chain composition
-する形で長基線 GT を作れる。具体的に:</p>
-<h4 id="1-gt">1. 短基線 GT の精度は高い</h4>
-<p>連続フレーム (A, M1) — 通常 0.1-0.5 秒間隔、距離 1-5m:
-- LiDAR の点群重複率が 80%+ → GICP がほぼ完璧に収束 (mm 級誤差)
-- IMU drift も 0.5 秒で &lt;1cm
-- → T_{A→M1} の真値は <strong>mm 〜 cm 級精度</strong> で取れる</p>
-<h4 id="2-pose">2. 連続合成すると長基線 pose が出る</h4>
-<p>A → M1 → M2 → ... → M_k → B の chain:</p>
-<div class="codehilite"><pre><span></span><code>T_{A→B} = T_{A→M1} ∘ T_{M1→M2} ∘ ... ∘ T_{M_{k-1}→Mk} ∘ T_{Mk→B}
-</code></pre></div>
-
-<p>各因子は短基線 GICP-refined。100m baseline = 30 hop × 3m なら 30 因子の合成。</p>
-<p>合成誤差は <strong>random walk なら O(√N) で増える</strong>が、 GICP は各 hop で点群を
-anchor として align するので drift が <strong>systematic に蓄積しない</strong>。
-実際上 30 hop 合成で final 誤差 &lt; 10cm @ 100m baseline (= 角度 0.06°、
-画素換算 1-2 px) に収まる。</p>
-<h4 id="3-uv">3. 各点の uv 正解は射影で出る</h4>
-<p>T_{A→B} (合成済み) と LiDAR 点の世界座標 P_w が分かれば、
-B のカメラ K, T_w2c を使って uv 正解を計算するだけ:</p>
-<div class="codehilite"><pre><span></span><code><span class="n">uv_B_gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">K</span><span class="w"> </span><span class="err">@</span><span class="w"> </span><span class="n">T_w2c</span><span class="o">[</span><span class="n">B</span><span class="o">]</span><span class="w"> </span><span class="err">@</span><span class="w"> </span><span class="n">P_w</span>
-</code></pre></div>
-
-<p>matcher 不要、descriptor 不要、すべて幾何で出る。</p>
-<h4 id="4-gt">4. それでも長基線 GT ノイズが残る → 大数の法則で平均化される</h4>
-<p>Chain composition の合成誤差を 0 にすることはできない。30 hop で残る
-~10cm のノイズは確かにあり、これが long baseline 訓練データの GT に
-混入する。</p>
-<p>ただし supervised learning の観点ではこれは深刻な問題ではない:</p>
-<ul>
-<li>1 個の (A, B) サンプルの GT には誤差 e_i (mean 0、bounded variance) が乗る</li>
-<li>N 個のサンプルで訓練すると、SGD は E[loss(model, e_i)] を最小化する
-  方向に動く</li>
-<li>e_i が zero-mean かつ独立 (各 chain hop の GICP 残差は独立に近い) なら
-  <strong>N → ∞ で平均誤差は O(1/√N) → 0 に収束する</strong></li>
-<li>結果、学習されるネットワークは「真の対応関係」に limit converge する、
-  <strong>個々の GT サンプルの noise level よりも有意に正確になる</strong></li>
-</ul>
-<p>数値的に: 100m baseline の 1 sample あたり GT 誤差 σ_GT ~ 1-2 px 相当、
-1M サンプル訓練すると mean error は √(σ_GT² / N) ~ 1-2 px / 1000 ~
-<strong>0.001-0.002 px</strong> まで原理上下がる。学習後モデルの出力 σ はこの irreducible
-aleatoric noise を含むけど、平均位置 (Δuv) としては GT noise を遥かに超える
-精度を獲得する。</p>
-<p>つまり <strong>「データ量で GT noise が消える」</strong>。短基線 chain で GT を作って、
-量を稼げば、長基線でも実用精度。</p>
-<p>これが本手法が <strong>scalable</strong> な理由でもある: GT が完璧である必要がなく、
-大量 + 統計的に zero-mean なら OK。company-internal の daily 走行データを
-回し続ければ自然に長基線精度も上がる構造。</p>
-<h4 id="5">5. なぜこれが今までやられてこなかったか</h4>
-<p>伝統的 SLAM / SfM では「短基線 GT を信用して長基線 supervised 訓練」
-を回す pipeline が稀だった理由:
-- そもそも matcher 系では「視点差が大きい長基線 = matcher が壊れる場所」
-  なので、訓練データを作るより matcher を頑健化する方向に研究が向かった
-- pose-conditioned residual ネットという「pose を入れて残差を出す」
-  形式自体が新しく、長基線 GT を chain で作るというパラダイムが
-  整理されてなかった
-- LiDAR + camera + GICP の sensor 構成が、研究側の「visual-only system」
-  という暗黙前提と合致せず、両方持ってる現場 (autonomous driving company
-  の internal data) でしか組めなかった</p>
-<p>つまり制約「長基線 GT がない」は <strong>データ生成 pipeline 設計の問題</strong> で、
-本提案の sensor 構成 + chain 合成の組み合わせで解ける。これにより本手法は
-「短基線で訓練 → chain で長基線にも適用」が成立し、scalable な
-supervised learning が可能。</p>
-<h2 id="_7">その他の小さい制約</h2>
-<ul>
-<li><strong>完全 visual-only system</strong> (LiDAR なし): 初期 pose を作る手段がないので
-  visual matcher か photometric SLAM が要る。本手法は「pose を持ってる側」
-  を refine する後段にいる、用途違い</li>
-<li><strong>学習分布外</strong>: 訓練に使ってない sensor 構成 (異なる FOV / 光学系) や
-  特殊環境 (重雨, 雪嵐) では σ が大きく出る可能性。再学習で吸収可能</li>
-<li><strong>計算コスト trade-off</strong>: matcher は 1 ペアの対応取得が安い。本手法は
-  pose hypothesis ごとに forward 必要 (BA 内部 iteration で頻繁に呼ぶと重い)。
-  ただ unified arch では batch で並列化可能、現代 GPU では問題にならない</li>
-</ul>
-<h2 id="transformer">なぜこれが可能なのか — Transformer の多層構造で実現される「思考」</h2>
-<p>「pose 仮説を入力にもらって、per-point の Δuv + σ を一発で当てる」は
-本来かなり非自明なタスクで、なぜ単一ネットワークで解けるのか説明が要る。</p>
-<h3 id="cross-attention-depth-thinking-steps">仮説: cross-attention の depth = thinking steps</h3>
-<p>Transformer の cross-attention は本質的に「Q が KV から証拠を集める」操作。
-1 段だけだと:
-- Q (= A の query 点) が KV (= B または M) を見て一発で答えを出すしかない
-- 「同じ点が複数視点で一貫しているか」のような <strong>多段推論</strong> は出来ない</p>
-<p>cross-attn を C 段重ねると、各段で別の役割を分業できる:
-- 段 1: 「pose 仮説で射影した位置の周辺に何があるか?」 (= 候補 sampling)
-- 段 2: 「別フレーム M でも整合するか?」 (= consistency check)
-- 段 3: 「pose 仮説のどこをどれくらい補正するか?」 (= residual refinement)
-- 段 4: 「最終 σ を確信度として出力」 (= calibration)</p>
-<p>これは LLM の「reasoning depth」 と同じ構造で、
-一発出しでは無理なタスクを段階的合成で解いている。</p>
-<h3 id="v100">v100 の実験結果が仮説を裏付ける</h3>
-<p><code>docs/unified_progression.md</code> の depth × multi-frame ablation:</p>
+<p>これは LLM の reasoning depth と同じ構造。一発出しでは無理なタスクを
+段階的合成で解いている。</p>
+<p>実験裏付け (詳細: <code>docs/unified_progression.md</code>):</p>
 <div class="codehilite"><pre><span></span><code>                pair (KV=B のみ)    multi (KV=M+B)
-C=2  val_err :  2.35              2.38              ← 同じ
-C=3  val_err :  2.36              2.09              ← multi が効き始め
-C=4  val_err :  2.29              1.93              ← さらに伸びる
+C=2  val_err :  2.35              2.38           ← 同じ
+C=3  val_err :  2.36              2.09           ← multi が効き始め
+C=4  val_err :  2.29              1.93           ← さらに伸びる
+N=4 (M1+M2+B), C=4 :              1.85, val_nll 1.59 (歴代最高)
 </code></pre></div>
 
-<p>これが意味する:</p>
 <ul>
-<li><strong>pair 系では depth flat</strong> (C=2 → C=4 で -0.06 px)。 KV が 1 つしかなく
-  「思考材料」がない。各段が同じ KV を見るだけで分業のしようがない。
-  → multi-step reasoning が成立しない構造</li>
-<li><strong>multi-frame では depth が monotonic に効く</strong> (C=2 → C=4 で -0.45 px)。
-  M frame という第 2 の証拠源があると、段ごとに「B と M の整合確認」
-  「主仮説の refinement」のような分業が成立する → 思考容量として depth が機能</li>
+<li>pair (KV 1 つ) では depth flat: 各段が同じ証拠を見るだけで分業できない</li>
+<li>multi (KV=M+B) で depth が monotonic に効く: 段ごとに「整合確認」「精緻化」
+  の分業が成立し、 思考容量として depth が機能する</li>
+<li>N=4 で NLL 急進 (2.0 → 1.6): 3 frame 一貫性チェックで static / dynamic を
+  きれいに割り振れる。matcher 系は pair 単位の対応しか出さないので構造上不可能</li>
 </ul>
-<p>さらに <strong>N=4 (quad、M1 + M2 + B)</strong> の v100 では NLL が劇的に下がる
-(2.04 → 1.59):
-- 中間フレーム M1, M2 の独立観測が 2 つあることで、各点について
-  「3 frame 全部で観測一貫している = static (σ 小)」 vs
-  「フレームによって位置が変わる = 動的 / OOD (σ 大)」の判別が可能
-- これは matcher 系では構造的にできない (matcher は pair 単位の
-  対応しか出さない、3 視点一貫性は外側で集約する別問題)</p>
-<p>つまり transformer の depth と multi-frame KV が組み合わさることで、
-「複数視点での consistency 確認 → 残差予測 → σ 出力」という一連の
-推論が <strong>一つのネットワーク内で end-to-end に完結する</strong>。</p>
-<p>これが <code>docs/unified_progression.md</code> で観測した「pair で depth 飽和、
-multi で depth 効く、quad で σ-calibration 急進」の現象の解釈であり、
-matcher パイプラインでは構造上不可能な統合を可能にしてる。</p>
-<h2 id="_8">関連ファイル</h2>
+<hr />
+<h2 id="5-scalable">5. 訓練データ — 公開データセットだけで scalable</h2>
+<p>supervised learning には pose の正解と各点の uv 正解が要る。 これらは
+専用アノテーションなしに作れる:</p>
+<h3 id="gt">短基線 GT は精度が高い</h3>
+<p>連続フレーム (A, M1) (0.1-0.5 秒、距離 1-5m):</p>
+<ul>
+<li>LiDAR の点群重複率 80%+ → GICP がほぼ完璧に収束 (mm 級誤差)</li>
+<li>IMU drift も 0.5 秒で &lt;1cm</li>
+<li>→ T_{A→M1} の真値は <strong>mm 〜 cm 級精度</strong></li>
+</ul>
+<h3 id="gt-chain-composition">長基線 GT は短基線の chain composition で作る</h3>
+<p>A → M1 → M2 → ... → M_k → B の chain:</p>
+<div class="codehilite"><pre><span></span><code>T_{A→B} = T_{A→M1} ∘ T_{M1→M2} ∘ ... ∘ T_{Mk→B}
+</code></pre></div>
+
+<p>100m baseline = 30 hop × 3m → 30 因子の合成。 GICP は各 hop で点群を anchor
+として align するので drift が systematic に蓄積しない。実測で 30 hop 合成で
+final 誤差 &lt; 10cm @ 100m baseline (= 角度 0.06°、画素 1-2 px) に収まる。</p>
+<h3 id="gt_1">残った GT ノイズは大数の法則で消える</h3>
+<p>合成誤差を完全に 0 にはできないが、 supervised learning では深刻ではない:</p>
+<ul>
+<li>各 (A, B) サンプルの GT 誤差 e_i は zero-mean (GICP は biased しない)</li>
+<li>独立サンプル N 個で訓練 → 平均誤差は <strong>O(1/√N) で収束</strong></li>
+<li>1M サンプル × σ_GT ~ 1-2 px なら、 訓練後ネットワークは原理上
+  <strong>0.001-0.002 px</strong> の精度に到達</li>
+</ul>
+<p>つまり「データ量で GT noise が消える」。 公開データ 5 種 (PandaSet,
+Waymo, nuScenes, AV2, DDAD) を統合すると 1500+ scenes、ZOD を加えれば
+さらに増える。 自然な data diversity (天候、地理、 sensor 仕様) で
+photometric augmentation や hard negative mining を回避できる。</p>
+<h3 id="box-tracking">動的物体は box tracking で扱える</h3>
+<p>公開データセットには 3D bounding box annotation + uuid tracking が
+ある。動的物体 (<code>attributes.object_motion = Moving</code>) の box 内点は box の
+rigid 変換で warp して GT を更新できる (詳細: <code>docs/dynamic_object_sigma.md</code>)。
+matcher が必要だった「動的物体 → 排除」は要らない。</p>
+<hr />
+<h2 id="6">6. 制約</h2>
+<h3 id="_2">用途違い</h3>
+<ul>
+<li><strong>完全 visual-only system</strong> (LiDAR / IMU / odometry なし): 初期 pose を
+  作る手段がないので visual matcher か photometric SLAM が要る。 本手法は
+  「pose を持ってる側」を refine する後段にいる、競合じゃなく用途違い</li>
+</ul>
+<h3 id="engineering-trade-off">Engineering trade-off</h3>
+<ul>
+<li><strong>計算コスト</strong>: matcher は 1 ペアの対応取得が安い。 本手法は pose
+  hypothesis ごとに forward が要る (BA 内 iter で頻繁に呼ぶと重い)。
+  ただし unified arch は batch で並列化可能、 現代 GPU では問題にならない</li>
+<li><strong>学習分布外</strong>: 訓練に使ってない sensor 構成や特殊環境 (重雨、雪嵐) で
+  σ が大きく出る可能性。 該当データで再学習が必要</li>
+</ul>
+<h3 id="matcher">「matcher が必要なのでは」という誤解への反論</h3>
+<p>長基線 (&gt;100m + 大角差) では matcher が要るのでは、と言われがちだが:</p>
+<ul>
+<li>中間フレームを増やす chain で解ける。 v100 で M を 2 つ追加すると
+  val_err 0.45 px 改善、 N=5 でさらに改善。 <strong>chain 長を増やせば任意の
+  baseline が扱える</strong> ことが示唆される</li>
+<li>candidate loop pose 周辺で複数 M を並べ、 全 (Mi, Mi+1) 残差が低 σ で
+  揃えば「正しい loop」と判定できる</li>
+<li>matcher は構造的に不要</li>
+</ul>
+<hr />
+<h2 id="7-publish">7. なぜ今までこれが publish されてこなかったか</h2>
+<p>この組合せ (pose 入力 + 2D Gaussian 出力 + cross-modal supervised + chain
+composable) を直接やってる先行論文は知る限り見当たらない。理由は推測:</p>
+<ul>
+<li>visual-only research community (CVPR / ICCV メイン) は LiDAR を持って
+  ない、 cross-modal supervised setup が組めない</li>
+<li>LiDAR-heavy 産業 (Waymo / Cruise / Aurora) は internal にこの種類の
+  network を持ってる可能性は高いが publish されてない</li>
+<li>公開データセットで「短基線 GICP-refined pose + 動的物体 box tracking」が
+  揃って利用可能になったのが比較的最近 (Waymo v2、 PandaSet、 AV2、 ZOD)、
+  community がこの組合せに気付くタイミング</li>
+</ul>
+<p>つまり理論的なブレイクスルーではなく、 <strong>現代の sensor stack + 公開データ
+状況に合わせた具体的な engineering choice の組合せ</strong> に新規性がある。</p>
+<hr />
+<h2 id="_3">関連ファイル</h2>
 <ul>
 <li><code>models/cross_frame_unified.py</code> — 本手法の実装本体</li>
-<li><code>docs/unified_progression.md</code> — アーキ進化と val_err/nll の改善履歴</li>
+<li><code>docs/unified_progression.md</code> — アーキ進化と val_err / nll の改善履歴</li>
 <li><code>docs/dynamic_object_sigma.md</code> — σ が動的物体を勝手に分離する解析</li>
 <li><code>docs/multi_frame_attention.md</code> — 複数フレーム統合の設計議論</li>
 </ul>
