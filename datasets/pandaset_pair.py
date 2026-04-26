@@ -1104,6 +1104,10 @@ class PandaSetCrossFrameDataset(Dataset):
         z_A_patch        = z_A_patch[inb]
         uv_B_gt_local_A  = uv_B_gt_local_A[inb]
         uv_B_hat_local_A = uv_B_hat_local_A[inb]
+        # Track world coords of A-query points through the same filter chain.
+        # Used by analysis scripts (dynamic_object_variance.py); padded to
+        # max_points alongside the rest of the per-query arrays below.
+        pts_w_QA_filt = pts_w_QA[good_qa][inb].astype(np.float32)
 
         # 11. B-query points = B's in-patch LiDAR (symmetric)
         in_box_B = ((uv_Bf[:, 0] >= box_B[0]) & (uv_Bf[:, 0] < box_B[0] + box_B[2]) &
@@ -1309,19 +1313,72 @@ class PandaSetCrossFrameDataset(Dataset):
                     arrs[6] = np.concatenate([arrs[6], np.zeros((pad_n, 2), np.float32)])
                     arrs[7] = np.concatenate([arrs[7], np.zeros(pad_n, np.float32)])
                 return (*arrs, pad)
+            uv_A_pre = uv_A_patch.copy()
             (uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A,
              d_B_gt_of_A, uv_M_local_A, d_M_of_A, pad_A) = _pad8(
                 uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A,
                 d_B_hat_of_A, d_B_gt_of_A, uv_M_local_A, d_M_of_A)
+            # Pick + pad world coords using same stratified pick (triplet path).
+            N = len(uv_A_pre)
+            if N > self.max_points:
+                G = int(np.sqrt(self.max_points))
+                cell = self.img_size / G
+                cj = np.clip((uv_A_pre[:, 0] / cell).astype(np.int32), 0, G - 1)
+                ci = np.clip((uv_A_pre[:, 1] / cell).astype(np.int32), 0, G - 1)
+                cid = ci * G + cj
+                du  = uv_A_pre[:, 0] - (cj + 0.5) * cell
+                dv  = uv_A_pre[:, 1] - (ci + 0.5) * cell
+                d2  = du * du + dv * dv
+                sel = []
+                for u_c in np.unique(cid):
+                    mem = np.where(cid == u_c)[0]
+                    sel.append(int(mem[np.argmin(d2[mem])]))
+                pick_a = np.array(sorted(set(sel)), dtype=np.int64)
+            else:
+                pick_a = np.arange(N, dtype=np.int64)
+            pts_w_A_query_padded = pts_w_QA_filt[pick_a]
+            if len(pts_w_A_query_padded) < self.max_points:
+                pad_n = self.max_points - len(pts_w_A_query_padded)
+                pts_w_A_query_padded = np.concatenate(
+                    [pts_w_A_query_padded,
+                     np.zeros((pad_n, 3), dtype=np.float32)], axis=0)
             (uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B,
              d_A_gt_of_B, uv_M_local_B, d_M_of_B, pad_B) = _pad8(
                 uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B,
                 d_A_hat_of_B, d_A_gt_of_B, uv_M_local_B, d_M_of_B)
         else:
+            # World-coord pick MUST be computed against the SAME uv_A_patch
+            # that _pad sees (i.e. before _pad mutates it). Snapshot first.
+            uv_A_pre = uv_A_patch.copy()
             uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A, pad_A = _pad(
                 uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A)
             uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B, pad_B = _pad(
                 uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B)
+
+            # Pick + pad pts_w_QA_filt with the same stratified pick _pad used.
+            N = len(uv_A_pre)
+            if N > self.max_points:
+                G = int(np.sqrt(self.max_points))
+                cell = self.img_size / G
+                cj = np.clip((uv_A_pre[:, 0] / cell).astype(np.int32), 0, G - 1)
+                ci = np.clip((uv_A_pre[:, 1] / cell).astype(np.int32), 0, G - 1)
+                cid = ci * G + cj
+                du  = uv_A_pre[:, 0] - (cj + 0.5) * cell
+                dv  = uv_A_pre[:, 1] - (ci + 0.5) * cell
+                d2  = du * du + dv * dv
+                sel = []
+                for u_c in np.unique(cid):
+                    mem = np.where(cid == u_c)[0]
+                    sel.append(int(mem[np.argmin(d2[mem])]))
+                pick_a = np.array(sorted(set(sel)), dtype=np.int64)
+            else:
+                pick_a = np.arange(N, dtype=np.int64)
+            pts_w_A_query_padded = pts_w_QA_filt[pick_a]
+            if len(pts_w_A_query_padded) < self.max_points:
+                pad_n = self.max_points - len(pts_w_A_query_padded)
+                pts_w_A_query_padded = np.concatenate(
+                    [pts_w_A_query_padded,
+                     np.zeros((pad_n, 3), dtype=np.float32)], axis=0)
 
         z_A_norm = z_A_patch / 50.0
         z_B_norm = z_B_patch / 50.0
@@ -1356,7 +1413,12 @@ class PandaSetCrossFrameDataset(Dataset):
             pad_B_full = torch.from_numpy(pad_B_full),
             fi_A = fi_A, fi_B = fi_B,
             scene = scn.scene_id,
+            scene_root = str(scn.root),
         )
+        # Optional side-channel for analysis: world-coord query points (A side)
+        # padded to max_points, ordered same as uvd_A. Computed in both pair
+        # and triplet code paths above.
+        out['pts_w_A_query'] = torch.from_numpy(pts_w_A_query_padded)
         if self.triplet:
             z_M_norm = z_M_patch / 50.0
             out['patch_M']      = patch_M.float()

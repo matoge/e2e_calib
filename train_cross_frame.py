@@ -765,11 +765,18 @@ def main():
             if cml_logger is not None:
                 # Each metric gets its OWN plot title — ClearML splits same-title
                 # different-series across subplots, which hid val_nll behind val_err.
+                # Also dual-report under the legacy ('train','val') titles so old
+                # dashboard layouts that pre-date the title split still populate.
                 cml_logger.report_scalar('nll',     'train',  value=curves['loss'][-1], iteration=ep)
                 cml_logger.report_scalar('err',     'train_AB', value=curves['err_AB'][-1], iteration=ep)
                 cml_logger.report_scalar('err',     'train_BA', value=curves['err_BA'][-1], iteration=ep)
                 cml_logger.report_scalar('err',     'base',   value=curves['base_AB'][-1], iteration=ep)
                 cml_logger.report_scalar('lr',      'lr',     value=opt.param_groups[0]['lr'], iteration=ep)
+                # legacy mirror
+                cml_logger.report_scalar('train', 'loss',   value=curves['loss'][-1], iteration=ep)
+                cml_logger.report_scalar('train', 'err_AB', value=curves['err_AB'][-1], iteration=ep)
+                cml_logger.report_scalar('train', 'err_BA', value=curves['err_BA'][-1], iteration=ep)
+                cml_logger.report_scalar('train', 'base',   value=curves['base_AB'][-1], iteration=ep)
                 if do_val:
                     val_err = 0.5*(v['err_AB']+v['err_BA'])
                     cml_logger.report_scalar('err', 'val',  value=val_err, iteration=ep)
@@ -778,6 +785,9 @@ def main():
                                               value=val_err/max(curves['err_AB'][-1], 1e-6), iteration=ep)
                     cml_logger.report_scalar('overfit', 'val_nll - train_nll',
                                               value=v['loss'] - curves['loss'][-1], iteration=ep)
+                    # legacy mirror
+                    cml_logger.report_scalar('val', 'err',  value=val_err, iteration=ep)
+                    cml_logger.report_scalar('val', 'nll',  value=v['loss'], iteration=ep)
 
         # save best by train (overfit) or val (full) mean err
         if overfit:
