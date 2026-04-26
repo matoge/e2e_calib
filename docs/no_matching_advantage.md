@@ -5,6 +5,36 @@
 推定する** ネットワークを学習することにある。本ドキュメントはなぜそれが
 重要か、何ができるか、何ができないかを整理する。
 
+## こんなことができる (実例)
+
+PandaSet 39-scene front_camera で訓練した v100 (unified multi c4 quad) の
+val サンプル。各サンプルは A→B 投影 1 ペアを示している:
+
+![per-point Δuv + σ predictions](images/no_matching_pred_examples.png)
+
+各点について:
+- **× (灰色)** = 静的シーン仮定での射影位置 (= pose 仮説 T_AB を信じた予測)
+- **○ (緑/赤)** = 真の B 位置 (GT)。緑 = 2σ 楕円内 (確信できてる)、赤 = 2σ 外
+- **+ (青)** = モデル出力 (× + Δuv)
+- **楕円** = 1σ / 2σ 不確実性 (Σ から描画)
+- **タイトルの "2σ-cover=XX%"** = 2σ 楕円内に GT が入った割合 (正しい σ なら ~95%)
+
+ぱっと見の特徴:
+- 道路面など静的シーン上の点は楕円が小さく、+ と ○ がほぼ重なる (= 高精度)
+- 動的物体の点は楕円が膨らみ、+ より ○ がずれていても 2σ で吸収される
+- 単一物体の点は σ も Δuv も近い分布で揃う (per-point 出力が空間的に整合)
+
+訓練曲線 (cross-frame タスク開始から 1 weekend での性能進化):
+
+![training progression](images/leaderboard_curves.png)
+
+σ が動的物体を勝手に分離してる挙動 (annotation なしで):
+
+![sigma by motion category](images/dynamic_object_sigma_v92.png)
+
+詳細: `docs/unified_progression.md` (アーキ進化), `docs/dynamic_object_sigma.md`
+(σ 解析)。
+
 ## なぜこれが必要か
 
 近年の SfM / SLAM / depth estimation 系論文の多くは、pose + 内部パラメータ
