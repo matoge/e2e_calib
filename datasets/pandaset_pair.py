@@ -378,6 +378,9 @@ class PandaSetCrossFrameDataset(Dataset):
                  quad: bool = False,       # extends triplet with M2: A, M1, M2, B
                  triplet: bool = False,    # legacy: append M as aux KV in the
                                            # named-field pair output (used by v51-v55)
+                 calib_legacy: bool = False, # if True with calib_mode, use the
+                                           # legacy _try_one path (pose_AB=δT
+                                           # hint). Reproduces v303 setup.
                  calib_mode: bool = False, # cam-LiDAR extrinsic calibration:
                                            # forces fi_B = fi_A so the perturbation
                                            # acts on the (world→cam = LiDAR→cam)
@@ -414,6 +417,10 @@ class PandaSetCrossFrameDataset(Dataset):
         self.use_stacked = use_stacked
         self.motion_warp_gt = motion_warp_gt
         self.calib_mode = calib_mode
+        # When set together with calib_mode=True, dispatch __getitem__ to
+        # the legacy _try_one path (calib_mode flag inside) instead of
+        # _try_one_calib. Reproduces v303 setup (pose_AB = δT hint).
+        self.calib_legacy = calib_legacy
         self.lidar_subdir = lidar_subdir
         self._cuboid_cache = {}                       # (scene_root_str, fi) → list of box dicts
         self.rng = np.random.default_rng(seed)
@@ -602,7 +609,13 @@ class PandaSetCrossFrameDataset(Dataset):
         # low (~10%) under restrictive vfl_range / multi-camera mixes, so
         # 30 retries is too few — bump to 200 and only raise if truly stuck.
         for retry in range(200):
-            if self.calib_mode:
+            if getattr(self, 'calib_legacy', False):
+                # Legacy calib path: _try_one with calib_mode flag (fi_B=fi_A,
+                # pose_AB_6dof = δT given as pose hint). Cheating-y (pose hint
+                # = answer at training, can't replicate at inference) but this
+                # is the proven-working baseline (v303 → 0.67 px).
+                sample = self._try_one(idx + retry * 9973)
+            elif self.calib_mode:
                 sample = self._try_one_calib(idx + retry * 9973)
             elif self.use_stacked:
                 sample = self._try_one_nframe(idx + retry * 9973)

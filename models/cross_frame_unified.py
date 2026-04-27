@@ -136,7 +136,7 @@ class FrameTokenEncoder(nn.Module):
     """
 
     def __init__(self, d=D_DIM, in_channels=3, use_convnext=False,
-                 r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True,
+                 r_uv=4.0, r_d=0.006, k_nb=8, use_frustum=True,
                  n_intra_layers=2, img_size=128,
                  n_xattn_modality=0, kv_image_only=False):
         super().__init__()
@@ -376,7 +376,7 @@ class CalibNetUnifiedFrame(nn.Module):
     def __init__(self, d=D_DIM, n_heads=4, n_intra_layers=2, n_cross_layers=2,
                  in_channels=3, img_size=128, max_kv_frames=2,
                  deform_n_points=4, use_convnext=False,
-                 r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True, out_dim=5,
+                 r_uv=4.0, r_d=0.006, k_nb=8, use_frustum=True, out_dim=5,
                  uv_only_query=False, q_uv_pure=False, n_xattn_modality=0,
                  kv_image_only=False):
         """uv_only_query: drop the bilinear sample of anchor frame_token from

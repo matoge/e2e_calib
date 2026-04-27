@@ -424,6 +424,9 @@ def main():
                          'flagged Moving by annotators, using the box A→B rigid '
                          'transform. Behind-camera warps drop; view-out warps '
                          'kept (model learns large Δuv). Trains motion-aware net.')
+    ap.add_argument('--calib-legacy', action='store_true',
+                    help='With --calib-mode, dispatch to the legacy _try_one '
+                         '(pose_AB=δT hint). Reproduces v303 setup (cheating).')
     ap.add_argument('--calib-mode', action='store_true',
                     help='cam-LiDAR extrinsic calibration: dataset forces '
                          'fi_B = fi_A so the perturbation acts on the cam-LiDAR '
@@ -557,6 +560,7 @@ def main():
         quint=args.quint_frame,                          # adds M3 (forces quad=True)
         motion_warp_gt=args.motion_warp_gt,
         calib_mode=args.calib_mode,
+        calib_legacy=args.calib_legacy,
         lidar_subdir=args.lidar_subdir,
         n_frames=n_frames_path,
         use_stacked=use_stacked,
