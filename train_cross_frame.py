@@ -271,14 +271,16 @@ def step_n(model, batch, loss_ab_only=False, mix_mode='mix'):
             bases.append(m_ij['base_px'])
             pair_metrics[f'err_{i}{j}']  = m_ij['err_px']
             pair_metrics[f'base_{i}{j}'] = m_ij['base_px']
-    # Mean of per-direction losses (multi-task standard).
-    # N=2 (pair): mean of 2 losses = (loss_AB + loss_BA) / 2 = legacy pair loss ✓
-    # N=3 (6 dir): mean of 6 losses → loss scale stays O(1) instead of growing
-    # to ~3× as `sum() * 0.5` did. The previous `sum() * 0.5` form effectively
-    # 3× the lr in v201 6-dir runs and was the cause of v201 underperforming
-    # v200 — composition-consistent perturbation was already correct, but the
-    # lr was implicitly too high for stability.
-    loss = torch.stack(losses).mean()
+    # Per-direction weight matches pair-mode: each direction contributes
+    # 0.5 × ∂loss_dir. For N=2 this is (l_AB + l_BA)/2 = mean = legacy pair.
+    # For N>2 the AB direction's gradient share is preserved at 0.5 (same as
+    # pair); other directions add extra signal at the same per-direction
+    # magnitude. Tried mean() in v309 — AB share drops to 1/6 and learning
+    # gets 3× slower → val_err 6.65 px (worse than v201's buggy 4.91 px).
+    # The empirical conclusion: 6-direction supervision is genuinely WORSE
+    # than pair (v200 = 2.27 px) regardless of loss scaling. M-related
+    # directions destabilise the shared encoder. Stick with pair for now.
+    loss = torch.stack(losses).sum() * 0.5
     # Surface the legacy A↔B direction (frame 0 = anchor, N-1 = far frame)
     # via the err_AB / err_BA / base_AB keys so the trainer's existing logger
     # is directly comparable to pair runs. Other directions are kept as

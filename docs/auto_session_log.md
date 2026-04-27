@@ -44,11 +44,23 @@
 - **map-side frame_token** PoC (永続地図 → frame_token render → cross-attn) — SLAM kernel
 - **学習済みモデルの量子化 + edge benchmark** (Hailo-8 / Coral / Jetson)
 
-## 注意
+## 注意 / 知見
 
-- 6DIR の問題は composition-consistent 摂動ではなく **loss スケール** だった
-  (`sum() * 0.5` → 6 directions で実効 lr 3× 過大)。
-- v306 の val_err 1.72px (ep8) は v303 単一ds の val_err 0.67px より高い。
-  Combined にすると per-dataset 最良に追いつかない傾向は cross-frame と同じ。
-  原因仮説: 複数ds の calib 摂動範囲が違う、or all-cam の摂動分布が
-  front-cam より厳しい。要観察。
+- **6DIR は実は pair より弱い** が empirical fact。3 つの仮説で順に検証:
+  1. composition-consistent 摂動 → 既に修正済み (v201 で確認、4.91 px)
+  2. loss スケール (`sum*0.5` → `mean`) → v309 で逆効果 (6.65 px、AB grad 1/6 weight)
+  3. **結論**: 6-direction supervision そのものが M 関連の方向経由で
+     共有 encoder を destabilize → pair (v200=2.27px) より構造的に弱い。
+  - v309 後に loss scaling は v201 の `sum * 0.5` に revert。
+- **Combined dataset は per-dataset best に追いつかない**:
+  - cam-LiDAR calib: v303 (PandaSet 103 単独) 0.67 < v306 (combined all-cam) 1.00
+  - cross-frame: v304 (PandaSet 103 単独) 2.54 < v307b (combined 3-ds) 2.63
+  - 仮説: 各 ds のキャリブ精度・センサー特性の差異を吸収しきれてない。
+    Per-dataset fine-tune が必要かも。
+
+- **All-cam scaling は OK**: v306 は 1100 scenes × all-cam = 4649 (scene,cam) で
+  1.00 px、v308 nuScenes all-cam で 0.71 px。データ量は劣化要因じゃない。
+
+- **3 modality (LiDAR / Radar / mm) × 2 dataset family** で同モデル動作確認。
+  論文にしてもよさそうだが、ユーザーは "papers as pebbles" 主義なので
+  artifact (動くシステム) に集中。
