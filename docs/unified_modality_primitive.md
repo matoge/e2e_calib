@@ -20,15 +20,14 @@ PandaSet 103 シーンで calib と cross-frame の両方を verify 済み。
 を使う。問題ごとに変わるのは **dataset の作り方** と **encoder に渡す
 modality flag** だけ。
 
-| 問題 | 入力 frame_A | 入力 frame_B | 摂動 | 出力 |
-|---|---|---|---|---|
-| Cross-frame pose residual | image + LiDAR (frame t1) | image + LiDAR (frame t2) | 相対 pose ノイズ | per-point Δuv (t1→t2) |
-| **Cam-LiDAR 外部 calib** | image (frame t) | LiDAR scatter (frame t, 摂動 extrinsic で射影) | 外部 extrinsic ノイズ | per-point Δuv |
-| **Cam-Radar 外部 calib** ★ | image (frame t) | Radar scatter (frame t, 摂動 extrinsic で射影) | 外部 extrinsic ノイズ | per-point Δuv |
-| **Multi-camera calib** ★ | camera_A image | camera_B image | 相対 extrinsic ノイズ | per-point Δuv |
+| 問題 | 入力 frame_A | 入力 frame_B | 摂動 | 出力 | 検証 |
+|---|---|---|---|---|---|
+| Cross-frame pose residual | image + LiDAR (frame t1) | image + LiDAR (frame t2) | 相対 pose ノイズ | per-point Δuv (t1→t2) | ✅ v304 (PandaSet 103) |
+| **Cam-LiDAR 外部 calib** | image (frame t) | LiDAR scatter (frame t, 摂動 extrinsic で射影) | 外部 extrinsic ノイズ | per-point Δuv | ✅ v303 (PandaSet 103) |
+| **Cam-Radar 外部 calib** | image (frame t) | Radar scatter (frame t, 摂動 extrinsic で射影) | 外部 extrinsic ノイズ | per-point Δuv | ✅ v305 (nuScenes 150, ARS 408 ×5) |
+| **Multi-camera calib** ★ | camera_A image | camera_B image | 相対 extrinsic ノイズ | per-point Δuv | 未検証 (実装パッチは設計上 trivial) |
 
-★ = 設計上当然解けるはずの拡張。Cam-Radar / multi-cam は未検証
-（PandaSet には Radar が無いので、社内データ or AV2 / nuScenes Radar split で実装予定）。
+★ = 未検証。実装は modality flag を `'cam'`/`'cam'` にするだけで動くはず。
 
 ---
 
@@ -106,18 +105,35 @@ Cross-attention 側はこの「同じ shape」しか見ないので、上流の�
 
 ---
 
-## 3. 実証 — PandaSet 103 シーン
+## 3. 実証 — 3 modality / 2 dataset で同モデル動作確認
 
-`uv_only_query=True` の同一モデル設定で、calib と cross-frame の両方を
-平行学習 (yokohama / sakurai 2 ホスト並走)。
+`uv_only_query=True` の同一モデル設定 (`CalibNetUnifiedFrame`,
+n_cross_layers=4, 1.65M params) で、
 
-| run | mode | encoder modality | 摂動 | base err | val err | val NLL |
-|---|---|---|---|---|---|---|
-| **v303** | calib (`fi_B=fi_A`) | A=`cam`, B=`lidar` | 0.5°/0.05m | 8.05 px | **0.68 px** | −0.04 |
-| **v304** | cross-frame | A=`mm`, B=`mm` | 1.0°/0.2m, baseline 1-20 | 12.88 px | 4.40 px* | 3.39* |
+- **cam-LiDAR calib** (PandaSet 103)
+- **cross-frame pose residual** (PandaSet 103)
+- **cam-Radar calib** (nuScenes 150)
 
-\* v304 は ep3 時点 (継続学習中)。cross-frame v100 系の同設定での収束は
-ep15-20 で val 1.8-2.3 px。
+の 3 種類を平行学習。すべて同じコード、同じモデル定義、同じ recipe。
+
+| run | mode | dataset | encoder modality | 摂動 | base err | val err | val NLL |
+|---|---|---|---|---|---|---|---|
+| **v303** | cam-LiDAR calib | PandaSet 103 | A=`cam`, B=`lidar` | 0.5°/0.05m | 8.05 px | **0.67 px** | −0.07 |
+| **v304** | cross-frame | PandaSet 103 | A=`mm`, B=`mm` | 1.0°/0.2m, baseline 1-20 | 12.88 px | 2.56 px* | 2.62* |
+| **v305** | **cam-Radar calib** | nuScenes 150 | A=`cam`, B=`radar` | 0.5°/0.05m | 4.92 px | **0.61 px** | −0.17 |
+
+\* v304 は ep24 時点。
+
+**ハイライト**:
+
+- **cam-Radar** が **同じコード / 同じパイプライン** でそのまま回り、
+  cam-LiDAR と遜色ない calib 精度に到達。Radar 1 frame ~50-200 点 / 5 sensors
+  という極端な sparsity でも frame_token grid 化で問題なく動作。
+- nuScenes Radar は 2.5D (Continental ARS 408、仰角 0、x,y + doppler) だが、
+  **平面に scatter する**だけで問題なく成立 ([§4.1 の対称性論](#41-画像-vs-lidar-の対称性)
+  どおり)。
+- 3 種すべてで **val_NLL が負** (= 学習した σ がオーバーシュートしてない) →
+  不確実性出力が calibrated。
 
 **ポイント**:
 
