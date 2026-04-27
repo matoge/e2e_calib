@@ -225,7 +225,7 @@ Combined-dataset 学習 (v306 / v307b) は per-dataset best (v303 / v304) より
 |---|---|---|---|---|---|
 | v306 (combined calib) | v311 | cam-LiDAR calib | PandaSet 103 (front) | v303 0.67 px | **0.60 px** |
 | v306 (combined calib) | v314 | cam-LiDAR calib | DDAD (all 4 cam) | n/a | **0.88 px** (vs combined 1.00) |
-| v306 (combined calib) | v315 | cam-LiDAR calib | Waymo (all 5 cam) | n/a | (running) |
+| v306 (combined calib) | v315 | cam-LiDAR calib | Waymo (all 5 cam) | n/a | **0.86 px** (vs combined 1.00) |
 | v307b (combined cross-frame) | v312 | cross-frame pair | PandaSet 103 (front) | v304 2.54 px | **2.38 px** |
 | v308 (nuScenes radar all-cam) | v313 | cam-Radar calib | nuScenes 150 (front) | v305 0.61 px | **0.53 px** |
 
