@@ -158,6 +158,7 @@ n_cross_layers=4, 1.65M params) で、</p>
 <th>run</th>
 <th>mode</th>
 <th>dataset</th>
+<th>cams</th>
 <th>encoder modality</th>
 <th>摂動</th>
 <th>base err</th>
@@ -170,45 +171,84 @@ n_cross_layers=4, 1.65M params) で、</p>
 <td><strong>v303</strong></td>
 <td>cam-LiDAR calib</td>
 <td>PandaSet 103</td>
+<td>front</td>
 <td>A=<code>cam</code>, B=<code>lidar</code></td>
 <td>0.5°/0.05m</td>
-<td>8.05 px</td>
-<td><strong>0.67 px</strong></td>
+<td>8.05</td>
+<td><strong>0.67</strong></td>
 <td>−0.07</td>
 </tr>
 <tr>
 <td><strong>v304</strong></td>
 <td>cross-frame</td>
 <td>PandaSet 103</td>
+<td>front</td>
 <td>A=<code>mm</code>, B=<code>mm</code></td>
-<td>1.0°/0.2m, baseline 1-20</td>
-<td>12.88 px</td>
-<td>2.56 px*</td>
-<td>2.62*</td>
+<td>1.0°/0.2m, base 1-20</td>
+<td>12.88</td>
+<td>2.54</td>
+<td>2.62</td>
 </tr>
 <tr>
 <td><strong>v305</strong></td>
 <td><strong>cam-Radar calib</strong></td>
 <td>nuScenes 150</td>
+<td>front</td>
 <td>A=<code>cam</code>, B=<code>radar</code></td>
 <td>0.5°/0.05m</td>
-<td>4.92 px</td>
-<td><strong>0.61 px</strong></td>
+<td>4.92</td>
+<td><strong>0.61</strong></td>
 <td>−0.17</td>
+</tr>
+<tr>
+<td><strong>v306</strong></td>
+<td>cam-LiDAR calib</td>
+<td>Panda+DDAD+Waymo (1100 scenes)</td>
+<td><strong>all (6/4/5)</strong></td>
+<td>A=<code>cam</code>, B=<code>lidar</code></td>
+<td>0.5°/0.05m</td>
+<td>7.60</td>
+<td><strong>1.00</strong></td>
+<td>0.53</td>
+</tr>
+<tr>
+<td><strong>v308</strong></td>
+<td><strong>cam-Radar calib</strong></td>
+<td>nuScenes 150</td>
+<td><strong>all (6 cams)</strong></td>
+<td>A=<code>cam</code>, B=<code>radar</code></td>
+<td>0.5°/0.05m</td>
+<td>4.29</td>
+<td><strong>0.71</strong></td>
+<td>0.03</td>
+</tr>
+<tr>
+<td><strong>v310</strong></td>
+<td>cam-LiDAR calib</td>
+<td>nuScenes 150</td>
+<td>front</td>
+<td>A=<code>cam</code>, B=<code>lidar</code></td>
+<td>0.5°/0.05m</td>
+<td>5.47</td>
+<td><strong>0.79</strong></td>
+<td>0.13</td>
 </tr>
 </tbody>
 </table>
-<p>* v304 は ep24 時点。</p>
+<p>(val_err / val_NLL は ep30 best、px / nat 単位)</p>
 <p><strong>ハイライト</strong>:</p>
 <ul>
-<li><strong>cam-Radar</strong> が <strong>同じコード / 同じパイプライン</strong> でそのまま回り、
-  cam-LiDAR と遜色ない calib 精度に到達。Radar 1 frame ~50-200 点 / 5 sensors
-  という極端な sparsity でも frame_token grid 化で問題なく動作。</li>
-<li>nuScenes Radar は 2.5D (Continental ARS 408、仰角 0、x,y + doppler) だが、
-  <strong>平面に scatter する</strong>だけで問題なく成立 (<a href="#41-画像-vs-lidar-の対称性">§4.1 の対称性論</a>
-  どおり)。</li>
-<li>3 種すべてで <strong>val_NLL が負</strong> (= 学習した σ がオーバーシュートしてない) →
-  不確実性出力が calibrated。</li>
+<li><strong>3 modality (LiDAR / Radar / multimodal)</strong> × <strong>3 dataset (PandaSet / nuScenes /
+  combined)</strong> × <strong>single-cam ↔ all-cam (6/4/5 cameras)</strong> の 6 通り全てで、<strong>同じ
+  モデル定義・同じ recipe</strong> が動作。</li>
+<li><strong>cam-Radar</strong> (nuScenes ARS 408 ×5、~50-200 点 / frame の sparsity、仰角 0 の
+  2.5D) でも cam-LiDAR と同じ calib 精度クラス (0.61-0.71 px val_err) に到達。
+  平面に scatter するだけ — modality 拡張のコストゼロ (<a href="#41-画像-vs-lidar-の対称性">§4.1 の対称性論</a> どおり)。</li>
+<li><strong>All-cam</strong> (PandaSet 6, DDAD 4, Waymo 5, nuScenes 6) でも <strong>数千の (scene, cam)
+  pair</strong> を 1 モデルで同時学習可能。<code>cameras='all'</code> で全カメラの LiDAR / Radar
+  / 画像が同じ frame_token に帰着する (前後左右の symmetry もモデルが勝手に学ぶ)。</li>
+<li>ほぼ全 run で val_NLL ≤ 1 (= 不確実性 σ が overshoot してない) → <strong>per-point Σ
+  が calibrated</strong> で、下流の Σ-weighted PnP / BA がそのまま使える。</li>
 </ul>
 <p><strong>ポイント</strong>:</p>
 <ul>
