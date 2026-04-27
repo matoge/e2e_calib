@@ -221,13 +221,15 @@ Combined-dataset 学習 (v306 / v307b) は per-dataset best (v303 / v304) より
 1. **大規模 pre-train**: combined-multi-dataset で M0 pair / M0 calib を 30 epoch
 2. **per-dataset fine-tune**: 重みを 1 つの dataset に対し低 lr (5e-4) で 15 epoch
 
-| run | flow | 摂動 | dataset | val_err |
-|---|---|---|---|---|
-| v303 | from scratch | calib | PandaSet 103 (front) | 0.67 px |
-| v306 | from scratch | calib | combined 1100 scenes (all cam) | 1.00 px |
-| **v311** | **v306 → fine-tune (PandaSet 103, front)** | calib | — | **0.60 px** ← v303 を超える |
+| pre-train | fine-tune target | task | dataset (cam) | from-scratch | **fine-tune** |
+|---|---|---|---|---|---|
+| v306 (combined calib) | v311 | cam-LiDAR calib | PandaSet 103 (front) | v303 0.67 px | **0.60 px** |
+| v306 (combined calib) | v314 | cam-LiDAR calib | DDAD (all 4 cam) | n/a | **0.88 px** (vs combined 1.00) |
+| v306 (combined calib) | v315 | cam-LiDAR calib | Waymo (all 5 cam) | n/a | (running) |
+| v307b (combined cross-frame) | v312 | cross-frame pair | PandaSet 103 (front) | v304 2.54 px | **2.38 px** |
+| v308 (nuScenes radar all-cam) | v313 | cam-Radar calib | nuScenes 150 (front) | v305 0.61 px | **0.53 px** |
 
-**Pre-train fine-tune が単独学習を超える**:
+**Pre-train fine-tune が単独学習を超える** (3/3 比較した case で勝利):
 
 - v306 が **1100 シーン × 3 dataset family × all-cam** で学んだ汎用な
   geometry / appearance 表現が encoder に乗ってる

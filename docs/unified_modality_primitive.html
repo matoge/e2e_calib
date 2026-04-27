@@ -332,38 +332,58 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 <table>
 <thead>
 <tr>
-<th>run</th>
-<th>flow</th>
-<th>摂動</th>
-<th>dataset</th>
-<th>val_err</th>
+<th>pre-train</th>
+<th>fine-tune target</th>
+<th>task</th>
+<th>dataset (cam)</th>
+<th>from-scratch</th>
+<th><strong>fine-tune</strong></th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>v303</td>
-<td>from scratch</td>
-<td>calib</td>
+<td>v306 (combined calib)</td>
+<td>v311</td>
+<td>cam-LiDAR calib</td>
 <td>PandaSet 103 (front)</td>
-<td>0.67 px</td>
+<td>v303 0.67 px</td>
+<td><strong>0.60 px</strong></td>
 </tr>
 <tr>
-<td>v306</td>
-<td>from scratch</td>
-<td>calib</td>
-<td>combined 1100 scenes (all cam)</td>
-<td>1.00 px</td>
+<td>v306 (combined calib)</td>
+<td>v314</td>
+<td>cam-LiDAR calib</td>
+<td>DDAD (all 4 cam)</td>
+<td>n/a</td>
+<td><strong>0.88 px</strong> (vs combined 1.00)</td>
 </tr>
 <tr>
-<td><strong>v311</strong></td>
-<td><strong>v306 → fine-tune (PandaSet 103, front)</strong></td>
-<td>calib</td>
-<td>—</td>
-<td><strong>0.60 px</strong> ← v303 を超える</td>
+<td>v306 (combined calib)</td>
+<td>v315</td>
+<td>cam-LiDAR calib</td>
+<td>Waymo (all 5 cam)</td>
+<td>n/a</td>
+<td>(running)</td>
+</tr>
+<tr>
+<td>v307b (combined cross-frame)</td>
+<td>v312</td>
+<td>cross-frame pair</td>
+<td>PandaSet 103 (front)</td>
+<td>v304 2.54 px</td>
+<td><strong>2.38 px</strong></td>
+</tr>
+<tr>
+<td>v308 (nuScenes radar all-cam)</td>
+<td>v313</td>
+<td>cam-Radar calib</td>
+<td>nuScenes 150 (front)</td>
+<td>v305 0.61 px</td>
+<td><strong>0.53 px</strong></td>
 </tr>
 </tbody>
 </table>
-<p><strong>Pre-train fine-tune が単独学習を超える</strong>:</p>
+<p><strong>Pre-train fine-tune が単独学習を超える</strong> (3/3 比較した case で勝利):</p>
 <ul>
 <li>v306 が <strong>1100 シーン × 3 dataset family × all-cam</strong> で学んだ汎用な
   geometry / appearance 表現が encoder に乗ってる</li>
