@@ -138,7 +138,7 @@ class FrameTokenEncoder(nn.Module):
     def __init__(self, d=D_DIM, in_channels=3, use_convnext=False,
                  r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True,
                  n_intra_layers=2, img_size=128,
-                 n_xattn_modality=0):
+                 n_xattn_modality=0, kv_image_only=False):
         super().__init__()
         self.cnn_d = d
         self.cnn = (ConvNeXtBackbone(d, in_channels=in_channels)
@@ -157,6 +157,11 @@ class FrameTokenEncoder(nn.Module):
                 self.fuse.weight[c, c, 0, 0] = 1.0
         self.intra = nn.ModuleList(
             [SelfAttnFusionBlock(d) for _ in range(n_intra_layers)])
+        # Ablation: when True, frame_token is CNN(image) only — pt is NOT
+        # mixed in via scatter/fuse/Perceiver. The decoder Q (PointMLP+
+        # frustum) then attends directly to image features → reproduces
+        # the old CalibNet pattern (camera-as-KV, lidar-as-Q with frustum).
+        self.kv_image_only = kv_image_only
         # Multi-round Perceiver-style cross-attn:
         #   Q (uv positional slots, initially fixed grid) ← cross ← KV
         # where KV = (image_tokens ⊕ pt_tokens) concat, each modality
@@ -165,14 +170,21 @@ class FrameTokenEncoder(nn.Module):
         self.xattn_modality = nn.ModuleList(
             [ModalityXAttnBlock(d) for _ in range(n_xattn_modality)])
         if n_xattn_modality > 0:
-            # Modality embeddings (learned, broadcast over tokens).
-            self.modality_emb_img = nn.Parameter(torch.zeros(1, 1, d))
-            self.modality_emb_pt  = nn.Parameter(torch.zeros(1, 1, d))
-            nn.init.normal_(self.modality_emb_img, std=0.02)
-            nn.init.normal_(self.modality_emb_pt,  std=0.02)
-            # Encoder Q: learned per-grid-cell positional slot (init from
-            # 2D sin/cos positional encoding so it has a useful prior).
+            # Shared 2D sin/cos positional encoding used for BOTH:
+            #   - image_tokens (added before concat → tells transformer
+            #     which UV cell each image token came from)
+            #   - encoder Q init (uv-slot grid; same UV system as image)
+            # Same coords → cross-attn can naturally align Q[uv] with
+            # image_tok[uv]. Modality is identified via feature distribution
+            # (CNN vs PointMLP outputs are clearly different) — no learned
+            # modality_emb needed.
             Hg = Wg = img_size // 8
+            self.register_buffer(
+                'pos_emb_2d',
+                _build_2d_pos_emb(Hg, Wg, d),    # (1, HW, D) fixed
+                persistent=False)
+            # Q init: learnable, starts as the same 2D sin/cos as image_tok
+            # then specializes via training.
             self.q_init = nn.Parameter(
                 _build_2d_pos_emb(Hg, Wg, d), requires_grad=True)
         self.img_size = img_size
@@ -195,6 +207,7 @@ class FrameTokenEncoder(nn.Module):
             coarse, _ = self.cnn(image)                              # (B, D, Hg, Wg)
         B, D, Hg, Wg = coarse.shape
 
+        pt_feat = None  # set in non-cam branch; remains None for camera-only
         if modality == 'cam':
             pt_grid = torch.zeros(B, D, Hg, Wg,
                                    device=coarse.device, dtype=coarse.dtype)
@@ -208,23 +221,40 @@ class FrameTokenEncoder(nn.Module):
                 pt_feat = pt_feat + self.frustum_enc(
                     uvd, full_uvd=uvd_full,
                     full_pad_mask=pad_full, query_pad_mask=pad_mask)
+            # Persist the per-point feature so the model can reuse it as
+            # decoder Q (same identity-encoded feature in Q and KV → the
+            # cross-attn becomes a self-consistency check).
+            self._last_pt_feat = pt_feat
 
             pt_grid, mask = scatter_pt_to_grid(
                 pt_feat, uvd[..., :2], pad_mask, Hg, Wg, self.img_size)
 
+        if self.kv_image_only:
+            # Ablation: frame_token = CNN(image) only. pt_feat is computed
+            # (and returned for decoder Q) but NOT mixed into frame_token.
+            # Decoder cross-attn becomes: Q (pt+frustum) → KV (image-only) —
+            # the old CalibNet direct pattern.
+            mask = torch.zeros(B, 1, Hg, Wg,
+                                device=coarse.device, dtype=coarse.dtype)
+            x = coarse.flatten(2).permute(0, 2, 1)
+            for blk in self.intra:
+                x = blk(x)
+            frame_token = x.permute(0, 2, 1).reshape(B, D, Hg, Wg).contiguous()
+            return frame_token, mask, pt_feat
+
         if len(self.xattn_modality) > 0:
-            # Perceiver-style: Q = uv positional slots,
-            #   KV = (image_tokens ⊕ pt_tokens) concat with modality_emb.
-            # Repeat Q ← cross ← KV for N rounds. Output Q grid = unified
-            # frame_token. Fall through to scatter+fuse if disabled.
+            # Perceiver-style: Q = uv positional slots, KV = image_tok ⊕ pt_tok.
+            # 2D sin/cos pos_emb is added to image_tok (same coord system as Q
+            # init) → cross-attn learns "Q[uv] ↔ image_tok[uv]" alignment from
+            # day 1. pt_tok already has uv info via PointMLP+frustum.
+            # Modality is implicit in feature distribution (CNN vs MLP outputs).
             img_tok = coarse.flatten(2).permute(0, 2, 1)            # (B, HW, D)
-            kv_img = img_tok + self.modality_emb_img
+            kv_img = img_tok + self.pos_emb_2d                      # +2D pos emb
             if modality == 'cam':
                 kv = kv_img
                 kv_pad = None
             else:
-                kv_pt  = pt_feat + self.modality_emb_pt              # (B, P, D)
-                kv = torch.cat([kv_img, kv_pt], dim=1)               # (B, HW+P, D)
+                kv = torch.cat([kv_img, pt_feat], dim=1)             # (B, HW+P, D)
                 if pad_mask is not None:
                     img_pad = torch.zeros(B, kv_img.shape[1],
                                            dtype=torch.bool, device=kv.device)
@@ -241,7 +271,7 @@ class FrameTokenEncoder(nn.Module):
             for blk in self.intra:
                 x = blk(x)
             frame_token = x.permute(0, 2, 1).reshape(B, D, Hg, Wg).contiguous()
-            return frame_token, mask
+            return frame_token, mask, pt_feat
 
         fused = self.fuse(torch.cat([coarse, pt_grid, mask], dim=1))
 
@@ -249,7 +279,7 @@ class FrameTokenEncoder(nn.Module):
         for blk in self.intra:
             x = blk(x)
         frame_token = x.permute(0, 2, 1).reshape(B, D, Hg, Wg).contiguous()
-        return frame_token, mask
+        return frame_token, mask, pt_feat
 
 
 class UnifiedCrossBlock(nn.Module):
@@ -347,7 +377,8 @@ class CalibNetUnifiedFrame(nn.Module):
                  in_channels=3, img_size=128, max_kv_frames=2,
                  deform_n_points=4, use_convnext=False,
                  r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True, out_dim=5,
-                 uv_only_query=False, q_uv_pure=False, n_xattn_modality=0):
+                 uv_only_query=False, q_uv_pure=False, n_xattn_modality=0,
+                 kv_image_only=False):
         """uv_only_query: drop the bilinear sample of anchor frame_token from
         Q construction. Q becomes (PointMLP(uvd) + pose_emb) only — purely
         positional. Required for calib mode (anchor-frame may be camera-only
@@ -365,7 +396,8 @@ class CalibNetUnifiedFrame(nn.Module):
             d, in_channels=in_channels, use_convnext=use_convnext,
             r_uv=r_uv, r_d=r_d, k_nb=k_nb, use_frustum=use_frustum,
             n_intra_layers=n_intra_layers, img_size=img_size,
-            n_xattn_modality=n_xattn_modality)
+            n_xattn_modality=n_xattn_modality,
+            kv_image_only=kv_image_only)
         self.point_mlp_q = PointMLP3(d)
         # Pure-uv positional Q (DETR-style): sin/cos basis at multi-freqs
         # over (u,v) ∈ [0, 1] only. No depth, no anchor sample. Used when
@@ -415,13 +447,20 @@ class CalibNetUnifiedFrame(nn.Module):
         ])
 
     def _build_query(self, frame_token_anchor, uvd_anchor, pose_emb_to_tgt,
-                     feats_anchor=None):
+                     feats_anchor=None, pt_feat_anchor=None):
         """Q = (optional bilinear(frame_token_A, uv_A)) + PointMLP_q(uvd_A)
              + pose_emb_AB + (optional FeatMLP(feats_A)).
 
         feats_anchor is optional per-point sensor side-channel (rcs, vx, vy
         for radar; zeros for lidar). Zero-initialised contribution so the
         added term is no-op until the model learns to use it.
+
+        pt_feat_anchor: when supplied AND uv_only_query=True, REUSE the
+        encoder's per-point feature (PointMLP+frustum) directly as Q's
+        identity component instead of computing a separate point_mlp_q.
+        Same identity in Q and KV (the frame_token built from the same
+        pt_feat) → decoder cross-attn becomes a self-consistency check
+        which is the right framing for "where did point i go?".
         """
         uv_01 = uvd_anchor[..., :2] / self.img_size
         if self.q_uv_pure:
@@ -434,7 +473,12 @@ class CalibNetUnifiedFrame(nn.Module):
             feat = torch.cat([uv_01, sc], dim=-1)                     # (B, P, 2+4F)
             return self.uv_pure_mlp(feat) + pose_emb_to_tgt
         uvd_n = torch.cat([uv_01, uvd_anchor[..., 2:3]], dim=-1)
-        ptq = self.point_mlp_q(uvd_n)
+        # Pick point identity feature: either reuse encoder's pt_feat
+        # (PointMLP+frustum) or recompute via the decoder's own point_mlp_q.
+        if pt_feat_anchor is not None and self.uv_only_query:
+            ptq = pt_feat_anchor
+        else:
+            ptq = self.point_mlp_q(uvd_n)
         if feats_anchor is not None:
             ptq = ptq + self.feat_mlp(feats_anchor)
         if self.uv_only_query:
@@ -497,19 +541,19 @@ class CalibNetUnifiedFrame(nn.Module):
         a camera-only frame_token and frame B is a LiDAR-only frame_token —
         same encoder, same downstream cross-attention path.
         """
-        ft_A, _ = self.encoder(patch_A, uvd_A, pad_A,
-                                uvd_A_full, pad_A_full, modality=modality_A)
-        ft_B, _ = self.encoder(patch_B, uvd_B, pad_B,
-                                uvd_B_full, pad_B_full, modality=modality_B)
+        ft_A, _, ptf_A = self.encoder(patch_A, uvd_A, pad_A,
+                                       uvd_A_full, pad_A_full, modality=modality_A)
+        ft_B, _, ptf_B = self.encoder(patch_B, uvd_B, pad_B,
+                                       uvd_B_full, pad_B_full, modality=modality_B)
         has_M = patch_M is not None
         has_M2 = patch_M2 is not None
         if has_M:
-            ft_M, _ = self.encoder(patch_M, uvd_M, pad_M, uvd_M_full, pad_M_full)
+            ft_M, _, ptf_M = self.encoder(patch_M, uvd_M, pad_M, uvd_M_full, pad_M_full)
         if has_M2:
-            ft_M2, _ = self.encoder(patch_M2, uvd_M2, pad_M2, uvd_M2_full, pad_M2_full)
+            ft_M2, _, ptf_M2 = self.encoder(patch_M2, uvd_M2, pad_M2, uvd_M2_full, pad_M2_full)
         has_M3 = patch_M3 is not None
         if has_M3:
-            ft_M3, _ = self.encoder(patch_M3, uvd_M3, pad_M3, uvd_M3_full, pad_M3_full)
+            ft_M3, _, ptf_M3 = self.encoder(patch_M3, uvd_M3, pad_M3, uvd_M3_full, pad_M3_full)
 
         Hg, Wg = ft_A.shape[2], ft_A.shape[3]
 
@@ -550,7 +594,8 @@ class CalibNetUnifiedFrame(nn.Module):
             kv_M3_for_A = ft_M3 + self._emb_to_grid(emb_AM3, Hg, Wg)
             kv_M3_for_B = ft_M3 + self._emb_to_grid(emb_BM3, Hg, Wg)
 
-        q_A = self._build_query(ft_A, uvd_A, emb_AB, feats_anchor=feats_A)
+        q_A = self._build_query(ft_A, uvd_A, emb_AB,
+                                  feats_anchor=feats_A, pt_feat_anchor=ptf_A)
         kv_AB  = [kv_B_for_A]
         ref_AB = [uv_B_hat_of_A / self.img_size]
         if has_M:
@@ -566,7 +611,8 @@ class CalibNetUnifiedFrame(nn.Module):
             q_A, kv_AB, ref_AB,
             uv_B_hat_of_A / self.img_size, q_pad=pad_A)
 
-        q_B = self._build_query(ft_B, uvd_B, emb_BA, feats_anchor=feats_B)
+        q_B = self._build_query(ft_B, uvd_B, emb_BA,
+                                  feats_anchor=feats_B, pt_feat_anchor=ptf_B)
         kv_BA  = [kv_A_for_B]
         ref_BA = [uv_A_hat_of_B / self.img_size]
         if has_M:
@@ -594,11 +640,13 @@ class CalibNetUnifiedFrame(nn.Module):
             f'N-1={N-1} > max_kv_frames={self.max_kv_frames}')
 
         ft_list = []
+        ptf_list = []
         for k in range(N):
-            ft_k, _ = self.encoder(
+            ft_k, _, ptf_k = self.encoder(
                 patches[:, k], uvd[:, k], pad[:, k],
                 uvd_full[:, k], pad_full[:, k])
             ft_list.append(ft_k)
+            ptf_list.append(ptf_k)
         Hg, Wg = ft_list[0].shape[2], ft_list[0].shape[3]
         P = uvd.shape[2]
 
@@ -610,7 +658,8 @@ class CalibNetUnifiedFrame(nn.Module):
                 if i == j:
                     continue
                 emb_ij = self.pose_mlp(pose_hat_6dof[:, i, j]).unsqueeze(1)
-                q = self._build_query(ft_list[i], uvd[:, i], emb_ij)
+                q = self._build_query(ft_list[i], uvd[:, i], emb_ij,
+                                        pt_feat_anchor=ptf_list[i])
                 if mix_mode == 'pair':
                     kv_order = [j]
                 else:

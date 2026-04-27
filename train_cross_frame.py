@@ -449,6 +449,11 @@ def main():
                          'pt_tokens BEFORE the scatter+fuse step. 0 (default) '
                          '= legacy single-pass. Higher = denser image-lidar '
                          'mixing per the ps_v11 unified-token spec.')
+    ap.add_argument('--kv-image-only', action='store_true',
+                    help='Ablation: frame_token = CNN(image) only, pt is NOT '
+                         'mixed in. Decoder Q (PointMLP+frustum) attends '
+                         'directly to image features — reproduces old '
+                         'CalibNet pattern (camera-as-KV, lidar-Q-frustum).')
     ap.add_argument('--lidar-subdir', default='lidar',
                     help="Point-source subdir name inside each scene. "
                          "'lidar' (default) reads scene/lidar/<fi>.pkl. "
@@ -643,6 +648,7 @@ def main():
             uv_only_query=(args.uv_only_query or args.calib_mode),
             q_uv_pure=args.q_uv_pure,
             n_xattn_modality=args.n_xattn_modality,
+            kv_image_only=args.kv_image_only,
         ).to(DEVICE)
     else:
         model = CalibNetMultiFrame(
