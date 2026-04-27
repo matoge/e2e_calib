@@ -210,6 +210,39 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 
 ---
 
+## 5.5 Production recipe — pre-train (combined) → fine-tune (single dataset)
+
+Combined-dataset 学習 (v306 / v307b) は per-dataset best (v303 / v304) より
+**やや劣る** (1.00 vs 0.67、2.63 vs 2.54)。理由は各 ds の calib / sensor noise
+分布の差異を 1 重みでは吸収しきれないため。
+
+これを解決する **production recipe** を実証:
+
+1. **大規模 pre-train**: combined-multi-dataset で M0 pair / M0 calib を 30 epoch
+2. **per-dataset fine-tune**: 重みを 1 つの dataset に対し低 lr (5e-4) で 15 epoch
+
+| run | flow | 摂動 | dataset | val_err |
+|---|---|---|---|---|
+| v303 | from scratch | calib | PandaSet 103 (front) | 0.67 px |
+| v306 | from scratch | calib | combined 1100 scenes (all cam) | 1.00 px |
+| **v311** | **v306 → fine-tune (PandaSet 103, front)** | calib | — | **0.60 px** ← v303 を超える |
+
+**Pre-train fine-tune が単独学習を超える**:
+
+- v306 が **1100 シーン × 3 dataset family × all-cam** で学んだ汎用な
+  geometry / appearance 表現が encoder に乗ってる
+- per-dataset fine-tune は cam-specific noise / focal length range に
+  わずかに適応するだけ → 数 epoch (数分) で済む
+- メモリフットプリント / 学習コスト両面で実運用向き
+
+**Deployment 視点**:
+
+- 1 つの "base" 重みを社内サーバに置く
+- 各 ds / 各車載 SoC 向けに数十分の fine-tune で展開
+- 新 sensor / 新地域は同じ recipe で追加学習可能
+
+---
+
 ## 6. 地図ありのケース — frame_token を「地図から」 作る
 
 ここまでは複数の **観測フレーム** 同士の cross-attn だった。これを

@@ -320,6 +320,64 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 <p>「sensor / task の対称性」を architecture の中に折り畳むことで、
 ロボット / 自動運転の空間スタックが大幅に薄くなる。</p>
 <hr />
+<h2 id="55-production-recipe-pre-train-combined-fine-tune-single-dataset">5.5 Production recipe — pre-train (combined) → fine-tune (single dataset)</h2>
+<p>Combined-dataset 学習 (v306 / v307b) は per-dataset best (v303 / v304) より
+<strong>やや劣る</strong> (1.00 vs 0.67、2.63 vs 2.54)。理由は各 ds の calib / sensor noise
+分布の差異を 1 重みでは吸収しきれないため。</p>
+<p>これを解決する <strong>production recipe</strong> を実証:</p>
+<ol>
+<li><strong>大規模 pre-train</strong>: combined-multi-dataset で M0 pair / M0 calib を 30 epoch</li>
+<li><strong>per-dataset fine-tune</strong>: 重みを 1 つの dataset に対し低 lr (5e-4) で 15 epoch</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>run</th>
+<th>flow</th>
+<th>摂動</th>
+<th>dataset</th>
+<th>val_err</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>v303</td>
+<td>from scratch</td>
+<td>calib</td>
+<td>PandaSet 103 (front)</td>
+<td>0.67 px</td>
+</tr>
+<tr>
+<td>v306</td>
+<td>from scratch</td>
+<td>calib</td>
+<td>combined 1100 scenes (all cam)</td>
+<td>1.00 px</td>
+</tr>
+<tr>
+<td><strong>v311</strong></td>
+<td><strong>v306 → fine-tune (PandaSet 103, front)</strong></td>
+<td>calib</td>
+<td>—</td>
+<td><strong>0.60 px</strong> ← v303 を超える</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Pre-train fine-tune が単独学習を超える</strong>:</p>
+<ul>
+<li>v306 が <strong>1100 シーン × 3 dataset family × all-cam</strong> で学んだ汎用な
+  geometry / appearance 表現が encoder に乗ってる</li>
+<li>per-dataset fine-tune は cam-specific noise / focal length range に
+  わずかに適応するだけ → 数 epoch (数分) で済む</li>
+<li>メモリフットプリント / 学習コスト両面で実運用向き</li>
+</ul>
+<p><strong>Deployment 視点</strong>:</p>
+<ul>
+<li>1 つの "base" 重みを社内サーバに置く</li>
+<li>各 ds / 各車載 SoC 向けに数十分の fine-tune で展開</li>
+<li>新 sensor / 新地域は同じ recipe で追加学習可能</li>
+</ul>
+<hr />
 <h2 id="6-frame_token">6. 地図ありのケース — frame_token を「地図から」 作る</h2>
 <p>ここまでは複数の <strong>観測フレーム</strong> 同士の cross-attn だった。これを
 「<strong>地図から来た frame_token vs 現在の観測 frame_token</strong>」 に置き換えると、
