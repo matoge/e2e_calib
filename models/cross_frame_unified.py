@@ -29,6 +29,23 @@ from models.cross_frame import SelfAttnFusionBlock, PoseMLP
 from models.cross_frame_multi import _invert_6dof, _compose_pose_MB
 
 
+def _build_2d_pos_emb(Hg: int, Wg: int, d: int) -> torch.Tensor:
+    """Sin/cos 2D positional encoding, (1, Hg*Wg, d)."""
+    assert d % 4 == 0, f'd={d} must be divisible by 4 for 2D sin/cos'
+    d4 = d // 4
+    freq = 1.0 / (10000 ** (torch.arange(d4, dtype=torch.float32) / d4))  # (d/4,)
+    yy, xx = torch.meshgrid(
+        torch.arange(Hg, dtype=torch.float32) / max(1, Hg - 1),
+        torch.arange(Wg, dtype=torch.float32) / max(1, Wg - 1),
+        indexing='ij')
+    angy = yy.flatten().unsqueeze(-1) * freq               # (HW, d/4)
+    angx = xx.flatten().unsqueeze(-1) * freq               # (HW, d/4)
+    emb = torch.cat([
+        torch.sin(angy), torch.cos(angy),
+        torch.sin(angx), torch.cos(angx)], dim=-1)         # (HW, d)
+    return emb.unsqueeze(0)                                # (1, HW, d)
+
+
 def scatter_pt_to_grid(pt_feat: torch.Tensor, uv: torch.Tensor,
                        pad_mask, Hg: int, Wg: int, img_size: int):
     """(B,P,D) pt features → (B,D,Hg,Wg) avg-per-cell grid + (B,1,Hg,Wg) mask.
@@ -70,42 +87,31 @@ def sample_grid_at_uv(grid: torch.Tensor, uv_01: torch.Tensor) -> torch.Tensor:
 
 
 class ModalityXAttnBlock(nn.Module):
-    """One round of bidirectional image_tokens ↔ pt_tokens cross-attention.
+    """One round of Q ← cross-attn ← KV(image⊕lidar concat).
 
-    Inside the encoder, BEFORE pt is scattered to grid, this lets each
-    modality directly query the other (instead of the single 1x1 fuse +
-    self-attn route). Multi-round version produces a denser unified
-    representation per the user's spec for ps_v11-style baseline.
+    Per user spec: encoder repeats `Q (UV positional slots) ← KV (lidar +
+    camera concat, with modality_emb to distinguish)` N times. Q starts
+    as a fixed grid of UV slots, absorbs multimodal info each round.
+    Output = refined Q grid → unified frame_token.
     """
     def __init__(self, d, n_heads=4):
         super().__init__()
-        self.norm_img_q   = nn.LayerNorm(d)
-        self.norm_pt_q    = nn.LayerNorm(d)
-        self.attn_img2pt  = nn.MultiheadAttention(
+        self.norm_q   = nn.LayerNorm(d)
+        self.norm_kv  = nn.LayerNorm(d)
+        self.attn     = nn.MultiheadAttention(
             d, n_heads, batch_first=True, dropout=0.1)
-        self.attn_pt2img  = nn.MultiheadAttention(
-            d, n_heads, batch_first=True, dropout=0.1)
-        self.norm_img_ffn = nn.LayerNorm(d)
-        self.norm_pt_ffn  = nn.LayerNorm(d)
-        self.ffn_img = nn.Sequential(
-            nn.Linear(d, 2 * d), nn.GELU(), nn.Dropout(0.1), nn.Linear(2 * d, d))
-        self.ffn_pt = nn.Sequential(
+        self.norm_ffn = nn.LayerNorm(d)
+        self.ffn = nn.Sequential(
             nn.Linear(d, 2 * d), nn.GELU(), nn.Dropout(0.1), nn.Linear(2 * d, d))
         self.drop = nn.Dropout(0.1)
 
-    def forward(self, img_tok, pt_tok, pt_pad_mask=None):
-        # Image queries point cloud
-        img2pt, _ = self.attn_img2pt(
-            self.norm_img_q(img_tok), pt_tok, pt_tok,
-            key_padding_mask=pt_pad_mask)
-        img_tok = img_tok + self.drop(img2pt)
-        img_tok = img_tok + self.ffn_img(self.norm_img_ffn(img_tok))
-        # Point cloud queries image
-        pt2img, _ = self.attn_pt2img(
-            self.norm_pt_q(pt_tok), img_tok, img_tok)
-        pt_tok = pt_tok + self.drop(pt2img)
-        pt_tok = pt_tok + self.ffn_pt(self.norm_pt_ffn(pt_tok))
-        return img_tok, pt_tok
+    def forward(self, q, kv, kv_pad_mask=None):
+        attn, _ = self.attn(
+            self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv),
+            key_padding_mask=kv_pad_mask)
+        q = q + self.drop(attn)
+        q = q + self.ffn(self.norm_ffn(q))
+        return q
 
 
 class FrameTokenEncoder(nn.Module):
@@ -139,9 +145,24 @@ class FrameTokenEncoder(nn.Module):
                 self.fuse.weight[c, c, 0, 0] = 1.0
         self.intra = nn.ModuleList(
             [SelfAttnFusionBlock(d) for _ in range(n_intra_layers)])
-        # Multi-round image↔lidar cross-attn (before scatter+fuse).
+        # Multi-round Perceiver-style cross-attn:
+        #   Q (uv positional slots, initially fixed grid) ← cross ← KV
+        # where KV = (image_tokens ⊕ pt_tokens) concat, each modality
+        # tagged with its own learned modality_emb. After N rounds, Q is
+        # the unified frame_token grid.
         self.xattn_modality = nn.ModuleList(
             [ModalityXAttnBlock(d) for _ in range(n_xattn_modality)])
+        if n_xattn_modality > 0:
+            # Modality embeddings (learned, broadcast over tokens).
+            self.modality_emb_img = nn.Parameter(torch.zeros(1, 1, d))
+            self.modality_emb_pt  = nn.Parameter(torch.zeros(1, 1, d))
+            nn.init.normal_(self.modality_emb_img, std=0.02)
+            nn.init.normal_(self.modality_emb_pt,  std=0.02)
+            # Encoder Q: learned per-grid-cell positional slot (init from
+            # 2D sin/cos positional encoding so it has a useful prior).
+            Hg = Wg = img_size // 8
+            self.q_init = nn.Parameter(
+                _build_2d_pos_emb(Hg, Wg, d), requires_grad=True)
         self.img_size = img_size
 
     def forward(self, image, uvd, pad_mask=None,
@@ -176,19 +197,39 @@ class FrameTokenEncoder(nn.Module):
                     uvd, full_uvd=uvd_full,
                     full_pad_mask=pad_full, query_pad_mask=pad_mask)
 
-            # Multi-round image↔lidar cross-attn (if any). Image tokens
-            # absorb point info, then point tokens absorb image info, etc.
-            # When `xattn_modality` is empty → no-op, falls back to scatter+fuse.
-            if len(self.xattn_modality) > 0:
-                img_tok = coarse.flatten(2).permute(0, 2, 1)        # (B, HW, D)
-                pt_tok = pt_feat
-                for blk in self.xattn_modality:
-                    img_tok, pt_tok = blk(img_tok, pt_tok, pt_pad_mask=pad_mask)
-                coarse = img_tok.permute(0, 2, 1).reshape(B, D, Hg, Wg).contiguous()
-                pt_feat = pt_tok
-
             pt_grid, mask = scatter_pt_to_grid(
                 pt_feat, uvd[..., :2], pad_mask, Hg, Wg, self.img_size)
+
+        if len(self.xattn_modality) > 0:
+            # Perceiver-style: Q = uv positional slots,
+            #   KV = (image_tokens ⊕ pt_tokens) concat with modality_emb.
+            # Repeat Q ← cross ← KV for N rounds. Output Q grid = unified
+            # frame_token. Fall through to scatter+fuse if disabled.
+            img_tok = coarse.flatten(2).permute(0, 2, 1)            # (B, HW, D)
+            kv_img = img_tok + self.modality_emb_img
+            if modality == 'cam':
+                kv = kv_img
+                kv_pad = None
+            else:
+                kv_pt  = pt_feat + self.modality_emb_pt              # (B, P, D)
+                kv = torch.cat([kv_img, kv_pt], dim=1)               # (B, HW+P, D)
+                if pad_mask is not None:
+                    img_pad = torch.zeros(B, kv_img.shape[1],
+                                           dtype=torch.bool, device=kv.device)
+                    kv_pad = torch.cat([img_pad, pad_mask], dim=1)
+                else:
+                    kv_pad = None
+            q = self.q_init.expand(B, -1, -1)                        # (B, HW, D)
+            for blk in self.xattn_modality:
+                q = blk(q, kv, kv_pad_mask=kv_pad)
+            x = q
+            mask = (mask if modality != 'cam'
+                    else torch.zeros(B, 1, Hg, Wg,
+                                      device=coarse.device, dtype=coarse.dtype))
+            for blk in self.intra:
+                x = blk(x)
+            frame_token = x.permute(0, 2, 1).reshape(B, D, Hg, Wg).contiguous()
+            return frame_token, mask
 
         fused = self.fuse(torch.cat([coarse, pt_grid, mask], dim=1))
 
