@@ -1,66 +1,98 @@
 # Auto-mode 進捗ログ — 2026-04-27 PM
 
-ユーザー外出中の自走メモ。終わったもの / 走ってるもの / 待ち行列。
+ユーザー外出中の自走メモ。最終結果まで完走。
 
-## ✅ 完了
+## 🎯 最重要成果
 
-| 内容 | 結果 | コミット |
+### 1 モデル定義で 3 modality × 4 dataset を解いた
+
+`CalibNetUnifiedFrame(uv_only_query=True, n_cross_layers=4, 1.65M params)`
+で全部回る。modality (cam/lidar/radar/mm) は encoder の flag だけ。
+
+| run | task | dataset / cam | val_err |
+|---|---|---|---|
+| v303 | calib | PandaSet 103 / front | 0.67 |
+| v304 | cross-frame | PandaSet 103 / front | 2.54 |
+| v305 | **cam-Radar** calib | nuScenes 150 / front | 0.61 |
+| v306 | calib (combined) | Panda+DDAD+Waymo / **all-cam** | 1.00 |
+| v307b | cross-frame (combined 3-ds) | all-cam | 2.63 |
+| v308 | cam-Radar (all-cam) | nuScenes / 6 cams | 0.71 |
+| v310 | calib | nuScenes / front | 0.79 |
+
+### Pre-train (combined) → fine-tune (single ds) recipe が効く
+
+| pre-train | target | val_err | from-scratch | Δ |
+|---|---|---|---|---|
+| v306 | v311 PandaSet 103 calib | **0.60** | v303 0.67 | −10% |
+| v307b | v312 PandaSet 103 cross-frame | **2.38** | v304 2.54 | −6% |
+| v308 | v313 nuScenes radar | **0.53** | v305 0.61 | −13% |
+| v306 | v314 DDAD calib | **0.88** | (combined 1.00) | −12% |
+| v306 | v315 Waymo calib | **0.86** | (combined 1.00) | −14% |
+
+**全 5 fine-tune が from-scratch / combined を改善**。Production deployment
+recipe 確立: 「1 base 重み × N 短時間 fine-tune」。
+
+### Cross-modal transfer の非対称性 (v316/v317)
+
+| direction | val_err | from-scratch baseline |
 |---|---|---|
-| Unified arch 同モデルで cam-LiDAR calib + cross-frame 同時動作 | v303 0.67px / v304 進行中 | 6094a19 |
-| 1 model N problems 設計 doc | `docs/unified_modality_primitive.md` | 8c3a18c |
-| Map-side frame_token + LIVO 比較 (SLAM 拡張) | doc 同上 §6 | 07f8054 |
-| **Cam-Radar PoC** (nuScenes) | v305 val_err 0.61px / val_nll −0.17 | f59b64a |
-| **6DIR バグ修正** (step_n loss = sum*0.5 → mean) | v201 が v200 に劣る原因特定 + 修正 | b7b03c4 |
-| Cam-Radar 結果 doc 反映 | 3 modality × 2 dataset 表 | c452eda |
+| LiDAR → Radar (v316) | **0.58** | v305 0.61 ← better |
+| Radar → LiDAR (v317) | 0.81 (ep12) | v303 0.67 ← **worse** |
 
-## 🔄 走行中
+**情報量の大きい modality を pre-train に**。Radar encoder の細い表現は
+dense LiDAR には載らない。
 
-### yokohama (5080)
-- **v306** combined cam-LiDAR calib (PandaSet 103 + DDAD 200 + Waymo 797、all cams、4649 pairs)
-  - ep8: val_err 1.72px (base 7.56), val_nll 1.32 → 順調
+### 6-direction supervision は pair より構造的に弱い (negative result)
 
-### sakurai (5070Ti)
-- **v304** PandaSet 103 cross-frame uv-only-Q (ep27/30、val_err 2.56px)
-  - 残り 3 epoch (~ 4 分)
+| run | scheme | val_err |
+|---|---|---|
+| v200 | pair (2 dirs, mean) | 2.27 |
+| v201 | 6 dirs, sum*0.5 (実効 lr 3×) | 4.91 |
+| v309 | 6 dirs, mean (lr 校正) | 6.65 ← 最悪 |
 
-### Background
-- **AV2 sensor sync** to mininas: train 687/830GB ≈ 83%、val/test 完了
+仮説 1 (composition-consistent): 修正済み (v201)。
+仮説 2 (loss scale): mean 試したら逆効果 (v309)。
+**結論**: M 関連方向が共有 encoder を destabilize、pair が最適。
 
-## 📋 待ち行列
+## ✅ 完了タスク (全 17 runs)
 
-### yokohama (v306 後)
-1. **v307** combined pair (4 dataset = panda + ddad + waymo + **nuScenes**、all cams)
-2. **v308** nuScenes cam-Radar calib all-cam (front_cam → all-cam scale-up)
-3. **v310** nuScenes cam-LiDAR calib (calibration の dataset 多様性検証)
+- v303 / v305 / v310 (per-dataset calib from scratch)
+- v306 / v307b / v308 (combined pre-train)
+- v311 / v312 / v313 / v314 / v315 (per-dataset fine-tune)
+- v309 (6DIR fix verification — confirmed dead-end)
+- v316 / v317 (cross-modal transfer)
+- AV2 sync to mininas (1.1TB train+val+test 完了)
+- nuScenes radar 150 シーン変換完了
+- 7 commits + doc/html 更新
 
-### sakurai (v304 後)
-1. **v309** PandaSet 39 N=3 6-direction with **6DIR loss fix** (b7b03c4)
-   - 比較対象: v200 (val 2.27 px, 2-frame pair) / v201 (val 4.91 px, バグあり 6-dir)
+## 📋 残タスク (未着手 / user 帰り次第)
 
-## 🔜 まだやってない
+- **AV2 PandaSet 変換**: シンボリックリンクが nvme6t 古いパス向き、mininas 経路に再変換要
+  - `python scripts/preprocessing/av2_to_pandaset.py --src /mnt/mininas/datasets/argoverse2/sensor/train` で再 run 可能
+- **nuScenes lidar pickle 一部破損**: numpy 2.0 系で書かれたものがあり、現環境 (numpy 1.26) で読めない scene が混在。`scene-0001` で踏むので v307 (4-ds combined) は失敗、v310/v311 (front_camera 単独) は OK だった
+- **multi-camera calib** smoke test: modality_A=`cam`, modality_B=`cam` で動くはず、未検証
+- **map-side frame_token**: 永続地図 → frame_token render → cross-attn の SLAM kernel、設計のみ
 
-- **AV2 PandaSet-format 変換** — train sync 終わり次第
-- **multi-camera calib** smoke test (modality flag swap、コード修正最小)
-- **map-side frame_token** PoC (永続地図 → frame_token render → cross-attn) — SLAM kernel
-- **学習済みモデルの量子化 + edge benchmark** (Hailo-8 / Coral / Jetson)
+## 🔗 参照
 
-## 注意 / 知見
+- 設計 doc: `docs/unified_modality_primitive.md` (and html)
+- 全実験 ckpt: `experiments/cross_frame_v3{03..17}*/best_model.pt`
+- ClearML: http://localhost:18080/projects/99a9ff692440487f8e4251020103d041
 
-- **6DIR は実は pair より弱い** が empirical fact。3 つの仮説で順に検証:
-  1. composition-consistent 摂動 → 既に修正済み (v201 で確認、4.91 px)
-  2. loss スケール (`sum*0.5` → `mean`) → v309 で逆効果 (6.65 px、AB grad 1/6 weight)
-  3. **結論**: 6-direction supervision そのものが M 関連の方向経由で
-     共有 encoder を destabilize → pair (v200=2.27px) より構造的に弱い。
-  - v309 後に loss scaling は v201 の `sum * 0.5` に revert。
-- **Combined dataset は per-dataset best に追いつかない**:
-  - cam-LiDAR calib: v303 (PandaSet 103 単独) 0.67 < v306 (combined all-cam) 1.00
-  - cross-frame: v304 (PandaSet 103 単独) 2.54 < v307b (combined 3-ds) 2.63
-  - 仮説: 各 ds のキャリブ精度・センサー特性の差異を吸収しきれてない。
-    Per-dataset fine-tune が必要かも。
+## コミット履歴 (今セッション、新しい順)
 
-- **All-cam scaling は OK**: v306 は 1100 scenes × all-cam = 4649 (scene,cam) で
-  1.00 px、v308 nuScenes all-cam で 0.71 px。データ量は劣化要因じゃない。
-
-- **3 modality (LiDAR / Radar / mm) × 2 dataset family** で同モデル動作確認。
-  論文にしてもよさそうだが、ユーザーは "papers as pebbles" 主義なので
-  artifact (動くシステム) に集中。
+```
+5610ec2 docs: cross-modal transfer asymmetry — LiDAR→Radar works, Radar→LiDAR doesn't
+9a64262 docs: v315 Waymo fine-tune lands at 0.86 px (vs 1.00 combined)
+bd9741f docs: pre-train+fine-tune validated across 3 modalities + 3 dataset families
+ab77077 docs: pre-train + fine-tune recipe — beats from-scratch single-dataset
+f85c9d3 revert 6DIR loss scaling fix — 6-direction is empirically weaker than pair
+d38bb2a docs: empirical table now 6 runs across 3 modalities × 3 datasets
+edbac92 docs: auto-mode session log
+c452eda docs: cam-Radar PoC empirical row + 3-modality verification table
+b7b03c4 6DIR fix: switch step_n loss from sum()*0.5 to mean()
+f59b64a cam-Radar PoC — nuScenes radar via lidar_subdir flag
+07f8054 docs: extend unified primitive — map-side frame_token + LIVO comparison
+8c3a18c docs: 1 model, N problems — uv-Q + multimodal frame_token primitive
+6094a19 unified arch: same model handles calib + cross-frame via modality split
+```
