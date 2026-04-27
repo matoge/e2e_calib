@@ -271,11 +271,14 @@ def step_n(model, batch, loss_ab_only=False, mix_mode='mix'):
             bases.append(m_ij['base_px'])
             pair_metrics[f'err_{i}{j}']  = m_ij['err_px']
             pair_metrics[f'base_{i}{j}'] = m_ij['base_px']
-    # Per-direction weight matches pair-mode (loss_AB + loss_BA)/2 → 0.5 each
-    # so the A↔B gradient magnitude doesn't shrink as we add more directions.
-    # Equivalent to sum(losses)/2; the extra directions add as bonus terms
-    # rather than diluting AB.
-    loss = torch.stack(losses).sum() * 0.5
+    # Mean of per-direction losses (multi-task standard).
+    # N=2 (pair): mean of 2 losses = (loss_AB + loss_BA) / 2 = legacy pair loss ✓
+    # N=3 (6 dir): mean of 6 losses → loss scale stays O(1) instead of growing
+    # to ~3× as `sum() * 0.5` did. The previous `sum() * 0.5` form effectively
+    # 3× the lr in v201 6-dir runs and was the cause of v201 underperforming
+    # v200 — composition-consistent perturbation was already correct, but the
+    # lr was implicitly too high for stability.
+    loss = torch.stack(losses).mean()
     # Surface the legacy A↔B direction (frame 0 = anchor, N-1 = far frame)
     # via the err_AB / err_BA / base_AB keys so the trainer's existing logger
     # is directly comparable to pair runs. Other directions are kept as
