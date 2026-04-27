@@ -96,20 +96,32 @@ class ModalityXAttnBlock(nn.Module):
     """
     def __init__(self, d, n_heads=4):
         super().__init__()
-        self.norm_q   = nn.LayerNorm(d)
-        self.norm_kv  = nn.LayerNorm(d)
-        self.attn     = nn.MultiheadAttention(
+        # cross-attn (Q → KV)
+        self.norm_q    = nn.LayerNorm(d)
+        self.norm_kv   = nn.LayerNorm(d)
+        self.attn      = nn.MultiheadAttention(
             d, n_heads, batch_first=True, dropout=0.1)
-        self.norm_ffn = nn.LayerNorm(d)
+        # self-attn (Q → Q) — Perceiver-style mixing inside the latent set
+        self.norm_sa   = nn.LayerNorm(d)
+        self.self_attn = nn.MultiheadAttention(
+            d, n_heads, batch_first=True, dropout=0.1)
+        # FFN
+        self.norm_ffn  = nn.LayerNorm(d)
         self.ffn = nn.Sequential(
             nn.Linear(d, 2 * d), nn.GELU(), nn.Dropout(0.1), nn.Linear(2 * d, d))
         self.drop = nn.Dropout(0.1)
 
     def forward(self, q, kv, kv_pad_mask=None):
+        # Q ← cross-attn ← KV
         attn, _ = self.attn(
             self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv),
             key_padding_mask=kv_pad_mask)
         q = q + self.drop(attn)
+        # Q ← self-attn ← Q (latent mixing)
+        sa, _ = self.self_attn(
+            self.norm_sa(q), self.norm_sa(q), self.norm_sa(q))
+        q = q + self.drop(sa)
+        # FFN
         q = q + self.ffn(self.norm_ffn(q))
         return q
 
