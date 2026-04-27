@@ -130,9 +130,11 @@ def _argmin_per_cell(cid: np.ndarray, d2: np.ndarray) -> np.ndarray:
 class _SceneData:
     """Holds metadata + precomputed per-frame projections for ONE (scene, camera) pair."""
 
-    def __init__(self, scene_root: Path, camera_name: str = 'front_camera'):
+    def __init__(self, scene_root: Path, camera_name: str = 'front_camera',
+                 lidar_subdir: str = 'lidar'):
         self.root = scene_root
         self.camera_name = camera_name
+        self.lidar_subdir = lidar_subdir   # 'lidar' or 'radar' — point-source folder
         # identifier used by collate/debug: "<scene>/<cam>"
         self.scene_id = f'{scene_root.name}/{camera_name}'
 
@@ -152,13 +154,15 @@ class _SceneData:
         self.n_frames = len(poses)
         self.T_w2c = np.stack([_quat_pos_to_mat(p['heading'], p['position']) for p in poses])
 
-        # image/lidar paths (lidar is shared across cameras in a scene)
+        # image/lidar paths (lidar is shared across cameras in a scene).
+        # `lidar_subdir='radar'` swaps the point source from lidar/ to radar/
+        # for camera-radar calib runs.
         self.image_paths = [cam_dir / f'{fi:02d}.jpg' for fi in range(self.n_frames)]
         self.lidar_paths = []
         for fi in range(self.n_frames):
-            p = scene_root / f'lidar/{fi:02d}.pkl'
+            p = scene_root / f'{lidar_subdir}/{fi:02d}.pkl'
             if not p.exists():
-                pgz = scene_root / f'lidar/{fi:02d}.pkl.gz'
+                pgz = scene_root / f'{lidar_subdir}/{fi:02d}.pkl.gz'
                 if pgz.exists():
                     p = pgz
             self.lidar_paths.append(p)
@@ -226,7 +230,10 @@ class _SceneData:
     def _proj_cache_path(self, fi):
         # packed binary: [N:uint32 LE][pts_w: N*12][uv: N*8][z: N*4][in_view: N]
         # → single file, single memmap, zero-copy reads.
-        return self.root / '_proj_cache' / self.camera_name / f'{fi:02d}.bin'
+        # Namespace by lidar_subdir so radar projections live in
+        # _proj_cache_radar/ and don't collide with the lidar cache.
+        suffix = f'_{self.lidar_subdir}' if self.lidar_subdir != 'lidar' else ''
+        return self.root / f'_proj_cache{suffix}' / self.camera_name / f'{fi:02d}.bin'
 
     def _build_proj(self, fi):
         df = pd.read_pickle(self.lidar_paths[fi])
@@ -349,6 +356,12 @@ class PandaSetCrossFrameDataset(Dataset):
                                            # vs perturbed pivot uv). All other
                                            # logic (LiDAR projection, patch crop,
                                            # padding, loss) is unchanged.
+                 lidar_subdir: str = 'lidar', # 'lidar' or 'radar'. Selects the
+                                           # point-source subdir inside each scene.
+                                           # 'radar' enables cam-Radar calib runs
+                                           # using the same pipeline; per-scene
+                                           # radar/<fi>.pkl must be present (see
+                                           # scripts/preprocessing/nuscenes_radar_to_pandaset.py).
                  seed: int = 42):
         super().__init__()
         if n_frames not in (2, 3):
@@ -370,6 +383,7 @@ class PandaSetCrossFrameDataset(Dataset):
         self.use_stacked = use_stacked
         self.motion_warp_gt = motion_warp_gt
         self.calib_mode = calib_mode
+        self.lidar_subdir = lidar_subdir
         self._cuboid_cache = {}                       # (scene_root_str, fi) → list of box dicts
         self.rng = np.random.default_rng(seed)
 
@@ -448,7 +462,8 @@ class PandaSetCrossFrameDataset(Dataset):
 
         def _load_scene(sr_cam):
             sr, cam = sr_cam
-            scn = _SceneData(Path(sr), camera_name=cam)
+            scn = _SceneData(Path(sr), camera_name=cam,
+                              lidar_subdir=self.lidar_subdir)
             scn.precompute_all(n_workers=4)   # within-scene threads
             all_fi = list(range(scn.n_frames))
             if frame_train_frac < 1.0:
@@ -1024,7 +1039,10 @@ class PandaSetCrossFrameDataset(Dataset):
         # 4. load LiDAR and project (cached per frame)
         pts_w_A, uv_Af, z_Af, in_A = scn.frame_data(fi_A)
         pts_w_B, uv_Bf, z_Bf, in_B = scn.frame_data(fi_B)
-        if in_A.sum() < 50 or in_B.sum() < 50:
+        # Radar has ~50-200 pts/frame across 5 sensors; LiDAR ~30k+. Use a
+        # gentler in-view threshold for the radar case.
+        min_in_view = 10 if self.lidar_subdir == 'radar' else 50
+        if in_A.sum() < min_in_view or in_B.sum() < min_in_view:
             return None
 
         pts_w_A_in = pts_w_A[in_A]

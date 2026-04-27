@@ -388,6 +388,12 @@ def main():
                          'purely positional. Makes the model modality-agnostic '
                          'so the same arch handles calib (cam|lidar) and '
                          'cross-frame (mm|mm) cases.')
+    ap.add_argument('--lidar-subdir', default='lidar',
+                    help="Point-source subdir name inside each scene. "
+                         "'lidar' (default) reads scene/lidar/<fi>.pkl. "
+                         "'radar' reads scene/radar/<fi>.pkl — enables "
+                         "cam-Radar calib on nuScenes (after running "
+                         "scripts/preprocessing/nuscenes_radar_to_pandaset.py).")
     ap.add_argument('--quad-frame', action='store_true',
                     help='extends --multi-frame to quad: A, M1, M2, B (M1 at 1/3 and '
                          'M2 at 2/3 between A and B). Requires --multi-frame and a '
@@ -482,6 +488,7 @@ def main():
         quint=args.quint_frame,                          # adds M3 (forces quad=True)
         motion_warp_gt=args.motion_warp_gt,
         calib_mode=args.calib_mode,
+        lidar_subdir=args.lidar_subdir,
         n_frames=n_frames_path,
         use_stacked=use_stacked,
     )
