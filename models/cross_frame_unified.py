@@ -76,6 +76,7 @@ class FrameTokenEncoder(nn.Module):
                  r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True,
                  n_intra_layers=2, img_size=128):
         super().__init__()
+        self.cnn_d = d
         self.cnn = (ConvNeXtBackbone(d, in_channels=in_channels)
                     if use_convnext else CNNBackbone(d, in_channels=in_channels))
         self.point_mlp = PointMLP3(d)
@@ -95,20 +96,39 @@ class FrameTokenEncoder(nn.Module):
         self.img_size = img_size
 
     def forward(self, image, uvd, pad_mask=None,
-                uvd_full=None, pad_full=None):
-        coarse, _ = self.cnn(image)                                  # (B, D, Hg, Wg)
+                uvd_full=None, pad_full=None, modality='mm'):
+        """modality: 'mm' (camera+LiDAR), 'cam' (LiDAR-zeroed), 'lidar' (image-zeroed).
+
+        For 'cam'/'lidar' modes the missing modality's grid contribution is
+        zeroed so the same encoder can produce a frame_token from any single
+        modality — enables calibration training where one frame is camera-only
+        and the other is LiDAR-only.
+        """
+        if modality == 'lidar':
+            B = uvd.shape[0]
+            Hg = Wg = self.img_size // 8
+            coarse = torch.zeros(B, self.cnn_d, Hg, Wg,
+                                  device=uvd.device, dtype=uvd.dtype)
+        else:
+            coarse, _ = self.cnn(image)                              # (B, D, Hg, Wg)
         B, D, Hg, Wg = coarse.shape
 
-        uv_01 = uvd[..., :2] / self.img_size
-        uvd_n = torch.cat([uv_01, uvd[..., 2:3]], dim=-1)
-        pt_feat = self.point_mlp(uvd_n)
-        if self.frustum_enc is not None:
-            pt_feat = pt_feat + self.frustum_enc(
-                uvd, full_uvd=uvd_full,
-                full_pad_mask=pad_full, query_pad_mask=pad_mask)
+        if modality == 'cam':
+            pt_grid = torch.zeros(B, D, Hg, Wg,
+                                   device=coarse.device, dtype=coarse.dtype)
+            mask = torch.zeros(B, 1, Hg, Wg,
+                                device=coarse.device, dtype=coarse.dtype)
+        else:
+            uv_01 = uvd[..., :2] / self.img_size
+            uvd_n = torch.cat([uv_01, uvd[..., 2:3]], dim=-1)
+            pt_feat = self.point_mlp(uvd_n)
+            if self.frustum_enc is not None:
+                pt_feat = pt_feat + self.frustum_enc(
+                    uvd, full_uvd=uvd_full,
+                    full_pad_mask=pad_full, query_pad_mask=pad_mask)
 
-        pt_grid, mask = scatter_pt_to_grid(
-            pt_feat, uvd[..., :2], pad_mask, Hg, Wg, self.img_size)
+            pt_grid, mask = scatter_pt_to_grid(
+                pt_feat, uvd[..., :2], pad_mask, Hg, Wg, self.img_size)
 
         fused = self.fuse(torch.cat([coarse, pt_grid, mask], dim=1))
 
@@ -213,12 +233,20 @@ class CalibNetUnifiedFrame(nn.Module):
     def __init__(self, d=D_DIM, n_heads=4, n_intra_layers=2, n_cross_layers=2,
                  in_channels=3, img_size=128, max_kv_frames=2,
                  deform_n_points=4, use_convnext=False,
-                 r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True, out_dim=5):
+                 r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True, out_dim=5,
+                 uv_only_query=False):
+        """uv_only_query: drop the bilinear sample of anchor frame_token from
+        Q construction. Q becomes (PointMLP(uvd) + pose_emb) only — purely
+        positional. Required for calib mode (anchor-frame may be camera-only
+        or LiDAR-only, so the mixed bilinear sample doesn't carry uniform
+        modality content). Cross-frame still works with uv_only_query=True;
+        the model just relies entirely on cross-attention to pull context."""
         super().__init__()
         self.d = d
         self.img_size = img_size
         self.max_kv_frames = max_kv_frames
         self._out_dim = out_dim
+        self.uv_only_query = uv_only_query
         self.encoder = FrameTokenEncoder(
             d, in_channels=in_channels, use_convnext=use_convnext,
             r_uv=r_uv, r_d=r_d, k_nb=k_nb, use_frustum=use_frustum,
@@ -233,17 +261,24 @@ class CalibNetUnifiedFrame(nn.Module):
         ])
 
     def _build_query(self, frame_token_anchor, uvd_anchor, pose_emb_to_tgt):
-        """Q = bilinear(frame_token_A, uv_A) + PointMLP_q(uvd_A) + pose_emb_AB.
+        """Q = (optional bilinear(frame_token_A, uv_A)) + PointMLP_q(uvd_A) + pose_emb_AB.
 
         The bilinear sample carries A-frame's local image+LiDAR context at
         the point's projection. PointMLP encodes the 3D position/depth.
         Pose embedding bridges to the target frame. Same construction shape
         in pair / triplet — only `pose_emb_to_tgt` changes per (Q-frame, T-frame).
+
+        If `self.uv_only_query`, the bilinear sample is dropped — Q is purely
+        positional (uv + depth + pose hint). Required for calib mode where
+        the anchor frame may be unimodal (camera-only or LiDAR-only) and the
+        bilinear sample wouldn't carry consistent modality content.
         """
         uv_01 = uvd_anchor[..., :2] / self.img_size
-        ctx = sample_grid_at_uv(frame_token_anchor, uv_01)
         uvd_n = torch.cat([uv_01, uvd_anchor[..., 2:3]], dim=-1)
         ptq = self.point_mlp_q(uvd_n)
+        if self.uv_only_query:
+            return ptq + pose_emb_to_tgt
+        ctx = sample_grid_at_uv(frame_token_anchor, uv_01)
         return ctx + ptq + pose_emb_to_tgt
 
     def _multi_forward(self, q, kv_grids, ref_uv_01_list, uv_hat_01, q_pad=None):
@@ -278,10 +313,19 @@ class CalibNetUnifiedFrame(nn.Module):
                 uvd_M3_full=None, pad_M3_full=None,
                 pose_AM3_6dof=None,
                 uv_M3_hat_of_A=None, uv_M3_hat_of_B=None,
+                modality_A='mm', modality_B='mm',
                 **_ignored):
-        """Pair / triplet (M) / quad (M+M2) modes via optional kwargs."""
-        ft_A, _ = self.encoder(patch_A, uvd_A, pad_A, uvd_A_full, pad_A_full)
-        ft_B, _ = self.encoder(patch_B, uvd_B, pad_B, uvd_B_full, pad_B_full)
+        """Pair / triplet (M) / quad (M+M2) modes via optional kwargs.
+
+        modality_A / modality_B: 'mm' (camera+LiDAR), 'cam' (LiDAR-zeroed),
+        'lidar' (image-zeroed). Calib uses ('cam', 'lidar') so frame A is
+        a camera-only frame_token and frame B is a LiDAR-only frame_token —
+        same encoder, same downstream cross-attention path.
+        """
+        ft_A, _ = self.encoder(patch_A, uvd_A, pad_A,
+                                uvd_A_full, pad_A_full, modality=modality_A)
+        ft_B, _ = self.encoder(patch_B, uvd_B, pad_B,
+                                uvd_B_full, pad_B_full, modality=modality_B)
         has_M = patch_M is not None
         has_M2 = patch_M2 is not None
         if has_M:

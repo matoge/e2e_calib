@@ -341,6 +341,14 @@ class PandaSetCrossFrameDataset(Dataset):
                  quad: bool = False,       # extends triplet with M2: A, M1, M2, B
                  triplet: bool = False,    # legacy: append M as aux KV in the
                                            # named-field pair output (used by v51-v55)
+                 calib_mode: bool = False, # cam-LiDAR extrinsic calibration:
+                                           # forces fi_B = fi_A so the perturbation
+                                           # acts on the (world→cam = LiDAR→cam)
+                                           # transform alone. Same image used for
+                                           # patch_A and patch_B (cropped at GT
+                                           # vs perturbed pivot uv). All other
+                                           # logic (LiDAR projection, patch crop,
+                                           # padding, loss) is unchanged.
                  seed: int = 42):
         super().__init__()
         if n_frames not in (2, 3):
@@ -361,6 +369,7 @@ class PandaSetCrossFrameDataset(Dataset):
         self.quint = quint
         self.use_stacked = use_stacked
         self.motion_warp_gt = motion_warp_gt
+        self.calib_mode = calib_mode
         self._cuboid_cache = {}                       # (scene_root_str, fi) → list of box dicts
         self.rng = np.random.default_rng(seed)
 
@@ -971,33 +980,40 @@ class PandaSetCrossFrameDataset(Dataset):
         if not scn.fi_pool:
             return None
         fi_A = int(rng.choice(scn.fi_pool))
-        # 2. fi_B: nearby frame. baseline_max is per-camera:
-        #   front/back (pure, no left/right/side) → unlimited (scene length)
-        #   side / front_left / rear_right / etc.                → baseline_max
-        # Pick direction first, then delta bounded by how much room is left
-        # on that side of fi_A — keeps the sampling uniform within a valid
-        # range instead of throwing away invalid draws.
-        bmin, bmax = self.baseline_range
-        cn = scn.camera_name.lower()
-        is_fb = (('front' in cn or 'back' in cn or 'rear' in cn)
-                 and 'left' not in cn and 'right' not in cn and 'side' not in cn)
-        direction = int(rng.choice([-1, 1]))
-        if direction > 0:
-            room = scn.n_frames - 1 - fi_A
+        # 2. calib mode: fi_B == fi_A. The "relative pose" perturbation
+        # then equals the cam-LiDAR extrinsic perturbation alone — same
+        # image, same world points, but projected with two different
+        # extrinsics (GT vs HAT).
+        if self.calib_mode:
+            fi_B = fi_A
         else:
-            room = fi_A
-        eff_max = room if is_fb else min(bmax, room)
-        if eff_max < bmin:
-            # try the other direction
-            direction = -direction
-            room = scn.n_frames - 1 - fi_A if direction > 0 else fi_A
+            # 2'. fi_B: nearby frame. baseline_max is per-camera:
+            #   front/back (pure, no left/right/side) → unlimited (scene length)
+            #   side / front_left / rear_right / etc.                → baseline_max
+            # Pick direction first, then delta bounded by how much room is left
+            # on that side of fi_A — keeps the sampling uniform within a valid
+            # range instead of throwing away invalid draws.
+            bmin, bmax = self.baseline_range
+            cn = scn.camera_name.lower()
+            is_fb = (('front' in cn or 'back' in cn or 'rear' in cn)
+                     and 'left' not in cn and 'right' not in cn and 'side' not in cn)
+            direction = int(rng.choice([-1, 1]))
+            if direction > 0:
+                room = scn.n_frames - 1 - fi_A
+            else:
+                room = fi_A
             eff_max = room if is_fb else min(bmax, room)
             if eff_max < bmin:
+                # try the other direction
+                direction = -direction
+                room = scn.n_frames - 1 - fi_A if direction > 0 else fi_A
+                eff_max = room if is_fb else min(bmax, room)
+                if eff_max < bmin:
+                    return None
+            delta = int(rng.integers(bmin, eff_max + 1)) * direction
+            fi_B = fi_A + delta
+            if fi_B < 0 or fi_B >= scn.n_frames:
                 return None
-        delta = int(rng.integers(bmin, eff_max + 1)) * direction
-        fi_B = fi_A + delta
-        if fi_B < 0 or fi_B >= scn.n_frames:
-            return None
 
         # 3. poses
         T_w2A = scn.T_w2c[fi_A]

@@ -150,7 +150,8 @@ def _apply_lidar_dropout(batch, max_rate, p_zero, multi_frame):
 
 
 def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
-         lidar_dropout=0.0, lidar_dropout_zero=0.0, per_frame_emb=False):
+         lidar_dropout=0.0, lidar_dropout_zero=0.0, per_frame_emb=False,
+         calib_mode=False):
     batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in batch.items()}
     if model.training and (lidar_dropout > 0 or lidar_dropout_zero > 0):
         _apply_lidar_dropout(batch, lidar_dropout, lidar_dropout_zero, multi_frame)
@@ -188,6 +189,11 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
             kw['uv_M3_hat_of_A'] = batch['uv_M3_hat_of_A']
             kw['uv_M3_hat_of_B'] = batch['uv_M3_hat_of_B']
     kw['per_frame_emb'] = per_frame_emb
+    if calib_mode:
+        # Frame A = camera-only image, Frame B = LiDAR-only scatter (perturbed
+        # extrinsic acts on B's projection). Same encoder, modality-zeroed.
+        kw['modality_A'] = 'cam'
+        kw['modality_B'] = 'lidar'
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
         patch_B=batch['patch_B'], uvd_B=batch['uvd_B'],
@@ -369,6 +375,19 @@ def main():
                          'flagged Moving by annotators, using the box A→B rigid '
                          'transform. Behind-camera warps drop; view-out warps '
                          'kept (model learns large Δuv). Trains motion-aware net.')
+    ap.add_argument('--calib-mode', action='store_true',
+                    help='cam-LiDAR extrinsic calibration: dataset forces '
+                         'fi_B = fi_A so the perturbation acts on the cam-LiDAR '
+                         'extrinsic alone. Use with smaller --sigma-ypr / --sigma-t '
+                         '(e.g. 0.5 / 0.05) typical of real miscalibration. Auto-'
+                         'enables modality split (frame A camera-only, frame B '
+                         'LiDAR-only) — same encoder, modality-zeroed by mode.')
+    ap.add_argument('--uv-only-query', action='store_true',
+                    help='Q construction drops the bilinear sample of anchor '
+                         'frame_token. Q = PointMLP(uvd) + pose_emb only — '
+                         'purely positional. Makes the model modality-agnostic '
+                         'so the same arch handles calib (cam|lidar) and '
+                         'cross-frame (mm|mm) cases.')
     ap.add_argument('--quad-frame', action='store_true',
                     help='extends --multi-frame to quad: A, M1, M2, B (M1 at 1/3 and '
                          'M2 at 2/3 between A and B). Requires --multi-frame and a '
@@ -462,6 +481,7 @@ def main():
         quad=args.quad_frame,                            # adds M2 (forces triplet=True)
         quint=args.quint_frame,                          # adds M3 (forces quad=True)
         motion_warp_gt=args.motion_warp_gt,
+        calib_mode=args.calib_mode,
         n_frames=n_frames_path,
         use_stacked=use_stacked,
     )
@@ -549,6 +569,7 @@ def main():
             n_cross_layers=args.n_cross_layers,
             out_dim=(7 if args.uvd else 5),
             max_kv_frames=max(2, n_frames_path - 1, 4 if args.quint_frame else (3 if args.quad_frame else 0)),
+            uv_only_query=(args.uv_only_query or args.calib_mode),
         ).to(DEVICE)
     else:
         model = CalibNetMultiFrame(
@@ -619,7 +640,7 @@ def main():
             if use_stacked:
                 _, m = step_n(model, batch, loss_ab_only=args.loss_ab_only, mix_mode=args.mix_mode)
             else:
-                _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero, per_frame_emb=args.per_frame_emb)
+                _, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero, per_frame_emb=args.per_frame_emb, calib_mode=args.calib_mode)
             vl.append(m['loss']); vA.append(m['err_AB'])
             vB.append(m['err_BA']); vbase.append(m['base_AB'])
             if args.uvd:
@@ -657,7 +678,7 @@ def main():
             if use_stacked:
                 loss, m = step_n(model, batch, loss_ab_only=args.loss_ab_only, mix_mode=args.mix_mode)
             else:
-                loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero, per_frame_emb=args.per_frame_emb)
+                loss, m = step(model, batch, uvd_mode=args.uvd, frustum_full=args.frustum_full, multi_frame=args.multi_frame, lidar_dropout=args.lidar_dropout, lidar_dropout_zero=args.lidar_dropout_zero, per_frame_emb=args.per_frame_emb, calib_mode=args.calib_mode)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
