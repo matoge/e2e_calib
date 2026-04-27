@@ -247,7 +247,136 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 <p>「sensor / task の対称性」を architecture の中に折り畳むことで、
 ロボット / 自動運転の空間スタックが大幅に薄くなる。</p>
 <hr />
-<h2 id="6">6. 既知の限界 / 次のステップ</h2>
+<h2 id="6-frame_token">6. 地図ありのケース — frame_token を「地図から」 作る</h2>
+<p>ここまでは複数の <strong>観測フレーム</strong> 同士の cross-attn だった。これを
+「<strong>地図から来た frame_token vs 現在の観測 frame_token</strong>」 に置き換えると、
+そのまま <strong>localization / loop closure / map update</strong> の primitive になる。</p>
+<h3 id="61">6.1 地図表現</h3>
+<p>時間累積で持っておくのは:</p>
+<ul>
+<li><strong>Gaussian Splat 群</strong> (μ_3D, Σ_3D, 色 or 特徴ベクトル) — 高密度・高品質</li>
+<li>もしくは <strong>点群 + per-point 特徴</strong> (色 / descriptor)</li>
+<li>もしくは <strong>surfel mesh</strong></li>
+</ul>
+<p>どれでもよい。重要なのは「<strong>現在のポーズ仮説に対して frame_token に
+潰せる</strong>」 こと。</p>
+<h3 id="62-render-frame_token">6.2 仮説ポーズで render → frame_token</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">T_world_to_cam_HAT</span><span class="w"> </span><span class="p">(</span><span class="err">現在の</span><span class="w"> </span><span class="n">pose</span><span class="w"> </span><span class="err">仮説</span><span class="p">)</span><span class="w">  </span><span class="o">+</span><span class="w">  </span><span class="err">地図</span><span class="w"> </span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">g</span><span class="o">.</span><span class="w"> </span><span class="n">GS</span><span class="w"> </span><span class="err">群</span><span class="p">)</span>
+<span class="w">   </span><span class="err">↓</span>
+<span class="w">   </span><span class="err">各</span><span class="w"> </span><span class="n">splat</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">point</span><span class="w"> </span><span class="err">を</span><span class="w"> </span><span class="n">T_HAT</span><span class="w"> </span><span class="err">で</span><span class="w"> </span><span class="nb">camera</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="err">に変換</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="err">射影</span>
+<span class="w">   </span><span class="err">↓</span>
+<span class="w">   </span><span class="n">image</span><span class="w"> </span><span class="nb">plane</span><span class="w"> </span><span class="err">で</span><span class="w"> </span><span class="n">feature</span><span class="w"> </span><span class="err">を</span><span class="w"> </span><span class="n">accumulate</span><span class="w"> </span><span class="p">(</span><span class="err">α</span><span class="o">-</span><span class="n">blend</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">scatter</span><span class="p">)</span>
+<span class="w">   </span><span class="err">↓</span>
+<span class="w">   </span><span class="n">frame_token_map</span><span class="w">  </span><span class="p">(</span><span class="n">B</span><span class="p">,</span><span class="w"> </span><span class="n">D</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">)</span><span class="w">   </span><span class="err">←</span><span class="w"> </span><span class="err">既存</span><span class="w"> </span><span class="n">encoder</span><span class="w"> </span><span class="err">の出力と同じ</span><span class="w"> </span><span class="n">shape</span>
+</code></pre></div>
+
+<p><code>frame_token_map</code> を、現フレームの <strong>観測 frame_token</strong> (image + 現フレ
+LiDAR の従来 encoder) と並べて KV にすればよい。Q は依然として位置のみ。</p>
+<h3 id="63">6.3 これで何が出るか</h3>
+<table>
+<thead>
+<tr>
+<th>用途</th>
+<th>やること</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>localization</strong></td>
+<td>仮説 pose から map render → frame_token_map. 観測 ft と cross-attn → per-point Δuv → Σ-weighted PnP で pose 更新. iterate.</td>
+</tr>
+<tr>
+<td><strong>loop closure 検証</strong></td>
+<td>place-recognition が出す候補 pose で map render. inlier σ ratio が閾値超えたら loop 採択. <strong>σ が naturally rejection metric になる</strong>。</td>
+</tr>
+<tr>
+<td><strong>map update / 差分検出</strong></td>
+<td>観測と map の残差が大きい patch (Δuv 大 / σ 小) は <strong>「地図と違う」</strong> = 動的変化または mapping 漏れ。新規取り込み or 動的除去の判断に使える.</td>
+</tr>
+<tr>
+<td><strong>multi-session merge</strong></td>
+<td>別セッションで作った map 同士を、共通エリアの観測経由で align。session A の地図に B の観測を流すだけ.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="64-livo-fast-livo">6.4 LIVO / FAST-LIVO 系との比較 — 地図最適化の有無が決定的</h3>
+<p><a href="https://github.com/hku-mars/FAST-LIVO2">FAST-LIVO2</a> などの最新の
+LIDAR-Inertial-Visual Odometry は <strong>純幾何</strong> (ICP + photometric error +
+EKF / factor graph)、ネットワークを一切使わない。さらに重要なのは:</p>
+<blockquote>
+<p><strong>LIVO 系は「地図を最適化しない」</strong></p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>システム</th>
+<th>map 表現</th>
+<th>map 最適化</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FAST-LIO2</td>
+<td>ikd-tree 点群</td>
+<td>❌ 蓄積のみ</td>
+</tr>
+<tr>
+<td>FAST-LIVO2</td>
+<td>LiDAR ikd-tree + 視覚 patch</td>
+<td>LiDAR ❌ / patch も最小限</td>
+</tr>
+<tr>
+<td>LIO-SAM</td>
+<td>点群</td>
+<td>❌ pose graph だけ最適化</td>
+</tr>
+<tr>
+<td>R3LIVE++</td>
+<td>点群 + 色</td>
+<td>❌ IESKF 蓄積</td>
+</tr>
+<tr>
+<td>3DGS / Photo-SLAM</td>
+<td>Gaussian</td>
+<td>⚠️ rendering loss で勾配 (動物体焼き込み)</td>
+</tr>
+<tr>
+<td><strong>本設計 (提案)</strong></td>
+<td><strong>GS or 点群 + 特徴</strong></td>
+<td><strong>✅ Σ-weighted residual で pose / 点位置 / 点 σ 全部に勾配</strong></td>
+</tr>
+</tbody>
+</table>
+<p>LIVO 系が動かす部分:</p>
+<ul>
+<li>ICP — 静的シーン仮定。動物体で破綻 (heuristic で除去)</li>
+<li>photometric — 暗所 / モーションブラー / 反射で破綻</li>
+<li>IMU — drift の積分でしか地図と繋がらない</li>
+<li>loop closure があっても <strong>pose 軌跡をずらすだけ</strong>、過去 map 点の誤差は固化</li>
+</ul>
+<p>本設計の優位:</p>
+<ul>
+<li><strong>σ が動的物体 / OOD を勝手に分離</strong> (annotation 不要、§4.1 参照) →
+  地図に動的物体を焼かない / 焼いても σ 大で再除去可能</li>
+<li>modality 失調を学習が吸収 (camera 暗所 → LiDAR 主導、LiDAR 雨天 → camera 主導)</li>
+<li><strong>map 自体に勾配が流せる</strong> → drift が地図に固化しない、loop closure で
+  過去の map 点もまとめて補正できる</li>
+<li>地図側を frame_token に潰せれば、新規 sensor が増えるたびにシステム再設計不要</li>
+</ul>
+<p>つまり「<strong>network-augmented full SLAM</strong>」(localization + map optimization +
+loop closure + sensor calib + 動物体除去 すべて 1 primitive で扱う) を、
+LIVO 並みの軽量 footprint で実現する設計。</p>
+<h3 id="65-deployment">6.5 エッジ deployment</h3>
+<p><code>CalibNetUnifiedFrame(d=128, n_cross_layers=4)</code> = <strong>1.65M params</strong>。</p>
+<ul>
+<li>fp16: <strong>3.3 MB</strong></li>
+<li>int8 量子化: <strong>1.7 MB</strong></li>
+<li>Jetson Orin Nano (8W) クラスで 30+ FPS 想定</li>
+<li>自動車向け車載 SoC (Renesas R-Car / NVIDIA DRIVE) なら余裕</li>
+</ul>
+<p>「地図持ち SLAM が車載で常時動く」 構成が現実的サイズ。</p>
+<hr />
+<h2 id="7">7. 既知の限界 / 次のステップ</h2>
 <ul>
 <li><strong>modality 重みの共有実験</strong>: 今は v303 と v304 で重みが別。同じ
   チェックポイントから両方 fine-tune して「どこまで多 task が共有できるか」

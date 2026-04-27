@@ -188,7 +188,98 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 
 ---
 
-## 6. 既知の限界 / 次のステップ
+## 6. 地図ありのケース — frame_token を「地図から」 作る
+
+ここまでは複数の **観測フレーム** 同士の cross-attn だった。これを
+「**地図から来た frame_token vs 現在の観測 frame_token**」 に置き換えると、
+そのまま **localization / loop closure / map update** の primitive になる。
+
+### 6.1 地図表現
+
+時間累積で持っておくのは:
+
+- **Gaussian Splat 群** (μ_3D, Σ_3D, 色 or 特徴ベクトル) — 高密度・高品質
+- もしくは **点群 + per-point 特徴** (色 / descriptor)
+- もしくは **surfel mesh**
+
+どれでもよい。重要なのは「**現在のポーズ仮説に対して frame_token に
+潰せる**」 こと。
+
+### 6.2 仮説ポーズで render → frame_token
+
+```
+T_world_to_cam_HAT (現在の pose 仮説)  +  地図 (e.g. GS 群)
+   ↓
+   各 splat / point を T_HAT で camera frame に変換 + 射影
+   ↓
+   image plane で feature を accumulate (α-blend or scatter)
+   ↓
+   frame_token_map  (B, D, 16, 16)   ← 既存 encoder の出力と同じ shape
+```
+
+`frame_token_map` を、現フレームの **観測 frame_token** (image + 現フレ
+LiDAR の従来 encoder) と並べて KV にすればよい。Q は依然として位置のみ。
+
+### 6.3 これで何が出るか
+
+| 用途 | やること |
+|---|---|
+| **localization** | 仮説 pose から map render → frame_token_map. 観測 ft と cross-attn → per-point Δuv → Σ-weighted PnP で pose 更新. iterate. |
+| **loop closure 検証** | place-recognition が出す候補 pose で map render. inlier σ ratio が閾値超えたら loop 採択. **σ が naturally rejection metric になる**。 |
+| **map update / 差分検出** | 観測と map の残差が大きい patch (Δuv 大 / σ 小) は **「地図と違う」** = 動的変化または mapping 漏れ。新規取り込み or 動的除去の判断に使える. |
+| **multi-session merge** | 別セッションで作った map 同士を、共通エリアの観測経由で align。session A の地図に B の観測を流すだけ. |
+
+### 6.4 LIVO / FAST-LIVO 系との比較 — 地図最適化の有無が決定的
+
+[FAST-LIVO2](https://github.com/hku-mars/FAST-LIVO2) などの最新の
+LIDAR-Inertial-Visual Odometry は **純幾何** (ICP + photometric error +
+EKF / factor graph)、ネットワークを一切使わない。さらに重要なのは:
+
+> **LIVO 系は「地図を最適化しない」**
+
+| システム | map 表現 | map 最適化 |
+|---|---|---|
+| FAST-LIO2 | ikd-tree 点群 | ❌ 蓄積のみ |
+| FAST-LIVO2 | LiDAR ikd-tree + 視覚 patch | LiDAR ❌ / patch も最小限 |
+| LIO-SAM | 点群 | ❌ pose graph だけ最適化 |
+| R3LIVE++ | 点群 + 色 | ❌ IESKF 蓄積 |
+| 3DGS / Photo-SLAM | Gaussian | ⚠️ rendering loss で勾配 (動物体焼き込み) |
+| **本設計 (提案)** | **GS or 点群 + 特徴** | **✅ Σ-weighted residual で pose / 点位置 / 点 σ 全部に勾配** |
+
+LIVO 系が動かす部分:
+
+- ICP — 静的シーン仮定。動物体で破綻 (heuristic で除去)
+- photometric — 暗所 / モーションブラー / 反射で破綻
+- IMU — drift の積分でしか地図と繋がらない
+- loop closure があっても **pose 軌跡をずらすだけ**、過去 map 点の誤差は固化
+
+本設計の優位:
+
+- **σ が動的物体 / OOD を勝手に分離** (annotation 不要、§4.1 参照) →
+  地図に動的物体を焼かない / 焼いても σ 大で再除去可能
+- modality 失調を学習が吸収 (camera 暗所 → LiDAR 主導、LiDAR 雨天 → camera 主導)
+- **map 自体に勾配が流せる** → drift が地図に固化しない、loop closure で
+  過去の map 点もまとめて補正できる
+- 地図側を frame_token に潰せれば、新規 sensor が増えるたびにシステム再設計不要
+
+つまり「**network-augmented full SLAM**」(localization + map optimization +
+loop closure + sensor calib + 動物体除去 すべて 1 primitive で扱う) を、
+LIVO 並みの軽量 footprint で実現する設計。
+
+### 6.5 エッジ deployment
+
+`CalibNetUnifiedFrame(d=128, n_cross_layers=4)` = **1.65M params**。
+
+- fp16: **3.3 MB**
+- int8 量子化: **1.7 MB**
+- Jetson Orin Nano (8W) クラスで 30+ FPS 想定
+- 自動車向け車載 SoC (Renesas R-Car / NVIDIA DRIVE) なら余裕
+
+「地図持ち SLAM が車載で常時動く」 構成が現実的サイズ。
+
+---
+
+## 7. 既知の限界 / 次のステップ
 
 - **modality 重みの共有実験**: 今は v303 と v304 で重みが別。同じ
   チェックポイントから両方 fine-tune して「どこまで多 task が共有できるか」
