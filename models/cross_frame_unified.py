@@ -69,12 +69,58 @@ def sample_grid_at_uv(grid: torch.Tensor, uv_01: torch.Tensor) -> torch.Tensor:
     return sampled.squeeze(-1).permute(0, 2, 1)                      # (B, P, D)
 
 
+class ModalityXAttnBlock(nn.Module):
+    """One round of bidirectional image_tokens ↔ pt_tokens cross-attention.
+
+    Inside the encoder, BEFORE pt is scattered to grid, this lets each
+    modality directly query the other (instead of the single 1x1 fuse +
+    self-attn route). Multi-round version produces a denser unified
+    representation per the user's spec for ps_v11-style baseline.
+    """
+    def __init__(self, d, n_heads=4):
+        super().__init__()
+        self.norm_img_q   = nn.LayerNorm(d)
+        self.norm_pt_q    = nn.LayerNorm(d)
+        self.attn_img2pt  = nn.MultiheadAttention(
+            d, n_heads, batch_first=True, dropout=0.1)
+        self.attn_pt2img  = nn.MultiheadAttention(
+            d, n_heads, batch_first=True, dropout=0.1)
+        self.norm_img_ffn = nn.LayerNorm(d)
+        self.norm_pt_ffn  = nn.LayerNorm(d)
+        self.ffn_img = nn.Sequential(
+            nn.Linear(d, 2 * d), nn.GELU(), nn.Dropout(0.1), nn.Linear(2 * d, d))
+        self.ffn_pt = nn.Sequential(
+            nn.Linear(d, 2 * d), nn.GELU(), nn.Dropout(0.1), nn.Linear(2 * d, d))
+        self.drop = nn.Dropout(0.1)
+
+    def forward(self, img_tok, pt_tok, pt_pad_mask=None):
+        # Image queries point cloud
+        img2pt, _ = self.attn_img2pt(
+            self.norm_img_q(img_tok), pt_tok, pt_tok,
+            key_padding_mask=pt_pad_mask)
+        img_tok = img_tok + self.drop(img2pt)
+        img_tok = img_tok + self.ffn_img(self.norm_img_ffn(img_tok))
+        # Point cloud queries image
+        pt2img, _ = self.attn_pt2img(
+            self.norm_pt_q(pt_tok), img_tok, img_tok)
+        pt_tok = pt_tok + self.drop(pt2img)
+        pt_tok = pt_tok + self.ffn_pt(self.norm_pt_ffn(pt_tok))
+        return img_tok, pt_tok
+
+
 class FrameTokenEncoder(nn.Module):
-    """Per-frame: image + sparse pts → unified (B, D, Hg, Wg) frame_token."""
+    """Per-frame: image + sparse pts → unified (B, D, Hg, Wg) frame_token.
+
+    `n_xattn_modality` ≥ 1 inserts that many ModalityXAttnBlock rounds
+    before the scatter+fuse step → image and lidar tokens directly mix
+    via cross-attention multiple times. 0 (default) = legacy single-pass
+    scatter-then-fuse path.
+    """
 
     def __init__(self, d=D_DIM, in_channels=3, use_convnext=False,
                  r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True,
-                 n_intra_layers=2, img_size=128):
+                 n_intra_layers=2, img_size=128,
+                 n_xattn_modality=0):
         super().__init__()
         self.cnn_d = d
         self.cnn = (ConvNeXtBackbone(d, in_channels=in_channels)
@@ -93,6 +139,9 @@ class FrameTokenEncoder(nn.Module):
                 self.fuse.weight[c, c, 0, 0] = 1.0
         self.intra = nn.ModuleList(
             [SelfAttnFusionBlock(d) for _ in range(n_intra_layers)])
+        # Multi-round image↔lidar cross-attn (before scatter+fuse).
+        self.xattn_modality = nn.ModuleList(
+            [ModalityXAttnBlock(d) for _ in range(n_xattn_modality)])
         self.img_size = img_size
 
     def forward(self, image, uvd, pad_mask=None,
@@ -126,6 +175,17 @@ class FrameTokenEncoder(nn.Module):
                 pt_feat = pt_feat + self.frustum_enc(
                     uvd, full_uvd=uvd_full,
                     full_pad_mask=pad_full, query_pad_mask=pad_mask)
+
+            # Multi-round image↔lidar cross-attn (if any). Image tokens
+            # absorb point info, then point tokens absorb image info, etc.
+            # When `xattn_modality` is empty → no-op, falls back to scatter+fuse.
+            if len(self.xattn_modality) > 0:
+                img_tok = coarse.flatten(2).permute(0, 2, 1)        # (B, HW, D)
+                pt_tok = pt_feat
+                for blk in self.xattn_modality:
+                    img_tok, pt_tok = blk(img_tok, pt_tok, pt_pad_mask=pad_mask)
+                coarse = img_tok.permute(0, 2, 1).reshape(B, D, Hg, Wg).contiguous()
+                pt_feat = pt_tok
 
             pt_grid, mask = scatter_pt_to_grid(
                 pt_feat, uvd[..., :2], pad_mask, Hg, Wg, self.img_size)
@@ -234,7 +294,7 @@ class CalibNetUnifiedFrame(nn.Module):
                  in_channels=3, img_size=128, max_kv_frames=2,
                  deform_n_points=4, use_convnext=False,
                  r_uv=4.0, r_d=2.0, k_nb=8, use_frustum=True, out_dim=5,
-                 uv_only_query=False):
+                 uv_only_query=False, q_uv_pure=False, n_xattn_modality=0):
         """uv_only_query: drop the bilinear sample of anchor frame_token from
         Q construction. Q becomes (PointMLP(uvd) + pose_emb) only — purely
         positional. Required for calib mode (anchor-frame may be camera-only
@@ -247,11 +307,26 @@ class CalibNetUnifiedFrame(nn.Module):
         self.max_kv_frames = max_kv_frames
         self._out_dim = out_dim
         self.uv_only_query = uv_only_query
+        self.q_uv_pure = q_uv_pure
         self.encoder = FrameTokenEncoder(
             d, in_channels=in_channels, use_convnext=use_convnext,
             r_uv=r_uv, r_d=r_d, k_nb=k_nb, use_frustum=use_frustum,
-            n_intra_layers=n_intra_layers, img_size=img_size)
+            n_intra_layers=n_intra_layers, img_size=img_size,
+            n_xattn_modality=n_xattn_modality)
         self.point_mlp_q = PointMLP3(d)
+        # Pure-uv positional Q (DETR-style): sin/cos basis at multi-freqs
+        # over (u,v) ∈ [0, 1] only. No depth, no anchor sample. Used when
+        # q_uv_pure=True — the model has to interpret 'which 3D point' from
+        # what it pulls out of the unified frame_token via cross-attn.
+        n_uv_freq = 6
+        self.register_buffer(
+            'uv_freqs',
+            (2.0 ** torch.arange(n_uv_freq, dtype=torch.float32)) * 3.14159265,
+            persistent=False)
+        self.uv_pure_mlp = nn.Sequential(
+            nn.Linear(2 + 2 * n_uv_freq * 2, 64), nn.GELU(),
+            nn.Linear(64, d),
+        )
         self.pose_mlp = PoseMLP(d)
         # Per-point feature embed (rcs, vx_world, vy_world). Zero for LiDAR,
         # real for radar — initialised so the contribution starts at zero so
@@ -296,6 +371,15 @@ class CalibNetUnifiedFrame(nn.Module):
         added term is no-op until the model learns to use it.
         """
         uv_01 = uvd_anchor[..., :2] / self.img_size
+        if self.q_uv_pure:
+            # Pure-uv positional Q: sin/cos basis on (u, v), no depth, no
+            # anchor sample. Q is purely a positional slot — the model
+            # must pull '3D content' from KV via cross-attn.
+            ang = uv_01.unsqueeze(-1) * self.uv_freqs                # (B, P, 2, F)
+            sc = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1) # (B, P, 2, 2F)
+            sc = sc.flatten(-2)                                       # (B, P, 4F)
+            feat = torch.cat([uv_01, sc], dim=-1)                     # (B, P, 2+4F)
+            return self.uv_pure_mlp(feat) + pose_emb_to_tgt
         uvd_n = torch.cat([uv_01, uvd_anchor[..., 2:3]], dim=-1)
         ptq = self.point_mlp_q(uvd_n)
         if feats_anchor is not None:

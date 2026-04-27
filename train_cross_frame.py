@@ -437,6 +437,18 @@ def main():
                          'purely positional. Makes the model modality-agnostic '
                          'so the same arch handles calib (cam|lidar) and '
                          'cross-frame (mm|mm) cases.')
+    ap.add_argument('--q-uv-pure', action='store_true',
+                    help='Q is built from sin/cos UV positional encoding ALONE '
+                         '(no depth, no PointMLP, no anchor sample). DETR-style '
+                         'positional slot. The model has to pull 3D info from '
+                         'KV (unified frame_token) via cross-attn. Tests '
+                         'whether lidar-as-Q is actually necessary.')
+    ap.add_argument('--n-xattn-modality', type=int, default=0,
+                    help='Inside FrameTokenEncoder, insert N rounds of '
+                         'bidirectional cross-attn between image_tokens and '
+                         'pt_tokens BEFORE the scatter+fuse step. 0 (default) '
+                         '= legacy single-pass. Higher = denser image-lidar '
+                         'mixing per the ps_v11 unified-token spec.')
     ap.add_argument('--lidar-subdir', default='lidar',
                     help="Point-source subdir name inside each scene. "
                          "'lidar' (default) reads scene/lidar/<fi>.pkl. "
@@ -629,6 +641,8 @@ def main():
             out_dim=(7 if args.uvd else 5),
             max_kv_frames=max(2, n_frames_path - 1, 4 if args.quint_frame else (3 if args.quad_frame else 0)),
             uv_only_query=(args.uv_only_query or args.calib_mode),
+            q_uv_pure=args.q_uv_pure,
+            n_xattn_modality=args.n_xattn_modality,
         ).to(DEVICE)
     else:
         model = CalibNetMultiFrame(
