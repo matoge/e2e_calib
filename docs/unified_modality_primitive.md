@@ -234,7 +234,7 @@ Combined-dataset 学習 (v306 / v307b) は per-dataset best (v303 / v304) より
 | direction | val_err | vs from-scratch | vs same-modality fine-tune |
 |---|---|---|---|
 | LiDAR pre-train → Radar fine-tune (v316) | 0.58 px | better (v305 0.61) | worse (v313 0.53) |
-| Radar pre-train → LiDAR fine-tune (v317) | 0.81 px | **worse** (v303 0.67) | worse (v311 0.60) |
+| Radar pre-train → LiDAR fine-tune (v317) | 0.76 px | **worse** (v303 0.67) | worse (v311 0.60) |
 
 LiDAR → Radar は「dense geometry を学んだ encoder の subset を使う」 ので転移可能。
 Radar → LiDAR は「sparse / planar しか見てない encoder を dense / 3D に使う」 ので
