@@ -598,7 +598,10 @@ class PandaSetCrossFrameDataset(Dataset):
         return self.virtual_epoch_len
 
     def __getitem__(self, idx):
-        for retry in range(30):
+        # Retry until we get a valid sample. Per-attempt success rate can be
+        # low (~10%) under restrictive vfl_range / multi-camera mixes, so
+        # 30 retries is too few — bump to 200 and only raise if truly stuck.
+        for retry in range(200):
             if self.calib_mode:
                 sample = self._try_one_calib(idx + retry * 9973)
             elif self.use_stacked:
@@ -1092,6 +1095,11 @@ class PandaSetCrossFrameDataset(Dataset):
         v0 = vc - half
         if CROP < 2:
             return None
+        # Effective virtual focal length of the resized patch:
+        # vfl_eff = fx_orig * img_size / CROP. Same scalar for all cameras
+        # IF vfl_range is set; varies per-sample otherwise. Emitted to the
+        # batch so the model can condition on the patch's angular FOV.
+        vfl_eff = float(scn.K[0, 0]) * self.img_size / float(CROP)
         patch_img = scn.load_patch(fi, u0, v0, CROP)
         pa = self._resize_patch(patch_img, u0, v0, CROP)
         if pa is None:
@@ -1305,6 +1313,7 @@ class PandaSetCrossFrameDataset(Dataset):
             T_w2c_B=torch.from_numpy(T_w2c).float(),
             pts_w_A_query=torch.from_numpy(pts_w_in.astype(np.float32)),
             is_obj_A=is_obj_t.clone(), is_obj_B=is_obj_t.clone(),
+            vfl=torch.tensor(vfl_eff, dtype=torch.float32),
         )
         return out
 

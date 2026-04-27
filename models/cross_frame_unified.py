@@ -253,6 +253,32 @@ class CalibNetUnifiedFrame(nn.Module):
             n_intra_layers=n_intra_layers, img_size=img_size)
         self.point_mlp_q = PointMLP3(d)
         self.pose_mlp = PoseMLP(d)
+        # Per-point feature embed (rcs, vx_world, vy_world). Zero for LiDAR,
+        # real for radar — initialised so the contribution starts at zero so
+        # existing LiDAR-only training is unchanged at init, then the model
+        # learns to use radar features only when present.
+        self.feat_mlp = nn.Sequential(
+            nn.Linear(3, 32), nn.GELU(),
+            nn.Linear(32, d),
+        )
+        nn.init.zeros_(self.feat_mlp[-1].weight)
+        nn.init.zeros_(self.feat_mlp[-1].bias)
+        # Per-sample virtual-focal-length embedding. Encodes log(vfl) at 4
+        # frequencies (sin+cos basis). When vfl is None, the embedding is
+        # skipped — back-compat with checkpoints trained without it.
+        # Last-layer zero-init so newly-added vfl conditioning is a no-op
+        # until the model learns to use it.
+        n_freq = 4
+        self.register_buffer(
+            'vfl_freqs',
+            2.0 ** torch.arange(n_freq, dtype=torch.float32) * 0.5,  # 0.5,1,2,4
+            persistent=False)
+        self.vfl_mlp = nn.Sequential(
+            nn.Linear(2 * n_freq + 1, 32), nn.GELU(),
+            nn.Linear(32, d),
+        )
+        nn.init.zeros_(self.vfl_mlp[-1].weight)
+        nn.init.zeros_(self.vfl_mlp[-1].bias)
         self.cross_blocks = nn.ModuleList([
             UnifiedCrossBlock(d, n_heads=n_heads, n_points=deform_n_points,
                               max_levels=max_kv_frames, out_dim=out_dim,
@@ -260,22 +286,20 @@ class CalibNetUnifiedFrame(nn.Module):
             for _ in range(n_cross_layers)
         ])
 
-    def _build_query(self, frame_token_anchor, uvd_anchor, pose_emb_to_tgt):
-        """Q = (optional bilinear(frame_token_A, uv_A)) + PointMLP_q(uvd_A) + pose_emb_AB.
+    def _build_query(self, frame_token_anchor, uvd_anchor, pose_emb_to_tgt,
+                     feats_anchor=None):
+        """Q = (optional bilinear(frame_token_A, uv_A)) + PointMLP_q(uvd_A)
+             + pose_emb_AB + (optional FeatMLP(feats_A)).
 
-        The bilinear sample carries A-frame's local image+LiDAR context at
-        the point's projection. PointMLP encodes the 3D position/depth.
-        Pose embedding bridges to the target frame. Same construction shape
-        in pair / triplet — only `pose_emb_to_tgt` changes per (Q-frame, T-frame).
-
-        If `self.uv_only_query`, the bilinear sample is dropped — Q is purely
-        positional (uv + depth + pose hint). Required for calib mode where
-        the anchor frame may be unimodal (camera-only or LiDAR-only) and the
-        bilinear sample wouldn't carry consistent modality content.
+        feats_anchor is optional per-point sensor side-channel (rcs, vx, vy
+        for radar; zeros for lidar). Zero-initialised contribution so the
+        added term is no-op until the model learns to use it.
         """
         uv_01 = uvd_anchor[..., :2] / self.img_size
         uvd_n = torch.cat([uv_01, uvd_anchor[..., 2:3]], dim=-1)
         ptq = self.point_mlp_q(uvd_n)
+        if feats_anchor is not None:
+            ptq = ptq + self.feat_mlp(feats_anchor)
         if self.uv_only_query:
             return ptq + pose_emb_to_tgt
         ctx = sample_grid_at_uv(frame_token_anchor, uv_01)
@@ -292,6 +316,18 @@ class CalibNetUnifiedFrame(nn.Module):
     def _emb_to_grid(emb_b1d, Hg, Wg):
         """(B, 1, D) → (B, D, Hg, Wg) broadcast."""
         return emb_b1d.permute(0, 2, 1).unsqueeze(-1).expand(-1, -1, Hg, Wg)
+
+    def _vfl_emb(self, vfl):
+        """vfl: (B,) — virtual focal length (float).
+        Returns (B, 1, d) embedding via log + sin/cos basis + 2-layer MLP.
+        """
+        # log(vfl), normalised by log(64) so range ~[-2, 4] for typical
+        # vfl ∈ [10, 4000].
+        x = torch.log(vfl.clamp(min=1e-3)).unsqueeze(-1) / 4.0   # (B, 1)
+        # sin/cos basis at multiple frequencies
+        ang = x * self.vfl_freqs                                # (B, n_freq)
+        feat = torch.cat([x, torch.sin(ang), torch.cos(ang)], dim=-1)  # (B, 2*nf+1)
+        return self.vfl_mlp(feat).unsqueeze(1)                  # (B, 1, d)
 
     def forward(self, patch_A, uvd_A, patch_B, uvd_B,
                 pose_AB_6dof, pose_BA_6dof,
@@ -314,6 +350,8 @@ class CalibNetUnifiedFrame(nn.Module):
                 pose_AM3_6dof=None,
                 uv_M3_hat_of_A=None, uv_M3_hat_of_B=None,
                 modality_A='mm', modality_B='mm',
+                feats_A=None, feats_B=None,
+                vfl=None,
                 **_ignored):
         """Pair / triplet (M) / quad (M+M2) modes via optional kwargs.
 
@@ -337,6 +375,17 @@ class CalibNetUnifiedFrame(nn.Module):
             ft_M3, _ = self.encoder(patch_M3, uvd_M3, pad_M3, uvd_M3_full, pad_M3_full)
 
         Hg, Wg = ft_A.shape[2], ft_A.shape[3]
+
+        # vfl conditioning: same vfl per sample → broadcast as a global
+        # additive bias to every frame_token. Last-layer zero init means this
+        # is a no-op until the model learns to use it.
+        if vfl is not None:
+            vfl_grid = self._emb_to_grid(self._vfl_emb(vfl), Hg, Wg)
+            ft_A = ft_A + vfl_grid
+            ft_B = ft_B + vfl_grid
+            if has_M:  ft_M  = ft_M  + vfl_grid
+            if has_M2: ft_M2 = ft_M2 + vfl_grid
+            if has_M3: ft_M3 = ft_M3 + vfl_grid
         emb_AB = self.pose_mlp(pose_AB_6dof).unsqueeze(1)
         emb_BA = self.pose_mlp(pose_BA_6dof).unsqueeze(1)
 
@@ -364,7 +413,7 @@ class CalibNetUnifiedFrame(nn.Module):
             kv_M3_for_A = ft_M3 + self._emb_to_grid(emb_AM3, Hg, Wg)
             kv_M3_for_B = ft_M3 + self._emb_to_grid(emb_BM3, Hg, Wg)
 
-        q_A = self._build_query(ft_A, uvd_A, emb_AB)
+        q_A = self._build_query(ft_A, uvd_A, emb_AB, feats_anchor=feats_A)
         kv_AB  = [kv_B_for_A]
         ref_AB = [uv_B_hat_of_A / self.img_size]
         if has_M:
@@ -380,7 +429,7 @@ class CalibNetUnifiedFrame(nn.Module):
             q_A, kv_AB, ref_AB,
             uv_B_hat_of_A / self.img_size, q_pad=pad_A)
 
-        q_B = self._build_query(ft_B, uvd_B, emb_BA)
+        q_B = self._build_query(ft_B, uvd_B, emb_BA, feats_anchor=feats_B)
         kv_BA  = [kv_A_for_B]
         ref_BA = [uv_A_hat_of_B / self.img_size]
         if has_M:

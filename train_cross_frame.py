@@ -214,6 +214,8 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
         kw['feats_A'] = batch['feats_A']
     if 'feats_B' in batch:
         kw['feats_B'] = batch['feats_B']
+    if 'vfl' in batch:
+        kw['vfl'] = batch['vfl']
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
         patch_B=batch['patch_B'], uvd_B=batch['uvd_B'],
