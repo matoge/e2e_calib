@@ -204,11 +204,11 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
             kw['uv_M3_hat_of_A'] = batch['uv_M3_hat_of_A']
             kw['uv_M3_hat_of_B'] = batch['uv_M3_hat_of_B']
     kw['per_frame_emb'] = per_frame_emb
-    if calib_mode:
-        # Frame A = camera-only image, Frame B = LiDAR-only scatter (perturbed
-        # extrinsic acts on B's projection). Same encoder, modality-zeroed.
-        kw['modality_A'] = 'cam'
-        kw['modality_B'] = 'lidar'
+    # Calib mode: keep both frames multimodal ('mm'/'mm'). The earlier
+    # modality_A='cam', modality_B='lidar' split sounded clean but starved
+    # KV of image content → cross-attn can't visually match the (HAT-
+    # projected) lidar back to the image, model fails to learn (v321 stuck
+    # at base error). Multimodal both is what v303/v306 used and worked.
     # Per-point sensor features (rcs / vx / vy for radar; zeros for lidar).
     if 'feats_A' in batch:
         kw['feats_A'] = batch['feats_A']
