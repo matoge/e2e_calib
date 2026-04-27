@@ -229,6 +229,18 @@ Combined-dataset 学習 (v306 / v307b) は per-dataset best (v303 / v304) より
 | v307b (combined cross-frame) | v312 | cross-frame pair | PandaSet 103 (front) | v304 2.54 px | **2.38 px** |
 | v308 (nuScenes radar all-cam) | v313 | cam-Radar calib | nuScenes 150 (front) | v305 0.61 px | **0.53 px** |
 
+**Cross-modal transfer の非対称性** (v316 / v317):
+
+| direction | val_err | vs from-scratch | vs same-modality fine-tune |
+|---|---|---|---|
+| LiDAR pre-train → Radar fine-tune (v316) | 0.58 px | better (v305 0.61) | worse (v313 0.53) |
+| Radar pre-train → LiDAR fine-tune (v317) | 0.81 px | **worse** (v303 0.67) | worse (v311 0.60) |
+
+LiDAR → Radar は「dense geometry を学んだ encoder の subset を使う」 ので転移可能。
+Radar → LiDAR は「sparse / planar しか見てない encoder を dense / 3D に使う」 ので
+情報不足。同一 modality を経由せずに cross-modal 転移するなら、表現容量の大きい
+側を pre-train に置くこと。
+
 **Pre-train fine-tune が単独学習を超える** (3/3 比較した case で勝利):
 
 - v306 が **1100 シーン × 3 dataset family × all-cam** で学んだ汎用な

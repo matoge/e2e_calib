@@ -383,6 +383,35 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 </tr>
 </tbody>
 </table>
+<p><strong>Cross-modal transfer の非対称性</strong> (v316 / v317):</p>
+<table>
+<thead>
+<tr>
+<th>direction</th>
+<th>val_err</th>
+<th>vs from-scratch</th>
+<th>vs same-modality fine-tune</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LiDAR pre-train → Radar fine-tune (v316)</td>
+<td>0.58 px</td>
+<td>better (v305 0.61)</td>
+<td>worse (v313 0.53)</td>
+</tr>
+<tr>
+<td>Radar pre-train → LiDAR fine-tune (v317)</td>
+<td>0.81 px</td>
+<td><strong>worse</strong> (v303 0.67)</td>
+<td>worse (v311 0.60)</td>
+</tr>
+</tbody>
+</table>
+<p>LiDAR → Radar は「dense geometry を学んだ encoder の subset を使う」 ので転移可能。
+Radar → LiDAR は「sparse / planar しか見てない encoder を dense / 3D に使う」 ので
+情報不足。同一 modality を経由せずに cross-modal 転移するなら、表現容量の大きい
+側を pre-train に置くこと。</p>
 <p><strong>Pre-train fine-tune が単独学習を超える</strong> (3/3 比較した case で勝利):</p>
 <ul>
 <li>v306 が <strong>1100 シーン × 3 dataset family × all-cam</strong> で学んだ汎用な
