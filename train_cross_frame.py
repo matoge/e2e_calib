@@ -32,22 +32,18 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ─── loss helpers ─────────────────────────────────────────────────────────────
 
-def residual_nll_and_metrics(raw, uv_hat, uv_gt, pad_mask, img_size):
+def residual_nll_and_metrics(raw, uv_hat, uv_gt, pad_mask, img_size, is_obj=None):
     """raw: (B,N,5)  — (Δu, Δv, log σu, log σv, ρ_raw) already clamped.
        uv_hat, uv_gt: (B,N,2) in patch-local pixel coords.
        pad_mask: (B,N) bool, True = padding.
+       is_obj: optional (B,N) bool — True = inside an annotated 3D cuboid.
 
     Target residual Δ_gt = uv_gt - uv_hat  (in pixel space).
-    `gaussian2d_nll` is fed (Δ_gt) as the target and expects raw params where
-    the first two channels ARE the predicted Δ (not an absolute position).
     """
     target = uv_gt - uv_hat                              # (B, N, 2) — target Δ
     B, N, _ = raw.shape
-    # mask out padding: replace with zeros and reduce over valid only
     valid = ~pad_mask                                     # (B,N)
 
-    # gaussian2d_nll expects params shaped (B,N,5) + target (B,N,2)
-    # it returns mean NLL; we do per-sample and mask manually
     mu   = raw[..., :2]
     log_sx, log_sy = raw[..., 2], raw[..., 3]
     rho  = torch.tanh(raw[..., 4]) * 0.99
@@ -58,32 +54,41 @@ def residual_nll_and_metrics(raw, uv_hat, uv_gt, pad_mask, img_size):
     z  = (dx * dx + dy * dy - 2 * rho * dx * dy) / r2
     nll = 0.5 * z + log_sx + log_sy + 0.5 * torch.log(r2)
 
-    # reduce over valid
     nll_masked = torch.where(valid, nll, torch.zeros_like(nll))
     n_valid    = valid.sum().clamp_min(1)
     loss = nll_masked.sum() / n_valid
 
-    # diagnostic metrics: mean |pred|  and  pred err
-    pred_uv = uv_hat + mu                                 # (B,N,2)
+    pred_uv = uv_hat + mu
     with torch.no_grad():
-        err_px = (pred_uv - uv_gt).pow(2).sum(-1).sqrt()  # (B,N)
+        err_px = (pred_uv - uv_gt).pow(2).sum(-1).sqrt()
         err_masked = torch.where(valid, err_px, torch.zeros_like(err_px))
         err_mean   = (err_masked.sum() / n_valid).item()
-        # base error (no correction): |uv_hat - uv_gt|
         base = (uv_hat - uv_gt).pow(2).sum(-1).sqrt()
         base_masked = torch.where(valid, base, torch.zeros_like(base))
         base_mean   = (base_masked.sum() / n_valid).item()
+        metrics = dict(err_px=err_mean, base_px=base_mean)
+        if is_obj is not None:
+            obj = valid & is_obj
+            bg  = valid & (~is_obj)
+            for tag, m in (('obj', obj), ('bg', bg)):
+                n_m = m.sum().clamp_min(1)
+                metrics[f'err_px_{tag}']  = (torch.where(m, err_px, torch.zeros_like(err_px)).sum() / n_m).item()
+                metrics[f'base_px_{tag}'] = (torch.where(m, base,   torch.zeros_like(base)).sum() / n_m).item()
+                metrics[f'nll_{tag}']     = (torch.where(m, nll,    torch.zeros_like(nll)).sum() / n_m).item()
+                metrics[f'n_{tag}']       = m.sum().item()
 
-    return loss, dict(err_px=err_mean, base_px=base_mean)
+    return loss, metrics
 
 
-def residual_uvd_nll_and_metrics(raw, uv_hat, uv_gt, d_hat, d_gt, pad_mask, img_size):
+def residual_uvd_nll_and_metrics(raw, uv_hat, uv_gt, d_hat, d_gt, pad_mask, img_size,
+                                   is_obj=None):
     """raw: (B,N,7) [Δu, Δv, Δd, log σu, log σv, log σd, ρ_uv] already clamped.
        d_hat, d_gt: (B,N,) in meters (target-camera frame z).
-       Returns (loss, dict(err_px, base_px, err_d, base_d))."""
-    target_uv = uv_gt - uv_hat                              # (B,N,2) pixel Δ target
-    target_d  = d_gt - d_hat                                # (B,N,)  meter Δ target
-    valid = ~pad_mask                                       # (B,N)
+       is_obj: optional (B,N) bool — True = inside an annotated 3D cuboid.
+       Returns (loss, dict(err_px, base_px, err_d, base_d, [+ obj/bg splits]))."""
+    target_uv = uv_gt - uv_hat
+    target_d  = d_gt - d_hat
+    valid = ~pad_mask
 
     tx, ty, td = raw[..., 0], raw[..., 1], raw[..., 2]
     log_sx, log_sy, log_sd = raw[..., 3], raw[..., 4], raw[..., 5]
@@ -110,9 +115,19 @@ def residual_uvd_nll_and_metrics(raw, uv_hat, uv_gt, d_hat, d_gt, pad_mask, img_
         err_d   = (pred_d  - d_gt).abs()
         base_px = (uv_hat - uv_gt).pow(2).sum(-1).sqrt()
         base_d  = (d_hat  - d_gt).abs()
-        m = lambda x: (torch.where(valid, x, torch.zeros_like(x)).sum() / n_valid).item()
-        metrics = dict(err_px=m(err_px), base_px=m(base_px),
-                       err_d=m(err_d),   base_d=m(base_d))
+        m = lambda x, mask, n: (torch.where(mask, x, torch.zeros_like(x)).sum() / n).item()
+        metrics = dict(err_px=m(err_px, valid, n_valid), base_px=m(base_px, valid, n_valid),
+                       err_d=m(err_d, valid, n_valid),   base_d=m(base_d, valid, n_valid))
+        if is_obj is not None:
+            obj = valid & is_obj
+            bg  = valid & (~is_obj)
+            for tag, mask in (('obj', obj), ('bg', bg)):
+                n_m = mask.sum().clamp_min(1)
+                metrics[f'err_px_{tag}']  = m(err_px,  mask, n_m)
+                metrics[f'base_px_{tag}'] = m(base_px, mask, n_m)
+                metrics[f'err_d_{tag}']   = m(err_d,   mask, n_m)
+                metrics[f'nll_{tag}']     = m(nll,     mask, n_m)
+                metrics[f'n_{tag}']       = mask.sum().item()
     return loss, metrics
 
 
@@ -194,6 +209,11 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
         # extrinsic acts on B's projection). Same encoder, modality-zeroed.
         kw['modality_A'] = 'cam'
         kw['modality_B'] = 'lidar'
+    # Per-point sensor features (rcs / vx / vy for radar; zeros for lidar).
+    if 'feats_A' in batch:
+        kw['feats_A'] = batch['feats_A']
+    if 'feats_B' in batch:
+        kw['feats_B'] = batch['feats_B']
     raw_AB, raw_BA = model(
         patch_A=batch['patch_A'], uvd_A=batch['uvd_A'],
         patch_B=batch['patch_B'], uvd_B=batch['uvd_B'],
@@ -202,18 +222,24 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
         pad_A=batch['pad_A'], pad_B=batch['pad_B'],
         **kw,
     )
+    is_obj_A = batch.get('is_obj_A')
+    is_obj_B = batch.get('is_obj_B')
     if uvd_mode:
         loss_AB, m_AB = residual_uvd_nll_and_metrics(
             raw_AB, batch['uv_B_hat_of_A'], batch['uv_B_gt_of_A'],
-            batch['d_B_hat_of_A'], batch['d_B_gt_of_A'], batch['pad_A'], 64)
+            batch['d_B_hat_of_A'], batch['d_B_gt_of_A'], batch['pad_A'], 64,
+            is_obj=is_obj_A)
         loss_BA, m_BA = residual_uvd_nll_and_metrics(
             raw_BA, batch['uv_A_hat_of_B'], batch['uv_A_gt_of_B'],
-            batch['d_A_hat_of_B'], batch['d_A_gt_of_B'], batch['pad_B'], 64)
+            batch['d_A_hat_of_B'], batch['d_A_gt_of_B'], batch['pad_B'], 64,
+            is_obj=is_obj_B)
     else:
         loss_AB, m_AB = residual_nll_and_metrics(
-            raw_AB, batch['uv_B_hat_of_A'], batch['uv_B_gt_of_A'], batch['pad_A'], 64)
+            raw_AB, batch['uv_B_hat_of_A'], batch['uv_B_gt_of_A'], batch['pad_A'], 64,
+            is_obj=is_obj_A)
         loss_BA, m_BA = residual_nll_and_metrics(
-            raw_BA, batch['uv_A_hat_of_B'], batch['uv_A_gt_of_B'], batch['pad_B'], 64)
+            raw_BA, batch['uv_A_hat_of_B'], batch['uv_A_gt_of_B'], batch['pad_B'], 64,
+            is_obj=is_obj_B)
 
     loss = 0.5 * (loss_AB + loss_BA)
     metrics = dict(
@@ -226,6 +252,13 @@ def step(model, batch, uvd_mode=False, frustum_full=True, multi_frame=False,
             err_d_AB=m_AB['err_d'], base_d_AB=m_AB['base_d'],
             err_d_BA=m_BA['err_d'], base_d_BA=m_BA['base_d'],
         )
+    # Object/background split — averages of A and B side metrics if available.
+    for tag in ('obj', 'bg'):
+        if f'err_px_{tag}' in m_AB and f'err_px_{tag}' in m_BA:
+            metrics[f'err_{tag}'] = 0.5 * (m_AB[f'err_px_{tag}'] + m_BA[f'err_px_{tag}'])
+            metrics[f'base_{tag}'] = 0.5 * (m_AB[f'base_px_{tag}'] + m_BA[f'base_px_{tag}'])
+            metrics[f'nll_{tag}'] = 0.5 * (m_AB[f'nll_{tag}'] + m_BA[f'nll_{tag}'])
+            metrics[f'n_{tag}'] = m_AB[f'n_{tag}'] + m_BA[f'n_{tag}']
     return loss, metrics
 
 
@@ -326,6 +359,15 @@ def main():
     ap.add_argument('--sigma-t',   type=float, default=0.20)
     ap.add_argument('--crop-min', type=int, default=64)
     ap.add_argument('--crop-max', type=int, default=192)
+    ap.add_argument('--vfl-min', type=float, default=None,
+                    help='If set together with --vfl-max, dataset crops at a '
+                         'sampled virtual-focal-length ∈ [vfl_min, vfl_max] '
+                         'instead of pixel-units crop_range. Each sample uses '
+                         'CROP = fx * img_size / vfl_target → patches end up '
+                         'at the SAME angular FOV per pixel regardless of '
+                         'original camera intrinsics. Required for clean '
+                         'multi-camera / multi-dataset training.')
+    ap.add_argument('--vfl-max', type=float, default=None)
     ap.add_argument('--num-workers', type=int, default=8)
     ap.add_argument('--virtual-epoch', type=int, default=4000)
     ap.add_argument('--deform-mode', default='none', choices=['none', 'sl'])
@@ -487,6 +529,9 @@ def main():
         baseline_range=(args.baseline_min, args.baseline_max),
         sigma_ypr=args.sigma_ypr, sigma_t=args.sigma_t,
         crop_range=(args.crop_min, args.crop_max),
+        vfl_range=((args.vfl_min, args.vfl_max)
+                    if (args.vfl_min is not None and args.vfl_max is not None)
+                    else None),
         cameras=args.cameras,
         triplet=args.multi_frame and not use_stacked,   # legacy aux-KV only
         quad=args.quad_frame,                            # adds M2 (forces triplet=True)
@@ -684,6 +729,7 @@ def main():
         model.train()
         ep_losses, ep_errs_AB, ep_errs_BA, ep_base_AB = [], [], [], []
         ep_errs_d_AB, ep_errs_d_BA, ep_base_d = [], [], []
+        ep_obj, ep_bg = [], []  # tuples of (err, base, nll, n) per step
 
         def _do_step(batch):
             opt.zero_grad(set_to_none=True)
@@ -697,6 +743,9 @@ def main():
             ep_losses.append(m['loss'])
             ep_errs_AB.append(m['err_AB']); ep_errs_BA.append(m['err_BA'])
             ep_base_AB.append(m['base_AB'])
+            if 'err_obj' in m:
+                ep_obj.append((m['err_obj'], m['base_obj'], m['nll_obj'], m['n_obj']))
+                ep_bg .append((m['err_bg'],  m['base_bg'],  m['nll_bg'],  m['n_bg']))
             if args.uvd:
                 ep_errs_d_AB.append(m['err_d_AB']); ep_errs_d_BA.append(m['err_d_BA'])
                 ep_base_d.append(m['base_d_AB'])
@@ -821,10 +870,32 @@ def main():
                 if do_val:
                     vd = 0.5 * (v['err_d_AB'] + v['err_d_BA'])
                     depth_str += f'  val_d={vd:.2f}m(base {v["base_d"]:.2f})'
-            log(f'ep {ep:3d}  loss={curves["loss"][-1]:.3f}  '
-                f'err_AB={curves["err_AB"][-1]:.2f}px  '
-                f'err_BA={curves["err_BA"][-1]:.2f}px  '
-                f'(base={curves["base_AB"][-1]:.2f}px){val_str}{depth_str}  '
+            # Obj / bg train-side weighted averages.
+            obj_split = bg_split = None
+            if ep_obj and ep_bg:
+                def _wmean(xs):
+                    tot_n = sum(n for *_, n in xs)
+                    if tot_n == 0:
+                        return float('nan'), float('nan'), float('nan')
+                    err  = sum(e * n for e, b, nll, n in xs) / tot_n
+                    base = sum(b * n for e, b, nll, n in xs) / tot_n
+                    nll_ = sum(nll * n for e, b, nll, n in xs) / tot_n
+                    return err, base, nll_
+                obj_split = _wmean(ep_obj)
+                bg_split  = _wmean(ep_bg)
+            err_avg = 0.5 * (curves['err_AB'][-1] + curves['err_BA'][-1])
+            base_avg = curves['base_AB'][-1]
+            err_str = f'err={err_avg:.2f}px'
+            if obj_split is not None:
+                err_str += f'(obj={obj_split[0]:.2f} bg={bg_split[0]:.2f})'
+            base_str = f'base={base_avg:.2f}px'
+            if obj_split is not None:
+                base_str += f'(obj={obj_split[1]:.2f} bg={bg_split[1]:.2f})'
+            loss_str = f'loss={curves["loss"][-1]:.3f}'
+            if obj_split is not None:
+                loss_str += f'(obj={obj_split[2]:.2f} bg={bg_split[2]:.2f})'
+            log(f'ep {ep:3d}  {loss_str}  {err_str}  ({base_str})'
+                f'{val_str}{depth_str}  '
                 f'lr={opt.param_groups[0]["lr"]:.2e}  '
                 f't={time.time()-t0:.0f}s')
 

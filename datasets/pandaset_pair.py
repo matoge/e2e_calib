@@ -289,6 +289,27 @@ class _SceneData:
             pass
         return pts_w, uv, z, in_view
 
+    def frame_feats(self, fi):
+        """Return per-point features (N, 3): [rcs, vx, vy].
+        For radar pkls (which carry rcs + ego-compensated velocity), reads the
+        actual values. For LiDAR (3-col pkl) returns zeros so the downstream
+        pipeline can treat lidar/radar uniformly. Order matches the per-frame
+        pkl row order, i.e. matches frame_data's pts_w order."""
+        try:
+            df = pd.read_pickle(self.lidar_paths[fi])
+        except Exception:
+            return None
+        n = len(df)
+        feats = np.zeros((n, 3), dtype=np.float32)
+        # rcs/vx/vy only exist on radar dumps; safe-fill from columns if present.
+        if 'rcs' in df.columns:
+            feats[:, 0] = df['rcs'].values.astype(np.float32)
+        if 'vx' in df.columns:
+            feats[:, 1] = df['vx'].values.astype(np.float32)
+        if 'vy' in df.columns:
+            feats[:, 2] = df['vy'].values.astype(np.float32)
+        return feats
+
     def precompute_all(self, n_workers: int = 8, **_ignored):
         """Build the on-disk projection cache for every frame. Idempotent:
         skips frames whose cache file already exists. Runs in parent only.
@@ -332,7 +353,16 @@ class PandaSetCrossFrameDataset(Dataset):
                  sigma_ypr: float = 0.3,
                  sigma_t:   float = 0.15,
                  max_points: int = 96,
-                 crop_range = (128, 256),
+                 crop_range = (128, 256),     # pixel-units fallback (legacy)
+                 vfl_range = None,            # if set (vfl_min, vfl_max), crop is
+                                              # sized so that
+                                              #     CROP = fx * img_size / vfl
+                                              # → all patches end up at the SAME
+                                              # virtual focal length (= same
+                                              # angular FOV per pixel) regardless
+                                              # of original camera intrinsics.
+                                              # Makes multi-camera training
+                                              # truly invariant.
                  virtual_epoch_len: int = 2000,
                  frame_train_frac: float = 1.0,
                  cameras: Union[List[str], str, None] = None,
@@ -372,6 +402,7 @@ class PandaSetCrossFrameDataset(Dataset):
         self.sigma_t   = sigma_t
         self.max_points = max_points
         self.crop_range = crop_range
+        self.vfl_range  = vfl_range   # None → pixel-units crop (legacy)
         self.virtual_epoch_len = virtual_epoch_len
         self.split = split
         self.n_frames = n_frames
@@ -509,6 +540,19 @@ class PandaSetCrossFrameDataset(Dataset):
                               mode='bilinear', align_corners=False).squeeze(0)
         return t, (int(u0_full), int(v0_full), s, s)
 
+    def _sample_crop_size(self, rng, fx):
+        """Sample crop size in original-image pixels.
+
+        - If `vfl_range` is set: sample target virtual-FL ∈ [vfl_min, vfl_max]
+          and compute CROP = round(fx * img_size / vfl). Same vfl across cams
+          → same angular FOV per pixel → patches are camera-invariant.
+        - Else: legacy pixel-units uniform sample from `crop_range`.
+        """
+        if self.vfl_range is not None:
+            vfl = rng.uniform(self.vfl_range[0], self.vfl_range[1])
+            return int(round(float(fx) * self.img_size / vfl))
+        return int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
+
     def _crop_patch(self, img_cached, u0_full, v0_full, s_full, IW, IH, scale_div):
         """Pivot stays at exact patch center — pad outside-FOV with zeros so
         pose_emb's "pivot = patch center" invariant holds. Patch box returned
@@ -555,7 +599,9 @@ class PandaSetCrossFrameDataset(Dataset):
 
     def __getitem__(self, idx):
         for retry in range(30):
-            if self.use_stacked:
+            if self.calib_mode:
+                sample = self._try_one_calib(idx + retry * 9973)
+            elif self.use_stacked:
                 sample = self._try_one_nframe(idx + retry * 9973)
             else:
                 sample = self._try_one(idx + retry * 9973)
@@ -808,7 +854,7 @@ class PandaSetCrossFrameDataset(Dataset):
                 return None
 
         # 6. crop patches with shared random size, centered on hat projection
-        CROP = int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
+        CROP = self._sample_crop_size(rng, scn.K[0, 0])
         if CROP < 2:
             return None
         half = CROP / 2
@@ -984,6 +1030,284 @@ class PandaSetCrossFrameDataset(Dataset):
         )
 
 
+    def _try_one_calib(self, idx):
+        """Calib-mode sample: ONE camera image + ONE LiDAR sweep, with
+        extrinsic perturbation applied at projection time.
+
+        Frame A and Frame B are the SAME image and the SAME perturbed
+        LiDAR projection. Pose A→B is identity. The model's only signal
+        is the visual mismatch between the (un-perturbed) camera content
+        and the (HAT-perturbed) LiDAR overlay.
+        """
+        rng = np.random.default_rng(idx)
+        if not self.scenes:
+            return None
+        scn: _SceneData = self.scenes[int(rng.integers(len(self.scenes)))]
+        if not scn.fi_pool:
+            return None
+        fi = int(rng.choice(scn.fi_pool))
+
+        K     = scn.K
+        IW, IH = scn.IW, scn.IH
+        T_w2c = scn.T_w2c[fi]
+
+        pts_w_all, uv_GT_all_full, z_all_full, in_view = scn.frame_data(fi)
+        feats_all_full = scn.frame_feats(fi)
+        if feats_all_full is None:
+            return None
+        min_in_view = 10 if self.lidar_subdir == 'radar' else 50
+        if in_view.sum() < min_in_view:
+            return None
+        pts_w     = pts_w_all[in_view]
+        uv_GT_v   = uv_GT_all_full[in_view]
+        z_GT_v    = z_all_full[in_view]
+        feats_v   = feats_all_full[in_view]
+
+        # Sample extrinsic perturbation (acts on cam-frame points).
+        ypr_pert = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
+        t_pert   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
+        δT       = _ypr_t_to_mat(ypr_pert, t_pert).astype(np.float64)
+
+        # Pivot: stratified-pick on GT projections (cached, no compute).
+        H_BINS, W_BINS = 4, 6
+        u_bin = np.clip((uv_GT_v[:, 0] * W_BINS / IW).astype(int), 0, W_BINS - 1)
+        v_bin = np.clip((uv_GT_v[:, 1] * H_BINS / IH).astype(int), 0, H_BINS - 1)
+        flat_bin = v_bin * W_BINS + u_bin
+        occupied = np.unique(flat_bin)
+        b = int(rng.choice(occupied))
+        in_bin = np.where(flat_bin == b)[0]
+        ci = int(rng.choice(in_bin))
+        P_pivot_GT = (T_w2c @ np.append(pts_w[ci], 1.0))[:3]
+        P_pivot_HAT = (δT @ np.append(P_pivot_GT, 1.0))[:3]
+        if P_pivot_HAT[2] < 1.0:
+            return None
+        uc_arr = _proj_cam(P_pivot_HAT[None, :], K, scn.dist)[0]
+        uc, vc = float(uc_arr[0]), float(uc_arr[1])
+        if not (0 <= uc < IW and 0 <= vc < IH):
+            return None
+
+        CROP = self._sample_crop_size(rng, scn.K[0, 0])
+        half = CROP / 2
+        u0 = uc - half
+        v0 = vc - half
+        if CROP < 2:
+            return None
+        patch_img = scn.load_patch(fi, u0, v0, CROP)
+        pa = self._resize_patch(patch_img, u0, v0, CROP)
+        if pa is None:
+            return None
+        patch, box = pa
+
+        # Coarse filter via GT positions with a margin (perturbation shifts
+        # points by a few px). Saves projecting all in-view points.
+        margin = 64.0  # full image-px around the patch
+        u_lo = box[0] - margin; u_hi = box[0] + box[2] + margin
+        v_lo = box[1] - margin; v_hi = box[1] + box[3] + margin
+        cand = ((uv_GT_v[:, 0] >= u_lo) & (uv_GT_v[:, 0] < u_hi) &
+                (uv_GT_v[:, 1] >= v_lo) & (uv_GT_v[:, 1] < v_hi))
+        if cand.sum() < min_in_view:
+            return None
+        pts_c    = pts_w[cand].astype(np.float64)
+        uv_GT_c  = uv_GT_v[cand].astype(np.float32)
+        z_GT_c   = z_GT_v [cand].astype(np.float32)
+        feats_c  = feats_v[cand]
+
+        # HAT projection over the small candidate set only.
+        homo_c = np.column_stack([pts_c, np.ones(len(pts_c), dtype=np.float64)])
+        P_GT_c  = (T_w2c @ homo_c.T)[:3].T
+        P_HAT_c = (δT @ np.column_stack([P_GT_c, np.ones(len(P_GT_c))]).T)[:3].T
+        good_z = (P_HAT_c[:, 2] > 0.5) & (P_GT_c[:, 2] > 0.5)
+        if good_z.sum() < 4:
+            return None
+        uv_HAT_c = _proj_cam(P_HAT_c[good_z], K, scn.dist).astype(np.float32)
+        uv_GT_c  = uv_GT_c[good_z]
+        z_HAT_c  = P_HAT_c[good_z, 2].astype(np.float32)
+        z_GT_c   = z_GT_c[good_z]
+        feats_c  = feats_c[good_z]
+        pts_c    = pts_c[good_z]
+
+        # Real in-patch filter (HAT positions).
+        in_box_hat = ((uv_HAT_c[:, 0] >= box[0]) & (uv_HAT_c[:, 0] < box[0] + box[2]) &
+                      (uv_HAT_c[:, 1] >= box[1]) & (uv_HAT_c[:, 1] < box[1] + box[3]))
+        if in_box_hat.sum() < 4:
+            return None
+        uv_HAT_local = self._uv_to_patch_local(uv_HAT_c[in_box_hat], box)
+        uv_GT_local  = self._uv_to_patch_local(uv_GT_c [in_box_hat], box)
+        z_HAT_in     = z_HAT_c[in_box_hat]
+        z_GT_in      = z_GT_c [in_box_hat]
+        feats_in     = feats_c[in_box_hat]
+        pts_w_in     = pts_c[in_box_hat].astype(np.float32)
+
+        # Drop points whose GT lands grossly outside the patch.
+        SLACK = self.img_size
+        gt_ok = ((uv_GT_local[:, 0] >= -SLACK) & (uv_GT_local[:, 0] <  self.img_size + SLACK) &
+                 (uv_GT_local[:, 1] >= -SLACK) & (uv_GT_local[:, 1] <  self.img_size + SLACK))
+        hat_ok = ((uv_HAT_local[:, 0] >= 0) & (uv_HAT_local[:, 0] < self.img_size) &
+                  (uv_HAT_local[:, 1] >= 0) & (uv_HAT_local[:, 1] < self.img_size))
+        keep = hat_ok & gt_ok
+        if keep.sum() < 4:
+            return None
+        uv_HAT_local = uv_HAT_local[keep]
+        uv_GT_local  = uv_GT_local [keep]
+        z_HAT_in     = z_HAT_in[keep]
+        z_GT_in      = z_GT_in [keep]
+        feats_in     = feats_in[keep]
+        pts_w_in     = pts_w_in[keep]
+
+        # Stratified subsample / zero-pad to max_points.
+        N = len(uv_HAT_local)
+        if N > self.max_points:
+            G = int(np.sqrt(self.max_points))
+            cell = self.img_size / G
+            cj = np.clip((uv_HAT_local[:, 0] / cell).astype(np.int32), 0, G - 1)
+            ci2 = np.clip((uv_HAT_local[:, 1] / cell).astype(np.int32), 0, G - 1)
+            cid = ci2 * G + cj
+            du = uv_HAT_local[:, 0] - (cj + 0.5) * cell
+            dv = uv_HAT_local[:, 1] - (ci2 + 0.5) * cell
+            d2 = du * du + dv * dv
+            pick = _argmin_per_cell(cid, d2)
+        else:
+            pick = np.arange(N, dtype=np.int64)
+        uv_HAT_local = uv_HAT_local[pick]
+        uv_GT_local  = uv_GT_local [pick]
+        z_HAT_in     = z_HAT_in[pick]
+        z_GT_in      = z_GT_in [pick]
+        feats_in     = feats_in[pick]
+        pts_w_in     = pts_w_in[pick]
+        N_use = len(uv_HAT_local)
+        pad = np.zeros(self.max_points, dtype=bool)
+        if N_use < self.max_points:
+            pad_n = self.max_points - N_use
+            pad[N_use:] = True
+            uv_HAT_local = np.concatenate([uv_HAT_local, np.zeros((pad_n, 2), np.float32)])
+            uv_GT_local  = np.concatenate([uv_GT_local,  np.zeros((pad_n, 2), np.float32)])
+            z_HAT_in     = np.concatenate([z_HAT_in, np.zeros(pad_n, np.float32)])
+            z_GT_in      = np.concatenate([z_GT_in,  np.zeros(pad_n, np.float32)])
+            feats_in     = np.concatenate([feats_in, np.zeros((pad_n, 3), np.float32)])
+            pts_w_in     = np.concatenate([pts_w_in, np.zeros((pad_n, 3), np.float32)])
+
+        z_norm = (z_HAT_in / 50.0).astype(np.float32)
+
+        # Frustum-context full set (same construction as _try_one).
+        N_FULL = 2048
+        def _pack_full(uv, z):
+            uvd = np.concatenate([uv, (z / 50.0)[:, None]], axis=1).astype(np.float32)
+            n = len(uvd)
+            if n > N_FULL:
+                G_full = int(np.sqrt(N_FULL))
+                cell_full = self.img_size / G_full
+                cj = np.clip((uv[:, 0] / cell_full).astype(np.int32), 0, G_full - 1)
+                ci2 = np.clip((uv[:, 1] / cell_full).astype(np.int32), 0, G_full - 1)
+                cid = ci2 * G_full + cj
+                du = uv[:, 0] - (cj + 0.5) * cell_full
+                dv = uv[:, 1] - (ci2 + 0.5) * cell_full
+                d2 = du * du + dv * dv
+                order = np.lexsort((d2, cid))
+                cid_s = cid[order]
+                first = np.empty(len(cid_s), dtype=bool); first[0] = True
+                first[1:] = cid_s[1:] != cid_s[:-1]
+                kept = np.sort(order[first])
+                if len(kept) < N_FULL:
+                    rest = np.setdiff1d(np.arange(n), kept, assume_unique=False)
+                    fill = self.rng.choice(rest, size=min(N_FULL - len(kept), len(rest)),
+                                           replace=False) if len(rest) > 0 else np.empty(0, dtype=np.int64)
+                    kept = np.concatenate([kept, fill])[:N_FULL]
+                uvd = uvd[kept]
+                n = len(uvd)
+            pad_full = np.zeros(N_FULL, dtype=bool)
+            if n < N_FULL:
+                pad_full[n:] = True
+                uvd = np.concatenate([uvd, np.zeros((N_FULL - n, 3), dtype=np.float32)], axis=0)
+            return uvd, pad_full
+
+        # Frustum context: use the candidate set's HAT projections (already
+        # localised to the patch neighbourhood, much smaller than full sweep).
+        uv_full_in_box = self._uv_to_patch_local(uv_HAT_c[in_box_hat], box)
+        z_full_in_box  = z_HAT_c[in_box_hat]
+        in_main = ((uv_full_in_box[:, 0] >= 0) & (uv_full_in_box[:, 0] < self.img_size) &
+                   (uv_full_in_box[:, 1] >= 0) & (uv_full_in_box[:, 1] < self.img_size))
+        uv_full_in_box = uv_full_in_box[in_main]
+        z_full_in_box  = z_full_in_box [in_main]
+        uvd_full, pad_full = _pack_full(uv_full_in_box, z_full_in_box)
+
+        # Per-point object-vs-background flag — points inside any annotated
+        # 3D cuboid count as 'object' (cars, peds, etc.), the rest as
+        # background (road, buildings, vegetation). Lets the trainer report
+        # err/NLL split obj vs bg, mirroring the v21-era log format. Only
+        # PandaSet currently has cuboid annotations under annotations/cuboids/;
+        # other datasets (nuScenes-as-pandaset etc.) get all-False.
+        is_obj = np.zeros(len(pts_w_in), dtype=bool)
+        try:
+            cb_path = scn.root / 'annotations' / 'cuboids' / f'{int(fi):02d}.pkl.gz'
+            if cb_path.exists():
+                import gzip as _gz, pickle as _pk, math as _math
+                key = (str(scn.root), int(fi))
+                if key not in self._cuboid_cache:
+                    with _gz.open(cb_path, 'rb') as f:
+                        df = _pk.load(f)
+                    boxes = []
+                    for _, row in df.iterrows():
+                        cy, sy = _math.cos(row['yaw']), _math.sin(row['yaw'])
+                        R = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=np.float64)
+                        boxes.append(dict(
+                            c=np.array([row['position.x'], row['position.y'], row['position.z']],
+                                        dtype=np.float64),
+                            s=np.array([row['dimensions.x'], row['dimensions.y'], row['dimensions.z']],
+                                        dtype=np.float64),
+                            R=R))
+                    self._cuboid_cache[key] = boxes
+                for cb in self._cuboid_cache[key]:
+                    rel = pts_w_in.astype(np.float64) - cb['c']
+                    local = rel @ cb['R']
+                    half = cb['s'] * 0.5
+                    inside = ((np.abs(local[:, 0]) < half[0]) &
+                              (np.abs(local[:, 1]) < half[1]) &
+                              (np.abs(local[:, 2]) < half[2]))
+                    is_obj |= inside
+        except Exception:
+            pass
+
+        # Build output dict — A == B everywhere (same image, same HAT projection),
+        # pose identity. Δuv supervision flows entirely from uv_*_hat → uv_*_gt
+        # via the visual mismatch in the patch.
+        feats_t = torch.from_numpy(np.ascontiguousarray(feats_in, dtype=np.float32))
+        uvd_t   = torch.from_numpy(
+            np.concatenate([uv_HAT_local, z_norm[:, None]], axis=1)).float()
+        uv_hat_t = torch.from_numpy(uv_HAT_local).float()
+        uv_gt_t  = torch.from_numpy(uv_GT_local).float()
+        d_hat_t  = torch.from_numpy(z_HAT_in).float()
+        d_gt_t   = torch.from_numpy(z_GT_in).float()
+        pad_t    = torch.from_numpy(pad)
+        uvd_full_t = torch.from_numpy(uvd_full)
+        pad_full_t = torch.from_numpy(pad_full)
+        zero_pose = torch.zeros(6, dtype=torch.float32)
+
+        is_obj_t = torch.from_numpy(is_obj.copy())
+
+        out = dict(
+            patch_A=patch.float(), patch_B=patch.float().clone(),
+            uvd_A=uvd_t.clone(), uvd_B=uvd_t.clone(),
+            uv_B_hat_of_A=uv_hat_t.clone(), uv_B_gt_of_A=uv_gt_t.clone(),
+            uv_A_hat_of_B=uv_hat_t.clone(), uv_A_gt_of_B=uv_gt_t.clone(),
+            d_B_hat_of_A=d_hat_t.clone(), d_B_gt_of_A=d_gt_t.clone(),
+            d_A_hat_of_B=d_hat_t.clone(), d_A_gt_of_B=d_gt_t.clone(),
+            pose_AB_6dof=zero_pose.clone(), pose_BA_6dof=zero_pose.clone(),
+            pad_A=pad_t.clone(), pad_B=pad_t.clone(),
+            feats_A=feats_t.clone(), feats_B=feats_t.clone(),
+            uvd_A_full=uvd_full_t.clone(), uvd_B_full=uvd_full_t.clone(),
+            pad_A_full=pad_full_t.clone(), pad_B_full=pad_full_t.clone(),
+            fi_A=fi, fi_B=fi,
+            scene=scn.scene_id,
+            scene_root=str(scn.root),
+            box_B=torch.tensor(box, dtype=torch.float32),
+            K=torch.from_numpy(K).float(),
+            dist=torch.from_numpy(scn.dist).float(),
+            T_w2c_B=torch.from_numpy(T_w2c).float(),
+            pts_w_A_query=torch.from_numpy(pts_w_in.astype(np.float32)),
+            is_obj_A=is_obj_t.clone(), is_obj_B=is_obj_t.clone(),
+        )
+        return out
+
     def _try_one(self, idx):
         rng = np.random.default_rng((idx + 1) * 2654435761 & 0xFFFFFFFF)
 
@@ -1039,6 +1363,13 @@ class PandaSetCrossFrameDataset(Dataset):
         # 4. load LiDAR and project (cached per frame)
         pts_w_A, uv_Af, z_Af, in_A = scn.frame_data(fi_A)
         pts_w_B, uv_Bf, z_Bf, in_B = scn.frame_data(fi_B)
+        # Per-point features (rcs, vx_world, vy_world). Radar carries real
+        # values; LiDAR returns zeros — same shape so downstream filtering
+        # treats both uniformly.
+        feats_Af = scn.frame_feats(fi_A)
+        feats_Bf = scn.frame_feats(fi_B)
+        if feats_Af is None or feats_Bf is None:
+            return None
         # Radar has ~50-200 pts/frame across 5 sensors; LiDAR ~30k+. Use a
         # gentler in-view threshold for the radar case.
         min_in_view = 10 if self.lidar_subdir == 'radar' else 50
@@ -1048,6 +1379,7 @@ class PandaSetCrossFrameDataset(Dataset):
         pts_w_A_in = pts_w_A[in_A]
         uv_A_all   = uv_Af[in_A]
         z_A_all    = z_Af[in_A]
+        feats_A_in = feats_Af[in_A]
 
         # 6. pick center 3D point from A via spatial-bin stratified sampling.
         # Uniform rng.integers over all in-view points heavily biases toward
@@ -1067,6 +1399,15 @@ class PandaSetCrossFrameDataset(Dataset):
         uc_A, vc_A = uv_A_all[ci]
 
         # 7. sample perturbation → T_AB_hat
+        # In cross-frame: δT acts on the relative pose A→B (T_A_to_B_hat = T_A_to_B_gt @ δT).
+        # In calib_mode (fi_A==fi_B): T_A_to_B_gt = identity, so T_A_to_B_hat = δT.
+        # This is mathematically equivalent to "LiDAR misaligned in cam frame by δT",
+        # so the existing P_QA_in_B_hat = δT @ P_QA_in_A correctly produces the
+        # perturbed image projection. BUT we also need uvd_A (model input) to
+        # reflect the perturbation — currently it uses GT projection, which means
+        # the model never sees a misaligned LiDAR overlay in the camera image and
+        # can solve the task purely from pose_emb(δT). Below we re-project A's
+        # query points with δT applied so uvd_A shows the HAT positions.
         ypr_pert = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
         t_pert   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
         δT       = _ypr_t_to_mat(ypr_pert, t_pert)
@@ -1093,12 +1434,25 @@ class PandaSetCrossFrameDataset(Dataset):
         # 9. crop patches with random shared size
         # pivot stays at EXACT patch center — padding (inside _crop_patch)
         # handles any out-of-image area so pose_emb semantics are preserved.
-        CROP = int(rng.integers(self.crop_range[0], self.crop_range[1] + 1))
+        # In calib_mode we MUST share the crop center between A and B —
+        # otherwise the per-pair offset (uc_B_hat - uc_A) leaks the
+        # perturbation through the difference between uvd_A and
+        # uv_B_hat_of_A, and the model learns to ignore the image entirely.
+        # We align both crops on uc_B_hat (= what's available at inference
+        # time given a HAT extrinsic). In cross-frame mode the existing
+        # asymmetric crop is kept.
+        CROP = self._sample_crop_size(rng, scn.K[0, 0])
         half = CROP / 2
-        u0_A = uc_A - half
-        v0_A = vc_A - half
-        u0_B = uc_B_hat[0] - half
-        v0_B = uc_B_hat[1] - half
+        if self.calib_mode:
+            u0_A = uc_B_hat[0] - half
+            v0_A = uc_B_hat[1] - half
+            u0_B = uc_B_hat[0] - half
+            v0_B = uc_B_hat[1] - half
+        else:
+            u0_A = uc_A - half
+            v0_A = vc_A - half
+            u0_B = uc_B_hat[0] - half
+            v0_B = uc_B_hat[1] - half
         if CROP < 2:
             return None
         patch_A_img = scn.load_patch(fi_A, u0_A, v0_A, CROP)
@@ -1225,6 +1579,7 @@ class PandaSetCrossFrameDataset(Dataset):
         pts_w_QA   = pts_w_A_in[in_box_A]
         uv_A_patch = self._uv_to_patch_local(uv_A_all[in_box_A], box_A)
         z_A_patch  = z_A_all[in_box_A]
+        feats_QA   = feats_A_in[in_box_A]
 
         homo = np.concatenate([pts_w_QA, np.ones((len(pts_w_QA), 1), dtype=np.float32)], axis=1)
         P_QA_in_A     = (T_w2A @ homo.T)[:3].T
@@ -1255,8 +1610,19 @@ class PandaSetCrossFrameDataset(Dataset):
         uv_B_gt_local_A  = self._uv_to_patch_local(uv_B_gt_full_A,  box_B)
         uv_B_hat_local_A = self._uv_to_patch_local(uv_B_hat_full_A, box_B)
 
+        # Calib mode: uvd_A (model input) must reflect the HAT projection in
+        # patch_A's local coords so the model sees a visually misaligned LiDAR
+        # overlay rather than the GT-projected one. fi_A==fi_B means the world
+        # points project the same way under HAT in cam A and cam B; only the
+        # patch frame differs.
+        if self.calib_mode:
+            uv_A_hat_local_A = self._uv_to_patch_local(uv_B_hat_full_A, box_A)
+        else:
+            uv_A_hat_local_A = None  # unused
+
         uv_A_patch    = uv_A_patch[good_qa]
         z_A_patch     = z_A_patch[good_qa]
+        feats_QA      = feats_QA[good_qa]
         is_warped_A_filt = is_warped_A[good_qa]
         inb_hat = ((uv_B_hat_local_A[:, 0] >= 0) & (uv_B_hat_local_A[:, 0] < self.img_size) &
                    (uv_B_hat_local_A[:, 1] >= 0) & (uv_B_hat_local_A[:, 1] < self.img_size))
@@ -1276,8 +1642,15 @@ class PandaSetCrossFrameDataset(Dataset):
             return None
         uv_A_patch       = uv_A_patch[inb]
         z_A_patch        = z_A_patch[inb]
+        feats_QA         = feats_QA[inb]
         uv_B_gt_local_A  = uv_B_gt_local_A[inb]
         uv_B_hat_local_A = uv_B_hat_local_A[inb]
+        if self.calib_mode and uv_A_hat_local_A is not None:
+            uv_A_hat_local_A = uv_A_hat_local_A[inb]
+            # Replace uvd_A's uv component with the HAT-projected positions:
+            # this is what the model SEES (LiDAR shifted from where it really
+            # is in the camera image).
+            uv_A_patch = uv_A_hat_local_A.astype(np.float32)
         # Track world coords of A-query points through the same filter chain.
         # Used by analysis scripts (dynamic_object_variance.py); padded to
         # max_points alongside the rest of the per-query arrays below.
@@ -1290,6 +1663,7 @@ class PandaSetCrossFrameDataset(Dataset):
         uv_B_patch = self._uv_to_patch_local(uv_Bf[in_box_B], box_B)
         z_B_patch  = z_Bf[in_box_B]
         pts_w_QB   = pts_w_B[in_box_B]
+        feats_QB   = feats_Bf[in_box_B]
         if len(pts_w_QB) < 4:
             return None
         homoB = np.concatenate([pts_w_QB, np.ones((len(pts_w_QB), 1), dtype=np.float32)], axis=1)
@@ -1321,8 +1695,19 @@ class PandaSetCrossFrameDataset(Dataset):
         uv_A_hat_full_B = _proj_cam(P_QB_in_A_hat[good_qb], K, scn.dist)
         uv_A_gt_local_B  = self._uv_to_patch_local(uv_A_gt_full_B,  box_A)
         uv_A_hat_local_B = self._uv_to_patch_local(uv_A_hat_full_B, box_A)
+
+        # Calib mode: same logic as A-side — uvd_B reflects HAT projection in
+        # patch_B coords. P_QB_in_A_hat is the HAT-projected B-side cam-frame
+        # point; in calib (fi_A==fi_B) projecting it gives the same image
+        # position as the perturbed B-side projection itself.
+        if self.calib_mode:
+            uv_B_hat_local_B = self._uv_to_patch_local(uv_A_hat_full_B, box_B)
+        else:
+            uv_B_hat_local_B = None
+
         uv_B_patch = uv_B_patch[good_qb]
         z_B_patch  = z_B_patch[good_qb]
+        feats_QB   = feats_QB[good_qb]
         is_warped_B_filt = is_warped_B[good_qb]
         inb2_hat = ((uv_A_hat_local_B[:, 0] >= 0) & (uv_A_hat_local_B[:, 0] < self.img_size) &
                     (uv_A_hat_local_B[:, 1] >= 0) & (uv_A_hat_local_B[:, 1] < self.img_size))
@@ -1338,8 +1723,12 @@ class PandaSetCrossFrameDataset(Dataset):
             return None
         uv_B_patch       = uv_B_patch[inb2]
         z_B_patch        = z_B_patch[inb2]
+        feats_QB         = feats_QB[inb2]
         uv_A_gt_local_B  = uv_A_gt_local_B[inb2]
         uv_A_hat_local_B = uv_A_hat_local_B[inb2]
+        if self.calib_mode and uv_B_hat_local_B is not None:
+            uv_B_hat_local_B = uv_B_hat_local_B[inb2]
+            uv_B_patch = uv_B_hat_local_B.astype(np.float32)
 
         # depth in target camera frame (B for A-query, A for B-query)
         d_B_hat_of_A = P_QA_in_B_hat[good_qa][inb, 2].astype(np.float32)
@@ -1374,7 +1763,7 @@ class PandaSetCrossFrameDataset(Dataset):
         # pick which biased toward dense regions (ground / nearby cars).
         # img=64,  max_points=256  → G=16, cell=4×4 px
         # img=128, max_points=256  → G=16, cell=8×8 px
-        def _pad(uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt):
+        def _pad(uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt, feats=None):
             N = len(uv_query)
             if N > self.max_points:
                 G = int(np.sqrt(self.max_points))
@@ -1392,6 +1781,8 @@ class PandaSetCrossFrameDataset(Dataset):
             uv_query = uv_query[pick]; z_query = z_query[pick]
             uv_hat = uv_hat[pick];     uv_gt = uv_gt[pick]
             d_hat = d_hat[pick];       d_gt  = d_gt[pick]
+            if feats is not None:
+                feats = feats[pick]
             pad = np.zeros((self.max_points,), dtype=bool)
             if N_use < self.max_points:
                 pad[N_use:] = True
@@ -1402,7 +1793,9 @@ class PandaSetCrossFrameDataset(Dataset):
                 uv_gt    = np.concatenate([uv_gt,    np.zeros((pad_n, 2), np.float32)])
                 d_hat    = np.concatenate([d_hat,    np.zeros(pad_n, np.float32)])
                 d_gt     = np.concatenate([d_gt,     np.zeros(pad_n, np.float32)])
-            return uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt, pad
+                if feats is not None:
+                    feats = np.concatenate([feats, np.zeros((pad_n, feats.shape[1]), np.float32)])
+            return uv_query, z_query, uv_hat, uv_gt, d_hat, d_gt, pad, feats
 
         # ── snapshot the FULL in-box sets BEFORE subsampling, for frustum
         # local-encoder lookup (model side runs on GPU, no CPU cost concern).
@@ -1583,10 +1976,14 @@ class PandaSetCrossFrameDataset(Dataset):
             # World-coord pick MUST be computed against the SAME uv_A_patch
             # that _pad sees (i.e. before _pad mutates it). Snapshot first.
             uv_A_pre = uv_A_patch.copy()
-            uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A, pad_A = _pad(
-                uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A, d_B_hat_of_A, d_B_gt_of_A)
-            uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B, pad_B = _pad(
-                uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B, d_A_hat_of_B, d_A_gt_of_B)
+            (uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A,
+             d_B_hat_of_A, d_B_gt_of_A, pad_A, feats_QA) = _pad(
+                uv_A_patch, z_A_patch, uv_B_hat_local_A, uv_B_gt_local_A,
+                d_B_hat_of_A, d_B_gt_of_A, feats=feats_QA)
+            (uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B,
+             d_A_hat_of_B, d_A_gt_of_B, pad_B, feats_QB) = _pad(
+                uv_B_patch, z_B_patch, uv_A_hat_local_B, uv_A_gt_local_B,
+                d_A_hat_of_B, d_A_gt_of_B, feats=feats_QB)
 
             # Pick + pad pts_w_QA_filt with the same stratified pick _pad used.
             N = len(uv_A_pre)
@@ -1614,6 +2011,14 @@ class PandaSetCrossFrameDataset(Dataset):
 
         ypr_AB_hat, t_AB_hat = _mat_to_ypr_t(T_A_to_B_hat)
         ypr_BA_hat, t_BA_hat = _mat_to_ypr_t(_invert_mat(T_A_to_B_hat))
+        if self.calib_mode:
+            # Calib supervision must come from the visual mismatch between
+            # uvd (HAT-projected) and the camera image, not from pose_emb
+            # leaking δT directly. Mask the pose to identity.
+            ypr_AB_hat = np.zeros(3, dtype=np.float32)
+            t_AB_hat   = np.zeros(3, dtype=np.float32)
+            ypr_BA_hat = np.zeros(3, dtype=np.float32)
+            t_BA_hat   = np.zeros(3, dtype=np.float32)
 
         out = dict(
             patch_A = patch_A.float(),
@@ -1636,6 +2041,10 @@ class PandaSetCrossFrameDataset(Dataset):
                 np.concatenate([ypr_BA_hat, t_BA_hat]).astype(np.float32)),
             pad_A = torch.from_numpy(pad_A),
             pad_B = torch.from_numpy(pad_B),
+            # Per-point sensor-side features (rcs, vx_world, vy_world).
+            # Zero for LiDAR; real values for radar. Padded to max_points.
+            feats_A = torch.from_numpy(np.ascontiguousarray(feats_QA, dtype=np.float32)),
+            feats_B = torch.from_numpy(np.ascontiguousarray(feats_QB, dtype=np.float32)),
             uvd_A_full = torch.from_numpy(uvd_A_full),       # (N_FULL, 3) frustum-context
             uvd_B_full = torch.from_numpy(uvd_B_full),
             pad_A_full = torch.from_numpy(pad_A_full),       # (N_FULL,) bool
