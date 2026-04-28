@@ -48,7 +48,9 @@ def init_with_context(project: str, name: str, cfg: dict,
     from clearml import Task
     task = Task.init(project_name=project, task_name=name,
                      reuse_last_task_id=reuse_last_task_id, output_uri=True)
-    cfg = dict(cfg)
+    # Important: connect MUTATES cfg in place — on remote runs ClearML re-fills
+    # the dict's keys with stored hyperparam values. Don't shallow-copy here,
+    # or the caller's dict misses the re-fill.
     task.connect(cfg, name='cfg')
 
     lines: list[str] = []
