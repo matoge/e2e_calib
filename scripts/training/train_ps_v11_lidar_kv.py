@@ -95,6 +95,10 @@ def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
                              reuse_last_task_id=False, output_uri=True)
         cml_task.connect(c, name='cfg')
         if queue:
+            # Skip auto-detected requirements: rely on agent's system_site_packages=true
+            # to pull torch/scipy/etc from the host. Otherwise pip resolves the local
+            # Linux+CUDA versions (e.g. scipy==1.16.1) which the remote box may not have.
+            cml_task.set_packages([])
             cml_task.execute_remotely(queue_name=queue, exit_process=True)
 
     exp_dir = Path("experiments") / c["name"]
