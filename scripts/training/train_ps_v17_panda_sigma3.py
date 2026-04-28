@@ -20,7 +20,7 @@ CFG.update(
     use_lidar_kv     = True,
     epochs           = 100,                       # was 30 in v15/v16 — too short
     crop_min         = 128,
-    crop_max         = 256,
+    crop_max         = 384,
     max_points       = 256,
     virtual_epoch    = 10000,
 )
