@@ -95,7 +95,7 @@ def write_retrospective(task, history: dict,
     if conclusion:
         lines.append(f'\n## Conclusion\n{conclusion}')
     try:
-        existing = task.get_comment() or ''
+        existing = getattr(task, 'comment', None) or ''
         task.set_comment(existing + '\n' + '\n'.join(lines))
     except Exception as e:
         print(f'[clearml retrospective write failed: {e}]')
