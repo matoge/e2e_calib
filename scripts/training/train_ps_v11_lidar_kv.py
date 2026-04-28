@@ -85,15 +85,18 @@ def epoch_loop(model, loader, optimizer, scaler, train):
 
 
 def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
-         cache: str = '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy'):
+         cache: str = '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy',
+         why: str = ''):
     c = cfg if cfg is not None else CFG
     c = dict(c); c['cache'] = cache       # surface cache path in saved cfg
     cml_task = None
     if clearml:
-        from clearml import Task
-        cml_task = Task.init(project_name=clearml_project, task_name=c['name'],
-                             reuse_last_task_id=False, output_uri=True)
-        cml_task.connect(c, name='cfg')
+        from scripts.util.clearml_context import init_with_context
+        cml_task = init_with_context(
+            project=clearml_project, name=c['name'], cfg=c,
+            why=why,
+            baseline={'name': 'ps_v9_lazy', 'metric': 'val_nll', 'value': 1.8141},
+        )
         if queue:
             # Skip auto-detected requirements: rely on agent's system_site_packages=true
             # to pull torch/scipy/etc from the host. Otherwise pip resolves the local
@@ -198,6 +201,15 @@ def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
 
     log(f"Best val NLL: {best_val:.4f}  |  time: {(time.time()-t0)/60:.1f}min")
 
+    if cml_task is not None:
+        from scripts.util.clearml_context import write_retrospective
+        write_retrospective(cml_task, dict(
+            best_val_nll=best_val,
+            final_val_nll=history['va_nll'][-1] if history['va_nll'] else None,
+            time_min=(time.time() - t0) / 60,
+            epochs=len(history['ep']),
+        ), baseline={'name': 'ps_v9_lazy', 'value': 1.8141})
+
     vis_dir = exp_dir / "vis"; vis_dir.mkdir(exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     axes[0].plot(history['ep'], history['tr_nll'], label='train'); axes[0].plot(history['ep'], history['va_nll'], label='val')
@@ -218,10 +230,12 @@ if __name__ == "__main__":
     ap.add_argument('--name', default=None, help='override exp name suffix')
     ap.add_argument('--no-pose-emb',  action='store_true', help='ablation: drop pose_emb (no vfp scale anchor)')
     ap.add_argument('--no-lidar-kv',  action='store_true', help='ablation: drop lidar bank from KV')
+    ap.add_argument('--why', default='',
+                    help='Rationale for this run (goes into ClearML task comment as "## Why").')
     args = ap.parse_args()
     cfg = dict(CFG)
     if args.name:        cfg['name'] = args.name
     if args.no_pose_emb: cfg['use_pose_emb']  = False
     if args.no_lidar_kv: cfg['use_lidar_kv']  = False
     main(cfg=cfg, clearml=args.clearml, clearml_project=args.clearml_project,
-         queue=args.queue, cache=args.cache)
+         queue=args.queue, cache=args.cache, why=args.why)
