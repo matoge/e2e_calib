@@ -28,6 +28,50 @@ class PointMLP3(nn.Module):
         return self.net(uvd)
 
 
+class FrameTokenEncoder(nn.Module):
+    """UV-pos-enc-only Q ← cross-attn over (coarse, fine) image tokens.
+
+    Compresses image features into M frame tokens whose only identity is
+    their UV position in [0,1]. No per-point info, no CNN-side bias —
+    just a learned read-out at fixed UV slots.
+    """
+    def __init__(self, d: int = D_DIM, m_side: int = 8, n_heads: int = 4):
+        super().__init__()
+        self.m_side = m_side
+        self.M = m_side * m_side
+        # UV-only positional Q (Fourier-style projection of (u,v) ∈ [0,1])
+        self.uv_proj = nn.Sequential(
+            nn.Linear(2, d), nn.GELU(),
+            nn.Linear(d, d),
+        )
+        self.cross   = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+        self.norm_q  = nn.LayerNorm(d)
+        self.norm_kv = nn.LayerNorm(d)
+        self.drop    = nn.Dropout(0.1)
+        self.ffn     = nn.Sequential(
+            nn.Linear(d, d*2), nn.GELU(), nn.Dropout(0.1), nn.Linear(d*2, d),
+        )
+        self.norm_ffn = nn.LayerNorm(d)
+
+        u = torch.linspace(0, 1, m_side)
+        v = torch.linspace(0, 1, m_side)
+        gv, gu = torch.meshgrid(v, u, indexing='ij')
+        uv = torch.stack([gu.flatten(), gv.flatten()], dim=-1)   # (M, 2)
+        self.register_buffer('uv_grid', uv)
+
+    def forward(self, *feats: torch.Tensor) -> torch.Tensor:
+        """feats: any number of (B, D, H, W) maps. KV = concat over flattened spatial.
+        Returns (B, M, D) frame tokens."""
+        kv_list = [f.flatten(2).permute(0, 2, 1) for f in feats]
+        kv = torch.cat(kv_list, dim=1)                           # (B, sum_HW, D)
+        B  = kv.size(0)
+        q  = self.uv_proj(self.uv_grid).unsqueeze(0).expand(B, -1, -1)  # (B, M, D)
+        ca, _ = self.cross(self.norm_q(q), self.norm_kv(kv), self.norm_kv(kv))
+        q = q + self.drop(ca)
+        q = q + self.ffn(self.norm_ffn(q))
+        return q                                                  # (B, M, D)
+
+
 class FrustumLocalEncoder(nn.Module):
     """Local neighborhood feature via box-filter + top-k + MaxPool (PointNet2 style).
 
@@ -100,12 +144,33 @@ class FrustumLocalEncoder(nn.Module):
         return feat
 
 
+class PoseEmb(nn.Module):
+    """Embed (relative SE3 6-DoF + log_vfp) into a per-sample D-dim bias.
+
+    For single-frame calib, the SE3 part is constant zero — the network sees
+    only log(vfp), giving it the scale anchor (vfp + depth → metric size).
+    For cross-frame, SE3 carries the virtual-cam → virtual-cam pose change.
+    """
+    def __init__(self, d: int = D_DIM, in_dof: int = 7):
+        super().__init__()
+        self.in_dof = in_dof
+        self.net = nn.Sequential(
+            nn.Linear(in_dof, d), nn.GELU(),
+            nn.Linear(d, d),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)   # (B, D)
+
+
 class CalibNetDepth(nn.Module):
     def __init__(self, d: int = D_DIM, img_size: int = 128, in_channels: int = 1,
                  n_layers: int = 3, self_first: bool = False, kv_self_attn: bool = False,
                  cross_temp: float = 1.0, use_convnext: bool = False,
                  use_frustum: bool = False, r_uv: float = 8.0, r_d: float = 0.004, k_nb: int = 8,
-                 deform_mode: str = 'none', deform_n_points: int = 4):
+                 deform_mode: str = 'none', deform_n_points: int = 4,
+                 use_frame_token: bool = False, frame_token_side: int = 8,
+                 use_lidar_kv: bool = False, use_pose_emb: bool = False):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -118,6 +183,12 @@ class CalibNetDepth(nn.Module):
                             if use_convnext else CNNBackbone(d, in_channels=in_channels))
         self.point_mlp   = PointMLP3(d)
         self.frustum_enc = FrustumLocalEncoder(d, r_uv=r_uv, r_d=r_d, k=k_nb) if use_frustum else None
+        self.frame_enc   = FrameTokenEncoder(d, m_side=frame_token_side) if use_frame_token else None
+        self._use_frame_token  = use_frame_token
+        self._frame_token_side = frame_token_side
+        self._use_lidar_kv = use_lidar_kv
+        self._use_pose_emb = use_pose_emb
+        self.pose_emb = PoseEmb(d) if use_pose_emb else None
 
         if deform_mode != 'none':
             assert not self_first, "deform_mode is incompatible with self_first=True"
@@ -154,17 +225,18 @@ class CalibNetDepth(nn.Module):
             if hasattr(m, '_cross_temp'):
                 m._cross_temp = t
 
-    def _block(self, block, q, feat, uv_01, mask):
+    def _block(self, block, q, feat, uv_01, mask, extra_kv=None, extra_kv_mask=None):
         if self._deform_mode == 'ml':
             # feat here is (coarse_feat, fine_feat) tuple — ML block wants the list
             return block(q, list(feat), uv_01, self.level_embed,
                           key_padding_mask=mask, self_first=False)
         if self._self_first:
             return block(q, feat, uv_01, key_padding_mask=mask)
-        return block(q, feat, uv_01, key_padding_mask=mask, self_first=False)
+        return block(q, feat, uv_01, key_padding_mask=mask, self_first=False,
+                     extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
 
     def forward(self, image: torch.Tensor, distorted_uvd: torch.Tensor,
-                key_padding_mask=None):
+                key_padding_mask=None, vfp: torch.Tensor = None):
         """
         image           : (B, C, H, W)
         distorted_uvd   : (B, N, 3)  [U, V, D_norm]
@@ -173,6 +245,17 @@ class CalibNetDepth(nn.Module):
         """
         coarse_feat, fine_feat = self.cnn(image)
 
+        # Frame-token bottleneck: compress (coarse, fine) into M=m_side² tokens
+        # whose Q is UV-pos-enc only. Both per-point layers then read out of
+        # this same bank, replacing direct image-token cross-attn.
+        if self.frame_enc is not None:
+            ft = self.frame_enc(coarse_feat, fine_feat)                  # (B, M, D)
+            B  = ft.size(0)
+            ms = self._frame_token_side
+            ft_map = ft.transpose(1, 2).reshape(B, -1, ms, ms)            # (B, D, m, m)
+            coarse_feat = ft_map
+            fine_feat   = ft_map
+
         uv_01    = distorted_uvd[..., :2] / self.img_size
         uvd_norm = torch.cat([uv_01, distorted_uvd[..., 2:3]], dim=-1)
         d3       = distorted_uvd[..., 2:3]
@@ -180,6 +263,27 @@ class CalibNetDepth(nn.Module):
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
             q = q + self.frustum_enc(distorted_uvd, query_pad_mask=key_padding_mask)
+
+        # pose_emb: per-sample (SE3=0 for calib) + log(vfp) → D-dim bias.
+        # Broadcast added to Q (per-point) AND to KV (image tokens, lidar tokens).
+        pose_emb_b = None
+        if self._use_pose_emb:
+            B = image.size(0)
+            if vfp is None:
+                vfp = torch.full((B,), float(self.img_size), device=image.device)
+            log_vfp = torch.log(vfp.clamp(min=1.0)).unsqueeze(-1)            # (B, 1)
+            zero_se3 = torch.zeros(B, 6, device=image.device, dtype=log_vfp.dtype)
+            pose_emb_b = self.pose_emb(torch.cat([zero_se3, log_vfp], dim=-1))  # (B, D)
+            q = q + pose_emb_b.unsqueeze(1)                                   # broadcast → (B, N, D)
+            pe_2d = pose_emb_b.unsqueeze(-1).unsqueeze(-1)                    # (B, D, 1, 1)
+            coarse_feat = coarse_feat + pe_2d
+            fine_feat   = fine_feat   + pe_2d
+
+        # extra_kv (lidar bank): copy of initial Q (= per-point features after
+        # PointMLP+Frustum+pose_emb), held constant across layers as KV-side
+        # complement to image tokens. Mask follows the per-point pad mask.
+        extra_kv = q if self._use_lidar_kv else None
+        extra_kv_mask = key_padding_mask if self._use_lidar_kv else None
 
         # ML mode: every block sees both levels; SL / none: alternate coarse→fine
         if self._deform_mode == 'ml':
@@ -214,12 +318,14 @@ class CalibNetDepth(nn.Module):
             if self.n_layers >= 4: blocks.append(self.cross_fine2)
 
         # first layer (uv_01)
-        q, raw_cum = self._block(blocks[0], q, feats_by_layer[0], uv_01, key_padding_mask)
+        q, raw_cum = self._block(blocks[0], q, feats_by_layer[0], uv_01, key_padding_mask,
+                                  extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
         # refinement layers
         for i in range(1, min(self.n_layers, len(blocks))):
             uv_i = (uv_01 + raw_cum[..., :2]).clamp(0, 1)
             q    = self.point_mlp(torch.cat([uv_i, d3], dim=-1)) + q
-            q, raw_i = self._block(blocks[i], q, feats_by_layer[i], uv_i, key_padding_mask)
+            q, raw_i = self._block(blocks[i], q, feats_by_layer[i], uv_i, key_padding_mask,
+                                    extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
             raw_cum = raw_cum + raw_i
         raw = raw_cum
 

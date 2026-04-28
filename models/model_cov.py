@@ -53,14 +53,30 @@ class CrossAttentionBlockCov(nn.Module):
         self._kv_self_attn = kv_self_attn
         self._cross_temp   = cross_temp
 
-    def forward(self, q, feat, uv_01, key_padding_mask=None, self_first=False):
+    def forward(self, q, feat, uv_01, key_padding_mask=None, self_first=False,
+                extra_kv=None, extra_kv_mask=None):
+        """extra_kv: (B, M, D) — appended to flattened image KV.
+        extra_kv_mask: (B, M) bool, True = padded position to ignore.
+        Used for the lidar-token-bank in the per-modality KV concat path."""
         B, D_, H, W = feat.shape
         kv = feat.flatten(2).permute(0, 2, 1)   # (B, H*W, D)
+        HW = H * W
 
-        # image self-attn (optional)
+        # image self-attn (optional, image tokens only — does not touch extra_kv)
         if self._kv_self_attn:
             img_sa, _ = self.kv_sa(self.norm_kv_sa(kv), self.norm_kv_sa(kv), self.norm_kv_sa(kv))
             kv = kv + self.drop(img_sa)
+
+        # append extra (e.g. lidar) KV tokens
+        if extra_kv is not None:
+            kv = torch.cat([kv, extra_kv], dim=1)   # (B, HW + M, D)
+            if extra_kv_mask is not None:
+                cam_mask = torch.zeros(B, HW, dtype=torch.bool, device=kv.device)
+                cross_kv_mask = torch.cat([cam_mask, extra_kv_mask], dim=1)
+            else:
+                cross_kv_mask = None
+        else:
+            cross_kv_mask = None
 
         # temperature scaling: divide Q by T → softmax(QK^T / (T·√d_k))
         nq = self.norm_q(q) / self._cross_temp
@@ -69,10 +85,12 @@ class CrossAttentionBlockCov(nn.Module):
             sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
                                    key_padding_mask=key_padding_mask)
             q = q + self.drop(sa)
-            ca, _ = self.cross_attn(nq, self.norm_kv(kv), self.norm_kv(kv))
+            ca, _ = self.cross_attn(nq, self.norm_kv(kv), self.norm_kv(kv),
+                                    key_padding_mask=cross_kv_mask)
             q = q + self.drop(ca)
         else:
-            ca, _ = self.cross_attn(nq, self.norm_kv(kv), self.norm_kv(kv))
+            ca, _ = self.cross_attn(nq, self.norm_kv(kv), self.norm_kv(kv),
+                                    key_padding_mask=cross_kv_mask)
             q = q + self.drop(ca)
             sa, _ = self.self_attn(self.norm_self(q), self.norm_self(q), self.norm_self(q),
                                    key_padding_mask=key_padding_mask)

@@ -350,7 +350,12 @@ def build_sample(inst, ypr, t_delta, img_size: int = 64, min_pts: int = 8,
     img_crop = F.interpolate(sub_img, size=(S, S), mode='bilinear',
                              align_corners=False).squeeze(0) / 255.0
 
-    return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd), idx_in
+    # virtual focal length in cropped+resampled-image pixels (= scale anchor):
+    #   vfp = fx_full * S / crop_size_full_px
+    # img_size=64, crop_size 128 → vfp = fx/2 (wider FOV per pixel).
+    vfp = float(K[0, 0]) * S / crop_size
+
+    return img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd), idx_in, np.float32(vfp)
 
 
 # ── dataset ──────────────────────────────────────────────────────────────────
@@ -400,7 +405,7 @@ class PandaSetCalibDataset(Dataset):
                                img_size=self.img_size, min_pts=self.min_pts,
                                sub=sub)
             if out is not None:
-                img_crop, true_uvd, dist_uvd, _ = out
+                img_crop, true_uvd, dist_uvd, *_ = out
                 return img_crop, true_uvd, dist_uvd
         return self[random.randint(0, len(self)-1)]
 

@@ -77,10 +77,42 @@ class PandaSetCalibDatasetLazy(Dataset):
                                 img_size=self.img_size, min_pts=self.min_pts,
                                 sub=sub)
             if out is not None:
-                img_crop, true_uvd, dist_uvd, _ = out
+                img_crop, true_uvd, dist_uvd, _, _ = out
                 return img_crop, true_uvd, dist_uvd
         # all retries failed → recurse into a random other instance
         return self[random.randint(0, len(self) - 1)]
+
+
+class PandaSetCalibDatasetLazyVFP(PandaSetCalibDatasetLazy):
+    """Returns 4-tuple (img, true_uvd, dist_uvd, vfp). vfp = scale anchor."""
+    def __getitem__(self, idx):
+        inst = self._load_inst(idx % len(self))
+        for _ in range(self.max_tries):
+            t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+            ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+            sub     = self._sample_sub(inst)
+            out = build_sample(inst, ypr, t_delta,
+                                img_size=self.img_size, min_pts=self.min_pts,
+                                sub=sub)
+            if out is not None:
+                img_crop, true_uvd, dist_uvd, _, vfp = out
+                return img_crop, true_uvd, dist_uvd, torch.tensor(vfp, dtype=torch.float32)
+        return self[random.randint(0, len(self) - 1)]
+
+
+def collate_pandaset_vfp(batch):
+    """5-tuple collate: (imgs, true_t, dist_t, mask, vfp_t)."""
+    imgs, true_uvds, dist_uvds, vfps = zip(*batch)
+    max_n = max(t.shape[0] for t in true_uvds)
+    def pad(tensors):
+        out  = torch.zeros(len(tensors), max_n, tensors[0].shape[1])
+        mask = torch.ones(len(tensors), max_n, dtype=torch.bool)
+        for i, t in enumerate(tensors):
+            out[i, :len(t)] = t; mask[i, :len(t)] = False
+        return out, mask
+    true_t, _    = pad(true_uvds)
+    dist_t, mask = pad(dist_uvds)
+    return torch.stack(imgs), true_t, dist_t, mask, torch.stack(vfps)
 
 
 if __name__ == '__main__':
