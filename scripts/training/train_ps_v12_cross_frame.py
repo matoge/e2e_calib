@@ -125,7 +125,8 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     return total_nll / max(n,1), total_mse / max(n,1)
 
 
-def main(cfg=None, clearml=False, why='', clearml_project='e2e_calib/cross-frame'):
+def main(cfg=None, clearml=False, why='', clearml_project='e2e_calib/cross-frame',
+         queue=None):
     c = cfg if cfg is not None else CFG
     cml_task = None
     if clearml:
@@ -133,6 +134,9 @@ def main(cfg=None, clearml=False, why='', clearml_project='e2e_calib/cross-frame
         cml_task = init_with_context(
             project=clearml_project, name=c['name'], cfg=c, why=why,
             baseline={'name': 'ps_v9_lazy (calib)', 'metric': 'val_nll', 'value': 1.8141})
+        if queue:
+            cml_task.set_packages([])
+            cml_task.execute_remotely(queue_name=queue, exit_process=True)
 
     exp_dir = Path("experiments") / c['name']
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -260,6 +264,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument('--clearml', action='store_true')
     ap.add_argument('--clearml-project', default='e2e_calib/cross-frame')
+    ap.add_argument('--queue', default=None,
+                    help='If set with --clearml: submit to this queue and exit (remote run).')
     ap.add_argument('--why', default='')
     ap.add_argument('--name', default=None)
     ap.add_argument('--scene', default=None,
@@ -286,4 +292,5 @@ if __name__ == "__main__":
     if args.scenes_root:
         cfg['scenes_root'] = args.scenes_root
         cfg.pop('scene', None)
-    main(cfg=cfg, clearml=args.clearml, clearml_project=args.clearml_project, why=args.why)
+    main(cfg=cfg, clearml=args.clearml, clearml_project=args.clearml_project, why=args.why,
+         queue=args.queue)
