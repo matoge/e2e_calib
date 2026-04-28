@@ -267,6 +267,10 @@ if __name__ == "__main__":
                          'via pandaset_pair _try_one_calib (e.g. /mnt/nvme6t/nuscenes_ps)')
     ap.add_argument('--epochs', type=int, default=None)
     ap.add_argument('--batch-size', type=int, default=None)
+    ap.add_argument('--sigma-ypr', type=float, default=None,
+                    help='extrinsic perturbation sigma in degrees (multi-DS path only)')
+    ap.add_argument('--sigma-t', type=float, default=None,
+                    help='extrinsic perturbation sigma in meters (multi-DS path only)')
     ap.add_argument('--why', default='',
                     help='Rationale for this run (goes into ClearML task comment as "## Why").')
     args = ap.parse_args()
@@ -277,5 +281,7 @@ if __name__ == "__main__":
     if args.scenes_root_pair: cfg['scenes_root_pair'] = args.scenes_root_pair
     if args.epochs is not None: cfg['epochs'] = args.epochs
     if args.batch_size is not None: cfg['batch_size'] = args.batch_size
+    if args.sigma_ypr is not None: cfg['sigma_ypr'] = args.sigma_ypr
+    if args.sigma_t   is not None: cfg['sigma_t']   = args.sigma_t
     main(cfg=cfg, clearml=args.clearml, clearml_project=args.clearml_project,
          queue=args.queue, cache=args.cache, why=args.why)
