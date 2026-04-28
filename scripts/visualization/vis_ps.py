@@ -32,7 +32,9 @@ def main(exp: str, n_vis: int = 48, cache: str = '/tmp/pandaset_cache.pt',
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", False),
                           use_frame_token=c.get("use_frame_token", False),
-                          frame_token_side=c.get("frame_token_side", 8)).to(DEVICE)
+                          frame_token_side=c.get("frame_token_side", 8),
+                          use_lidar_kv=c.get("use_lidar_kv", False),
+                          use_pose_emb=c.get("use_pose_emb", False)).to(DEVICE)
     model.load_state_dict(torch.load(exp_dir / "best_model.pt",
                                      map_location=DEVICE, weights_only=True))
     model.eval()

@@ -30,10 +30,12 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     upstream = request.app['upstream']
     url = upstream.rstrip('/') + request.rel_url.path_qs
 
-    # forward
+    # forward — keep Host header so the upstream sets cookies / generates URLs
+    # using the public domain (otherwise browser receives Set-Cookie domain=
+    # 'localhost', login session is rejected, infinite /login redirect loop).
     session: aiohttp.ClientSession = request.app['session']
     headers = {k: v for k, v in request.headers.items()
-               if k.lower() not in {'host', 'content-length'}}
+               if k.lower() not in {'content-length'}}
     body = await request.read() if request.method not in ('GET', 'HEAD') else None
 
     async with session.request(request.method, url, headers=headers, data=body,

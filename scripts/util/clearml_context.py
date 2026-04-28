@@ -83,7 +83,7 @@ def write_retrospective(task, history: dict,
         lines.append(f'- best val_nll: **{history["best_val_nll"]:.4f}**')
     if 'final_val_nll' in history and 'best_val_nll' in history:
         lines.append(f'- final val_nll: {history["final_val_nll"]:.4f}')
-    if 'best_obj_mse' in history:
+    if history.get('best_obj_mse') is not None:
         lines.append(f'- best obj_mse: {history["best_obj_mse"]:.3f} px')
     if 'time_min' in history:
         lines.append(f'- training time: {history["time_min"]:.1f} min')

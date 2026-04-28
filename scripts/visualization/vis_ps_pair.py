@@ -1,28 +1,31 @@
-"""Visualize ps_v12+ cross-frame predictions.
+"""Cross-frame Δuv visualization (vis_ps_pair).
 
-Loads experiments/{exp}/best_model.pt + config, draws 24 sample tiles where
-each tile shows:
-  - patch_B (the target frame's image crop)
-  - GT positions (uv_B_gt) as green X
-  - naive forward-projected positions (uv_B_naive) as yellow X
-  - predicted positions (= uv_B_naive + Δuv) as cyan X
-  - per-point covariance σ as faint ellipses around predictions
-  - quiver: dist→pred (orange) and dist→gt (green dashed)
+For each sampled pair, shows A and B side-by-side. A few points are colour-
+coded; on A we mark the source position, on B we mark three positions in the
+same colour:
+  ○ naive   (= forward-project from A through the perturbed pose, current guess)
+  ×  gt     (= true projection in B)
+  +  pred   (= naive + Δuv predicted by the model)
+Plus arrows naive→pred (orange) and naive→gt (lime, dashed).
+
+So per-point reading: starting at ○, did the model arrow (orange to +)
+land at × (lime arrow target)? If yes the model is correct on that point.
+σ is shown as a faint ellipse around +.
 
 Usage:
-    python scripts/visualization/vis_ps_pair.py ps_v13_cross_frame_full
+    python scripts/visualization/vis_ps_pair.py <exp> [n_samples=12] [split=val] [points_per_sample=8]
 """
 import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-import sys, importlib.util, torch
+import importlib.util, torch
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 from matplotlib.patches import Ellipse
 import numpy as np
 from pathlib import Path
 
 from datasets.pandaset_pair import PandaSetCrossFrameDataset
 from models.model_pair import CalibNetDepthPair
-from models.model_cov import MIN_SIGMA, MAX_SIGMA
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,7 +36,9 @@ def load_cfg(exp_dir: Path) -> dict:
     return m.CFG
 
 
-def main(exp: str, n_vis: int = 24, split: str = 'val', max_scan: int = 200):
+def main(exp: str, n_samples: int = 12, split: str = 'val',
+         pts_per_sample: int = 8, max_scan: int = 200,
+         upload_to_clearml: bool = True):
     exp_dir = Path("experiments") / exp
     c = load_cfg(exp_dir)
 
@@ -67,39 +72,39 @@ def main(exp: str, n_vis: int = 24, split: str = 'val', max_scan: int = 200):
                                       map_location=DEVICE, weights_only=True))
     model.eval()
 
-    print(f"[{exp}] split={split} scanning up to {max_scan} for {n_vis} samples")
+    print(f"[{exp}] split={split}, scanning up to {max_scan} for {n_samples} samples")
     picked = []
     for i in range(max_scan):
         s = ds[i]
-        # require at least some valid points in the (0,1) direction
         valid = ~s['pad_dir'][0, 1]
-        if valid.sum() < 8:
+        if valid.sum() < pts_per_sample:
             continue
         picked.append(s)
-        if len(picked) >= n_vis:
+        if len(picked) >= n_samples:
             break
     print(f"  picked {len(picked)} samples")
 
     vis_dir = exp_dir / "vis"; vis_dir.mkdir(exist_ok=True)
-    for old in vis_dir.glob("pair_*.png"):
-        old.unlink()
+    for old in vis_dir.glob("pair_*.png"): old.unlink()
 
-    cols = 6
-    rows = (len(picked) + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(cols*3, rows*3), dpi=110)
-    axes = np.atleast_2d(axes).flatten()
+    rng = np.random.default_rng(0)
+    cmap = plt.get_cmap('tab10')
 
-    for vi, s in enumerate(picked):
+    cols = 2  # A | B per sample
+    rows = len(picked)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols*4, rows*3.6), dpi=110)
+    axes = np.atleast_2d(axes)
+
+    for ri, s in enumerate(picked):
         with torch.no_grad():
-            patches    = s['patches'].to(DEVICE).unsqueeze(0)         # (1, 2, 3, H, W)
-            uvd        = s['uvd'].to(DEVICE).unsqueeze(0)             # (1, 2, N, 4)
+            patches    = s['patches'].to(DEVICE).unsqueeze(0)
+            uvd        = s['uvd'].to(DEVICE).unsqueeze(0)
             pad        = s['pad'].to(DEVICE).unsqueeze(0)
             pose_hat   = s['pose_hat_6dof'].to(DEVICE).unsqueeze(0)
             uv_hat     = s['uv_hat'].to(DEVICE).unsqueeze(0)
             uv_gt      = s['uv_gt'].to(DEVICE).unsqueeze(0)
             pad_dir    = s['pad_dir'].to(DEVICE).unsqueeze(0)
 
-            image_A = patches[:, 0]; image_B = patches[:, 1]
             uvd_A   = uvd[:, 0, :, :3]; uvd_B = uvd[:, 1, :, :3]
             pose_AB = pose_hat[:, 0, 1]
             uv_B_naive = uv_hat[:, 0, 1]
@@ -107,50 +112,102 @@ def main(exp: str, n_vis: int = 24, split: str = 'val', max_scan: int = 200):
             valid      = ~pad_dir[:, 0, 1]
             vfp = torch.full((1,), float(c['img_size']), device=DEVICE)
             params = model.forward_pair(
-                image_A, image_B, uvd_A, uvd_B, uv_B_naive,
+                patches[:, 0], patches[:, 1], uvd_A, uvd_B, uv_B_naive,
                 pose_AB, vfp, pad_A=pad[:, 0], pad_B=pad[:, 1], query_pad=pad[:, 0],
             )[0]
             valid = valid[0]
 
-        img_B  = image_B[0].permute(1, 2, 0).cpu().numpy()
+        img_A  = patches[0, 0].permute(1,2,0).cpu().numpy()
+        img_B  = patches[0, 1].permute(1,2,0).cpu().numpy()
+        uvA    = uvd_A[0, :, :2].cpu().numpy()
         uvN    = uv_B_naive[0].cpu().numpy()
         uvG    = uv_B_gt[0].cpu().numpy()
         delta  = params[:, :2].float().cpu().numpy()
         sx     = params[:, 2].float().exp().cpu().numpy()
         sy     = params[:, 3].float().exp().cpu().numpy()
         uvP    = uvN + delta
-        v      = valid.cpu().numpy()
+        v_idx  = np.where(valid.cpu().numpy())[0]
+        n_pick = min(pts_per_sample, len(v_idx))
+        sel    = rng.choice(v_idx, size=n_pick, replace=False)
 
-        ax = axes[vi]
-        ax.imshow(img_B); ax.set_axis_off()
-        ax.scatter(uvN[v, 0], uvN[v, 1], c='yellow', s=14, marker='x', linewidths=1.0, label='naive')
-        ax.scatter(uvG[v, 0], uvG[v, 1], c='lime',   s=18, marker='x', linewidths=1.2, label='gt')
-        ax.scatter(uvP[v, 0], uvP[v, 1], c='cyan',   s=16, marker='+', linewidths=1.2, label='pred')
-        for i in np.where(v)[0]:
-            sxi = float(sx[i].clip(0.5, 8))
-            syi = float(sy[i].clip(0.5, 8))
-            ax.add_patch(Ellipse((uvP[i,0], uvP[i,1]), 2*sxi, 2*syi, fill=False,
-                                 ec='cyan', alpha=0.25, lw=0.6))
-        for i in np.where(v)[0]:
-            ax.plot([uvN[i,0], uvP[i,0]], [uvN[i,1], uvP[i,1]],
-                    color='orange', lw=0.8, alpha=0.7)
-            ax.plot([uvN[i,0], uvG[i,0]], [uvN[i,1], uvG[i,1]],
-                    color='lime', lw=0.6, alpha=0.4, linestyle=':')
-        err_naive = np.linalg.norm(uvN[v] - uvG[v], axis=-1).mean()
-        err_pred  = np.linalg.norm(uvP[v] - uvG[v], axis=-1).mean()
-        ax.set_title(f'naive→gt {err_naive:.2f}px → pred→gt {err_pred:.2f}px',
-                     fontsize=7)
-    for ax in axes[len(picked):]:
-        ax.set_axis_off()
-    plt.tight_layout()
+        ax_A = axes[ri, 0]
+        ax_B = axes[ri, 1]
+        ax_A.imshow(img_A); ax_A.set_axis_off()
+        ax_B.imshow(img_B); ax_B.set_axis_off()
+
+        # all valid (faint, for context)
+        ax_A.scatter(uvA[v_idx, 0], uvA[v_idx, 1], c='white', s=4, alpha=0.25, marker='.')
+        ax_B.scatter(uvN[v_idx, 0], uvN[v_idx, 1], c='white', s=4, alpha=0.25, marker='.')
+
+        for ci, i in enumerate(sel):
+            color = cmap(ci % 10)
+            # A: source dot
+            ax_A.scatter(uvA[i, 0], uvA[i, 1], c=[color], s=44, marker='o',
+                         edgecolors='black', linewidths=0.7, zorder=4)
+            ax_A.text(uvA[i, 0]+1.5, uvA[i, 1]-1.5, str(ci), color=color,
+                       fontsize=7, fontweight='bold',
+                       path_effects=[pe.withStroke(linewidth=1.5, foreground='black')])
+
+            # B: naive (○) → pred (+) arrow in orange
+            ax_B.scatter(uvN[i, 0], uvN[i, 1], facecolors='none', edgecolors=[color],
+                          s=70, marker='o', linewidths=1.2, zorder=4)
+            # B: gt (×) in same color
+            ax_B.scatter(uvG[i, 0], uvG[i, 1], c=[color], s=60, marker='x',
+                          linewidths=1.6, zorder=5)
+            # B: pred (+) in same color
+            ax_B.scatter(uvP[i, 0], uvP[i, 1], c=[color], s=70, marker='+',
+                          linewidths=1.6, zorder=5)
+            # σ ellipse around pred
+            ax_B.add_patch(Ellipse((uvP[i,0], uvP[i,1]),
+                                    2*float(sx[i].clip(0.5, 8)),
+                                    2*float(sy[i].clip(0.5, 8)),
+                                    fill=False, ec=color, alpha=0.35, lw=0.7, zorder=3))
+            # arrows: naive→pred (orange-ish solid), naive→gt (lime dashed)
+            ax_B.annotate('', xy=(uvP[i,0], uvP[i,1]), xytext=(uvN[i,0], uvN[i,1]),
+                          arrowprops=dict(arrowstyle='->', color='orange', lw=1.0, alpha=0.85),
+                          zorder=4)
+            ax_B.annotate('', xy=(uvG[i,0], uvG[i,1]), xytext=(uvN[i,0], uvN[i,1]),
+                          arrowprops=dict(arrowstyle='->', color='lime', lw=0.8,
+                                           alpha=0.65, linestyle=':'),
+                          zorder=4)
+            ax_B.text(uvN[i, 0]+1.5, uvN[i, 1]-1.5, str(ci), color=color,
+                       fontsize=7, fontweight='bold',
+                       path_effects=[pe.withStroke(linewidth=1.5, foreground='black')])
+
+        err_naive = float(np.linalg.norm(uvN[sel] - uvG[sel], axis=-1).mean())
+        err_pred  = float(np.linalg.norm(uvP[sel] - uvG[sel], axis=-1).mean())
+        ax_A.set_title(f'patch_A  (sample {ri})', fontsize=9)
+        ax_B.set_title(f'patch_B   naive→gt {err_naive:.2f}px → pred→gt {err_pred:.2f}px',
+                        fontsize=9)
+
+    fig.suptitle(f'{exp}  •  ○ naive  ×  gt  + pred   (orange arrow = model, lime dotted = truth)',
+                  fontsize=10, y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.985])
     out = vis_dir / "pair_grid.png"
     plt.savefig(out, dpi=110, bbox_inches='tight')
     plt.close(fig)
     print(f"saved {out}")
 
+    if upload_to_clearml:
+        try:
+            from clearml import Task
+            tasks = Task.get_tasks(project_name='e2e_calib/cross-frame',
+                                   task_filter={'order_by':['-last_update']})
+            t = next((t for t in tasks if t.name == exp), None)
+            if t is not None:
+                t.get_logger().report_image(
+                    title='vis', series='pair_grid',
+                    iteration=0, local_path=str(out))
+                print(f'uploaded → ClearML task {t.id[:8]}')
+            else:
+                print(f'(no matching ClearML task for {exp}, vis kept local only)')
+        except Exception as e:
+            print(f'(clearml upload skipped: {e})')
+
 
 if __name__ == "__main__":
     exp = sys.argv[1] if len(sys.argv) > 1 else "ps_v12_cross_frame_overfit"
-    n   = int(sys.argv[2]) if len(sys.argv) > 2 else 24
+    n   = int(sys.argv[2]) if len(sys.argv) > 2 else 12
     split = sys.argv[3] if len(sys.argv) > 3 else 'val'
-    main(exp, n, split=split)
+    ppl   = int(sys.argv[4]) if len(sys.argv) > 4 else 8
+    main(exp, n, split=split, pts_per_sample=ppl)

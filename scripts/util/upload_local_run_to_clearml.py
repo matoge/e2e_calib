@@ -29,14 +29,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 
-_LINE = re.compile(
+_LINE_CALIB = re.compile(
     r'^(?P<ts>\d{2}:\d{2}:\d{2})\s+\[\s*(?P<ep>\d+)/\d+\]\s+'
     r'train nll=(?P<tr_nll>[+-][\d.]+)\(obj=(?P<tr_obj_nll>[+-][\d.]+)\s+bg=(?P<tr_bg_nll>[+-][\d.]+)\)\s+'
     r'mse=(?P<tr_mse>[\d.]+)\(obj=(?P<tr_obj_mse>[\d.]+)\s+bg=(?P<tr_bg_mse>[\d.]+)\)\s+'
     r'val nll=(?P<va_nll>[+-][\d.]+)\(obj=(?P<va_obj_nll>[+-][\d.]+)\s+bg=(?P<va_bg_nll>[+-][\d.]+)\)\s+'
     r'mse=(?P<va_mse>[\d.]+)\(obj=(?P<va_obj_mse>[\d.]+)\s+bg=(?P<va_bg_mse>[\d.]+)\)'
 )
-_BEST = re.compile(r'Best val NLL: (?P<best>[\d.]+)\s+\|\s+time:\s+(?P<min>[\d.]+)min')
+# cross-frame log lacks the obj/bg breakdowns
+_LINE_PAIR = re.compile(
+    r'^(?P<ts>\d{2}:\d{2}:\d{2})\s+\[\s*(?P<ep>\d+)/\d+\]\s+'
+    r'train nll=(?P<tr_nll>[+-][\d.]+)\s+mse=(?P<tr_mse>[\d.]+)px\s+'
+    r'val nll=(?P<va_nll>[+-][\d.]+)\s+mse=(?P<va_mse>[\d.]+)px'
+)
+_BEST = re.compile(r'Best val NLL: (?P<best>[+-]?[\d.]+)\s+\|\s+time:\s+(?P<min>[\d.]+)min')
 
 
 def parse_log(log_path: Path):
@@ -44,7 +50,7 @@ def parse_log(log_path: Path):
     best = None
     elapsed = None
     for line in log_path.read_text(errors='replace').splitlines():
-        m = _LINE.match(line)
+        m = _LINE_CALIB.match(line) or _LINE_PAIR.match(line)
         if m:
             rows.append({k: (int(v) if k == 'ep' else float(v) if k != 'ts' else v)
                          for k, v in m.groupdict().items()})
@@ -98,12 +104,14 @@ def main():
         log.report_scalar('nll', 'val',   r['va_nll'], ep)
         log.report_scalar('mse', 'train', r['tr_mse'], ep)
         log.report_scalar('mse', 'val',   r['va_mse'], ep)
-        log.report_scalar('obj_nll', 'train', r['tr_obj_nll'], ep)
-        log.report_scalar('obj_nll', 'val',   r['va_obj_nll'], ep)
-        log.report_scalar('obj_mse', 'train', r['tr_obj_mse'], ep)
-        log.report_scalar('obj_mse', 'val',   r['va_obj_mse'], ep)
-        log.report_scalar('bg_nll',  'val',   r['va_bg_nll'],  ep)
-        log.report_scalar('bg_mse',  'val',   r['va_bg_mse'],  ep)
+        # calib log has obj/bg breakdowns; cross-frame doesn't
+        for k_in, k_title, k_series in [
+            ('tr_obj_nll', 'obj_nll', 'train'), ('va_obj_nll', 'obj_nll', 'val'),
+            ('tr_obj_mse', 'obj_mse', 'train'), ('va_obj_mse', 'obj_mse', 'val'),
+            ('va_bg_nll',  'bg_nll',  'val'),   ('va_bg_mse',  'bg_mse',  'val'),
+        ]:
+            if k_in in r:
+                log.report_scalar(k_title, k_series, r[k_in], ep)
 
     # artifacts
     for name in ('best_model.pt', 'config.py'):
@@ -116,10 +124,11 @@ def main():
     log_artifact = log_path
     task.upload_artifact('train.log', artifact_object=str(log_artifact))
 
+    obj_mses = [r['va_obj_mse'] for r in rows if 'va_obj_mse' in r]
     write_retrospective(task, dict(
         best_val_nll=best if best is not None else min(r['va_nll'] for r in rows),
         final_val_nll=rows[-1]['va_nll'],
-        best_obj_mse=min(r['va_obj_mse'] for r in rows),
+        best_obj_mse=min(obj_mses) if obj_mses else None,
         time_min=elapsed_min if elapsed_min else None,
         epochs=rows[-1]['ep'],
     ), baseline=baseline, conclusion=args.conclusion)
