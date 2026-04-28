@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 from pathlib import Path
 from datasets.pandaset import PandaSetCalibDataset
+from datasets.pandaset_lazy import PandaSetCalibDatasetLazy
 from models.model_depth import CalibNetDepth
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,8 +35,12 @@ def main(exp: str, n_vis: int = 48, cache: str = '/tmp/pandaset_cache.pt',
                                      map_location=DEVICE, weights_only=True))
     model.eval()
 
-    # Same perturbation as training; shift filter naturally picks close/large objects
-    ds = PandaSetCalibDataset(cache, split=split)
+    # Same perturbation as training; shift filter naturally picks close/large objects.
+    # Auto-detect: directory → lazy disk-backed; file → legacy in-memory.
+    if Path(cache).is_dir():
+        ds = PandaSetCalibDatasetLazy(cache, split=split)
+    else:
+        ds = PandaSetCalibDataset(cache, split=split)
     lo, hi = idx_range if idx_range else (0, len(ds))
     hi = min(hi, len(ds))
     print(f"[{exp}] split={split} range=[{lo},{hi})  scanning for {n_vis} large-obj samples"

@@ -179,7 +179,7 @@ class CalibNetDepth(nn.Module):
 
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
-            q = q + self.frustum_enc(distorted_uvd, pad_mask=key_padding_mask)
+            q = q + self.frustum_enc(distorted_uvd, query_pad_mask=key_padding_mask)
 
         # ML mode: every block sees both levels; SL / none: alternate coarse→fine
         if self._deform_mode == 'ml':
