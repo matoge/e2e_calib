@@ -100,6 +100,9 @@ def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
             # Linux+CUDA versions (e.g. scipy==1.16.1) which the remote box may not have.
             cml_task.set_packages([])
             cml_task.execute_remotely(queue_name=queue, exit_process=True)
+    # post-connect: trust the cfg dict's cache (ClearML overwrites it with the
+    # task's stored hyperparam on remote runs; argparse default would otherwise win).
+    cache = c['cache']
 
     exp_dir = Path("experiments") / c["name"]
     exp_dir.mkdir(parents=True, exist_ok=True)
