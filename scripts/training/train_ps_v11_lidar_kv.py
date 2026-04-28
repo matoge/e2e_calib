@@ -100,9 +100,17 @@ def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
             # Linux+CUDA versions (e.g. scipy==1.16.1) which the remote box may not have.
             cml_task.set_packages([])
             cml_task.execute_remotely(queue_name=queue, exit_process=True)
-    # post-connect: trust the cfg dict's cache (ClearML overwrites it with the
-    # task's stored hyperparam on remote runs; argparse default would otherwise win).
+    # post-connect: pick cache. Prefer cfg dict (ClearML stored param), but if
+    # we landed on a sakurai* host with the yokohama NFS default still set,
+    # fall back to the local SSD rsync copy explicitly.
     cache = c['cache']
+    import socket
+    if 'sakurai' in socket.gethostname().lower() and '/mnt/nvme6t/' in cache:
+        local = '/home/sakurai1/data/pandaset_mc_s64_lazy'
+        from pathlib import Path as _P
+        if _P(local).is_dir():
+            cache = local
+    c['cache'] = cache
 
     exp_dir = Path("experiments") / c["name"]
     exp_dir.mkdir(parents=True, exist_ok=True)
