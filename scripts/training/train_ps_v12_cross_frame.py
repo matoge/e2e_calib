@@ -58,6 +58,10 @@ CFG = dict(
     baseline_max     = 10,    # 10 frames @ 10 Hz = 1.0 s
     cameras          = "front_camera",
     scene            = "/mnt/mininas/datasets/pandaset/015",
+    scenes_root      = None,    # CLI-only override; ClearML connect() needs the
+                                 # key to exist in the dict to fill from stored val
+    train_frac       = 0.8,
+    num_workers      = 8,
 )
 
 
