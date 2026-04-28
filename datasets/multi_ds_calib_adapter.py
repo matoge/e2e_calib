@@ -78,14 +78,23 @@ class MultiDSCalibDataset(Dataset):
         uv_dist    = s['uv_B_hat_of_A']                  # (N, 2)  perturbed UV
         uv_true    = s['uv_B_gt_of_A']                   # (N, 2)  GT UV
         depth      = s['uvd_A'][:, 2:3]                  # (N, 1)  z_norm (= z/50)
-        is_obj     = s['uvd_A'][:, 3:4] if s['uvd_A'].shape[-1] >= 4 else \
-                      torch.zeros((uv_dist.shape[0], 1), dtype=torch.float32)
+        # obj label: pair's uvd_A is (N, 3) [u, v, d_norm] — obj lives in
+        # is_obj_A as a separate (N,) bool. Carry it through; fall back to 0
+        # only if the field truly isn't there (e.g., older cache).
+        if 'is_obj_A' in s:
+            is_obj = s['is_obj_A'].to(dtype=torch.float32).unsqueeze(-1)
+        elif s['uvd_A'].shape[-1] >= 4:
+            is_obj = s['uvd_A'][:, 3:4]
+        else:
+            is_obj = torch.zeros((uv_dist.shape[0], 1), dtype=torch.float32)
         # 4-channel uvd to match collate_pandaset_vfp expectations:
         # [u, v, d, is_obj]
         true_uvd = torch.cat([uv_true,  depth, is_obj], dim=-1)
         dist_uvd = torch.cat([uv_dist,  depth, is_obj], dim=-1)
-        # vfp scalar: derive from inner._try_one_calib if exposed; else use img_size
-        # (= placeholder, model just sees a per-sample bias). The pair's vfl_range
-        # path stores the effective focal in the patch; without it we fall back.
-        vfp = float(s.get('vfp', s.get('virtual_focal_length', self.img_size)))
-        return img, true_uvd, dist_uvd, torch.tensor(vfp, dtype=torch.float32)
+        # vfp scalar: pair's _try_one_calib stores it under key 'vfl'
+        # (= fx_orig * img_size / CROP). Fall back to img_size if absent.
+        if 'vfl' in s:
+            vfp_val = s['vfl'].float() if torch.is_tensor(s['vfl']) else torch.tensor(float(s['vfl']))
+        else:
+            vfp_val = torch.tensor(float(self.img_size))
+        return img, true_uvd, dist_uvd, vfp_val.float()
