@@ -38,10 +38,13 @@ async def proxy(request: web.Request) -> web.StreamResponse:
 
     async with session.request(request.method, url, headers=headers, data=body,
                                 allow_redirects=False) as up:
+        # Pass Content-Encoding through so the client can decompress. Drop only
+        # transfer-encoding (chunked is reconstructed by aiohttp) and content-
+        # length (recomputed downstream). Previously stripping content-encoding
+        # caused the browser to receive raw gzip bytes for ClearML's web UI.
         resp = web.StreamResponse(status=up.status, reason=up.reason,
                                    headers={k: v for k, v in up.headers.items()
                                             if k.lower() not in {'transfer-encoding',
-                                                                  'content-encoding',
                                                                   'content-length'}})
         await resp.prepare(request)
         async for chunk in up.content.iter_any():
