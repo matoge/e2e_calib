@@ -148,8 +148,8 @@ def main(cfg=None, clearml=False, why='', clearml_project='e2e_calib/cross-frame
         print(line)
         with open(log_path, "a") as f: f.write(line+"\n")
 
-    ds = PandaSetCrossFrameDataset(
-        scene_root        = c['scene'],
+    overfit = (c.get('n_overfit') or 0) > 0
+    ds_kw = dict(
         cameras           = c['cameras'],
         img_size          = c['img_size'],
         max_points        = c['max_points'],
@@ -157,26 +157,43 @@ def main(cfg=None, clearml=False, why='', clearml_project='e2e_calib/cross-frame
         sigma_ypr         = c['sigma_ypr'],
         sigma_t           = c['sigma_t'],
         crop_range        = (c['crop_min'], c['crop_max']),
-        virtual_epoch_len = c['n_overfit'],
+        virtual_epoch_len = c['n_overfit'] if overfit else c.get('virtual_epoch', 10000),
         n_frames          = 2,
-        use_stacked       = True,         # → _try_one_nframe(N=2) stacked dict
+        use_stacked       = True,
     )
-    log(f"dataset ready  scene={c['scene']}  baseline={c['baseline_min']}..{c['baseline_max']}")
+    if c.get('scenes_root'):
+        ds_kw['scenes_root'] = c['scenes_root']
+        ds_kw['train_frac']  = c.get('train_frac', 0.8)
+        train_ds = PandaSetCrossFrameDataset(split='train', **ds_kw)
+        val_kw = dict(ds_kw); val_kw['virtual_epoch_len'] = max(256, ds_kw['virtual_epoch_len'] // 20)
+        val_ds   = PandaSetCrossFrameDataset(split='val',   **val_kw)
+        log(f"dataset ready  scenes_root={c['scenes_root']}  "
+            f"baseline={c['baseline_min']}..{c['baseline_max']}  "
+            f"train.virt_ep={ds_kw['virtual_epoch_len']}  val.virt_ep={val_kw['virtual_epoch_len']}")
+    else:
+        ds_kw['scene_root'] = c['scene']
+        ds = PandaSetCrossFrameDataset(**ds_kw)
+        log(f"dataset ready  scene={c['scene']}  baseline={c['baseline_min']}..{c['baseline_max']}")
+        if overfit:
+            log(f"caching {c['n_overfit']} fixed overfit samples ...")
+            fixed = [ds[i] for i in range(c['n_overfit'])]
+            log(f"cached {len(fixed)} samples")
+            class Fixed(torch.utils.data.Dataset):
+                def __len__(self): return len(fixed)
+                def __getitem__(self, i): return fixed[i]
+            train_ds = val_ds = Fixed()
+        else:
+            train_ds = ds
+            val_kw = dict(ds_kw); val_kw['virtual_epoch_len'] = max(256, ds_kw['virtual_epoch_len'] // 20)
+            val_ds = PandaSetCrossFrameDataset(**val_kw)
 
-    # cache n_overfit fixed samples in RAM (= classic overfit setup)
-    log(f"caching {c['n_overfit']} fixed overfit samples ...")
-    fixed = []
-    for i in range(c['n_overfit']):
-        fixed.append(ds[i])
-    log(f"cached {len(fixed)} samples")
-
-    class Fixed(torch.utils.data.Dataset):
-        def __len__(self): return len(fixed)
-        def __getitem__(self, i): return fixed[i]
-    train_loader = DataLoader(Fixed(), batch_size=c['batch_size'], shuffle=True,
-                              collate_fn=collate_pair, num_workers=0)
-    val_loader   = DataLoader(Fixed(), batch_size=c['batch_size'], shuffle=False,
-                              collate_fn=collate_pair, num_workers=0)
+    nw = 0 if overfit else c.get('num_workers', 8)
+    train_loader = DataLoader(train_ds, batch_size=c['batch_size'], shuffle=True,
+                              collate_fn=collate_pair, num_workers=nw,
+                              persistent_workers=(nw > 0))
+    val_loader   = DataLoader(val_ds, batch_size=c['batch_size'], shuffle=False,
+                              collate_fn=collate_pair, num_workers=nw,
+                              persistent_workers=(nw > 0))
 
     model = CalibNetDepthPair(
         img_size=c['img_size'], in_channels=c['in_channels'],
@@ -244,5 +261,29 @@ if __name__ == "__main__":
     ap.add_argument('--clearml', action='store_true')
     ap.add_argument('--clearml-project', default='e2e_calib/cross-frame')
     ap.add_argument('--why', default='')
+    ap.add_argument('--name', default=None)
+    ap.add_argument('--scene', default=None,
+                    help='single scene root (mutually exclusive with --scenes-root)')
+    ap.add_argument('--scenes-root', default=None,
+                    help='root dir holding many scenes (e.g. /mnt/nvme6t/pandaset)')
+    ap.add_argument('--baseline-min', type=int, default=None)
+    ap.add_argument('--baseline-max', type=int, default=None)
+    ap.add_argument('--virtual-epoch', type=int, default=None,
+                    help='samples per epoch when not in n_overfit mode')
+    ap.add_argument('--n-overfit', type=int, default=None,
+                    help='if 0, run full (multi-scene) mode')
+    ap.add_argument('--epochs', type=int, default=None)
+    ap.add_argument('--batch-size', type=int, default=None)
     args = ap.parse_args()
-    main(clearml=args.clearml, clearml_project=args.clearml_project, why=args.why)
+    cfg = dict(CFG)
+    for k_arg, k_cfg in [('name', 'name'), ('scene', 'scene'),
+                         ('baseline_min', 'baseline_min'), ('baseline_max', 'baseline_max'),
+                         ('virtual_epoch', 'virtual_epoch'), ('n_overfit', 'n_overfit'),
+                         ('epochs', 'epochs'), ('batch_size', 'batch_size')]:
+        v = getattr(args, k_arg)
+        if v is not None:
+            cfg[k_cfg] = v
+    if args.scenes_root:
+        cfg['scenes_root'] = args.scenes_root
+        cfg.pop('scene', None)
+    main(cfg=cfg, clearml=args.clearml, clearml_project=args.clearml_project, why=args.why)
