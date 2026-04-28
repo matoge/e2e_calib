@@ -159,6 +159,7 @@ def main(cfg=None, clearml=False, why='', clearml_project='e2e_calib/cross-frame
         crop_range        = (c['crop_min'], c['crop_max']),
         virtual_epoch_len = c['n_overfit'],
         n_frames          = 2,
+        use_stacked       = True,         # → _try_one_nframe(N=2) stacked dict
     )
     log(f"dataset ready  scene={c['scene']}  baseline={c['baseline_min']}..{c['baseline_max']}")
 
