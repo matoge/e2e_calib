@@ -200,6 +200,13 @@ if __name__ == "__main__":
                     help='If set with --clearml: submit to this queue and exit (remote run).')
     ap.add_argument('--cache', default='/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy',
                     help='Lazy disk cache dir. Override on remote hosts (e.g., sakurai2 local SSD).')
+    ap.add_argument('--name', default=None, help='override exp name suffix')
+    ap.add_argument('--no-pose-emb',  action='store_true', help='ablation: drop pose_emb (no vfp scale anchor)')
+    ap.add_argument('--no-lidar-kv',  action='store_true', help='ablation: drop lidar bank from KV')
     args = ap.parse_args()
-    main(clearml=args.clearml, clearml_project=args.clearml_project, queue=args.queue,
-         cache=args.cache)
+    cfg = dict(CFG)
+    if args.name:        cfg['name'] = args.name
+    if args.no_pose_emb: cfg['use_pose_emb']  = False
+    if args.no_lidar_kv: cfg['use_lidar_kv']  = False
+    main(cfg=cfg, clearml=args.clearml, clearml_project=args.clearml_project,
+         queue=args.queue, cache=args.cache)
