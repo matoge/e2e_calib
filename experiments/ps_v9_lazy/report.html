@@ -1,0 +1,70 @@
+<!doctype html><meta charset="utf-8">
+<title>ps_v9_lazy — report</title>
+<style>body{background:#0d1117;color:#eee;font-family:sans-serif;padding:20px;} pre{background:#161b22;padding:10px;border-radius:6px;} h2{border-bottom:1px solid #333;padding-bottom:4px;}</style>
+<h1>ps_v9_lazy</h1>
+<p>best val NLL: <b>1.8141</b></p>
+<pre>name           = 'ps_v9_lazy'
+n_layers       = 2
+img_size       = 64
+in_channels    = 3
+use_convnext   = False
+use_frustum    = True
+epochs         = 100
+batch_size     = 64
+lr             = 0.001
+lr_min         = 1e-06
+val_fraction   = 0.1
+split_seed     = 42</pre>
+<h2>Curves</h2>
+<img src="vis/curves.png" style="max-width:800px;">
+<h2>Val samples (BB: red=dist, cyan=shifted by mean obj offset)</h2>
+<div style="display:flex;flex-wrap:wrap;">
+      <img src="vis/val_00.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_01.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_02.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_03.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_04.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_05.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_06.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_07.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_08.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_09.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_10.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_11.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_12.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_13.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_14.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_15.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_16.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_17.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_18.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_19.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_20.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_21.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_22.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_23.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_24.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_25.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_26.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_27.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_28.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_29.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_30.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_31.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_32.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_33.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_34.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_35.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_36.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_37.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_38.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_39.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_40.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_41.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_42.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_43.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_44.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_45.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_46.png" style="width:200px;margin:4px;border:1px solid #333;">
+      <img src="vis/val_47.png" style="width:200px;margin:4px;border:1px solid #333;">
+</div>
