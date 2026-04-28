@@ -46,7 +46,8 @@ class MultiDSCalibDataset(Dataset):
                  vfl_range = None,
                  virtual_epoch_len: int = 10000,
                  split: str = 'train',
-                 train_frac: float = 0.8):
+                 train_frac: float = 0.8,
+                 uniform_perturb: bool = False):
         if isinstance(scenes_root, (list, tuple)):
             scenes_root = ','.join(scenes_root)
         self.inner = PandaSetCrossFrameDataset(
@@ -67,6 +68,9 @@ class MultiDSCalibDataset(Dataset):
             calib_mode       = True,    # → _try_one_calib (no leak)
             calib_legacy     = False,
         )
+        # Surface uniform_perturb to the inner dataset (post-init flag flip;
+        # PandaSetCrossFrameDataset has no constructor arg yet — kept simple).
+        self.inner.uniform_perturb = bool(uniform_perturb)
         self.img_size = img_size
 
     def __len__(self):

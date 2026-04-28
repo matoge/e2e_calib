@@ -403,6 +403,10 @@ class PandaSetCrossFrameDataset(Dataset):
         self.baseline_range = baseline_range
         self.sigma_ypr = sigma_ypr
         self.sigma_t   = sigma_t
+        # If True, perturbations sampled from uniform [-sigma, +sigma] (matches the
+        # legacy PandaSetCalibDatasetLazy contract used by ps_v9_lazy). Default
+        # False = gaussian (used by all cross-frame runs to date).
+        self.uniform_perturb = False
         self.max_points = max_points
         self.crop_range = crop_range
         self.vfl_range  = vfl_range   # None → pixel-units crop (legacy)
@@ -1080,8 +1084,12 @@ class PandaSetCrossFrameDataset(Dataset):
         feats_v   = feats_all_full[in_view]
 
         # Sample extrinsic perturbation (acts on cam-frame points).
-        ypr_pert = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
-        t_pert   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
+        if self.uniform_perturb:
+            ypr_pert = ((rng.random(3).astype(np.float32) * 2 - 1) * self.sigma_ypr)
+            t_pert   = ((rng.random(3).astype(np.float32) * 2 - 1) * self.sigma_t)
+        else:
+            ypr_pert = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
+            t_pert   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
         δT       = _ypr_t_to_mat(ypr_pert, t_pert).astype(np.float64)
 
         # Pivot: stratified-pick on GT projections (cached, no compute).
@@ -1430,8 +1438,12 @@ class PandaSetCrossFrameDataset(Dataset):
         # the model never sees a misaligned LiDAR overlay in the camera image and
         # can solve the task purely from pose_emb(δT). Below we re-project A's
         # query points with δT applied so uvd_A shows the HAT positions.
-        ypr_pert = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
-        t_pert   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
+        if self.uniform_perturb:
+            ypr_pert = ((rng.random(3).astype(np.float32) * 2 - 1) * self.sigma_ypr)
+            t_pert   = ((rng.random(3).astype(np.float32) * 2 - 1) * self.sigma_t)
+        else:
+            ypr_pert = rng.standard_normal(3).astype(np.float32) * self.sigma_ypr
+            t_pert   = rng.standard_normal(3).astype(np.float32) * self.sigma_t
         δT       = _ypr_t_to_mat(ypr_pert, t_pert)
         T_A_to_B_hat = T_A_to_B_gt @ δT
 
