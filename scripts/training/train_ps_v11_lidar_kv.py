@@ -43,6 +43,17 @@ CFG = dict(
     lr_min           = 1e-6,
     val_fraction     = 0.1,
     split_seed       = 42,
+    # multi-DS / multi-cam path (when scenes_root_pair is set, switches to
+    # MultiDSCalibDataset adapter wrapping pandaset_pair calib_mode):
+    scenes_root_pair = None,    # e.g. "/mnt/nvme6t/nuscenes_ps" or comma-separated
+    cameras          = 'all',
+    sigma_ypr        = 2.0,
+    sigma_t          = 0.20,
+    crop_min         = 128,
+    crop_max         = 256,
+    max_points       = 256,
+    virtual_epoch    = 10000,
+    train_frac       = 0.8,
 )
 
 
@@ -133,20 +144,41 @@ def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
     kw = dict(num_workers=16, pin_memory=True, persistent_workers=True,
               collate_fn=collate_pandaset_vfp)
     import random as _r
-    log(f"loading cache {cache} (lazy)")
-    tr_full = PandaSetCalibDatasetLazyVFP(cache, split='train')
-    log(f"train cache: {len(tr_full)} instances")
-    va_full = PandaSetCalibDatasetLazyVFP(cache, split='val')
-    log(f"val   cache: {len(va_full)} instances")
-    from torch.utils.data import ConcatDataset
-    full_ds = ConcatDataset([tr_full, va_full])
-    idxs = list(range(len(full_ds)))
-    _r.Random(c["split_seed"]).shuffle(idxs)
-    n_val = int(len(idxs) * c["val_fraction"])
-    val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
-    train_ds = Subset(full_ds, train_idxs)
-    val_ds   = Subset(full_ds, val_idxs)
-    log(f"object-level split: train={len(train_ds)} val={len(val_ds)}")
+    if c.get('scenes_root_pair'):
+        # Multi-DS multi-cam calib via the pair dataset's _try_one_calib path
+        from datasets.multi_ds_calib_adapter import MultiDSCalibDataset
+        log(f"multi-DS calib  scenes_root={c['scenes_root_pair']}  cameras={c['cameras']}"
+            f"  sigma=({c['sigma_ypr']}deg, {c['sigma_t']}m)")
+        train_ds = MultiDSCalibDataset(
+            scenes_root=c['scenes_root_pair'], cameras=c['cameras'],
+            img_size=c['img_size'], max_points=c['max_points'],
+            sigma_ypr=c['sigma_ypr'], sigma_t=c['sigma_t'],
+            crop_range=(c['crop_min'], c['crop_max']),
+            virtual_epoch_len=c.get('virtual_epoch', 10000),
+            split='train', train_frac=c.get('train_frac', 0.8))
+        val_ds = MultiDSCalibDataset(
+            scenes_root=c['scenes_root_pair'], cameras=c['cameras'],
+            img_size=c['img_size'], max_points=c['max_points'],
+            sigma_ypr=c['sigma_ypr'], sigma_t=c['sigma_t'],
+            crop_range=(c['crop_min'], c['crop_max']),
+            virtual_epoch_len=max(500, c.get('virtual_epoch', 10000) // 20),
+            split='val', train_frac=c.get('train_frac', 0.8))
+        log(f"train: {len(train_ds)}  val: {len(val_ds)}")
+    else:
+        log(f"loading cache {cache} (lazy)")
+        tr_full = PandaSetCalibDatasetLazyVFP(cache, split='train')
+        log(f"train cache: {len(tr_full)} instances")
+        va_full = PandaSetCalibDatasetLazyVFP(cache, split='val')
+        log(f"val   cache: {len(va_full)} instances")
+        from torch.utils.data import ConcatDataset
+        full_ds = ConcatDataset([tr_full, va_full])
+        idxs = list(range(len(full_ds)))
+        _r.Random(c["split_seed"]).shuffle(idxs)
+        n_val = int(len(idxs) * c["val_fraction"])
+        val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
+        train_ds = Subset(full_ds, train_idxs)
+        val_ds   = Subset(full_ds, val_idxs)
+        log(f"object-level split: train={len(train_ds)} val={len(val_ds)}")
 
     train_loader = DataLoader(train_ds, batch_size=c["batch_size"], shuffle=True,  **kw)
     val_loader   = DataLoader(val_ds,   batch_size=c["batch_size"], shuffle=False, **kw)
@@ -230,6 +262,11 @@ if __name__ == "__main__":
     ap.add_argument('--name', default=None, help='override exp name suffix')
     ap.add_argument('--no-pose-emb',  action='store_true', help='ablation: drop pose_emb (no vfp scale anchor)')
     ap.add_argument('--no-lidar-kv',  action='store_true', help='ablation: drop lidar bank from KV')
+    ap.add_argument('--scenes-root-pair', default=None,
+                    help='comma-separated dataset roots, switches to multi-DS calib '
+                         'via pandaset_pair _try_one_calib (e.g. /mnt/nvme6t/nuscenes_ps)')
+    ap.add_argument('--epochs', type=int, default=None)
+    ap.add_argument('--batch-size', type=int, default=None)
     ap.add_argument('--why', default='',
                     help='Rationale for this run (goes into ClearML task comment as "## Why").')
     args = ap.parse_args()
@@ -237,5 +274,8 @@ if __name__ == "__main__":
     if args.name:        cfg['name'] = args.name
     if args.no_pose_emb: cfg['use_pose_emb']  = False
     if args.no_lidar_kv: cfg['use_lidar_kv']  = False
+    if args.scenes_root_pair: cfg['scenes_root_pair'] = args.scenes_root_pair
+    if args.epochs is not None: cfg['epochs'] = args.epochs
+    if args.batch_size is not None: cfg['batch_size'] = args.batch_size
     main(cfg=cfg, clearml=args.clearml, clearml_project=args.clearml_project,
          queue=args.queue, cache=args.cache, why=args.why)
