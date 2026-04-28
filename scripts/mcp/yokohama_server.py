@@ -216,9 +216,21 @@ def main():
                     help='Allowlist a Cf-Connecting-Ip value. Repeatable. If set,'
                          ' requests without a matching header are 403\'d. Allows'
                          ' bare IPs and exact host headers.')
+    ap.add_argument('--allow-host', action='append', default=[],
+                    help='Override FastMCP TransportSecurity allowed_hosts list. '
+                         'Repeatable. Add the public hostname (e.g. mcp.budda.site) '
+                         'when behind cloudflared. Defaults preserved if omitted.')
     args = ap.parse_args()
     mcp.settings.host = args.host
     mcp.settings.port = args.port
+    if args.allow_host:
+        # FastMCP's default allowed_hosts only matches 127.0.0.1:*/localhost:*/[::1]:*
+        # — anything else (e.g. requests forwarded by cloudflared with Host:
+        # mcp.budda.site) gets a 421 "Invalid Host header". Extend the list.
+        mcp.settings.transport_security.allowed_hosts = list(set(
+            mcp.settings.transport_security.allowed_hosts + args.allow_host))
+        print(f'[mcp] allowed Host headers: '
+              f'{mcp.settings.transport_security.allowed_hosts}')
 
     # Build SSE app, then wrap with IP allowlist middleware if requested.
     app = mcp.sse_app()
