@@ -30,7 +30,9 @@ def main(exp: str, n_vis: int = 48, cache: str = '/tmp/pandaset_cache.pt',
     model = CalibNetDepth(img_size=c["img_size"], in_channels=c["in_channels"],
                           n_layers=c["n_layers"], self_first=False,
                           use_convnext=c.get("use_convnext", False),
-                          use_frustum=c.get("use_frustum", False)).to(DEVICE)
+                          use_frustum=c.get("use_frustum", False),
+                          use_frame_token=c.get("use_frame_token", False),
+                          frame_token_side=c.get("frame_token_side", 8)).to(DEVICE)
     model.load_state_dict(torch.load(exp_dir / "best_model.pt",
                                      map_location=DEVICE, weights_only=True))
     model.eval()

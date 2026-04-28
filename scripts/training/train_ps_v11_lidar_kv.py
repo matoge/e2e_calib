@@ -84,8 +84,10 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     return total_nll / max(n,1), total_mse / max(n,1), obj_nll, bg_nll, obj_mse, bg_mse
 
 
-def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None):
+def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
+         cache: str = '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy'):
     c = cfg if cfg is not None else CFG
+    c = dict(c); c['cache'] = cache       # surface cache path in saved cfg
     cml_task = None
     if clearml:
         from clearml import Task
@@ -110,7 +112,6 @@ def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None)
         print(line)
         with open(log_path, "a") as f: f.write(line+"\n")
 
-    cache = '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy'
     kw = dict(num_workers=16, pin_memory=True, persistent_workers=True,
               collate_fn=collate_pandaset_vfp)
     import random as _r
@@ -197,5 +198,8 @@ if __name__ == "__main__":
     ap.add_argument('--clearml-project', default='e2e_calib/calib')
     ap.add_argument('--queue', default=None,
                     help='If set with --clearml: submit to this queue and exit (remote run).')
+    ap.add_argument('--cache', default='/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy',
+                    help='Lazy disk cache dir. Override on remote hosts (e.g., sakurai2 local SSD).')
     args = ap.parse_args()
-    main(clearml=args.clearml, clearml_project=args.clearml_project, queue=args.queue)
+    main(clearml=args.clearml, clearml_project=args.clearml_project, queue=args.queue,
+         cache=args.cache)
