@@ -94,10 +94,12 @@ def main(cfg=None):
     import random as _r
     log(f"loading cache {cache} (lazy)")
     ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
-                  max_rot_deg=c.get('max_rot_deg', 0.5))
-    log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m")
+                  max_rot_deg=c.get('max_rot_deg', 0.5),
+                  min_sub_px=c.get('min_sub_px', None))
+    log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
+        f"   min_sub_px={ds_kw['min_sub_px']}")
     tr_full = PandaSetCalibDatasetLazy(cache, split='train', **ds_kw)
-    log(f"train cache loaded: {len(tr_full)} instances")
+    log(f"train cache loaded: {len(tr_full)} instances  (cache_img={tr_full.cache_img})")
     va_full = PandaSetCalibDatasetLazy(cache, split='val', **ds_kw)
     log(f"val cache loaded: {len(va_full)} instances")
     from torch.utils.data import ConcatDataset
@@ -134,7 +136,37 @@ def main(cfg=None):
 
     history = {'ep': [], 'tr_nll': [], 'va_nll': [], 'tr_mse': [], 'va_mse': []}
 
+    # Optional curriculum: schedule = list of (start_ep, end_ep, rot_deg, t_m).
+    # If set, sigma is clamped to that schedule at each epoch start. The dataset's
+    # max_rot_deg / max_offset_m are mutated in place — but workers cache the dataset
+    # at fork time, so persistent_workers=False is required for the curriculum to
+    # take effect mid-run. We restart workers per stage transition by toggling
+    # train_loader.dataset attributes and recreating the loader.
+    sigma_schedule = c.get('sigma_schedule', None)
+    def _sigma_for_epoch(ep):
+        if not sigma_schedule:
+            return None
+        for s in sigma_schedule:
+            if s[0] <= ep <= s[1]:
+                return s[2], s[3]
+        return sigma_schedule[-1][2], sigma_schedule[-1][3]
+
+    cur_sigma = None
     for epoch in range(1, epochs+1):
+        if sigma_schedule is not None:
+            new_sigma = _sigma_for_epoch(epoch)
+            if new_sigma != cur_sigma:
+                rot, tm = new_sigma
+                tr_full.max_rot_deg = rot;  tr_full.max_offset_m = tm
+                va_full.max_rot_deg = rot;  va_full.max_offset_m = tm
+                # rebuild loaders with workers=0 OR fresh persistent workers
+                # so the in-memory dataset state propagates.
+                train_loader = DataLoader(train_ds, batch_size=c["batch_size"],
+                                          shuffle=True, **kw)
+                val_loader   = DataLoader(val_ds,   batch_size=c["batch_size"],
+                                          shuffle=False, **kw)
+                cur_sigma = new_sigma
+                log(f"  curriculum: sigma → rot={rot} t={tm}")
         tr_nll, tr_mse, tr_obj, tr_bg, tr_obj_mse, tr_bg_mse = epoch_loop(
             model, train_loader, optimizer, scaler, True)
         with torch.no_grad():
@@ -203,6 +235,11 @@ if __name__ == "__main__":
     ap.add_argument('--epochs',  type=int,   default=None)
     ap.add_argument('--workers', type=int,   default=None,
                     help='dataloader workers (default 16; sakurai2 may hang at 16, try 4)')
+    ap.add_argument('--min-sub-px', type=int, default=None,
+                    help='min sub-window side in cache px (v2 384-cache: 128 recommended)')
+    ap.add_argument('--curriculum', default=None,
+                    help='sigma curriculum spec, semicolon-separated stages '
+                         'e.g. "1-25:0.5,0.05;26-60:1.0,0.10;61-100:2.0,0.20"')
     ap.add_argument('--clearml', action='store_true')
     ap.add_argument('--why',     default='')
     args = ap.parse_args()
@@ -213,6 +250,16 @@ if __name__ == "__main__":
     if args.t_m     is not None: cfg['max_offset_m'] = args.t_m
     if args.epochs  is not None: cfg['epochs'] = args.epochs
     if args.workers is not None: cfg['num_workers'] = args.workers
+    if args.min_sub_px is not None: cfg['min_sub_px'] = args.min_sub_px
+    if args.curriculum:
+        # parse "1-25:0.5,0.05;26-60:1.0,0.10;..."
+        stages = []
+        for part in args.curriculum.split(';'):
+            rng, sigmas = part.strip().split(':')
+            ep_lo, ep_hi = (int(x) for x in rng.split('-'))
+            rot, tm = (float(x) for x in sigmas.split(','))
+            stages.append((ep_lo, ep_hi, rot, tm))
+        cfg['sigma_schedule'] = stages
 
     # optional ClearML reporting (with rich context if --clearml + --why)
     cml_task = None

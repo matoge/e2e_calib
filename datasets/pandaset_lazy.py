@@ -35,7 +35,8 @@ class PandaSetCalibDatasetLazy(Dataset):
                  max_offset_m: float = 0.20,
                  max_rot_deg: float = 0.5,
                  min_pts: int = 8,
-                 max_tries: int = 20):
+                 max_tries: int = 20,
+                 min_sub_px: int = None):
         self.cache_dir    = Path(cache_dir)
         self.inst_dir     = self.cache_dir / 'inst'
         meta              = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
@@ -45,6 +46,13 @@ class PandaSetCalibDatasetLazy(Dataset):
         self.max_rot_deg  = max_rot_deg
         self.min_pts      = min_pts
         self.max_tries    = max_tries
+        # cache_img read from meta when present (v2 = 384), else legacy default 192
+        self.cache_img    = int(meta.get('side', 192)) if isinstance(meta, dict) else 192
+        # min_sub_px = lower bound for the random sub-window side in cache px.
+        # Default: img_size (= legacy v1 behaviour). For v2 384-cache caller
+        # should pass min_sub_px=128 to keep the sampled patch from being a
+        # sub-50% region of an already-sized 384.
+        self.min_sub_px   = int(min_sub_px) if min_sub_px is not None else img_size
 
     def __len__(self):
         return len(self.fnames)
@@ -53,8 +61,9 @@ class PandaSetCalibDatasetLazy(Dataset):
         return torch.load(self.inst_dir / self.fnames[idx], weights_only=False)
 
     def _sample_sub(self, inst):
-        C = CACHE_IMG
-        s = int(np.random.randint(self.img_size, C + 1))
+        C = self.cache_img
+        s_min = max(self.img_size, int(self.min_sub_px))
+        s = int(np.random.randint(s_min, C + 1))
         if 'obj_pos' in inst:
             lo = max(0, 2 * C // 3 - s)
             hi = min(C - s, C // 3)
