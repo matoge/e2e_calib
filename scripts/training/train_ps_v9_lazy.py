@@ -68,16 +68,15 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     bg_nll  = bg_nll_s  / max(bg_n,  1)
     # full per-point distribution stats — gives mean/median/p95 that line up
     # with eyeballed vis (median ≈ "typical"); mean inflated by long-tail.
-    if obj_errs:
-        e = torch.cat(obj_errs)
-        obj_mse, obj_med, obj_p95 = e.mean().item(), e.median().item(), e.quantile(0.95).item()
-    else:
-        obj_mse = obj_med = obj_p95 = float('nan')
-    if bg_errs:
-        e = torch.cat(bg_errs)
-        bg_mse, bg_med, bg_p95 = e.mean().item(), e.median().item(), e.quantile(0.95).item()
-    else:
-        bg_mse = bg_med = bg_p95 = float('nan')
+    # torch.quantile errors at numel > 2^24; use numpy for arbitrary size
+    import numpy as _np
+    def _stats(errs):
+        if not errs:
+            return float('nan'), float('nan'), float('nan')
+        e = torch.cat(errs).numpy()
+        return float(e.mean()), float(_np.median(e)), float(_np.percentile(e, 95))
+    obj_mse, obj_med, obj_p95 = _stats(obj_errs)
+    bg_mse,  bg_med,  bg_p95  = _stats(bg_errs)
     return (total_nll / max(n,1), total_mse / max(n,1),
             obj_nll, bg_nll, obj_mse, bg_mse,
             obj_med, obj_p95, bg_med, bg_p95)
