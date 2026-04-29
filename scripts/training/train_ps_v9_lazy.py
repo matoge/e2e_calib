@@ -86,7 +86,9 @@ def main(cfg=None):
         with open(log_path, "a") as f: f.write(line+"\n")
 
     cache = c.get('cache', '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy')
-    kw = dict(num_workers=16, pin_memory=True, persistent_workers=True,
+    nw = c.get('num_workers', 16)
+    kw = dict(num_workers=nw, pin_memory=True,
+              persistent_workers=(nw > 0),
               collate_fn=collate_pandaset)
     # Merge train+val scenes, then random object-level split
     import random as _r
@@ -199,6 +201,8 @@ if __name__ == "__main__":
     ap.add_argument('--t-m',     type=float, default=None,
                     help='extrinsic perturbation half-range (m per axis)')
     ap.add_argument('--epochs',  type=int,   default=None)
+    ap.add_argument('--workers', type=int,   default=None,
+                    help='dataloader workers (default 16; sakurai2 may hang at 16, try 4)')
     ap.add_argument('--clearml', action='store_true')
     ap.add_argument('--why',     default='')
     args = ap.parse_args()
@@ -208,6 +212,7 @@ if __name__ == "__main__":
     if args.rot_deg is not None: cfg['max_rot_deg']  = args.rot_deg
     if args.t_m     is not None: cfg['max_offset_m'] = args.t_m
     if args.epochs  is not None: cfg['epochs'] = args.epochs
+    if args.workers is not None: cfg['num_workers'] = args.workers
 
     # optional ClearML reporting (with rich context if --clearml + --why)
     cml_task = None
