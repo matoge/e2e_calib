@@ -283,6 +283,9 @@ if __name__ == "__main__":
     ap.add_argument('--no-pose-emb',  action='store_true', help='ablation: drop pose_emb (no vfp scale anchor)')
     ap.add_argument('--no-lidar-kv',  action='store_true', help='ablation: drop lidar bank from KV')
     ap.add_argument('--no-frustum',   action='store_true', help='ablation: drop FrustumLocalEncoder entirely (pure PointMLP control)')
+    ap.add_argument('--frustum-r-uv', type=float, default=None, help='frustum box half-width in patch px')
+    ap.add_argument('--frustum-r-d',  type=float, default=None, help='frustum depth slab half-width in z_norm units')
+    ap.add_argument('--frustum-k',    type=int,   default=None, help='top-k neighbours per query in frustum pool')
     ap.add_argument('--scenes-root-pair', default=None,
                     help='comma-separated dataset roots, switches to multi-DS calib '
                          'via pandaset_pair _try_one_calib (e.g. /mnt/nvme6t/nuscenes_ps)')
@@ -300,6 +303,9 @@ if __name__ == "__main__":
     if args.no_pose_emb: cfg['use_pose_emb']  = False
     if args.no_lidar_kv: cfg['use_lidar_kv']  = False
     if args.no_frustum:  cfg['use_frustum']   = False
+    if args.frustum_r_uv is not None: cfg['frustum_r_uv'] = args.frustum_r_uv
+    if args.frustum_r_d  is not None: cfg['frustum_r_d']  = args.frustum_r_d
+    if args.frustum_k    is not None: cfg['frustum_k']    = args.frustum_k
     if args.scenes_root_pair: cfg['scenes_root_pair'] = args.scenes_root_pair
     if args.epochs is not None: cfg['epochs'] = args.epochs
     if args.batch_size is not None: cfg['batch_size'] = args.batch_size
