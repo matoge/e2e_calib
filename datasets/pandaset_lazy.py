@@ -36,7 +36,8 @@ class PandaSetCalibDatasetLazy(Dataset):
                  max_rot_deg: float = 0.5,
                  min_pts: int = 8,
                  max_tries: int = 20,
-                 min_sub_px: int = None):
+                 min_sub_px: int = None,
+                 max_sub_px: int = None):
         self.cache_dir    = Path(cache_dir)
         self.inst_dir     = self.cache_dir / 'inst'
         meta              = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
@@ -48,11 +49,14 @@ class PandaSetCalibDatasetLazy(Dataset):
         self.max_tries    = max_tries
         # cache_img read from meta when present (v2 = 384), else legacy default 192
         self.cache_img    = int(meta.get('side', 192)) if isinstance(meta, dict) else 192
-        # min_sub_px = lower bound for the random sub-window side in cache px.
-        # Default: img_size (= legacy v1 behaviour). For v2 384-cache caller
-        # should pass min_sub_px=128 to keep the sampled patch from being a
-        # sub-50% region of an already-sized 384.
+        # sub_px = side of the random sub-window cropped from the cache patch
+        # before resize-to-img_size. min..max gives the (zoom-out) difficulty
+        # range. Pass max_sub_px=192 with the v2 384-cache to match v1 cache's
+        # difficulty distribution (= same residual stats as ps_v9_lazy baseline)
+        # while still benefiting from the wider 384 context for crop selection.
         self.min_sub_px   = int(min_sub_px) if min_sub_px is not None else img_size
+        self.max_sub_px   = (min(int(max_sub_px), self.cache_img)
+                             if max_sub_px is not None else self.cache_img)
 
     def __len__(self):
         return len(self.fnames)
@@ -63,7 +67,8 @@ class PandaSetCalibDatasetLazy(Dataset):
     def _sample_sub(self, inst):
         C = self.cache_img
         s_min = max(self.img_size, int(self.min_sub_px))
-        s = int(np.random.randint(s_min, C + 1))
+        s_max = min(C, int(self.max_sub_px))
+        s = int(np.random.randint(s_min, s_max + 1))
         if 'obj_pos' in inst:
             lo = max(0, 2 * C // 3 - s)
             hi = min(C - s, C // 3)

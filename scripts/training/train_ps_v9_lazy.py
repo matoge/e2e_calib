@@ -33,8 +33,9 @@ CFG = dict(
 def epoch_loop(model, loader, optimizer, scaler, train):
     model.train(train)
     total_nll, total_mse, n = 0.0, 0.0, 0
-    obj_nll_s, obj_mse_s, obj_n = 0.0, 0.0, 0
-    bg_nll_s,  bg_mse_s,  bg_n  = 0.0, 0.0, 0
+    obj_nll_s, obj_n = 0.0, 0
+    bg_nll_s,  bg_n  = 0.0, 0
+    obj_errs, bg_errs = [], []  # collect per-point L2 to compute median/p95
     for imgs, true_uvd, dist_uvd, pad_mask in loader:
         imgs     = imgs.to(DEVICE)
         true_uvd = true_uvd.to(DEVICE)
@@ -52,19 +53,34 @@ def epoch_loop(model, loader, optimizer, scaler, train):
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer); scaler.update()
         with torch.no_grad():
-            mse    = (params[valid][..., :2] - gt[valid]).norm(dim=-1).mean().item()
+            err_all = (params[valid][..., :2].float() - gt[valid]).norm(dim=-1)
+            mse    = err_all.mean().item()
             is_obj = valid & (dist_uvd[..., 3] > 0.5)
             is_bg  = valid & (dist_uvd[..., 3] < 0.5)
             if is_obj.any():
                 obj_nll_s += gaussian2d_nll(params[is_obj], gt[is_obj]).item(); obj_n += 1
-                obj_mse_s += (params[is_obj][..., :2] - gt[is_obj]).norm(dim=-1).mean().item()
+                obj_errs.append((params[is_obj][..., :2].float() - gt[is_obj]).norm(dim=-1).cpu())
             if is_bg.any():
                 bg_nll_s  += gaussian2d_nll(params[is_bg],  gt[is_bg]).item();  bg_n  += 1
-                bg_mse_s  += (params[is_bg][...,  :2] - gt[is_bg]).norm(dim=-1).mean().item()
+                bg_errs.append((params[is_bg][..., :2].float() - gt[is_bg]).norm(dim=-1).cpu())
         total_nll += loss.item(); total_mse += mse; n += 1
-    obj_nll = obj_nll_s / max(obj_n, 1); obj_mse = obj_mse_s / max(obj_n, 1)
-    bg_nll  = bg_nll_s  / max(bg_n,  1); bg_mse  = bg_mse_s  / max(bg_n,  1)
-    return total_nll / max(n,1), total_mse / max(n,1), obj_nll, bg_nll, obj_mse, bg_mse
+    obj_nll = obj_nll_s / max(obj_n, 1)
+    bg_nll  = bg_nll_s  / max(bg_n,  1)
+    # full per-point distribution stats — gives mean/median/p95 that line up
+    # with eyeballed vis (median ≈ "typical"); mean inflated by long-tail.
+    if obj_errs:
+        e = torch.cat(obj_errs)
+        obj_mse, obj_med, obj_p95 = e.mean().item(), e.median().item(), e.quantile(0.95).item()
+    else:
+        obj_mse = obj_med = obj_p95 = float('nan')
+    if bg_errs:
+        e = torch.cat(bg_errs)
+        bg_mse, bg_med, bg_p95 = e.mean().item(), e.median().item(), e.quantile(0.95).item()
+    else:
+        bg_mse = bg_med = bg_p95 = float('nan')
+    return (total_nll / max(n,1), total_mse / max(n,1),
+            obj_nll, bg_nll, obj_mse, bg_mse,
+            obj_med, obj_p95, bg_med, bg_p95)
 
 
 def main(cfg=None):
@@ -87,15 +103,18 @@ def main(cfg=None):
 
     cache = c.get('cache', '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy')
     nw = c.get('num_workers', 16)
+    pf = c.get('prefetch_factor', 4)
     kw = dict(num_workers=nw, pin_memory=True,
               persistent_workers=(nw > 0),
+              prefetch_factor=pf if nw > 0 else None,
               collate_fn=collate_pandaset)
     # Merge train+val scenes, then random object-level split
     import random as _r
     log(f"loading cache {cache} (lazy)")
     ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
                   max_rot_deg=c.get('max_rot_deg', 0.5),
-                  min_sub_px=c.get('min_sub_px', None))
+                  min_sub_px=c.get('min_sub_px', None),
+                  max_sub_px=c.get('max_sub_px', None))
     log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
         f"   min_sub_px={ds_kw['min_sub_px']}")
     tr_full = PandaSetCalibDatasetLazy(cache, split='train', **ds_kw)
@@ -112,8 +131,26 @@ def main(cfg=None):
     val_ds   = Subset(full_ds, val_idxs)
     log(f"object-level split: train={len(train_ds)} val={len(val_ds)} (seed={c['split_seed']})")
 
-    train_loader = DataLoader(train_ds, batch_size=c["batch_size"], shuffle=True,  **kw)
-    val_loader   = DataLoader(val_ds,   batch_size=c["batch_size"], shuffle=False, **kw)
+    # Optional per-epoch random subsample (RandomSampler with num_samples).
+    # Each epoch draws this many random indices (without replacement when
+    # num_samples ≤ len(train_ds)) → caps wall-time per epoch independent of
+    # cache size. Used for many-short-experiment workflows on the 384 cache.
+    train_size = c.get('train_size', None)
+    val_size   = c.get('val_size',   None)
+    from torch.utils.data import RandomSampler, SequentialSampler
+    if train_size and train_size < len(train_ds):
+        tr_sampler = RandomSampler(train_ds, replacement=False, num_samples=train_size)
+        log(f"  train subsample: {train_size}/{len(train_ds)} per epoch")
+        train_loader = DataLoader(train_ds, batch_size=c["batch_size"], sampler=tr_sampler, **kw)
+    else:
+        train_loader = DataLoader(train_ds, batch_size=c["batch_size"], shuffle=True,  **kw)
+    if val_size and val_size < len(val_ds):
+        # deterministic first-N (sequential) so val NLL is comparable across runs
+        val_subset = Subset(val_ds, list(range(val_size)))
+        log(f"  val subsample: {val_size}/{len(val_ds)} (deterministic first-N)")
+        val_loader = DataLoader(val_subset, batch_size=c["batch_size"], shuffle=False, **kw)
+    else:
+        val_loader   = DataLoader(val_ds,   batch_size=c["batch_size"], shuffle=False, **kw)
 
     model = CalibNetDepth(img_size=c["img_size"], in_channels=c["in_channels"],
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
@@ -167,10 +204,12 @@ def main(cfg=None):
                                           shuffle=False, **kw)
                 cur_sigma = new_sigma
                 log(f"  curriculum: sigma → rot={rot} t={tm}")
-        tr_nll, tr_mse, tr_obj, tr_bg, tr_obj_mse, tr_bg_mse = epoch_loop(
+        (tr_nll, tr_mse, tr_obj, tr_bg, tr_obj_mse, tr_bg_mse,
+         tr_obj_med, tr_obj_p95, tr_bg_med, tr_bg_p95) = epoch_loop(
             model, train_loader, optimizer, scaler, True)
         with torch.no_grad():
-            va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse = epoch_loop(
+            (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
+             va_obj_med, va_obj_p95, va_bg_med, va_bg_p95) = epoch_loop(
                 model, val_loader, optimizer, scaler, False)
         scheduler.step()
         history['ep'].append(epoch)
@@ -178,9 +217,11 @@ def main(cfg=None):
         history['tr_mse'].append(tr_mse); history['va_mse'].append(va_mse)
         log(f"[{epoch:3d}/{epochs}]  "
             f"train nll={tr_nll:+.3f}(obj={tr_obj:+.3f} bg={tr_bg:+.3f}) "
-            f"mse={tr_mse:.3f}(obj={tr_obj_mse:.3f} bg={tr_bg_mse:.3f})  "
+            f"mse={tr_mse:.2f}(obj={tr_obj_mse:.2f}/m{tr_obj_med:.2f}/95p{tr_obj_p95:.1f} "
+            f"bg={tr_bg_mse:.2f}/m{tr_bg_med:.2f}/95p{tr_bg_p95:.1f})  "
             f"val nll={va_nll:+.3f}(obj={va_obj:+.3f} bg={va_bg:+.3f}) "
-            f"mse={va_mse:.3f}(obj={va_obj_mse:.3f} bg={va_bg_mse:.3f})  "
+            f"mse={va_mse:.2f}(obj={va_obj_mse:.2f}/m{va_obj_med:.2f}/95p{va_obj_p95:.1f} "
+            f"bg={va_bg_mse:.2f}/m{va_bg_med:.2f}/95p{va_bg_p95:.1f})  "
             f"lr={scheduler.get_last_lr()[0]:.2e}  tot={(time.time()-t0)/60:.1f}min")
         if va_nll < best_val:
             best_val = va_nll
@@ -199,7 +240,7 @@ def main(cfg=None):
     plt.tight_layout(); plt.savefig(vis_dir / "curves.png", dpi=100); plt.close(fig)
 
     # ── vis (delegated to vis_ps so BB overlay stays in sync) ──
-    from vis_ps import main as vis_main
+    from scripts.visualization.vis_ps import main as vis_main
     vis_main(c["name"], n_vis=48, cache=cache)
     n_vis = 48
     log(f"Saved {n_vis} vis → {vis_dir}")
@@ -224,6 +265,15 @@ def main(cfg=None):
 
 
 if __name__ == "__main__":
+    # Avoid fork-after-thread deadlock: ClearML's reporter thread holds locks
+    # at fork time, and DataLoader workers inherit those locks but not the
+    # holder thread → futex wait forever. forkserver spawns a clean server
+    # process up-front; all workers are forked from that thread-less server.
+    import multiprocessing as _mp
+    try:
+        _mp.set_start_method('forkserver', force=True)
+    except RuntimeError:
+        pass
     import argparse, copy
     ap = argparse.ArgumentParser()
     ap.add_argument('--name')
@@ -237,6 +287,22 @@ if __name__ == "__main__":
                     help='dataloader workers (default 16; sakurai2 may hang at 16, try 4)')
     ap.add_argument('--min-sub-px', type=int, default=None,
                     help='min sub-window side in cache px (v2 384-cache: 128 recommended)')
+    ap.add_argument('--max-sub-px', type=int, default=None,
+                    help='max sub-window side. v2 384-cache: pass 192 to match v1 difficulty '
+                         '(cap zoom-out at 3x like v1 192-cache).')
+    ap.add_argument('--batch-size', type=int, default=None,
+                    help='train/val batch size (default 64; bump to 256 for v2 cache to feed GPU)')
+    ap.add_argument('--prefetch-factor', type=int, default=None,
+                    help='DataLoader prefetch factor (default 4)')
+    ap.add_argument('--n-layers', type=int, default=None,
+                    help='cross-attn layers (default 2; all_v1 used 4)')
+    ap.add_argument('--convnext', action='store_true',
+                    help='use ConvNeXt backbone (=all_v1 1.62M config)')
+    ap.add_argument('--train-size', type=int, default=None,
+                    help='per-epoch random subsample of train set (caps wall-time). '
+                         'e.g. 20000 → 78 batches @ bs=256 → ~14s/ep')
+    ap.add_argument('--val-size', type=int, default=None,
+                    help='deterministic first-N val subsample for fast eval')
     ap.add_argument('--curriculum', default=None,
                     help='sigma curriculum spec, semicolon-separated stages '
                          'e.g. "1-25:0.5,0.05;26-60:1.0,0.10;61-100:2.0,0.20"')
@@ -251,6 +317,13 @@ if __name__ == "__main__":
     if args.epochs  is not None: cfg['epochs'] = args.epochs
     if args.workers is not None: cfg['num_workers'] = args.workers
     if args.min_sub_px is not None: cfg['min_sub_px'] = args.min_sub_px
+    if args.max_sub_px is not None: cfg['max_sub_px'] = args.max_sub_px
+    if args.batch_size is not None: cfg['batch_size'] = args.batch_size
+    if args.prefetch_factor is not None: cfg['prefetch_factor'] = args.prefetch_factor
+    if args.n_layers is not None: cfg['n_layers'] = args.n_layers
+    if args.convnext: cfg['use_convnext'] = True
+    if args.train_size is not None: cfg['train_size'] = args.train_size
+    if args.val_size   is not None: cfg['val_size']   = args.val_size
     if args.curriculum:
         # parse "1-25:0.5,0.05;26-60:1.0,0.10;..."
         stages = []
