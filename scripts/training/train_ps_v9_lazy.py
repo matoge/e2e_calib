@@ -57,23 +57,25 @@ def epoch_loop(model, loader, optimizer, scaler, train):
             mse    = err_all.mean().item()
             is_obj = valid & (dist_uvd[..., 3] > 0.5)
             is_bg  = valid & (dist_uvd[..., 3] < 0.5)
+            # keep err tensors on GPU; cat+cpu only at epoch end (avoid per-batch sync)
             if is_obj.any():
                 obj_nll_s += gaussian2d_nll(params[is_obj], gt[is_obj]).item(); obj_n += 1
-                obj_errs.append((params[is_obj][..., :2].float() - gt[is_obj]).norm(dim=-1).cpu())
+                obj_errs.append((params[is_obj][..., :2].float() - gt[is_obj]).norm(dim=-1).detach())
             if is_bg.any():
                 bg_nll_s  += gaussian2d_nll(params[is_bg],  gt[is_bg]).item();  bg_n  += 1
-                bg_errs.append((params[is_bg][..., :2].float() - gt[is_bg]).norm(dim=-1).cpu())
+                bg_errs.append((params[is_bg][..., :2].float() - gt[is_bg]).norm(dim=-1).detach())
         total_nll += loss.item(); total_mse += mse; n += 1
     obj_nll = obj_nll_s / max(obj_n, 1)
     bg_nll  = bg_nll_s  / max(bg_n,  1)
     # full per-point distribution stats — gives mean/median/p95 that line up
     # with eyeballed vis (median ≈ "typical"); mean inflated by long-tail.
-    # torch.quantile errors at numel > 2^24; use numpy for arbitrary size
+    # torch.quantile errors at numel > 2^24; cat on GPU (= no per-batch sync),
+    # then single .cpu().numpy() at epoch end.
     import numpy as _np
     def _stats(errs):
         if not errs:
             return float('nan'), float('nan'), float('nan')
-        e = torch.cat(errs).numpy()
+        e = torch.cat(errs).cpu().numpy()
         return float(e.mean()), float(_np.median(e)), float(_np.percentile(e, 95))
     obj_mse, obj_med, obj_p95 = _stats(obj_errs)
     bg_mse,  bg_med,  bg_p95  = _stats(bg_errs)
