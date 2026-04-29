@@ -144,6 +144,93 @@ class FrustumLocalEncoder(nn.Module):
         return feat
 
 
+class LocalNeighborhood3D(nn.Module):
+    """Multi-scale 3D ball-query encoder (PointNet++ MSG, point-cloud style).
+
+    Replaces the FrustumLocalEncoder's UV-pixel-box neighborhood with a
+    depth-scaled 3D ball: `||P_j - P_i|| < r` for each radius. Uses the
+    pixel-to-3D approximation `P ~ z * (u_c/vfp, v_c/vfp, 1)` in the cam
+    frame (z = z_norm * scale), so distances are in metric units (~m).
+
+    Multi-scale grouping (= concat over radii) keeps full per-point
+    resolution while letting each query see near + mid + far context.
+    """
+    def __init__(self, d_out: int = D_DIM,
+                 radii=(1.0, 4.0, 16.0),
+                 k_per_scale=(8, 8, 8),
+                 z_scale: float = 50.0,
+                 vfp_default: float = 64.0):
+        super().__init__()
+        assert len(radii) == len(k_per_scale)
+        self.radii = tuple(float(r) for r in radii)
+        self.k = tuple(int(k) for k in k_per_scale)
+        self.z_scale = z_scale
+        self.vfp_default = vfp_default
+        d_per = max(d_out // len(radii), 32)
+        self.mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(3, 32), nn.GELU(),
+                nn.Linear(32, d_per), nn.GELU(),
+                nn.Linear(d_per, d_per),
+            ) for _ in radii
+        ])
+        self.fuse = nn.Linear(d_per * len(radii), d_out)
+
+    def _to_3d(self, uvd: torch.Tensor, vfp: torch.Tensor, img_size: int) -> torch.Tensor:
+        """uvd: (B, N, 3) [u, v, z_norm]   vfp: (B,) or scalar.
+        Returns (B, N, 3) cam-frame 3D positions in meters (approx)."""
+        u = uvd[..., 0] - img_size * 0.5    # center: principal point ≈ patch center
+        v = uvd[..., 1] - img_size * 0.5
+        z = uvd[..., 2] * self.z_scale
+        if vfp is None:
+            f = uvd.new_full(uvd.shape[:-1], self.vfp_default)
+        else:
+            if vfp.dim() == 0:
+                f = uvd.new_full(uvd.shape[:-1], float(vfp))
+            else:
+                f = vfp.unsqueeze(-1).expand_as(z)
+        x = z * u / f.clamp(min=1.0)
+        y = z * v / f.clamp(min=1.0)
+        return torch.stack([x, y, z], dim=-1)        # (B, N, 3) in metres
+
+    def forward(self, query_uvd: torch.Tensor,
+                full_uvd: torch.Tensor = None,
+                vfp: torch.Tensor = None,
+                img_size: int = 64,
+                full_pad_mask: torch.Tensor = None,
+                query_pad_mask: torch.Tensor = None) -> torch.Tensor:
+        if full_uvd is None:
+            full_uvd = query_uvd
+            if full_pad_mask is None:
+                full_pad_mask = query_pad_mask
+
+        Pq = self._to_3d(query_uvd, vfp, img_size)         # (B, N_q, 3)
+        Pk = self._to_3d(full_uvd,  vfp, img_size)         # (B, N_kv, 3)
+        rel = Pk.unsqueeze(1) - Pq.unsqueeze(2)             # (B, N_q, N_kv, 3) metres
+        dist = rel.norm(dim=-1)                             # (B, N_q, N_kv)
+        # exclude self
+        self_match = (dist == 0)
+        dist = dist.masked_fill(self_match, 1e9)
+        if full_pad_mask is not None:
+            dist = dist.masked_fill(full_pad_mask.unsqueeze(1), 1e9)
+
+        feats_per_scale = []
+        for r, k, mlp in zip(self.radii, self.k, self.mlps):
+            d_masked = dist.masked_fill(dist > r, 1e9)
+            kk = min(k, dist.size(-1))
+            _, idx = d_masked.topk(kk, dim=-1, largest=False)         # (B, N_q, k)
+            idx_exp = idx.unsqueeze(-1).expand(-1, -1, -1, 3)
+            rel_top = rel.gather(2, idx_exp)                          # (B, N_q, k, 3)
+            valid = d_masked.gather(2, idx) < r                       # (B, N_q, k)
+            feat = mlp(rel_top)                                       # (B, N_q, k, d_per)
+            feat = feat.masked_fill(~valid.unsqueeze(-1), -1e9)
+            feat, _ = feat.max(dim=2)                                 # (B, N_q, d_per)
+            feat = feat.masked_fill(
+                ~valid.any(dim=-1, keepdim=True), 0.0)
+            feats_per_scale.append(feat)
+        return self.fuse(torch.cat(feats_per_scale, dim=-1))           # (B, N_q, d_out)
+
+
 class PoseEmb(nn.Module):
     """Embed (relative SE3 6-DoF + log_vfp) into a per-sample D-dim bias.
 
@@ -170,7 +257,10 @@ class CalibNetDepth(nn.Module):
                  use_frustum: bool = False, r_uv: float = 8.0, r_d: float = 0.004, k_nb: int = 8,
                  deform_mode: str = 'none', deform_n_points: int = 4,
                  use_frame_token: bool = False, frame_token_side: int = 8,
-                 use_lidar_kv: bool = False, use_pose_emb: bool = False):
+                 use_lidar_kv: bool = False, use_pose_emb: bool = False,
+                 use_3d_local: bool = False,
+                 local_3d_radii=(1.0, 4.0, 16.0),
+                 local_3d_k=(8, 8, 8)):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -182,7 +272,16 @@ class CalibNetDepth(nn.Module):
         self.cnn         = (ConvNeXtBackbone(d, in_channels=in_channels)
                             if use_convnext else CNNBackbone(d, in_channels=in_channels))
         self.point_mlp   = PointMLP3(d)
-        self.frustum_enc = FrustumLocalEncoder(d, r_uv=r_uv, r_d=r_d, k=k_nb) if use_frustum else None
+        if use_3d_local:
+            # Replaces FrustumLocalEncoder's UV-pixel-box with 3D ball-query
+            # MSG (PointNet++ style). Multi-scale via radii in metres.
+            self.frustum_enc = LocalNeighborhood3D(d, radii=local_3d_radii,
+                                                    k_per_scale=local_3d_k)
+            self._is_3d_local = True
+        else:
+            self.frustum_enc = (FrustumLocalEncoder(d, r_uv=r_uv, r_d=r_d, k=k_nb)
+                                if use_frustum else None)
+            self._is_3d_local = False
         self.frame_enc   = FrameTokenEncoder(d, m_side=frame_token_side) if use_frame_token else None
         self._use_frame_token  = use_frame_token
         self._frame_token_side = frame_token_side
@@ -236,7 +335,9 @@ class CalibNetDepth(nn.Module):
                      extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
 
     def forward(self, image: torch.Tensor, distorted_uvd: torch.Tensor,
-                key_padding_mask=None, vfp: torch.Tensor = None):
+                key_padding_mask=None, vfp: torch.Tensor = None,
+                distorted_uvd_full: torch.Tensor = None,
+                pad_full: torch.Tensor = None):
         """
         image           : (B, C, H, W)
         distorted_uvd   : (B, N, 3)  [U, V, D_norm]
@@ -262,7 +363,21 @@ class CalibNetDepth(nn.Module):
 
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
-            q = q + self.frustum_enc(distorted_uvd, query_pad_mask=key_padding_mask)
+            if getattr(self, '_is_3d_local', False):
+                q = q + self.frustum_enc(distorted_uvd, vfp=vfp,
+                                          img_size=self.img_size,
+                                          full_uvd=distorted_uvd_full,
+                                          full_pad_mask=pad_full,
+                                          query_pad_mask=key_padding_mask)
+            else:
+                # KEY: pass dense uvd_full as the context source so per-cell
+                # PointNet (= MLP + MaxPool over r_uv-box neighborhood) actually
+                # has neighbors to pool. Without full_uvd, frustum falls back
+                # to query-self where neighbors are 0-1 per query (= no signal).
+                q = q + self.frustum_enc(distorted_uvd,
+                                          full_uvd=distorted_uvd_full,
+                                          full_pad_mask=pad_full,
+                                          query_pad_mask=key_padding_mask)
 
         # pose_emb: per-sample (SE3=0 for calib) + log(vfp) → D-dim bias.
         # Broadcast added to Q (per-point) AND to KV (image tokens, lidar tokens).

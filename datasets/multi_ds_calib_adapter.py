@@ -101,4 +101,10 @@ class MultiDSCalibDataset(Dataset):
             vfp_val = s['vfl'].float() if torch.is_tensor(s['vfl']) else torch.tensor(float(s['vfl']))
         else:
             vfp_val = torch.tensor(float(self.img_size))
-        return img, true_uvd, dist_uvd, vfp_val.float()
+        # Dense LiDAR (~2048 points) for the frustum encoder's per-cell PointNet
+        # context. The 256-pt query subset above is the OUTPUT resolution; the
+        # local feature each query carries is computed by ball-query/MaxPool
+        # over the full dense set in the same cell × ±0.20m depth slab.
+        uvd_full = s['uvd_A_full'].float()              # (N_full, 3)
+        pad_full = s['pad_A_full'].bool()                # (N_full,) True=pad
+        return img, true_uvd, dist_uvd, vfp_val.float(), uvd_full, pad_full

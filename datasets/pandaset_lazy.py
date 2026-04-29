@@ -101,8 +101,21 @@ class PandaSetCalibDatasetLazyVFP(PandaSetCalibDatasetLazy):
 
 
 def collate_pandaset_vfp(batch):
-    """5-tuple collate: (imgs, true_t, dist_t, mask, vfp_t)."""
-    imgs, true_uvds, dist_uvds, vfps = zip(*batch)
+    """5-tuple OR 7-tuple collate.
+
+    5-tuple input → 5-tuple output: (imgs, true_t, dist_t, mask, vfp_t).
+    6-tuple input (img, true, dist, vfp, uvd_full, pad_full) → 7-tuple output:
+        (imgs, true_t, dist_t, mask, vfp_t, uvd_full_t, pad_full_t).
+
+    The 7-tuple form is used by MultiDSCalibDataset, which surfaces the dense
+    ~2048-pt lidar context for the frustum encoder's per-cell PointNet pool.
+    """
+    sample0 = batch[0]
+    has_full = len(sample0) >= 6
+    if has_full:
+        imgs, true_uvds, dist_uvds, vfps, uvd_fulls, pad_fulls = zip(*batch)
+    else:
+        imgs, true_uvds, dist_uvds, vfps = zip(*batch)
     max_n = max(t.shape[0] for t in true_uvds)
     def pad(tensors):
         out  = torch.zeros(len(tensors), max_n, tensors[0].shape[1])
@@ -112,6 +125,11 @@ def collate_pandaset_vfp(batch):
         return out, mask
     true_t, _    = pad(true_uvds)
     dist_t, mask = pad(dist_uvds)
+    if has_full:
+        # uvd_full / pad_full are already padded to fixed N_full per sample;
+        # MultiDSCalibDataset's pair source pads at _pack_full_local time.
+        return (torch.stack(imgs), true_t, dist_t, mask, torch.stack(vfps),
+                torch.stack(uvd_fulls), torch.stack(pad_fulls))
     return torch.stack(imgs), true_t, dist_t, mask, torch.stack(vfps)
 
 

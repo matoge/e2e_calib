@@ -35,8 +35,15 @@ CFG = dict(
     in_channels      = 3,
     use_convnext     = False,
     use_frustum      = True,
+    frustum_r_uv     = 4.0,        # = ±4 px ≈ one 8-px cell
+    frustum_r_d      = 0.004,      # = ±0.20 m at z_norm = z/50 (pair convention)
+    frustum_k        = 16,          # 16 random / nearest neighbours per query
     use_lidar_kv     = True,
     use_pose_emb     = True,
+    use_3d_local     = False,           # if True: replace FrustumLocalEncoder with
+                                         # multi-scale 3D ball-query MSG (PointNet++)
+    local_3d_radii   = (1.0, 4.0, 16.0),
+    local_3d_k       = (8, 8, 8),
     epochs           = 100,
     batch_size       = 64,
     lr               = 1e-3,
@@ -62,7 +69,16 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     total_nll, total_mse, n = 0.0, 0.0, 0
     obj_nll_s, obj_mse_s, obj_n = 0.0, 0.0, 0
     bg_nll_s,  bg_mse_s,  bg_n  = 0.0, 0.0, 0
-    for imgs, true_uvd, dist_uvd, pad_mask, vfp in loader:
+    for batch in loader:
+        # 5-tuple = single-DS lazy path; 7-tuple = multi-DS path with dense
+        # uvd_full / pad_full surfaced from pair's _try_one_calib.
+        if len(batch) == 7:
+            imgs, true_uvd, dist_uvd, pad_mask, vfp, uvd_full, pad_full = batch
+            uvd_full = uvd_full.to(DEVICE)
+            pad_full = pad_full.to(DEVICE)
+        else:
+            imgs, true_uvd, dist_uvd, pad_mask, vfp = batch
+            uvd_full = pad_full = None
         imgs     = imgs.to(DEVICE)
         true_uvd = true_uvd.to(DEVICE)
         dist_uvd = dist_uvd.to(DEVICE)
@@ -70,7 +86,8 @@ def epoch_loop(model, loader, optimizer, scaler, train):
         vfp      = vfp.to(DEVICE)
         gt       = true_uvd[..., :2] - dist_uvd[..., :2]
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp)
+            params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
+                            distorted_uvd_full=uvd_full, pad_full=pad_full)
             valid  = ~pad_mask
             loss   = gaussian2d_nll(params[valid], gt[valid])
         if train:
@@ -187,6 +204,9 @@ def main(cfg=None, clearml=False, clearml_project='e2e_calib/calib', queue=None,
                           n_layers=c["n_layers"],
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", False),
+                          r_uv=c.get("frustum_r_uv", 8.0),
+                          r_d=c.get("frustum_r_d", 0.004),
+                          k_nb=c.get("frustum_k", 8),
                           use_lidar_kv=c.get("use_lidar_kv", False),
                           use_pose_emb=c.get("use_pose_emb", False)).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
