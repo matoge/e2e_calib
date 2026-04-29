@@ -282,6 +282,7 @@ if __name__ == "__main__":
     ap.add_argument('--name', default=None, help='override exp name suffix')
     ap.add_argument('--no-pose-emb',  action='store_true', help='ablation: drop pose_emb (no vfp scale anchor)')
     ap.add_argument('--no-lidar-kv',  action='store_true', help='ablation: drop lidar bank from KV')
+    ap.add_argument('--no-frustum',   action='store_true', help='ablation: drop FrustumLocalEncoder entirely (pure PointMLP control)')
     ap.add_argument('--scenes-root-pair', default=None,
                     help='comma-separated dataset roots, switches to multi-DS calib '
                          'via pandaset_pair _try_one_calib (e.g. /mnt/nvme6t/nuscenes_ps)')
@@ -298,6 +299,7 @@ if __name__ == "__main__":
     if args.name:        cfg['name'] = args.name
     if args.no_pose_emb: cfg['use_pose_emb']  = False
     if args.no_lidar_kv: cfg['use_lidar_kv']  = False
+    if args.no_frustum:  cfg['use_frustum']   = False
     if args.scenes_root_pair: cfg['scenes_root_pair'] = args.scenes_root_pair
     if args.epochs is not None: cfg['epochs'] = args.epochs
     if args.batch_size is not None: cfg['batch_size'] = args.batch_size
