@@ -85,15 +85,18 @@ def main(cfg=None):
         print(line)
         with open(log_path, "a") as f: f.write(line+"\n")
 
-    cache = '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy'
+    cache = c.get('cache', '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy')
     kw = dict(num_workers=16, pin_memory=True, persistent_workers=True,
               collate_fn=collate_pandaset)
     # Merge train+val scenes, then random object-level split
     import random as _r
-    log(f"loading cache {cache} (~48GB, disk-backed lazy, instant)")
-    tr_full = PandaSetCalibDatasetLazy(cache, split='train')
+    log(f"loading cache {cache} (lazy)")
+    ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
+                  max_rot_deg=c.get('max_rot_deg', 0.5))
+    log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m")
+    tr_full = PandaSetCalibDatasetLazy(cache, split='train', **ds_kw)
     log(f"train cache loaded: {len(tr_full)} instances")
-    va_full = PandaSetCalibDatasetLazy(cache, split='val')
+    va_full = PandaSetCalibDatasetLazy(cache, split='val', **ds_kw)
     log(f"val cache loaded: {len(va_full)} instances")
     from torch.utils.data import ConcatDataset
     full_ds = ConcatDataset([tr_full, va_full])
@@ -187,4 +190,30 @@ def main(cfg=None):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse, copy
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--name')
+    ap.add_argument('--cache')
+    ap.add_argument('--rot-deg', type=float, default=None,
+                    help='extrinsic perturbation half-range (deg per axis)')
+    ap.add_argument('--t-m',     type=float, default=None,
+                    help='extrinsic perturbation half-range (m per axis)')
+    ap.add_argument('--epochs',  type=int,   default=None)
+    ap.add_argument('--clearml', action='store_true')
+    ap.add_argument('--why',     default='')
+    args = ap.parse_args()
+    cfg = dict(CFG)
+    if args.name:    cfg['name'] = args.name
+    if args.cache:   cfg['cache'] = args.cache
+    if args.rot_deg is not None: cfg['max_rot_deg']  = args.rot_deg
+    if args.t_m     is not None: cfg['max_offset_m'] = args.t_m
+    if args.epochs  is not None: cfg['epochs'] = args.epochs
+
+    # optional ClearML reporting (with rich context if --clearml + --why)
+    cml_task = None
+    if args.clearml:
+        from scripts.util.clearml_context import init_with_context, write_retrospective
+        cml_task = init_with_context(
+            project='e2e_calib/calib', name=cfg['name'], cfg=cfg,
+            why=args.why, baseline={'name':'ps_v9_lazy', 'metric':'val_nll', 'value':1.8141})
+    main(cfg=cfg)
