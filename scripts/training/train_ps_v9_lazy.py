@@ -174,6 +174,14 @@ def main(cfg=None):
 
     history = {'ep': [], 'tr_nll': [], 'va_nll': [], 'tr_mse': [], 'va_mse': []}
 
+    # ClearML scalar logger: report metrics per epoch so the web UI shows curves
+    # (otherwise only GPU auto-metrics appear). Pulls the active task.
+    try:
+        from clearml import Task as _ClearMLTask
+        cml_logger = _ClearMLTask.current_task().get_logger() if _ClearMLTask.current_task() else None
+    except Exception:
+        cml_logger = None
+
     # Optional curriculum: schedule = list of (start_ep, end_ep, rot_deg, t_m).
     # If set, sigma is clamped to that schedule at each epoch start. The dataset's
     # max_rot_deg / max_offset_m are mutated in place — but workers cache the dataset
@@ -228,6 +236,26 @@ def main(cfg=None):
             best_val = va_nll
             torch.save(model.state_dict(), ckpt)
             log(f"  ↳ saved (val_nll={best_val:.4f})")
+        # report scalars to ClearML so curves render in the web UI
+        if cml_logger is not None:
+            try:
+                rs = cml_logger.report_scalar
+                rs('nll', 'train',     iteration=epoch, value=tr_nll)
+                rs('nll', 'val',       iteration=epoch, value=va_nll)
+                rs('nll', 'val_obj',   iteration=epoch, value=va_obj)
+                rs('nll', 'val_bg',    iteration=epoch, value=va_bg)
+                rs('mse_px', 'train',  iteration=epoch, value=tr_mse)
+                rs('mse_px', 'val',    iteration=epoch, value=va_mse)
+                rs('mse_px', 'val_obj_mean',   iteration=epoch, value=va_obj_mse)
+                rs('mse_px', 'val_obj_median', iteration=epoch, value=va_obj_med)
+                rs('mse_px', 'val_obj_p95',    iteration=epoch, value=va_obj_p95)
+                rs('mse_px', 'val_bg_mean',    iteration=epoch, value=va_bg_mse)
+                rs('mse_px', 'val_bg_median',  iteration=epoch, value=va_bg_med)
+                rs('mse_px', 'val_bg_p95',     iteration=epoch, value=va_bg_p95)
+                rs('lr', 'lr', iteration=epoch, value=scheduler.get_last_lr()[0])
+                rs('best', 'best_val_nll', iteration=epoch, value=best_val)
+            except Exception:
+                pass
 
     log(f"Best val NLL: {best_val:.4f}  |  time: {(time.time()-t0)/60:.1f}min")
 
