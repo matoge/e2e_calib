@@ -223,10 +223,15 @@ def convert_segment(seg_name: str, out_root: Path, max_frames: int = 80,
                 img_bytes = img_row['[CameraImageComponent].image']
                 Image.open(io.BytesIO(img_bytes)).convert('RGB').save(
                     jpg_path, quality=jpg_quality)
-            # Pose per camera (world_from_waymocam → world_from_opencvcam).
-            T_world_from_wcam = np.array(
+            # [CameraImageComponent].pose is T_world_from_VEHICLE interpolated
+            # at the camera's shutter time (not T_world_from_wcam). Compose with
+            # the static cam extrinsic to get the actual cam world pose, then
+            # convert Waymo-cam → OpenCV-cam axes.
+            T_world_from_veh_shutter = np.array(
                 img_row['[CameraImageComponent].pose.transform'],
                 dtype=np.float64).reshape(4, 4)
+            _, _, _, _, T_veh_from_wcam_static = cam_intr[cid]
+            T_world_from_wcam = T_world_from_veh_shutter @ T_veh_from_wcam_static
             T_world_from_cam = _T_world_from_opencvcam(T_world_from_wcam)
             cam_poses[cid].append(_mat_to_quat_pos(T_world_from_cam))
 
