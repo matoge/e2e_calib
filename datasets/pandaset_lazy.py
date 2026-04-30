@@ -69,16 +69,8 @@ class PandaSetCalibDatasetLazy(Dataset):
         s_min = max(self.img_size, int(self.min_sub_px))
         s_max = min(C, int(self.max_sub_px))
         s = int(np.random.randint(s_min, s_max + 1))
-        if 'obj_pos' in inst:
-            lo = max(0, 2 * C // 3 - s)
-            hi = min(C - s, C // 3)
-            if hi < lo:
-                hi = lo
-            u = int(np.random.randint(lo, hi + 1))
-            v = int(np.random.randint(lo, hi + 1))
-        else:
-            u = int(np.random.randint(0, C - s + 1))
-            v = int(np.random.randint(0, C - s + 1))
+        u = int(np.random.randint(0, C - s + 1))
+        v = int(np.random.randint(0, C - s + 1))
         return (u, v, s)
 
     def __getitem__(self, idx):

@@ -134,13 +134,21 @@ class PandaSetLiveDataset(Dataset):
                  val_fraction: float = 0.15,
                  split_seed: int = 42,
                  split: str = 'train',
-                 virtual_epoch_len: int = None):
+                 virtual_epoch_len: int = None,
+                 pivot_mode: str = 'v1',
+                 min_crop_px: int = 128,
+                 max_crop_px: int = 384,
+                 points_cap: int = 2000):
         self.root         = Path(scenes_root)
         self.img_size     = int(img_size)
         self.max_offset_m = float(max_offset_m)
         self.max_rot_deg  = float(max_rot_deg)
         self.bbox_scale   = float(bbox_scale)
         self.min_pts      = int(min_pts)
+        self.pivot_mode   = str(pivot_mode)
+        self.min_crop_px  = int(min_crop_px)
+        self.max_crop_px  = int(max_crop_px)
+        self.points_cap   = int(points_cap)
 
         # Stable scene-level split (shuffle then cut, matches build_cache).
         all_scenes = sorted(p.name for p in self.root.iterdir() if p.is_dir())
@@ -240,13 +248,156 @@ class PandaSetLiveDataset(Dataset):
         return self.index[idx % len(self.index)]
 
     def __getitem__(self, idx):
+        build_fn = self._build_v3 if self.pivot_mode == 'v3' else self._build
         for _try in range(20):
             sc_name, cam_name, fi, _ = self._pick(idx + _try)
-            out = self._build(sc_name, cam_name, fi)
+            out = build_fn(sc_name, cam_name, fi)
             if out is not None:
                 return out
-        # final fallback: random reroll
         return self[random.randint(0, len(self) - 1)]
+
+    def _build_v3(self, sc_name: str, cam_name: str, fi: int):
+        """V3 pivot: 50/50 obj/bg lidar pivot, random crop 128-384, 2000 cap, vectorized 16x16 sub-grid."""
+        meta = self._scene_meta[sc_name]
+        cam  = meta['cams'][cam_name]
+        IW, IH = cam['width'], cam['height']
+        K = cam['K']
+        cam_pose = cam['poses'][fi]
+        pose_mat = _quat_pos_to_mat(cam_pose['heading'], cam_pose['position'])
+        cam_pos = np.array([cam_pose['position']['x'], cam_pose['position']['y'],
+                            cam_pose['position']['z']], dtype=np.float32)
+
+        lp = meta['lidar_files'][fi]
+        if lp.suffix == '.npy':
+            pts_world = np.array(np.load(lp, mmap_mode='r'))   # materialize for matrix ops
+        else:
+            df = _load_pickle(lp)
+            if 'd' in df.columns: df = df[df['d'] == 0]
+            pts_world = df[['x','y','z']].values.astype(np.float32)
+
+        uv_gt_full, z_gt_full = _project(pts_world, pose_mat, K)
+        vis = (z_gt_full > 0.5) & (uv_gt_full[:,0] >= 0) & (uv_gt_full[:,0] < IW) & \
+              (uv_gt_full[:,1] >= 0) & (uv_gt_full[:,1] < IH)
+        if vis.sum() < self.min_pts:
+            return None
+        pts_v   = pts_world[vis]
+        uv_v    = uv_gt_full[vis]
+        z_v     = z_gt_full[vis]
+
+        cuboids = _load_pickle(meta['cuboid_files'][fi])
+        if 'label' in cuboids.columns:
+            cuboids = cuboids[cuboids['label'].isin(USEFUL_LABELS)]
+        # Avoid iterrows (~7ms/sample): pull columns as numpy arrays once
+        cub_pos  = cuboids[['position.x','position.y','position.z']].to_numpy(dtype=np.float32) if len(cuboids) else np.zeros((0,3), dtype=np.float32)
+        cub_dims = cuboids[['dimensions.x','dimensions.y','dimensions.z']].to_numpy(dtype=np.float32) if len(cuboids) else np.zeros((0,3), dtype=np.float32)
+        cub_yaw  = cuboids['yaw'].to_numpy(dtype=np.float32) if len(cuboids) else np.zeros((0,), dtype=np.float32)
+
+        # is_obj per visible point: vectorized over cuboids, reusing column arrays.
+        is_obj_v = np.zeros(len(pts_v), dtype=bool)
+        for k in range(len(cub_pos)):
+            yaw = float(cub_yaw[k]); pos = cub_pos[k]; dims = cub_dims[k]
+            cy, sy = np.cos(yaw), np.sin(yaw)
+            R_obj = np.array([[cy, sy, 0], [-sy, cy, 0], [0, 0, 1]], dtype=np.float32)
+            local = (R_obj @ (pts_v - pos).T).T
+            half = dims / 2.0
+            is_obj_v |= ((np.abs(local[:,0]) <= half[0]) & (np.abs(local[:,1]) <= half[1]) &
+                          (np.abs(local[:,2]) <= half[2]))
+
+        obj_idxs = np.where(is_obj_v)[0]
+        bg_mask  = ~is_obj_v
+        GU, GV = 10, 5
+        cell_w = IW / GU; cell_h = IH / GV
+        cell_u = np.clip((uv_v[:,0] / cell_w).astype(int), 0, GU-1)
+        cell_v_ = np.clip((uv_v[:,1] / cell_h).astype(int), 0, GV-1)
+        cell_id_full = cell_v_ * GU + cell_u
+        bg_cells = np.unique(cell_id_full[bg_mask]) if bg_mask.any() else np.array([], dtype=int)
+
+        R_gt = Rotation.from_quat([cam_pose['heading']['x'], cam_pose['heading']['y'],
+                                    cam_pose['heading']['z'], cam_pose['heading']['w']]).as_matrix().astype(np.float32)
+        S = self.img_size
+
+        for _ in range(8):
+            cs = int(np.random.randint(self.min_crop_px, self.max_crop_px + 1))
+            cs = min(cs, IW, IH)
+            if len(obj_idxs) > 0 and (len(bg_cells) == 0 or np.random.rand() < 0.5):
+                i = obj_idxs[np.random.randint(len(obj_idxs))]
+                pu, pv_ = uv_v[i]
+            elif len(bg_cells) > 0:
+                c = bg_cells[np.random.randint(len(bg_cells))]
+                idxs = np.where(bg_mask & (cell_id_full == c))[0]
+                i = idxs[np.random.randint(len(idxs))]
+                pu, pv_ = uv_v[i]
+            else:
+                continue
+            u0 = int(np.clip(pu - cs/2, 0, IW - cs))
+            v0 = int(np.clip(pv_ - cs/2, 0, IH - cs))
+
+            # crop+10% pad pre-filter, cap to points_cap
+            pad_px = int(cs * 0.10)
+            in_pad = ((uv_v[:,0] >= u0 - pad_px) & (uv_v[:,0] < u0 + cs + pad_px) &
+                      (uv_v[:,1] >= v0 - pad_px) & (uv_v[:,1] < v0 + cs + pad_px) &
+                      (z_v > 0.5))
+            cand_idx = np.where(in_pad)[0]
+            if len(cand_idx) < self.min_pts:
+                continue
+            if len(cand_idx) > self.points_cap:
+                cand_idx = np.random.choice(cand_idx, size=self.points_cap, replace=False)
+            pts_c = pts_v[cand_idx]
+            uv_gt_c = uv_v[cand_idx]
+            is_obj_c = is_obj_v[cand_idx]
+
+            # Perturbed projection on candidates only
+            t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+            ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+            R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
+            cp_off = cam_pos + t_delta.astype(np.float32)
+            R_inv = R_off.T.astype(np.float32)
+            t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
+            pts_cam_off = pts_c @ R_inv.T + t_inv
+            z_off = pts_cam_off[:, 2]
+            fxfy = np.array([K[0,0], K[1,1]], dtype=np.float32)
+            cxcy = np.array([K[0,2], K[1,2]], dtype=np.float32)
+            uv_off_c = pts_cam_off[:, :2] * fxfy / np.maximum(z_off[:, None], 1e-6) + cxcy
+
+            in_crop = ((uv_off_c[:,0] >= u0) & (uv_off_c[:,0] < u0 + cs) &
+                       (uv_off_c[:,1] >= v0) & (uv_off_c[:,1] < v0 + cs) &
+                       (z_off > 0.5))
+            if in_crop.sum() < self.min_pts:
+                continue
+
+            # Vectorized 16x16 sub-grid
+            scale = S / cs
+            uv_local = np.stack([(uv_off_c[in_crop,0] - u0) * scale,
+                                 (uv_off_c[in_crop,1] - v0) * scale], axis=1)
+            G, cs_ = 16, S / 16
+            ci_u = np.clip((uv_local[:,0] / cs_).astype(int), 0, G-1)
+            ci_v = np.clip((uv_local[:,1] / cs_).astype(int), 0, G-1)
+            cid = ci_v * G + ci_u
+            cu_c = (ci_u + 0.5) * cs_; cv_c = (ci_v + 0.5) * cs_
+            d2 = (uv_local[:,0] - cu_c)**2 + (uv_local[:,1] - cv_c)**2
+            order = np.lexsort((d2, cid))
+            _, first = np.unique(cid[order], return_index=True)
+            sel = order[first]
+            sub_idx = np.where(in_crop)[0][sel]
+
+            pts_sel = pts_c[sub_idx]
+            uv_gt_loc  = ((uv_gt_c[sub_idx]  - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
+            uv_off_loc = ((uv_off_c[sub_idx] - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
+            dist_m = (np.linalg.norm(pts_sel - cam_pos, axis=1) / 100.0).astype(np.float32)
+            is_obj_sel = is_obj_c[sub_idx].astype(np.float32)
+
+            true_uvd = np.concatenate([uv_gt_loc,  dist_m[:,None], is_obj_sel[:,None]], axis=1)
+            dist_uvd = np.concatenate([uv_off_loc, dist_m[:,None], is_obj_sel[:,None]], axis=1)
+
+            # JPG scaled-decode crop → resize to S×S
+            jpg_path = cam['cam_dir'] / f'{fi:02d}.jpg'
+            patch = _scaled_decode_crop(jpg_path, int(u0), int(v0), int(cs), S, IW, IH)
+            img_crop = torch.from_numpy(patch).permute(2,0,1).float() / 255.0
+
+            vfp = float(K[0,0]) * S / cs
+            return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
+                    torch.tensor(vfp, dtype=torch.float32))
+        return None
 
     def _build(self, sc_name: str, cam_name: str, fi: int):
         meta = self._scene_meta[sc_name]
