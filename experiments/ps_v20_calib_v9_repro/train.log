@@ -1,5 +1,0 @@
-12:04:47  loading cache /home/sakurai1/data/pandaset_mc_s64_lazy (lazy)
-12:04:47  train cache: 90251 instances
-12:04:48  val   cache: 10580 instances
-12:04:48  object-level split: train=90748 val=10083
-12:04:48  params: 0.98M

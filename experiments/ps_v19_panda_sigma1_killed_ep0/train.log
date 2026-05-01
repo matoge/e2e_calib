@@ -1,5 +1,0 @@
-22:31:11  multi-DS calib  scenes_root=/mnt/nvme6t/pandaset  cameras=all  sigma=(1.0deg, 0.2m)
-22:31:13  train: 10000  val: 500
-22:31:13  params: 1.00M
-22:32:02  [  1/100]  train nll=+4.093(obj=+5.341 bg=+3.930) mse=7.264(obj=10.595 bg=6.824)  val nll=+3.393(obj=+4.792 bg=+3.206) mse=7.544(obj=10.063 bg=7.175)  lr=4.00e-04  tot=0.8min
-22:32:02    ↳ saved (val_nll=3.3930)
