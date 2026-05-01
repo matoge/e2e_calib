@@ -100,7 +100,8 @@ class ZODCalibDataset(Dataset):
                  max_tries: int = 8,
                  oversample: int = 4,
                  grid_n: int = 16,
-                 anonymization: str = 'dnat'):
+                 anonymization: str = 'dnat',
+                 edge_margin_frac: float = 0.08):
         try:
             from zod import ZodFrames
             from zod.constants import Anonymization
@@ -138,6 +139,10 @@ class ZODCalibDataset(Dataset):
         self.oversample = int(oversample)
         self.grid_n    = int(grid_n)
         self._anon = Anonymization.DNAT if anonymization == 'dnat' else Anonymization.BLUR
+        # ZOD edge calib residual is ~few px at the outermost ring (KB distortion
+        # estimation error + lidar mount offset). Excluding 8% margin at each
+        # edge keeps training pivots in the area where projection is reliable.
+        self.edge_margin_frac = float(edge_margin_frac)
 
         # Worker-local zod handle (forked workers don't share cleanly)
         self._zf = None
@@ -154,18 +159,31 @@ class ZODCalibDataset(Dataset):
     def __getitem__(self, idx: int):
         from zod.constants import Camera, Lidar
         from zod.utils.geometry import transform_points, get_points_in_camera_fov
+        from zod.utils.compensation import motion_compensate_pointwise
 
         zf = self._ensure_zf()
         fid = self.fnames[idx % len(self.fnames)]
         frame = zf[fid]
 
-        # Lazy: load image only after crop is picked (full PIL decode ~30-50ms
-        # for 8.3 MP, but we still need IH/IW upfront — use PIL header-only).
         cam = frame.calibration.cameras[Camera.FRONT]
         lidar_calib = frame.calibration.lidars[Lidar.VELODYNE]
 
-        # Pre-transform lidar pts to cam frame ONCE
-        pc = frame.get_lidar()[0]
+        # Per-shot motion compensation to camera shutter time.
+        # The lidar takes ~115 ms to scan 360°. Without per-shot ego-pose
+        # interpolation, points captured early in the scan project a few px
+        # off (50 km/h × 100 ms = 1.4 m → ~10 px at 30 m for fx=1857).
+        # zod.utils.compensation.motion_compensate_scanwise uses ONE
+        # `core_timestamp` for the whole scan — that's block compensation,
+        # not enough at the edges. `motion_compensate_pointwise` interpolates
+        # ego pose at every per-shot timestamp (lidar_data.timestamps), giving
+        # alignment quality comparable to Waymo's precomputed LCP.
+        cam_ts = frame.info.camera_frames['front_dnat'][0].time.timestamp()
+        pc = motion_compensate_pointwise(
+            frame.get_lidar()[0],
+            frame.ego_motion,
+            lidar_calib,
+            target_timestamp=cam_ts,
+        )
         T_c_l = np.linalg.inv(cam.extrinsics.transform) @ lidar_calib.extrinsics.transform
         pts_cam = transform_points(pc.points, T_c_l).astype(np.float32)
         pts_cam_fov, fov_mask = get_points_in_camera_fov(cam.field_of_view, pts_cam)
@@ -176,9 +194,13 @@ class ZODCalibDataset(Dataset):
         # GT projection (Kannala) for full set of in-FOV pts
         uv_full = _project_kannala(pts_cam_fov, K, dist)
         z = pts_cam_fov[:, 2]
+        # Drop edge-ring pivots where KB distortion residual is largest
+        em = self.edge_margin_frac
+        u_lo, u_hi = int(em * IW), int((1 - em) * IW)
+        v_lo, v_hi = int(em * IH), int((1 - em) * IH)
         valid_in_image = ((z > 0.5) &
-                          (uv_full[:, 0] >= 0) & (uv_full[:, 0] < IW) &
-                          (uv_full[:, 1] >= 0) & (uv_full[:, 1] < IH))
+                          (uv_full[:, 0] >= u_lo) & (uv_full[:, 0] < u_hi) &
+                          (uv_full[:, 1] >= v_lo) & (uv_full[:, 1] < v_hi))
 
         # Cuboid is_obj (only on visible pts to save compute)
         cubs = []
