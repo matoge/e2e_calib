@@ -118,7 +118,9 @@ def main(cfg=None):
     ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
                   max_rot_deg=c.get('max_rot_deg', 0.5),
                   min_crop_px=c.get('min_crop_px', 128),
-                  max_crop_px=c.get('max_crop_px', 512))
+                  max_crop_px=c.get('max_crop_px', 512),
+                  frame_stride=c.get('frame_stride', 1),
+                  grid_n=c.get('grid_n', 16))
     log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
         f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
     tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
@@ -159,7 +161,8 @@ def main(cfg=None):
     model = CalibNetDepth(img_size=c["img_size"], in_channels=c["in_channels"],
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
                           use_convnext=c.get("use_convnext", False),
-                          use_frustum=c.get("use_frustum", False)).to(DEVICE)
+                          use_frustum=c.get("use_frustum", False),
+                          deform_mode=c.get("deform_mode", "none")).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=c["lr"], weight_decay=1e-3)
@@ -184,6 +187,84 @@ def main(cfg=None):
         cml_logger = _ClearMLTask.current_task().get_logger() if _ClearMLTask.current_task() else None
     except Exception:
         cml_logger = None
+
+    # Pre-training cache sanity vis: 10 random insts with GT projection on full image.
+    # Lets a human eyeball the cache before sinking hours into training.
+    try:
+        from scripts.visualization.vis_pretrain import main as _vis_pretrain
+        import sys as _sys
+        _argv = _sys.argv[:]
+        _sys.argv = ['vis_pretrain', '--cache', cache, '--out', str(exp_dir / 'vis_pretrain'), '--n', '10']
+        _vis_pretrain(); _sys.argv = _argv
+        log(f"vis_pretrain → {exp_dir / 'vis_pretrain'}")
+        if cml_logger is not None:
+            for p in sorted((exp_dir / 'vis_pretrain').glob('*.png')):
+                try: cml_logger.report_image('vis_pretrain', p.stem, iteration=0, local_path=str(p))
+                except Exception: pass
+    except Exception as e:
+        log(f"vis_pretrain skipped: {e}")
+
+    def _midtrain_vis(epoch: int, n: int = 10):
+        """Render N obj-centered val tiles with current model output."""
+        out = exp_dir / f'vis_ep{epoch:03d}'
+        out.mkdir(exist_ok=True)
+        for old in out.glob('*.png'): old.unlink()
+        from datasets.pandaset_full import PandaSetCalibDatasetFull
+        ds = PandaSetCalibDatasetFull(cache, split='val',
+                                              img_size=c['img_size'],
+                                              min_crop_px=c.get('min_crop_px', 128),
+                                              max_crop_px=c.get('max_crop_px', 384),
+                                              oversample=1)
+        import random as _r, numpy as _np
+        idxs = list(range(len(ds))); _r.Random(epoch).shuffle(idxs)
+        S = int(c['img_size']); saved = 0
+        for idx in idxs[:200]:
+            if saved >= n: break
+            try:
+                img, true_uvd, dist_uvd, vfp = ds[idx]
+            except Exception:
+                continue
+            is_obj = dist_uvd[:, 3].numpy() > 0.5
+            if not is_obj.any(): continue
+            d_obj = dist_uvd[is_obj, :2].numpy()
+            if max(float(d_obj[:,0].max()-d_obj[:,0].min()),
+                   float(d_obj[:,1].max()-d_obj[:,1].min())) < 16: continue
+            Nmax = true_uvd.shape[0]
+            pad = torch.zeros(1, Nmax, dtype=torch.bool, device=DEVICE)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16), torch.no_grad():
+                p = model(img.unsqueeze(0).to(DEVICE),
+                          dist_uvd.unsqueeze(0).to(DEVICE)[..., :3],
+                          key_padding_mask=pad,
+                          vfp=vfp.view(1).to(DEVICE))[0].float().cpu().numpy()
+            true_uv = true_uvd[:,:2].numpy(); dist_uv = dist_uvd[:,:2].numpy()
+            pred_uv = dist_uv + p[:,:2]
+            err_b_obj = float(_np.linalg.norm(dist_uv[is_obj] - true_uv[is_obj], axis=1).mean())
+            err_a_obj = float(_np.linalg.norm(pred_uv[is_obj] - true_uv[is_obj], axis=1).mean())
+            err_b_bg  = float(_np.linalg.norm(dist_uv[~is_obj] - true_uv[~is_obj], axis=1).mean()) if (~is_obj).any() else float('nan')
+            err_a_bg  = float(_np.linalg.norm(pred_uv[~is_obj] - true_uv[~is_obj], axis=1).mean()) if (~is_obj).any() else float('nan')
+            fig, ax = plt.subplots(figsize=(4, 4), dpi=96)
+            ax.imshow(_np.clip(img.permute(1,2,0).cpu().numpy(), 0, 1))
+            uc = pred_uv[:,0]-dist_uv[:,0]; vc = pred_uv[:,1]-dist_uv[:,1]
+            if (~is_obj).any():
+                ax.quiver(dist_uv[~is_obj,0], dist_uv[~is_obj,1], uc[~is_obj], vc[~is_obj],
+                          angles='xy', scale_units='xy', scale=1, color='deepskyblue',
+                          width=0.004, headwidth=3.5, headlength=4, alpha=0.55, zorder=2)
+            if is_obj.any():
+                ax.quiver(dist_uv[is_obj,0], dist_uv[is_obj,1], uc[is_obj], vc[is_obj],
+                          angles='xy', scale_units='xy', scale=1, color='orange',
+                          width=0.006, headwidth=3.5, headlength=4, alpha=0.95, zorder=4)
+            ax.scatter(true_uv[is_obj,0], true_uv[is_obj,1], c='lime', s=14, marker='x', linewidths=0.9, zorder=5)
+            ax.scatter(true_uv[~is_obj,0], true_uv[~is_obj,1], c='yellow', s=6, marker='x', linewidths=0.5, alpha=0.5, zorder=3)
+            ax.set_xlim(0, S); ax.set_ylim(S, 0); ax.axis('off')
+            ax.set_title(f"ep{epoch:03d} obj:{err_b_obj:.2f}→{err_a_obj:.2f} bg:{err_b_bg:.2f}→{err_a_bg:.2f}px", fontsize=6)
+            plt.tight_layout(pad=0.2)
+            fp = out / f'val_{saved:02d}.png'
+            plt.savefig(fp, dpi=96, bbox_inches='tight'); plt.close(fig)
+            if cml_logger is not None:
+                try: cml_logger.report_image(f'vis_ep', f'sample_{saved:02d}', iteration=epoch, local_path=str(fp))
+                except Exception: pass
+            saved += 1
+        log(f"vis_ep{epoch:03d}: saved {saved} → {out}")
 
     # Optional curriculum: schedule = list of (start_ep, end_ep, rot_deg, t_m).
     # If set, sigma is clamped to that schedule at each epoch start. The dataset's
@@ -260,6 +341,10 @@ def main(cfg=None):
             except Exception:
                 pass
 
+        if epoch % 10 == 0 or epoch == epochs:
+            try: _midtrain_vis(epoch, n=10)
+            except Exception as _e: log(f"vis_ep{epoch:03d} skipped: {_e}")
+
     log(f"Best val NLL: {best_val:.4f}  |  time: {(time.time()-t0)/60:.1f}min")
 
     # ── curves ──
@@ -272,8 +357,14 @@ def main(cfg=None):
     plt.tight_layout(); plt.savefig(vis_dir / "curves.png", dpi=100); plt.close(fig)
 
     # ── vis (V3 cache uses different schema than vis_ps expects; skip) ──
-    n_vis = 0
-    log("vis: skipped (V3 cache uses full-image schema, not yet wired to vis_ps)")
+    n_vis = 48
+    try:
+        from scripts.visualization.vis_ps_v3 import main as vis_main
+        vis_main(c["name"], n_vis=n_vis, cache=cache)
+        log(f"Saved {n_vis} vis → {vis_dir}")
+    except Exception as e:
+        n_vis = 0
+        log(f"vis: skipped due to error: {e}")
 
     # ── report.html (overwritten by vis_ps; rebuild to include local best_nll) ──
     vis_imgs = "\n".join(f'      <img src="vis/val_{i:02d}.png" style="width:200px; margin:4px; border:1px solid #333;">' for i in range(n_vis))
@@ -313,6 +404,12 @@ if __name__ == "__main__":
     ap.add_argument('--t-m',     type=float, default=None,
                     help='extrinsic perturbation half-range (m per axis)')
     ap.add_argument('--epochs',  type=int,   default=None)
+    ap.add_argument('--lr',      type=float, default=None)
+    ap.add_argument('--lr-min',  type=float, default=None)
+    ap.add_argument('--frame-stride', type=int, default=1,
+                    help='subsample fnames by this stride at runtime (e.g. 5 → 2Hz from 10Hz cache)')
+    ap.add_argument('--grid-n', type=int, default=None,
+                    help='point sub-grid size (16=default, 8 for coarser, set with img-size for matching coarse feat map)')
     ap.add_argument('--workers', type=int,   default=None,
                     help='dataloader workers (default 16; sakurai2 may hang at 16, try 4)')
     ap.add_argument('--min-crop-px', type=int, default=None,
@@ -331,6 +428,8 @@ if __name__ == "__main__":
                     help='model input side (px); default 64. e.g. 128 for higher-res experiment')
     ap.add_argument('--convnext', action='store_true',
                     help='use ConvNeXt backbone (=all_v1 1.62M config)')
+    ap.add_argument('--deform-mode', default=None,
+                    help="deformable cross-attn: 'none' (default) | 'sl' single-level | 'ml' multi-level")
     ap.add_argument('--train-size', type=int, default=None,
                     help='per-epoch random subsample of train set (caps wall-time). '
                          'e.g. 20000 → 78 batches @ bs=256 → ~14s/ep')
@@ -348,6 +447,10 @@ if __name__ == "__main__":
     if args.rot_deg is not None: cfg['max_rot_deg']  = args.rot_deg
     if args.t_m     is not None: cfg['max_offset_m'] = args.t_m
     if args.epochs  is not None: cfg['epochs'] = args.epochs
+    if args.lr      is not None: cfg['lr']     = args.lr
+    if args.lr_min  is not None: cfg['lr_min'] = args.lr_min
+    if args.frame_stride and args.frame_stride > 1: cfg['frame_stride'] = args.frame_stride
+    if args.grid_n is not None: cfg['grid_n'] = args.grid_n
     if args.workers is not None: cfg['num_workers'] = args.workers
     if args.min_crop_px is not None: cfg['min_crop_px'] = args.min_crop_px
     if args.max_crop_px is not None: cfg['max_crop_px'] = args.max_crop_px

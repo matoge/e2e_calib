@@ -101,8 +101,10 @@ def convert_log(log_dir: Path, out_root: Path, every_k: int = 2, symlink: bool =
     """
     log_id = log_dir.name
     out_dir = out_root / log_id
-    if (out_dir / 'camera' / AV2_CAMERAS[-1] / 'poses.json').exists():
-        return f'[skip] {log_id}'  # already done
+    have_poses  = (out_dir / 'camera' / AV2_CAMERAS[-1] / 'poses.json').exists()
+    have_mc     = (out_dir / 'lidar' / '.mc_v2').exists()
+    if have_poses and have_mc:
+        return f'[skip] {log_id}'  # already done with per-point MC
 
     # --- log-level calib and ego-pose tables ---
     intr = pd.read_feather(log_dir / 'calibration/intrinsics.feather')
@@ -118,27 +120,52 @@ def convert_log(log_dir: Path, out_root: Path, every_k: int = 2, symlink: bool =
     N_FRAMES = len(sampled_lidar)
 
     # --- lidar (world frame, shared across all cams) ---
-    # IMPORTANT: AV2 `.feather` lidar sweeps are already in the EGO-VEHICLE
-    # frame (not the lidar sensor frame — the egovehicle_SE3_sensor extrinsic
-    # for `up_lidar` is informational only for raw sensor coords, but the
-    # provided feather is the motion-compensated ego-frame sweep).
-    # So: pts_ego = df[['x','y','z']]; pts_world = T_e2w @ pts_ego.
+    # AV2 `.feather` lidar sweeps are in EGO-VEHICLE frame at each point's own
+    # capture time (NOT motion-compensated to a single timestamp). Each point
+    # carries `offset_ns` indicating its capture time relative to the sweep
+    # start (file stem). Sweep span = ~103 ms across the rotating beam.
+    #
+    # Per-point motion compensation: for each pt, look up T_e2w(t_capture) from
+    # the high-rate `city_SE3_egovehicle` table (~5 ms cadence) via SLERP +
+    # linear translation, then transform that single point to world. Without
+    # this, side cameras show 30-100 px misalignment at typical urban speeds.
+    #
+    # `lidar/.mc_v2` sentinel marks the directory as built with this code path;
+    # if a log was previously preprocessed without per-point MC, the sentinel
+    # is missing and we rebuild every pkl.
     lidar_out = out_dir / 'lidar'
     lidar_out.mkdir(parents=True, exist_ok=True)
+    mc_sentinel = lidar_out / '.mc_v2'
+
+    # vectorized ego-pose interpolators (reused across all frames in this log)
+    city_ts_ns = city['timestamp_ns'].values
+    city_quats = np.stack([city['qx'].values, city['qy'].values,
+                            city['qz'].values, city['qw'].values], axis=1)
+    city_slerp = Slerp(city_ts_ns, Rotation.from_quat(city_quats))
+    city_tx, city_ty, city_tz = city['tx_m'].values, city['ty_m'].values, city['tz_m'].values
+
+    needs_rebuild = not mc_sentinel.exists()
     lidar_ts_ns = []
     for fi, lf in enumerate(sampled_lidar):
         ts_ns = int(lf.stem)
         lidar_ts_ns.append(ts_ns)
         out_pkl = lidar_out / f'{fi:02d}.pkl'
-        if out_pkl.exists():
+        if out_pkl.exists() and not needs_rebuild:
             continue
         df = pd.read_feather(lf)
-        pts_e = df[['x', 'y', 'z']].values.astype(np.float64)
-        T_e2w = _slerp_ego_pose(city, ts_ns)
-        pts_w = (T_e2w[:3, :3] @ pts_e.T + T_e2w[:3, 3:4]).T
+        pts_e     = df[['x', 'y', 'z']].values.astype(np.float64)
+        offset_ns = df['offset_ns'].values.astype(np.int64)
+        pts_ts_ns = ts_ns + offset_ns
+        pts_ts_clipped = np.clip(pts_ts_ns, city_ts_ns[0], city_ts_ns[-1])
+        Rs = city_slerp(pts_ts_clipped).as_matrix()              # (N, 3, 3)
+        tx = np.interp(pts_ts_clipped, city_ts_ns, city_tx)
+        ty = np.interp(pts_ts_clipped, city_ts_ns, city_ty)
+        tz = np.interp(pts_ts_clipped, city_ts_ns, city_tz)
+        pts_w = np.einsum('nij,nj->ni', Rs, pts_e) + np.stack([tx, ty, tz], axis=1)
         pd.DataFrame({'x': pts_w[:, 0].astype(np.float32),
                       'y': pts_w[:, 1].astype(np.float32),
                       'z': pts_w[:, 2].astype(np.float32)}).to_pickle(out_pkl)
+    mc_sentinel.touch()
 
     # --- per-camera: intrinsics, poses, image symlinks ---
     for cam in AV2_CAMERAS:

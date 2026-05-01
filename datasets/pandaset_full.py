@@ -14,6 +14,24 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
+try:
+    import turbojpeg as _tj
+    _HAVE_TJ = True
+    _MCU = 16
+except Exception:
+    _tj = None
+    _HAVE_TJ = False
+
+
+def decode_inst_img(inst: dict) -> torch.Tensor:
+    """Return (3, H, W) uint8 torch tensor regardless of cache schema.
+    New schema: inst['jpg_bytes'] + inst['IH']/['IW'].  Legacy: inst['img']."""
+    if 'jpg_bytes' in inst:
+        import io
+        from PIL import Image as _PIL
+        arr = np.asarray(_PIL.open(io.BytesIO(inst['jpg_bytes'])).convert('RGB'), dtype=np.uint8)
+        return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+    return inst['img']
 
 
 def _is_obj_per_point(pts_sel: np.ndarray, cuboids: list) -> np.ndarray:
@@ -62,12 +80,16 @@ class PandaSetCalibDatasetFull(Dataset):
                  max_rot_deg: float = 0.5,
                  min_pts: int = 8,
                  max_tries: int = 8,
-                 oversample: int = 12):
+                 oversample: int = 12,
+                 frame_stride: int = 1,
+                 grid_n: int = 16):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
         meta = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
         assert split in ('train', 'val')
         self.fnames    = list(meta[split])
+        if frame_stride > 1:
+            self.fnames = self.fnames[::frame_stride]
         self.img_size  = int(img_size)
         self.min_crop_px = int(min_crop_px)
         self.max_crop_px = int(max_crop_px)
@@ -76,6 +98,7 @@ class PandaSetCalibDatasetFull(Dataset):
         self.min_pts   = int(min_pts)
         self.max_tries = int(max_tries)
         self.oversample = int(oversample)
+        self.grid_n     = int(grid_n)
 
     def __len__(self):
         return len(self.fnames) * self.oversample
@@ -86,7 +109,11 @@ class PandaSetCalibDatasetFull(Dataset):
 
     def __getitem__(self, idx: int):
         inst = self._load_inst(idx)
-        IH, IW = int(inst['img'].shape[-2]), int(inst['img'].shape[-1])
+        # New cache stores jpg_bytes; old cache stored decoded uint8 'img'
+        if 'jpg_bytes' in inst:
+            IH, IW = int(inst['IH']), int(inst['IW'])
+        else:
+            IH, IW = int(inst['img'].shape[-2]), int(inst['img'].shape[-1])
         K = inst['K_full'].numpy()
         pts = inst['pts'].numpy()
         cp  = inst['cam_pos'].numpy()
@@ -122,8 +149,9 @@ class PandaSetCalibDatasetFull(Dataset):
         bg_cells = np.unique(cell_id_full[bg_mask]) if bg_mask.any() else np.array([], dtype=int)
 
         S = self.img_size
-        # Pre-flatten image for fast cropping
-        img_full = inst['img']  # (3, H, W) uint8
+        # If new cache: defer JPEG decode until crop is chosen (partial decode on the
+        # cropped region only). Old cache: image is already decoded as a tensor.
+        img_full = None if 'jpg_bytes' in inst else inst['img']  # (3, H, W) uint8 or None
 
         for _ in range(self.max_tries):
             cs = int(np.random.randint(self.min_crop_px, self.max_crop_px + 1))
@@ -177,7 +205,8 @@ class PandaSetCalibDatasetFull(Dataset):
             scale = S / cs
             uv_local = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
                                  (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1)
-            grid_n, cell_S = 16, float(S) / 16
+            grid_n = self.grid_n
+            cell_S = float(S) / grid_n
             ci_u = np.clip((uv_local[:, 0] / cell_S).astype(int), 0, grid_n - 1)
             ci_v = np.clip((uv_local[:, 1] / cell_S).astype(int), 0, grid_n - 1)
             cell_id = ci_v * grid_n + ci_u
@@ -200,11 +229,34 @@ class PandaSetCalibDatasetFull(Dataset):
             true_uvd = np.concatenate([uv_gt_loc,  dist_m[:, None], is_obj[:, None]], axis=1)
             dist_uvd = np.concatenate([uv_off_loc, dist_m[:, None], is_obj[:, None]], axis=1)
 
-            img_crop = img_full[:, v0:v0+cs, u0:u0+cs].float().unsqueeze(0)
+            if img_full is None:
+                # TurboJPEG partial decode of just the crop region (~3-5ms for 384px MCU-aligned)
+                ju0 = (u0 // _MCU) * _MCU
+                jv0 = (v0 // _MCU) * _MCU
+                ju1 = min(IW, ((u0 + cs + _MCU - 1) // _MCU) * _MCU)
+                jv1 = min(IH, ((v0 + cs + _MCU - 1) // _MCU) * _MCU)
+                jw, jh = ju1 - ju0, jv1 - jv0
+                if _HAVE_TJ:
+                    cropped = _tj.transform(inst['jpg_bytes'], crop=True, x=ju0, y=jv0,
+                                             w=jw, h=jh, perfect=False)
+                    arr = np.asarray(_tj.decompress(cropped, pixelformat=_tj.PF.RGB))[:jh, :jw]
+                else:
+                    import io
+                    from PIL import Image as _PILImage
+                    full = np.asarray(_PILImage.open(io.BytesIO(inst['jpg_bytes'])).convert('RGB'),
+                                      dtype=np.uint8)
+                    arr = full[jv0:jv1, ju0:ju1]
+                # Slice to exact (cs, cs) inside the MCU-padded region
+                arr = arr[v0 - jv0:v0 - jv0 + cs, u0 - ju0:u0 - ju0 + cs]
+                img_crop = torch.from_numpy(arr.copy()).permute(2, 0, 1).contiguous().float().unsqueeze(0)
+            else:
+                img_crop = img_full[:, v0:v0+cs, u0:u0+cs].float().unsqueeze(0)
             img_crop = F.interpolate(img_crop, size=(S, S), mode='bilinear',
                                       align_corners=False).squeeze(0) / 255.0
 
             vfp = float(K[0, 0]) * S / cs
+            self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
+                                    scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
             return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
                     torch.tensor(vfp, dtype=torch.float32))
 
