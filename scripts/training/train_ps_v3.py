@@ -39,7 +39,8 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     bg_nll_s,  bg_n  = 0.0, 0
     obj_errs, bg_errs = [], []  # collect per-point L2 to compute median/p95
     for imgs, true_uvd, dist_uvd, pad_mask, vfp in loader:
-        imgs     = imgs.to(DEVICE, non_blocking=True)
+        # dataset returns uint8 to cut IPC 4x; convert to float on GPU
+        imgs     = imgs.to(DEVICE, non_blocking=True).float().div_(255.0)
         true_uvd = true_uvd.to(DEVICE, non_blocking=True)
         dist_uvd = dist_uvd.to(DEVICE, non_blocking=True)
         pad_mask = pad_mask.to(DEVICE, non_blocking=True)
@@ -232,7 +233,8 @@ def main(cfg=None):
             Nmax = true_uvd.shape[0]
             pad = torch.zeros(1, Nmax, dtype=torch.bool, device=DEVICE)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16), torch.no_grad():
-                p = model(img.unsqueeze(0).to(DEVICE),
+                img_gpu = img.unsqueeze(0).to(DEVICE).float().div_(255.0)
+                p = model(img_gpu,
                           dist_uvd.unsqueeze(0).to(DEVICE)[..., :3],
                           key_padding_mask=pad,
                           vfp=vfp.view(1).to(DEVICE))[0].float().cpu().numpy()

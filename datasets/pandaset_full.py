@@ -35,25 +35,30 @@ def decode_inst_img(inst: dict) -> torch.Tensor:
 
 
 def _is_obj_per_point(pts_sel: np.ndarray, cuboids: list) -> np.ndarray:
-    """Return (N,) float32 mask: 1 if a point lies inside ANY cuboid AABB-rotated box."""
-    if not cuboids:
-        return np.zeros(len(pts_sel), dtype=np.float32)
-    is_obj = np.zeros(len(pts_sel), dtype=bool)
-    for cub in cuboids:
-        pos  = cub['pos']
-        dims = cub['dims']
-        yaw  = float(cub['yaw'])
-        c_y, s_y = np.cos(yaw), np.sin(yaw)
-        R_obj = np.array([[c_y, s_y, 0],
-                          [-s_y, c_y, 0],
-                          [0,    0,  1]], dtype=np.float32)
-        local = (R_obj @ (pts_sel - pos).T).T
-        half = dims / 2.0
-        inside = ((np.abs(local[:,0]) <= half[0]) &
-                  (np.abs(local[:,1]) <= half[1]) &
-                  (np.abs(local[:,2]) <= half[2]))
-        is_obj |= inside
-    return is_obj.astype(np.float32)
+    """Return (N,) float32 mask: 1 if a point lies inside ANY cuboid (yaw-rotated AABB).
+
+    Vectorized across both points and cuboids: one einsum + two reductions,
+    no Python loop over cuboids.
+    """
+    N = len(pts_sel)
+    if not cuboids or N == 0:
+        return np.zeros(N, dtype=np.float32)
+    M = len(cuboids)
+    poss = np.stack([np.asarray(c['pos'],  dtype=np.float32) for c in cuboids])  # (M,3)
+    dims = np.stack([np.asarray(c['dims'], dtype=np.float32) for c in cuboids])  # (M,3)
+    yaws = np.fromiter((float(c['yaw']) for c in cuboids), dtype=np.float32, count=M)
+    cy, sy = np.cos(yaws), np.sin(yaws)
+    # Per-cuboid 3x3 rotation: yaw about z, with the same convention as the loop version
+    R = np.zeros((M, 3, 3), dtype=np.float32)
+    R[:, 0, 0] = cy;  R[:, 0, 1] = sy
+    R[:, 1, 0] = -sy; R[:, 1, 1] = cy
+    R[:, 2, 2] = 1.0
+    # delta = pts (N,3) - pos (M,3) → (M, N, 3); local = R @ delta.T per cuboid
+    delta = pts_sel.astype(np.float32, copy=False)[None, :, :] - poss[:, None, :]
+    local = np.einsum('mij,mnj->mni', R, delta)                                 # (M,N,3)
+    half  = (dims * 0.5)[:, None, :]                                              # (M,1,3)
+    inside = np.all(np.abs(local) <= half, axis=-1)                               # (M,N)
+    return inside.any(axis=0).astype(np.float32)                                  # (N,)
 
 
 class PandaSetCalibDatasetFull(Dataset):
@@ -154,9 +159,8 @@ class PandaSetCalibDatasetFull(Dataset):
         img_full = None if 'jpg_bytes' in inst else inst['img']  # (3, H, W) uint8 or None
 
         for _ in range(self.max_tries):
-            cs = int(np.random.randint(self.min_crop_px, self.max_crop_px + 1))
-            cs = min(cs, IW, IH)
-            # 50/50 obj/bg pivot
+            # Pick pivot first so cs can scale with depth (close pivots need
+            # larger crops to capture object edges; far pivots fit fine in small).
             if len(obj_idxs) > 0 and (len(bg_cells) == 0 or np.random.rand() < 0.5):
                 i = obj_idxs[np.random.randint(len(obj_idxs))]
                 pu, pv = uv_full[i]
@@ -167,6 +171,15 @@ class PandaSetCalibDatasetFull(Dataset):
                 pu, pv = uv_full[i]
             else:
                 continue
+            # Depth-aware cs sampling: <20m → up to 768 px (keep whole vehicle in frame),
+            # else stay narrow [min_crop_px, max_crop_px]
+            piv_z = float(z[i])
+            if piv_z < 20.0:
+                cs_lo, cs_hi = max(self.min_crop_px, 256), min(768, IW, IH)
+            else:
+                cs_lo, cs_hi = self.min_crop_px, self.max_crop_px
+            cs = int(np.random.randint(cs_lo, cs_hi + 1))
+            cs = min(cs, IW, IH)
             u0 = int(np.clip(pu - cs/2, 0, IW - cs))
             v0 = int(np.clip(pv - cs/2, 0, IH - cs))
 
@@ -252,7 +265,9 @@ class PandaSetCalibDatasetFull(Dataset):
             else:
                 img_crop = img_full[:, v0:v0+cs, u0:u0+cs].float().unsqueeze(0)
             img_crop = F.interpolate(img_crop, size=(S, S), mode='bilinear',
-                                      align_corners=False).squeeze(0) / 255.0
+                                      align_corners=False).squeeze(0)
+            # uint8 で渡す → IPC 4x 軽量化、GPU 側で .float()/255.0 する
+            img_crop = img_crop.clamp_(0, 255).to(torch.uint8)
 
             vfp = float(K[0, 0]) * S / cs
             self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
