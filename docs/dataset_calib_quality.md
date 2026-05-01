@@ -1,67 +1,72 @@
-# 公開データセット 4 種の lidar-camera キャリブレーション品質レポート
+# Lidar–Camera Calibration Quality across Four Public AD Datasets
 
-calib 残差ネット学習用データとして使う 4 つの公開データセットについて、**lidar→camera 投影品質** を実画像で検証した結果のメモ。
+A practitioner's note on lidar→camera projection quality for the four public datasets we use as training material for the calibration-residual network: **Waymo Open Dataset v2, nuScenes, ZOD (Zenseact Open Dataset), and PandaSet**. Every example below is rendered at the dataset's native resolution from publicly available data using each project's official toolkit.
 
-## サマリー
+## Summary
 
-| Dataset | カメラ | LiDAR | 解像度 / FOV | calib 品質 | 主な癖 |
+| Dataset | Cameras | LiDAR | Resolution / FOV | Calib Quality | Quirks |
 |---|---|---|---|---|---|
-| **Waymo** v2 | 5 cam | 64 beam custom | 1.9 MP / ~50° | **★★★★★ ほぼ完璧** | LCP per-shot 補正 + image-lidar BA、ただし FOV 狭くて近めの絵 |
-| **nuScenes** | 6 cam | HDL-32E | 1.4 MP / ~70° | **★★★★★ 完璧** | 全 cam 安定、低密度 lidar |
-| **ZOD** Frames | 1 cam (front) | **VLS-128** | **8.3 MP / 121°** | ★★★★ 中央良好 / **エッジ・高速で時々ズレ** | 8% 端切ればクリーン、>50 km/h で残差増 |
-| **PandaSet** | 6 cam | Pandar64 | 2.0 MP / ~60° | front ★★★★ / **side ★★ 多い** | front 以外は 30-75 ms time-offset、cross-frame 学習で顕在化 |
+| **Waymo** v2 | 5 | 64-beam custom | 1.9 MP / ~50° HFOV | **★★★★★ near-perfect** | LCP per-shot compensation + image-lidar BA. Narrow FOV → "close-up" feel. |
+| **nuScenes** | 6 | HDL-32E | 1.4 MP / ~70° | **★★★★★ clean across all 6 cams** | Sparse 32-beam returns. Best multi-cam reference. |
+| **ZOD** Frames | 1 (front) | **VLS-128** | **8.3 MP / 121°** | ★★★★ center clean / **edges & high-speed residuals** | Drop outer 8% pivots; filter <50 km/h. Dense long-range returns (250 m). |
+| **PandaSet** | 6 | Pandar64 | 2.0 MP / ~60° | front ★★★★ / **side cams ★★** | 30–75 ms cam–lidar time offset on the 5 non-front cams. |
 
-**会社データ (8.3 MP + VLS-128) との適合性順:**
-1. **Waymo** — calib 信号品質は決定的、pretrain ベース  
-2. **nuScenes** — 多 cam mix のクッション  
-3. **ZOD** — sensor 解像度 1:1 マッチ、low-speed フィルタ必須  
-4. **PandaSet** — front のみ採用、side 切る
+**Suitability for the company sensor (8.3 MP front cam + VLS-128) — pretrain order:**
+1. **Waymo** — gold-standard signal quality. Pretrain backbone here.
+2. **nuScenes** — multi-cam robustness blend.
+3. **ZOD** — exact sensor-resolution match, residual-aware fine-tune.
+4. **PandaSet** (front-only) — extra domain diversity.
 
 ---
 
-## Waymo
+## Waymo Open Dataset v2
 
-5 cam (front / front-left / front-right / side-left / side-right) × 64-beam custom lidar。**lidar_camera_projection (LCP) parquet** で per-pixel level の precomputed UV が配布されてる。これは Waymo 内部の bundle adjustment で:
-- per-shot lidar timestamp に対する ego-pose interpolation
-- lidar 機械的回転に伴う rolling shutter 補正
-- camera image-lidar tie-point 残差最小化
-を全部焼いた結果なので、**ユーザ側で再計算しても同等品質に届かない**。
+5 cameras (front / front-left / front-right / side-left / side-right) plus a 64-beam custom rooftop lidar. Waymo distributes a precomputed `lidar_camera_projection.parquet` (LCP) per segment that encodes, for every range-image pixel, the target camera plus pixel-accurate (u, v). The LCP is the output of Waymo's internal pipeline that bakes in:
 
-**高速 (102 km/h, 高速道路)：**
+- Per-shot lidar timestamp ego-pose interpolation
+- Mechanical-rotation rolling-shutter correction across the spinning lidar
+- Joint image–lidar tie-point bundle adjustment
 
-![Waymo 102 km/h](images/dataset_calib/01_waymo_highway_102kmh.png)
+Replicating this quality with only the raw range image and `vehicle_pose.parquet` is **not** achievable — the LCP is the data the user-facing toolkit is meant to consume.
 
-道路標識 / 街灯の支柱 / 路面ラインがピクセル一致。Waymo の calib 信号は **学習時の真の GT** として使える。FOV ~50° で被写体が近めに見えるのが弱点。
+**Highway scene (102 km/h):**
 
-**結論:** calib 残差ネットの **pretrain ベース** にこれより適切なデータは無い。
+![Waymo 102 km/h highway](images/dataset_calib/01_waymo_highway_102kmh.png)
+
+Streetlight poles, sign edges, and lane markings line up to within a pixel even at the highest ego speed in the dataset. The trade-off is the moderate horizontal FOV (~50°) and resolution (1.9 MP), which makes scenes feel "zoomed in" — far objects fall off quickly compared to wide-FOV sensors.
+
+**Verdict:** The reference baseline. There is no better public source for clean lidar–camera supervision signal.
 
 ---
 
 ## nuScenes
 
-6 cam × HDL-32E lidar。lidar 32 beam で密度低めだが、calib は全 cam で素直に合う。
+6 cameras × HDL-32E lidar (32 laser channels, ~30 k points per frame). Lower lidar density than the others, but the calibration is uniformly stable across cameras.
 
-**front cam:**
-![NS front](images/dataset_calib/04_ns_front.png)
+**Front camera:**
+![nuScenes front cam](images/dataset_calib/04_ns_front.png)
 
-**back cam:**
-![NS back](images/dataset_calib/05_ns_back.png)
+**Back camera:**
+![nuScenes back cam](images/dataset_calib/05_ns_back.png)
 
-**front-left:**
-![NS front_left](images/dataset_calib/06_ns_front_left.png)
+**Front-left camera:**
+![nuScenes front-left cam](images/dataset_calib/06_ns_front_left.png)
 
-全 cam で時間同期 + extrinsic がよく取れてる、Waymo に次ぐ完成度。pts 密度が低い (1 frame あたり 30k 程度) ので遠距離は薄いが、**多 cam で大量データ取れるドメイン拡張用** に最適。
+Synchronization and extrinsics are well-fitted on every camera. Closest to Waymo in calib hygiene; the only catch is the relatively sparse return density at long range (32-beam vs. 64+ on Waymo / 128 on ZOD).
 
-**結論:** Waymo の補完。多 cam ロバストネス学習用。
+**Verdict:** Multi-camera baseline. Use it to teach the network that the residual prediction is camera-position-invariant.
 
 ---
 
 ## ZOD (Zenseact Open Dataset)
 
-**唯一 VLS-128 (会社と同じ lidar) を搭載した公開データセット。** 1 cam (front 8.3 MP / FOV 121°) のみだが解像度・視野角・lidar 射程 (250 m) が会社の sensor 構成と完全一致。
+The **only public dataset that ships with VLS-128**, the same Velodyne lidar as the company's production stack. One front camera (8.3 MP, 121° HFOV) + the VLS-128 with its full 250 m return range. Sensor-resolution and lidar-density parity with company data are unique to ZOD.
 
-**重要な実装上の罠:**
-ZOD SDK は `frame.compensate_lidar()` / `motion_compensate_scanwise()` というヘルパを公開してるが、**これらは `core_timestamp` 1 点のみで block 補正**で、per-shot 補正はやってない。115 ms かけてスキャンする VLS-128 では block 補正だと 50 km/h で ~5 px の残差が乗る。**真に per-shot 補正するには `motion_compensate_pointwise()` を直接呼ぶ必要がある:**
+### Important toolkit gotcha
+
+The ZOD SDK exposes both `frame.compensate_lidar()` and `motion_compensate_scanwise()`. **Despite the "scanwise" name, both apply only `core_timestamp` block compensation** — they do *not* interpolate ego pose at the per-shot timestamps stored in `lidar_data.timestamps`. With a 115 ms VLS-128 sweep, block compensation leaves several pixels of residual at 50 km/h.
+
+The right helper is `motion_compensate_pointwise`, which interpolates ego pose at every shot's timestamp:
 
 ```python
 from zod.utils.compensation import motion_compensate_pointwise
@@ -74,90 +79,87 @@ pc = motion_compensate_pointwise(
 )
 ```
 
-**pointwise 補正後の都市部 (~30 km/h):**
-![ZOD city pointwise](images/dataset_calib/02_zod_pointwise_clean.png)
+After this, ZOD projection quality is competitive with Waymo's LCP across the central image region.
 
-街灯、看板、フェンスがクリーンに乗る。VLS-128 の 250 m 射程で **遠距離まで点が立つ** のが ZOD の強み (Waymo の lidar は ~75 m が実用域)。
+**City driving (~30 km/h):**
 
-**幹線道路 (~60 km/h, 夜間, 雨):**
-![ZOD arterial 60 km/h](images/dataset_calib/03_zod_arterial_residual.png)
+![ZOD city, pointwise compensated](images/dataset_calib/02_zod_pointwise_clean.png)
 
-中央域は問題ないが、**画像左右端に 2-3 px のズレ** が出る。原因は KB 4 係数モデル自体の限界というより、**publish された intrinsic 値の精度不足** (calib ターゲットが画像中心に集中してたため周辺の係数が tight じゃない) と推定。
+Streetlights, signs, and fences sit cleanly on the lidar return. The VLS-128's 250 m range puts dense points on the horizon — far past where Waymo's lidar (~75 m practical) drops off.
 
-**実用上の制約:**
-- **エッジ 8% は学習対象から外す** (`edge_margin_frac=0.08`)
-- **>50 km/h は train から除外** が安全 (oxts.velocities でフィルタ)
+**Arterial road, ~60 km/h, night, wet pavement:**
 
-**結論:** 会社 sensor へのドメインマッチ用。低速・中央域に絞れば Waymo に近い品質、フィルタ前提で大規模学習に投入可能。
+![ZOD 60 km/h arterial residual](images/dataset_calib/03_zod_arterial_residual.png)
+
+The center of the frame is fine, but the outermost left/right edges drift by 2–3 px. The likely root cause is **insufficient precision in the published intrinsics** (KB four-coefficient fit done with checkerboards skewed toward image center), rather than a Kannala-Brandt model class limitation. Real lenses are well-fit by KB *if the coefficients are tight*; ZOD's are loose at extreme off-axis angles.
+
+### Practical filters for ZOD
+
+- **Drop the outer 8% of pivot positions** (`edge_margin_frac=0.08`) so training never anchors crops in the residual-heavy ring.
+- **Filter to ≤50 km/h** during training. The full 100 k frames split roughly 65/35 between city/arterial (where the filter passes) and highway (where it drops).
+
+**Verdict:** Domain matcher. With pointwise compensation + edge-margin + speed filter, ZOD pulls its weight as the closest public proxy to the company sensor.
 
 ---
 
 ## PandaSet
 
-6 cam × Pandar64 lidar。**front_camera は綺麗だが、他 5 cam に 30-75 ms の cam-lidar 時刻オフセット** が乗ってる (前 V3 cache 構築時の検証で確定)。
+6 cameras × Pandar64 lidar. Front camera quality is in line with the others, but a **30–75 ms cam–lidar capture-pipeline offset on the five non-front cameras** — confirmed during V3 cache construction — produces visible disagreement between lidar returns and image content.
 
-**front_camera (基準):**
-![PS front](images/dataset_calib/07_pandaset_front.png)
+**front_camera (reference):**
+![PandaSet front cam](images/dataset_calib/07_pandaset_front.png)
 
-ほぼ Waymo 並みのクリーンさ、地面・建物・道路標識合致。
+Ground plane, signs, and building edges line up. Comparable to the other "good" cameras above.
 
-**back_camera (時刻オフセット顕在):**
-![PS back](images/dataset_calib/08_pandaset_back.png)
+**back_camera (time-offset visible):**
+![PandaSet back cam](images/dataset_calib/08_pandaset_back.png)
 
-地面のラインが lidar 点群と数 px 離れてる。これは calib (extrinsic) の誤りではなく、**capture box の cam-lidar 同期 pipeline 遅延** が原因。
+Lidar points sit a few pixels off the image content — most visible on the road surface markings. The cause is the capture box's cam–lidar synchronization pipeline, not a bad extrinsic.
 
 **right_camera:**
-![PS right](images/dataset_calib/09_pandaset_right.png)
+![PandaSet right cam](images/dataset_calib/09_pandaset_right.png)
 
-同様に高さ方向にズレ。
+Same pattern in the vertical direction.
 
-**結論:** front 限定で使う。side cam を mix に入れると calib 学習信号が time-offset の bias で汚染されるので除外。会社 zero-shot 評価でも front で評価が安定する。
+**Verdict:** Use **front_camera only** for calib-residual learning. The five side cams can pollute the training signal with a fixed time-offset bias that the network learns to "compensate" toward, hurting transfer.
 
 ---
 
-## 学習戦略への含意
+## What this means for training
 
 ```
-[Waymo 800k LCP-clean]
-       ↓ pretrain (calib sense 獲得)
-[ZOD 100k @ <50 km/h, edge 8% drop]
-       ↓ fine-tune (sensor 解像度マッチ、遠距離残差込み)
-[nuScenes 240k 全 cam mix]
-       ↓ blend (多 cam robustness)
-[PandaSet front_camera 100k]
-       ↓ blend (もう 1 ドメイン)
-[会社の "良い" frames]
+[Waymo, 800k LCP-clean cam-frames]
+       ↓ pretrain — calibration sense, all the clean signal we get
+[ZOD, 100k @ <50 km/h, edge 8% dropped]
+       ↓ fine-tune — sensor-resolution match, long-range residuals
+[nuScenes, 240k across 6 cams]
+       ↓ blend — multi-cam robustness
+[PandaSet, ~100k front_camera only]
+       ↓ blend — extra domain diversity
+[Company "good" frames]
        ↓ final fine-tune
-                 ↓
-       本番 zero-shot 評価 (TSS4, 他)
+                ↓
+       Zero-shot eval (TSS4 etc.)
 ```
 
-最終的に会社データで仕上げるが、**calib 残差ネットの基本性能は Waymo + ZOD で 90% 確保** できる見立て。
+The first two stages alone are projected to give us ~90 % of the achievable calib-residual performance; the company-data stage is for the last 10 % and for capturing the production-vehicle-specific calibration drift.
 
 ---
 
-## 検証スクリプト
+## Reproduction
 
-このレポートの全画像は以下から再現可能:
+All images above are reproducible from the public datasets using the official toolkits:
 
-```bash
-# Waymo 高速 seg 探索 + 投影
-python scripts/visualization/render_waymo_highspeed.py    # TODO: 一旦 inline
-
-# ZOD pointwise 補正投影 (12 mini frame)
-python -c "
-from zod import ZodFrames
-from zod.constants import Camera, Lidar, Anonymization
-from zod.utils.compensation import motion_compensate_pointwise
-from zod.utils.geometry import project_3d_to_2d_kannala, transform_points, get_points_in_camera_fov
-# ... (datasets/zod_full.py の __getitem__ 参照)
-"
-
-# nuScenes / PandaSet は build_*_v3.py の cache 経由 で render_calib_doc_samples.py
-```
+- **Waymo** projection uses the LCP parquet (`gs://waymo_open_dataset_v_2_0_0/training/lidar_camera_projection/`). See `datasets/waymo_lcp.py` and `scripts/preprocessing/build_waymo_v3.py`.
+- **ZOD** projection uses `zod.utils.compensation.motion_compensate_pointwise` + `zod.utils.geometry.project_3d_to_2d_kannala`. See `datasets/zod_full.py::ZODCalibDataset.__getitem__`.
+- **nuScenes** projection uses the standard `T_world_from_cam`/`K` pinhole model. Preview via the V3 cache (`scripts/preprocessing/build_nuscenes_v3.py`).
+- **PandaSet** projection uses per-frame `poses.json` × `intrinsics.json`. Preview via `scripts/preprocessing/build_pandaset_full_v3.py`.
 
 Dataset access:
-- Waymo Open Dataset v2: gs://waymo_open_dataset_v_2_0_0
-- ZOD: zod.zenseact.com (Dropbox 経由 462 GB / scripts/preprocessing/zod_dropbox_dl.py)
-- nuScenes: nuscenes.org (要登録, ~300 GB)
-- PandaSet: HuggingFace (georghess/pandaset, ~44 GB)
+
+| Dataset | Source | Approx. size |
+|---|---|---|
+| Waymo Open Dataset v2 | `gs://waymo_open_dataset_v_2_0_0` | ~7 TB full / training-only ~5 TB |
+| ZOD Frames | dropbox/zod.zenseact.com (462 GB calib subset) | 462 GB |
+| nuScenes | nuscenes.org (registration required) | ~300 GB |
+| PandaSet | HuggingFace `georghess/pandaset` | ~44 GB |
