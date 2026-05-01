@@ -1,6 +1,6 @@
 # Lidar–Camera Calibration Quality across Four Public AD Datasets
 
-A practitioner's note on lidar→camera projection quality for the four public datasets we use as training material for the calibration-residual network: **Waymo Open Dataset v2, nuScenes, ZOD (Zenseact Open Dataset), and PandaSet**. Every example below is rendered at the dataset's native resolution from publicly available data using each project's official toolkit.
+A practitioner's note on lidar→camera projection quality for the public datasets we use as training material for the calibration-residual network: **Waymo Open Dataset v2, nuScenes, ZOD (Zenseact Open Dataset), PandaSet, and DDAD (Dense Depth for Automated Driving)**. Every example below is rendered at the dataset's native resolution from publicly available data using each project's official toolkit.
 
 ## Summary
 
@@ -10,6 +10,7 @@ A practitioner's note on lidar→camera projection quality for the four public d
 | **nuScenes** | 6 | HDL-32E | 1.4 MP / ~70° | **★★★★★ clean across all 6 cams** | Sparse 32-beam returns. Best multi-cam reference. |
 | **ZOD** Frames | 1 (front) | **VLS-128** | **8.3 MP / 121°** | ★★★★ center clean / **edges & high-speed residuals** | Drop outer 8% pivots; filter <50 km/h. Dense long-range returns (250 m). |
 | **PandaSet** | 6 | Pandar64 | 2.0 MP / ~60° | front ★★★★ / **side cams ★★** | 30–75 ms cam–lidar time offset on the 5 non-front cams. |
+| **DDAD** | 6 | Luminar-H2 (front) + Velodyne | 2.4 MP / ~60° | **★★★★ clean across all 6 cams** | TRI's dataset; includes Tokyo footage. No 3D box labels. |
 
 **Suitability for the company sensor (8.3 MP front cam + VLS-128) — pretrain order:**
 1. **Waymo** — gold-standard signal quality. Pretrain backbone here.
@@ -125,6 +126,25 @@ Same pattern in the vertical direction.
 
 ---
 
+## DDAD (TRI Dense Depth for Automated Driving)
+
+6 cameras × 1 lidar (Luminar-H2 front + Velodyne for surround). No 3D bounding-box labels (the dataset is positioned for monocular depth research), but cam–lidar calibration is uniformly clean across all 6 cameras, and the dataset includes **Tokyo / Japan driving footage** — useful for domain matching to the company's operating region.
+
+**front (CAMERA_01):**
+![DDAD front](images/dataset_calib/10_ddad_front.png)
+
+**left (CAMERA_05):**
+![DDAD left](images/dataset_calib/11_ddad_left.png)
+
+**right (CAMERA_06):**
+![DDAD right](images/dataset_calib/12_ddad_right.png)
+
+Lidar returns sit cleanly on signs, ground markings, and building edges across the surround. The calibration is good enough that all 6 cameras can be used in a multi-cam blend without front-only filtering.
+
+**Verdict:** Multi-cam clean source with Japan domain coverage. Worth a slot in the blend; complements ZOD's Europe / Waymo's US scenery.
+
+---
+
 ## What this means for training
 
 ```
@@ -136,6 +156,8 @@ Same pattern in the vertical direction.
        ↓ blend — multi-cam robustness
 [PandaSet, ~100k front_camera only]
        ↓ blend — extra domain diversity
+[DDAD, ~24k @ 6 cams]
+       ↓ blend — Japan/Tokyo domain coverage
 [Company "good" frames]
        ↓ final fine-tune
                 ↓
@@ -163,3 +185,4 @@ Dataset access:
 | ZOD Frames | dropbox/zod.zenseact.com (462 GB calib subset) | 462 GB |
 | nuScenes | nuscenes.org (registration required) | ~300 GB |
 | PandaSet | HuggingFace `georghess/pandaset` | ~44 GB |
+| DDAD | tri-ml-public.s3.amazonaws.com / TRI release | ~280 GB |
