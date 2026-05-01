@@ -107,26 +107,42 @@ def main(cfg=None):
         with open(log_path, "a") as f: f.write(line+"\n")
 
     cache = c.get('cache', '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy')
+    zod_src = c.get('zod_src', None)
     nw = c.get('num_workers', 16)
     pf = c.get('prefetch_factor', 4)
     kw = dict(num_workers=nw, pin_memory=True,
               persistent_workers=(nw > 0),
               prefetch_factor=pf if nw > 0 else None,
               collate_fn=collate_full)
-    # Merge train+val scenes, then random object-level split
     import random as _r
-    log(f"loading cache {cache} (V3 full-image)")
-    ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
-                  max_rot_deg=c.get('max_rot_deg', 0.5),
-                  min_crop_px=c.get('min_crop_px', 128),
-                  max_crop_px=c.get('max_crop_px', 512),
-                  frame_stride=c.get('frame_stride', 1),
-                  grid_n=c.get('grid_n', 16))
-    log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
-        f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
-    tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
-    log(f"train cache loaded: {len(tr_full)} instances")
-    va_full = PandaSetCalibDatasetFull(cache, split='val', **ds_kw)
+    if zod_src:
+        from datasets.zod_full import ZODCalibDataset
+        log(f"loading ZOD direct-read from {zod_src} (no cache, KB-distortion projection)")
+        ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
+                      max_rot_deg=c.get('max_rot_deg', 1.0),
+                      min_crop_px=c.get('min_crop_px', 256),
+                      max_crop_px=c.get('max_crop_px', 768),
+                      grid_n=c.get('grid_n', 16))
+        log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
+            f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
+        tr_full = ZODCalibDataset(zod_src, split='train', img_size=c['img_size'],
+                                    oversample=c.get('oversample', 4), **ds_kw)
+        log(f"ZOD train: {len(tr_full)} instances")
+        va_full = ZODCalibDataset(zod_src, split='val', img_size=c['img_size'],
+                                    oversample=c.get('oversample', 4), **ds_kw)
+    else:
+        log(f"loading cache {cache} (V3 full-image)")
+        ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
+                      max_rot_deg=c.get('max_rot_deg', 0.5),
+                      min_crop_px=c.get('min_crop_px', 128),
+                      max_crop_px=c.get('max_crop_px', 512),
+                      frame_stride=c.get('frame_stride', 1),
+                      grid_n=c.get('grid_n', 16))
+        log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
+            f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
+        tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
+        log(f"train cache loaded: {len(tr_full)} instances")
+        va_full = PandaSetCalibDatasetFull(cache, split='val', **ds_kw)
     log(f"val cache loaded: {len(va_full)} instances")
     from torch.utils.data import ConcatDataset
     full_ds = ConcatDataset([tr_full, va_full])
@@ -191,31 +207,42 @@ def main(cfg=None):
 
     # Pre-training cache sanity vis: 10 random insts with GT projection on full image.
     # Lets a human eyeball the cache before sinking hours into training.
-    try:
-        from scripts.visualization.vis_pretrain import main as _vis_pretrain
-        import sys as _sys
-        _argv = _sys.argv[:]
-        _sys.argv = ['vis_pretrain', '--cache', cache, '--out', str(exp_dir / 'vis_pretrain'), '--n', '10']
-        _vis_pretrain(); _sys.argv = _argv
-        log(f"vis_pretrain → {exp_dir / 'vis_pretrain'}")
-        if cml_logger is not None:
-            for p in sorted((exp_dir / 'vis_pretrain').glob('*.png')):
-                try: cml_logger.report_image('vis_pretrain', p.stem, iteration=0, local_path=str(p))
-                except Exception: pass
-    except Exception as e:
-        log(f"vis_pretrain skipped: {e}")
+    if zod_src:
+        log("vis_pretrain skipped (ZOD direct-read; full-image vis not yet wired)")
+    else:
+        try:
+            from scripts.visualization.vis_pretrain import main as _vis_pretrain
+            import sys as _sys
+            _argv = _sys.argv[:]
+            _sys.argv = ['vis_pretrain', '--cache', cache, '--out', str(exp_dir / 'vis_pretrain'), '--n', '10']
+            _vis_pretrain(); _sys.argv = _argv
+            log(f"vis_pretrain → {exp_dir / 'vis_pretrain'}")
+            if cml_logger is not None:
+                for p in sorted((exp_dir / 'vis_pretrain').glob('*.png')):
+                    try: cml_logger.report_image('vis_pretrain', p.stem, iteration=0, local_path=str(p))
+                    except Exception: pass
+        except Exception as e:
+            log(f"vis_pretrain skipped: {e}")
 
     def _midtrain_vis(epoch: int, n: int = 10):
         """Render N obj-centered val tiles with current model output."""
         out = exp_dir / f'vis_ep{epoch:03d}'
         out.mkdir(exist_ok=True)
         for old in out.glob('*.png'): old.unlink()
-        from datasets.pandaset_full import PandaSetCalibDatasetFull
-        ds = PandaSetCalibDatasetFull(cache, split='val',
-                                              img_size=c['img_size'],
-                                              min_crop_px=c.get('min_crop_px', 128),
-                                              max_crop_px=c.get('max_crop_px', 384),
-                                              oversample=1)
+        if zod_src:
+            from datasets.zod_full import ZODCalibDataset
+            ds = ZODCalibDataset(zod_src, split='val',
+                                  img_size=c['img_size'],
+                                  min_crop_px=c.get('min_crop_px', 256),
+                                  max_crop_px=c.get('max_crop_px', 768),
+                                  oversample=1)
+        else:
+            from datasets.pandaset_full import PandaSetCalibDatasetFull
+            ds = PandaSetCalibDatasetFull(cache, split='val',
+                                                  img_size=c['img_size'],
+                                                  min_crop_px=c.get('min_crop_px', 128),
+                                                  max_crop_px=c.get('max_crop_px', 384),
+                                                  oversample=1)
         import random as _r, numpy as _np
         idxs = list(range(len(ds))); _r.Random(epoch).shuffle(idxs)
         S = int(c['img_size']); saved = 0
@@ -401,6 +428,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument('--name')
     ap.add_argument('--cache')
+    ap.add_argument('--zod-src', default=None,
+                    help='ZOD Frames root (e.g. /mnt/nvme6t/zod/frames). '
+                         'When set, --cache is ignored and frames are read '
+                         'directly via the official zod toolkit (KB-distortion '
+                         'projection, no .pt cache).')
     ap.add_argument('--rot-deg', type=float, default=None,
                     help='extrinsic perturbation half-range (deg per axis)')
     ap.add_argument('--t-m',     type=float, default=None,
@@ -450,6 +482,7 @@ if __name__ == "__main__":
     cfg = dict(CFG)
     if args.name:    cfg['name'] = args.name
     if args.cache:   cfg['cache'] = args.cache
+    if args.zod_src: cfg['zod_src'] = args.zod_src
     if args.rot_deg is not None: cfg['max_rot_deg']  = args.rot_deg
     if args.t_m     is not None: cfg['max_offset_m'] = args.t_m
     if args.epochs  is not None: cfg['epochs'] = args.epochs
