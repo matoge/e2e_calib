@@ -50,7 +50,11 @@ def render_pair(ds, idx, out_path, S=64):
                   fontsize=10)
     axL.axis('off')
 
-    crop_np = np.clip(img_crop.permute(1, 2, 0).cpu().numpy(), 0, 1)
+    crop_t = img_crop.permute(1, 2, 0).cpu()
+    if crop_t.dtype == torch.uint8:
+        crop_np = crop_t.numpy()  # imshow handles uint8 natively
+    else:
+        crop_np = np.clip(crop_t.float().numpy(), 0, 1)
     axR.imshow(crop_np)
     t = true_uvd.numpy(); d = dist_uvd.numpy()
     is_obj_pt = d[:, 3] > 0.5
