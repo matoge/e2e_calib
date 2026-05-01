@@ -441,6 +441,10 @@ if __name__ == "__main__":
                     help='sigma curriculum spec, semicolon-separated stages '
                          'e.g. "1-25:0.5,0.05;26-60:1.0,0.10;61-100:2.0,0.20"')
     ap.add_argument('--clearml', action='store_true')
+    ap.add_argument('--queue', default=None,
+                    help='ClearML queue name. If set, Task.init then '
+                         'execute_remotely() — local process exits, agent on '
+                         'that queue picks up the run (e.g. dgx2 / sakurai2).')
     ap.add_argument('--why',     default='')
     args = ap.parse_args()
     cfg = dict(CFG)
@@ -475,9 +479,14 @@ if __name__ == "__main__":
 
     # optional ClearML reporting (with rich context if --clearml + --why)
     cml_task = None
-    if args.clearml:
+    if args.clearml or args.queue:
         from scripts.util.clearml_context import init_with_context, write_retrospective
         cml_task = init_with_context(
             project='e2e_calib/calib', name=cfg['name'], cfg=cfg,
             why=args.why, baseline={'name':'ps_v9_lazy', 'metric':'val_nll', 'value':1.7176})
+    if args.queue:
+        # Submit to remote agent on this queue and exit local process.
+        # Agent re-clones at task.script.repository@task.script.version_num
+        # and runs main(cfg=cfg) on its host.
+        cml_task.execute_remotely(queue_name=args.queue, clone=False, exit_process=True)
     main(cfg=cfg)
