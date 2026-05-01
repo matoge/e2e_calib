@@ -20,6 +20,7 @@ Range encoding per pixel (from the regular `lidar/<seg>.parquet`):
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Iterable
@@ -35,10 +36,14 @@ GCS_BASE = 'gs://waymo_open_dataset_v_2_0_0'
 
 
 def ensure_lcp(seg_name: str, split: str = 'training',
-               local_root: str = '/mnt/nvme6t/waymo_lcp') -> Path:
+               local_root: str | None = None) -> Path:
     """Ensure the LCP parquet for `seg_name` is on local disk; download from GCS if not.
     Returns the local path.
+
+    `local_root` defaults to env var `WAYMO_LCP_DIR` or `/mnt/nvme6t/waymo_lcp`.
     """
+    if local_root is None:
+        local_root = os.environ.get('WAYMO_LCP_DIR', '/mnt/nvme6t/waymo_lcp')
     p = Path(local_root) / split / f'{seg_name}.parquet'
     if p.exists():
         return p

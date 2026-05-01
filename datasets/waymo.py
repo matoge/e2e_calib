@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
 
-WAYMO_DIR   = Path('/mnt/nvme6t/waymo/training')
+WAYMO_DIR   = Path(os.environ.get('WAYMO_DIR', '/mnt/nvme6t/waymo/training'))
 TARGET_TYPES = {1, 2}      # Vehicle, Pedestrian
 FRONT_CAM    = 1
 TOP_LIDAR    = 1
