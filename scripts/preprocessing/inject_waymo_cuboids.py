@@ -26,14 +26,18 @@ from datasets.waymo import WAYMO_DIR
 
 
 def _box_corners_vehicle(pos: np.ndarray, dims: np.ndarray, yaw: float) -> np.ndarray:
+    """Official Waymo corner ordering (matches box_utils.get_upright_3d_box_corners):
+    bottom face CCW (-h2): [+l,+w], [-l,+w], [-l,-w], [+l,-w]
+    top face CCW (+h2):    same xy ordering
+    """
     l, w, h = dims
-    sx = np.array([+l/2, +l/2, -l/2, -l/2, +l/2, +l/2, -l/2, -l/2], dtype=np.float32)
-    sy = np.array([+w/2, -w/2, +w/2, -w/2, +w/2, -w/2, +w/2, -w/2], dtype=np.float32)
-    sz = np.array([+h/2, +h/2, +h/2, +h/2, -h/2, -h/2, -h/2, -h/2], dtype=np.float32)
+    l2, w2, h2 = l/2, w/2, h/2
+    cor = np.array([[ l2,  w2, -h2], [-l2,  w2, -h2], [-l2, -w2, -h2], [ l2, -w2, -h2],
+                    [ l2,  w2,  h2], [-l2,  w2,  h2], [-l2, -w2,  h2], [ l2, -w2,  h2]],
+                   dtype=np.float32)
     cy, sn = np.cos(yaw), np.sin(yaw)
-    rx = cy * sx - sn * sy
-    ry = sn * sx + cy * sy
-    return pos[None, :] + np.stack([rx, ry, sz], axis=-1)  # (8, 3)
+    R = np.array([[cy, -sn, 0], [sn, cy, 0], [0, 0, 1]], dtype=np.float32)
+    return (R @ cor.T).T + pos[None, :]
 
 
 def _process_seg(args):
@@ -52,10 +56,13 @@ def _process_seg(args):
         T_v_c = np.asarray(r['[CameraCalibrationComponent].extrinsic.transform']).reshape(4, 4)
         T_c_v_per_cam[cid] = np.linalg.inv(T_v_c).astype(np.float32)
 
-    # Waymo's CAMERA frame convention is x=forward, y=left, z=up (axes aligned to
-    # vehicle). build_waymo_v3.py recovers pts in cv2 convention from K @ p_cam:
-    # z=forward, x=right, y=down. We need to bring cuboid coords into the SAME
-    # cv2 convention so the pandaset_full is_obj test (cam-frame AABB) matches.
+    # Verified empirically + against Waymo's official C++ camera_model.cc:
+    # Waymo's CAMERA frame is x=forward, y=left, z=up (NOT cv2). The official
+    # projection is u_norm = -y/x, v_norm = -z/x (then distortion + intrinsic).
+    # build_waymo_v3.py recovers pts via the cv2-style formula
+    # `xc=(u-cx)*z/fx, yc=(v-cy)*z/fy, zc=depth` which is mathematically
+    # equivalent to taking (-y_w, -z_w, x_w) — so stored pts ARE in cv2 frame.
+    # We need to bring cuboid coords from waymo cam to cv2 cam to match.
     M_w2cv = np.array([[ 0, -1,  0],   # cv2_x = -waymo_y  (right = -left)
                        [ 0,  0, -1],   # cv2_y = -waymo_z  (down  = -up)
                        [ 1,  0,  0]],  # cv2_z = +waymo_x  (forward stays)
@@ -92,10 +99,12 @@ def _process_seg(args):
         cuboids = []
         for b in boxes_at_ts:
             corners_v = _box_corners_vehicle(b['pos_v'], b['dims_v'], b['heading'])
-            # corners → waymo-cam frame (x=fwd, y=left, z=up)
+            # vehicle → waymo cam (x=fwd, y=left, z=up)
             ones = np.ones((corners_v.shape[0], 1), dtype=np.float32)
             corners_cam_w = (T_c_v @ np.concatenate([corners_v, ones], axis=-1).T).T[:, :3]
-            # waymo-cam → cv2-cam (z=fwd, x=right, y=down) so coords match stored pts
+            # Skip box if any corner is behind the camera (waymo_cam x <= 0.5)
+            if (corners_cam_w[:, 0] <= 0.5).any(): continue
+            # waymo cam → cv2 cam (z=fwd, x=right, y=down) to match stored pts
             corners_cam = corners_cam_w @ M_w2cv.T
             # Skip boxes entirely behind the camera
             if corners_cam[:, 2].max() < 0.5: continue
