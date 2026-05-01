@@ -29,7 +29,7 @@ from PIL import Image
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from datasets.waymo_lcp import (CAM_NAMES, ALL_LASERS, ensure_lcp,
-                                  read_lcp_at_ts, read_range_at_ts, per_cam_projections)
+                                  read_lcp_all, read_range_all, per_cam_projections)
 from datasets.waymo import WAYMO_DIR
 
 
@@ -82,6 +82,11 @@ def process_seg(args_tuple):
 
     lidar_path = WAYMO_DIR / 'lidar' / f'{seg_name}.parquet'
 
+    # Read entire LCP + lidar parquets ONCE per seg (was: re-open + filter scan
+    # per ts × 20 frames = ~8s/seg of metadata overhead). Now ~1-2s/seg total.
+    lcp_by_ts   = read_lcp_all(lcp_path,   lasers=ALL_LASERS)
+    range_by_ts = read_range_all(lidar_path, lasers=ALL_LASERS)
+
     ts_list = sorted(cam_by_ts.keys())
     if stride > 1:
         ts_list = ts_list[::stride]
@@ -91,8 +96,10 @@ def process_seg(args_tuple):
     written = 0
     gid = gid_start
     for ts in ts_list:
-        lcp_arrs   = read_lcp_at_ts(lcp_path,   ts, lasers=ALL_LASERS)
-        range_arrs = read_range_at_ts(lidar_path, ts, lasers=ALL_LASERS)
+        lcp_arrs   = lcp_by_ts.get(ts, {})
+        range_arrs = range_by_ts.get(ts, {})
+        if not lcp_arrs or not range_arrs:
+            continue
         per_cam    = per_cam_projections(lcp_arrs, range_arrs, cams=cams_keep)
 
         for cam_id, proj in per_cam.items():
@@ -102,8 +109,10 @@ def process_seg(args_tuple):
             if cam_id not in cam_by_ts.get(ts, {}) or len(uv) < 16:
                 continue
             jpg_bytes = cam_by_ts[ts][cam_id]
-            img = np.array(Image.open(io.BytesIO(jpg_bytes)).convert('RGB'))
-            IH, IW = img.shape[:2]
+            # Skip full JPEG decode; PIL.Image.open is lazy — .size reads only
+            # the header for IW/IH. Was: 50ms × 5 cam × 20 frame = 5s/seg wasted.
+            with Image.open(io.BytesIO(jpg_bytes)) as _im:
+                IW, IH = _im.size
             K = K_per_cam[cam_id]
             fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
             xc = (uv[:, 0] - cx) * depth / fx

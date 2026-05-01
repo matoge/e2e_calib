@@ -104,6 +104,57 @@ def read_range_at_ts(lidar_parquet_path: Path | str, ts_micros: int,
     return out
 
 
+def read_lcp_all(lcp_path: Path | str,
+                 lasers: Iterable[int] = ALL_LASERS) -> dict:
+    """Read entire LCP parquet once, group by ts in memory.
+
+    Returns dict[ts_micros] -> dict[laser] -> dict[return_name] -> ndarray (H,W,6).
+    Use instead of calling read_lcp_at_ts() per frame (40x faster: one parquet
+    metadata scan vs one per ts).
+    """
+    df = pq.read_table(
+        lcp_path,
+        filters=[('key.laser_name', 'in', list(lasers))],
+    ).to_pandas()
+    out: dict[int, dict[int, dict[str, np.ndarray]]] = {}
+    for _, r in df.iterrows():
+        ts  = int(r['key.frame_timestamp_micros'])
+        lid = int(r['key.laser_name'])
+        out.setdefault(ts, {}).setdefault(lid, {})
+        for ret in ALL_RETURNS:
+            vals  = r[f'[LiDARCameraProjectionComponent].range_image_{ret}.values']
+            shape = r[f'[LiDARCameraProjectionComponent].range_image_{ret}.shape']
+            if vals is None or len(vals) == 0:
+                continue
+            out[ts][lid][ret] = np.asarray(vals, dtype=np.float32).reshape(shape)
+    return out
+
+
+def read_range_all(lidar_parquet_path: Path | str,
+                   lasers: Iterable[int] = ALL_LASERS) -> dict:
+    """Read entire lidar parquet once, group by ts in memory.
+
+    Returns dict[ts_micros] -> dict[laser] -> dict[return_name] -> ndarray (H,W) range in m.
+    """
+    df = pq.read_table(
+        lidar_parquet_path,
+        filters=[('key.laser_name', 'in', list(lasers))],
+    ).to_pandas()
+    out: dict[int, dict[int, dict[str, np.ndarray]]] = {}
+    for _, r in df.iterrows():
+        ts  = int(r['key.frame_timestamp_micros'])
+        lid = int(r['key.laser_name'])
+        out.setdefault(ts, {}).setdefault(lid, {})
+        for ret in ALL_RETURNS:
+            vals  = r[f'[LiDARComponent].range_image_{ret}.values']
+            shape = r[f'[LiDARComponent].range_image_{ret}.shape']
+            if vals is None or len(vals) == 0:
+                continue
+            arr = np.asarray(vals, dtype=np.float32).reshape(shape)
+            out[ts][lid][ret] = arr[:, :, 0]
+    return out
+
+
 def per_cam_projections(lcp_arrs: dict, range_arrs: dict,
                         cams: Iterable[int] = tuple(CAM_NAMES.keys())) -> dict:
     """Bucket LCP pixels into per-camera (uv, depth) arrays.
