@@ -1,0 +1,13 @@
+21:32:30  loading cache /dev/shm/pandaset_v3_full (V3 full-image)
+21:32:30    perturbation: ±0.5 deg / ±0.2 m   crop_px=[128, 384] (full-image px → 128)
+21:32:31  train cache loaded: 84480 instances
+21:32:31  val cache loaded: 14400 instances
+21:32:31  object-level split: train=88992 val=9888 (seed=42)
+21:32:31  params: 0.98M
+21:35:13  [  1/100]  train nll=+3.708(obj=+4.071 bg=+3.528) mse=5.12(obj=6.13/m5.17/95p14.1 bg=4.62/m4.03/95p10.1)  val nll=+3.658(obj=+4.011 bg=+3.477) mse=5.12(obj=6.14/m5.19/95p14.1 bg=4.59/m4.02/95p10.0)  lr=4.00e-04  tot=2.7min
+21:35:13    ↳ saved (val_nll=3.6580)
+21:36:57  [  2/100]  train nll=+3.669(obj=+4.019 bg=+3.497) mse=5.12(obj=6.13/m5.16/95p14.2 bg=4.63/m4.04/95p10.1)  val nll=+3.702(obj=+4.028 bg=+3.542) mse=5.22(obj=6.20/m5.28/95p14.1 bg=4.74/m4.18/95p10.2)  lr=6.00e-04  tot=4.4min
+21:38:40  [  3/100]  train nll=+3.649(obj=+3.995 bg=+3.479) mse=5.10(obj=6.10/m5.13/95p14.1 bg=4.61/m4.02/95p10.0)  val nll=+3.627(obj=+3.964 bg=+3.461) mse=5.10(obj=6.10/m5.06/95p14.6 bg=4.61/m4.01/95p10.1)  lr=8.00e-04  tot=6.1min
+21:38:40    ↳ saved (val_nll=3.6270)
+21:40:22  [  4/100]  train nll=+3.632(obj=+3.972 bg=+3.464) mse=5.08(obj=6.06/m5.12/95p13.9 bg=4.60/m4.01/95p10.1)  val nll=+3.608(obj=+3.938 bg=+3.444) mse=5.04(obj=5.97/m5.13/95p13.5 bg=4.58/m4.00/95p10.1)  lr=1.00e-03  tot=7.8min
+21:40:23    ↳ saved (val_nll=3.6075)

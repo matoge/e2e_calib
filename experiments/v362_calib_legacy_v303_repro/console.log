@@ -1,0 +1,152 @@
+ClearML Task: created new task id=cea5b8a0bb3a4958b6cdc7578db43943
+ClearML results page: http://localhost:18080/projects/99a9ff692440487f8e4251020103d041/experiments/cea5b8a0bb3a4958b6cdc7578db43943/output/log
+[00:49:15] device = cuda
+[00:49:15] args = {'name': 'v362_calib_legacy_v303_repro', 'full': True, 'scene': '/mnt/mininas/datasets/pandaset/015', 'scenes_root': '/mnt/nvme6t/pandaset', 'train_frac': 0.8, 'cameras': 'front_camera', 'img_size': 64, 'max_points': 64, 'batch_size': 64, 'lr': 0.001, 'n_overfit': 64, 'epochs': 30, 'log_every': 1, 'baseline_min': 1, 'baseline_max': 5, 'sigma_ypr': 0.5, 'sigma_t': 0.05, 'crop_min': 128, 'crop_max': 256, 'vfl_min': None, 'vfl_max': None, 'num_workers': 16, 'virtual_epoch': 10000, 'deform_mode': 'none', 'n_cross_layers': 4, 'n_intra_layers': 2, 'uvd': False, 'frustum_full': True, 'dataset': 'pandaset', 'waymo_root': '/mnt/mininas/datasets/waymo/training', 'max_train_scenes': 0, 'mine_val': False, 'val_pool_size': 2000, 'migrate_k': 100, 'overfit_patience': 2, 'overfit_metric': 'nll', 'rewind_back': 3, 'rewind_lr_reset': True, 'sentinel_size': 0, 'init_from': None, 'no_freeze': False, 'motion_warp_gt': False, 'calib_legacy': True, 'calib_mode': True, 'uv_only_query': True, 'q_uv_pure': False, 'n_xattn_modality': 0, 'kv_image_only': False, 'lidar_subdir': 'lidar', 'quad_frame': False, 'quint_frame': False, 'multi_frame': False, 'n_frames': 0, 'stop_no_improve_migrations': 0, 'lidar_dropout': 0.0, 'lidar_dropout_zero': 0.0, 'clearml': True, 'clearml_project': 'e2e_calib/cross-frame', 'loss_ab_only': False, 'mix_mode': 'mix', 'model': 'unified', 'per_frame_emb': False}
+[PandaSetCrossFrameDataset/train] loading 82 scenes × 1 cams = 82 (scene, camera) pairs…
+  · 051/front_camera: 80 frames, pool=80
+  · 097/front_camera: 80 frames, pool=80
+  · 101/front_camera: 80 frames, pool=80
+  · 013/front_camera: 80 frames, pool=80
+  · 084/front_camera: 80 frames, pool=80
+  · 057/front_camera: 80 frames, pool=80
+  · 002/front_camera: 80 frames, pool=80
+  · 090/front_camera: 80 frames, pool=80
+  · 019/front_camera: 80 frames, pool=80
+  · 099/front_camera: 80 frames, pool=80
+  · 070/front_camera: 80 frames, pool=80
+  · 014/front_camera: 80 frames, pool=80
+  · 055/front_camera: 80 frames, pool=80
+  · 042/front_camera: 80 frames, pool=80
+  · 068/front_camera: 80 frames, pool=80
+  · 046/front_camera: 80 frames, pool=80
+  · 062/front_camera: 80 frames, pool=80
+  · 041/front_camera: 80 frames, pool=80
+  · 080/front_camera: 80 frames, pool=80
+  · 054/front_camera: 80 frames, pool=80
+  · 039/front_camera: 80 frames, pool=80
+  · 079/front_camera: 80 frames, pool=80
+  · 012/front_camera: 80 frames, pool=80
+  · 028/front_camera: 80 frames, pool=80
+  · 067/front_camera: 80 frames, pool=80
+  · 122/front_camera: 80 frames, pool=80
+  · 110/front_camera: 80 frames, pool=80
+  · 052/front_camera: 80 frames, pool=80
+  · 077/front_camera: 80 frames, pool=80
+  · 034/front_camera: 80 frames, pool=80
+  · 098/front_camera: 80 frames, pool=80
+  · 064/front_camera: 80 frames, pool=80
+  · 119/front_camera: 80 frames, pool=80
+  · 059/front_camera: 80 frames, pool=80
+  · 073/front_camera: 80 frames, pool=80
+  · 092/front_camera: 80 frames, pool=80
+  · 058/front_camera: 80 frames, pool=80
+  · 094/front_camera: 80 frames, pool=80
+  · 149/front_camera: 80 frames, pool=80
+  · 071/front_camera: 80 frames, pool=80
+  · 106/front_camera: 80 frames, pool=80
+  · 016/front_camera: 80 frames, pool=80
+  · 045/front_camera: 80 frames, pool=80
+  · 030/front_camera: 80 frames, pool=80
+  · 048/front_camera: 80 frames, pool=80
+  · 050/front_camera: 80 frames, pool=80
+  · 023/front_camera: 80 frames, pool=80
+  · 085/front_camera: 80 frames, pool=80
+  · 006/front_camera: 80 frames, pool=80
+  · 074/front_camera: 80 frames, pool=80
+  · 011/front_camera: 80 frames, pool=80
+  · 043/front_camera: 80 frames, pool=80
+  · 102/front_camera: 80 frames, pool=80
+  · 056/front_camera: 80 frames, pool=80
+  · 003/front_camera: 80 frames, pool=80
+  · 063/front_camera: 80 frames, pool=80
+  · 020/front_camera: 80 frames, pool=80
+  · 047/front_camera: 80 frames, pool=80
+  · 072/front_camera: 80 frames, pool=80
+  · 088/front_camera: 80 frames, pool=80
+  · 029/front_camera: 80 frames, pool=80
+  · 008/front_camera: 80 frames, pool=80
+  · 032/front_camera: 80 frames, pool=80
+  · 104/front_camera: 80 frames, pool=80
+  · 116/front_camera: 80 frames, pool=80
+  · 158/front_camera: 80 frames, pool=80
+  · 103/front_camera: 80 frames, pool=80
+  · 024/front_camera: 80 frames, pool=80
+  · 091/front_camera: 80 frames, pool=80
+  · 053/front_camera: 80 frames, pool=80
+  · 109/front_camera: 80 frames, pool=80
+  · 027/front_camera: 80 frames, pool=80
+  · 001/front_camera: 80 frames, pool=80
+  · 123/front_camera: 80 frames, pool=80
+  · 069/front_camera: 80 frames, pool=80
+  · 120/front_camera: 80 frames, pool=80
+  · 065/front_camera: 80 frames, pool=80
+  · 113/front_camera: 80 frames, pool=80
+  · 033/front_camera: 80 frames, pool=80
+  · 089/front_camera: 80 frames, pool=80
+  · 115/front_camera: 80 frames, pool=80
+  · 095/front_camera: 80 frames, pool=80
+[PandaSetCrossFrameDataset/train] ready. 82 (scene, cam) pairs, 6560 total frames
+[PandaSetCrossFrameDataset/val] loading 21 scenes × 1 cams = 21 (scene, camera) pairs…
+<unknown>:83: SyntaxWarning:
+
+invalid escape sequence '\s'
+
+  · 109/front_camera: 80 frames, pool=80
+  · 040/front_camera: 80 frames, pool=80
+  · 113/front_camera: 80 frames, pool=80
+  · 115/front_camera: 80 frames, pool=80
+  · 112/front_camera: 80 frames, pool=80
+  · 021/front_camera: 80 frames, pool=80
+  · 027/front_camera: 80 frames, pool=80
+  · 158/front_camera: 80 frames, pool=80
+  · 053/front_camera: 80 frames, pool=80
+  · 052/front_camera: 80 frames, pool=80
+  · 089/front_camera: 80 frames, pool=80
+  · 085/front_camera: 80 frames, pool=80
+  · 058/front_camera: 80 frames, pool=80
+  · 005/front_camera: 80 frames, pool=80
+  · 017/front_camera: 80 frames, pool=80
+  · 149/front_camera: 80 frames, pool=80
+  · 064/front_camera: 80 frames, pool=80
+  · 123/front_camera: 80 frames, pool=80
+  · 015/front_camera: 80 frames, pool=80
+  · 043/front_camera: 80 frames, pool=80
+  · 008/front_camera: 80 frames, pool=80
+[PandaSetCrossFrameDataset/val] ready. 21 (scene, cam) pairs, 1680 total frames
+[00:49:17] model params: 1.667 M
+[00:52:12] ep   0  loss=5.032  err=6.70px  (base=8.06px)  val_err=3.35px (base 8.09)  val_nll=3.33  lr=9.97e-04  t=174s
+[00:54:44] ep   1  loss=2.584  err=2.88px  (base=8.06px)  val_err=2.14px (base 8.09)  val_nll=1.96  lr=9.89e-04  t=326s
+[00:57:22] ep   2  loss=2.057  err=2.22px  (base=8.05px)  val_err=2.07px (base 8.09)  val_nll=1.96  lr=9.76e-04  t=484s
+[00:59:55] ep   3  loss=1.815  err=1.97px  (base=8.06px)  val_err=1.61px (base 8.09)  val_nll=1.39  lr=9.57e-04  t=637s
+[01:02:28] ep   4  loss=1.524  err=1.71px  (base=8.05px)  val_err=1.81px (base 8.09)  val_nll=1.65  lr=9.34e-04  t=790s
+[01:05:03] ep   5  loss=1.333  err=1.57px  (base=8.06px)  val_err=1.39px (base 8.09)  val_nll=1.07  lr=9.05e-04  t=945s
+[01:07:37] ep   6  loss=1.229  err=1.48px  (base=8.04px)  val_err=1.55px (base 8.09)  val_nll=1.29  lr=8.73e-04  t=1099s
+[01:10:12] ep   7  loss=1.090  err=1.39px  (base=8.05px)  val_err=1.35px (base 8.09)  val_nll=1.11  lr=8.36e-04  t=1254s
+[01:12:05] ep   8  loss=0.960  err=1.31px  (base=8.05px)  val_err=1.33px (base 8.09)  val_nll=0.96  lr=7.96e-04  t=1367s
+[01:13:34] ep   9  loss=0.927  err=1.29px  (base=8.06px)  val_err=1.30px (base 8.09)  val_nll=0.91  lr=7.53e-04  t=1456s
+[01:14:58] ep  10  loss=0.816  err=1.22px  (base=8.06px)  val_err=1.22px (base 8.09)  val_nll=0.79  lr=7.06e-04  t=1540s
+[01:16:22] ep  11  loss=0.769  err=1.20px  (base=8.06px)  val_err=1.15px (base 8.09)  val_nll=0.74  lr=6.58e-04  t=1624s
+[01:17:47] ep  12  loss=0.638  err=1.12px  (base=8.05px)  val_err=1.14px (base 8.09)  val_nll=0.65  lr=6.08e-04  t=1709s
+[01:19:10] ep  13  loss=0.588  err=1.09px  (base=8.05px)  val_err=1.09px (base 8.09)  val_nll=0.60  lr=5.57e-04  t=1792s
+[01:20:35] ep  14  loss=0.548  err=1.07px  (base=8.05px)  val_err=1.09px (base 8.09)  val_nll=0.58  lr=5.05e-04  t=1877s
+[01:21:59] ep  15  loss=0.486  err=1.03px  (base=8.05px)  val_err=1.02px (base 8.09)  val_nll=0.46  lr=4.53e-04  t=1961s
+[01:23:23] ep  16  loss=0.426  err=1.00px  (base=8.06px)  val_err=1.08px (base 8.09)  val_nll=0.55  lr=4.02e-04  t=2045s
+[01:24:45] ep  17  loss=0.396  err=0.99px  (base=8.05px)  val_err=1.05px (base 8.09)  val_nll=0.49  lr=3.52e-04  t=2127s
+[01:26:08] ep  18  loss=0.357  err=0.96px  (base=8.05px)  val_err=0.94px (base 8.09)  val_nll=0.32  lr=3.04e-04  t=2210s
+[01:27:32] ep  19  loss=0.278  err=0.91px  (base=8.07px)  val_err=0.99px (base 8.09)  val_nll=0.42  lr=2.58e-04  t=2294s
+[01:28:55] ep  20  loss=0.241  err=0.89px  (base=8.05px)  val_err=0.95px (base 8.09)  val_nll=0.38  lr=2.14e-04  t=2377s
+[01:30:19] ep  21  loss=0.210  err=0.88px  (base=8.06px)  val_err=0.91px (base 8.09)  val_nll=0.32  lr=1.74e-04  t=2461s
+[01:31:41] ep  22  loss=0.154  err=0.84px  (base=8.05px)  val_err=0.90px (base 8.09)  val_nll=0.28  lr=1.37e-04  t=2543s
+[01:33:04] ep  23  loss=0.108  err=0.81px  (base=8.06px)  val_err=0.87px (base 8.09)  val_nll=0.26  lr=1.05e-04  t=2626s
+[01:34:26] ep  24  loss=0.074  err=0.79px  (base=8.05px)  val_err=0.84px (base 8.09)  val_nll=0.24  lr=7.63e-05  t=2708s
+[01:35:49] ep  25  loss=0.034  err=0.76px  (base=8.05px)  val_err=0.85px (base 8.09)  val_nll=0.25  lr=5.28e-05  t=2791s
+[01:37:12] ep  26  loss=0.009  err=0.75px  (base=8.06px)  val_err=0.83px (base 8.09)  val_nll=0.22  lr=3.42e-05  t=2874s
+[01:38:37] ep  27  loss=-0.012  err=0.73px  (base=8.06px)  val_err=0.80px (base 8.09)  val_nll=0.20  lr=2.08e-05  t=2958s
+[01:39:59] ep  28  loss=-0.033  err=0.72px  (base=8.07px)  val_err=0.80px (base 8.09)  val_nll=0.21  lr=1.27e-05  t=3041s
+[01:41:23] ep  29  loss=-0.048  err=0.71px  (base=8.05px)  val_err=0.79px (base 8.09)  val_nll=0.21  lr=1.00e-05  t=3125s
+[01:41:24] saved curve → experiments/cross_frame_v362_calib_legacy_v303_repro/curve.png
+[01:41:24] best val err = 0.79 px
+[01:41:46] saved viz → experiments/cross_frame_v362_calib_legacy_v303_repro/viz_TRAIN.png
+[01:42:07] saved viz → experiments/cross_frame_v362_calib_legacy_v303_repro/viz_VAL.png
+[01:42:07] running vis_ba_reproject → experiments/cross_frame_v362_calib_legacy_v303_repro/ba_reproject.png ...
+[01:42:11] saved viz → experiments/cross_frame_v362_calib_legacy_v303_repro/ba_reproject.png

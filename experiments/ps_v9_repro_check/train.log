@@ -1,0 +1,22 @@
+22:49:44  loading cache /mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy (~48GB, disk-backed lazy, instant)
+22:49:44  train cache loaded: 90251 instances
+22:49:44  val cache loaded: 10580 instances
+22:49:44  object-level split: train=90748 val=10083 (seed=42)
+22:49:44  params: 0.98M
+22:50:21  [  1/100]  train nll=+4.568(obj=+4.117 bg=+4.585) mse=8.376(obj=6.699 bg=8.442)  val nll=+4.465(obj=+4.069 bg=+4.481) mse=8.208(obj=6.751 bg=8.264)  lr=4.00e-04  tot=0.6min
+22:50:21    ↳ saved (val_nll=4.4655)
+22:50:55  [  2/100]  train nll=+4.460(obj=+4.011 bg=+4.478) mse=8.224(obj=6.519 bg=8.291)  val nll=+4.425(obj=+4.034 bg=+4.440) mse=8.067(obj=6.503 bg=8.129)  lr=6.00e-04  tot=1.2min
+22:50:55    ↳ saved (val_nll=4.4247)
+22:51:27  [  3/100]  train nll=+4.392(obj=+3.900 bg=+4.411) mse=8.017(obj=6.185 bg=8.088)  val nll=+4.420(obj=+4.000 bg=+4.436) mse=7.931(obj=6.318 bg=7.993)  lr=8.00e-04  tot=1.7min
+22:51:27    ↳ saved (val_nll=4.4199)
+22:51:58  [  4/100]  train nll=+4.346(obj=+3.838 bg=+4.366) mse=7.894(obj=6.094 bg=7.965)  val nll=+4.264(obj=+3.730 bg=+4.285) mse=7.686(obj=5.791 bg=7.758)  lr=1.00e-03  tot=2.2min
+22:51:58    ↳ saved (val_nll=4.2639)
+22:52:30  [  5/100]  train nll=+4.288(obj=+3.752 bg=+4.309) mse=7.740(obj=5.849 bg=7.813)  val nll=+4.254(obj=+3.711 bg=+4.275) mse=7.634(obj=5.771 bg=7.703)  lr=1.00e-03  tot=2.8min
+22:52:30    ↳ saved (val_nll=4.2544)
+22:53:01  [  6/100]  train nll=+4.189(obj=+3.605 bg=+4.213) mse=7.543(obj=5.599 bg=7.620)  val nll=+4.093(obj=+3.447 bg=+4.118) mse=7.393(obj=5.457 bg=7.469)  lr=1.00e-03  tot=3.3min
+22:53:01    ↳ saved (val_nll=4.0928)
+22:53:34  [  7/100]  train nll=+4.115(obj=+3.499 bg=+4.139) mse=7.421(obj=5.459 bg=7.497)  val nll=+4.038(obj=+3.423 bg=+4.063) mse=7.307(obj=5.426 bg=7.381)  lr=9.99e-04  tot=3.8min
+22:53:34    ↳ saved (val_nll=4.0377)
+22:54:06  [  8/100]  train nll=+4.036(obj=+3.408 bg=+4.061) mse=7.273(obj=5.335 bg=7.347)  val nll=+4.039(obj=+3.480 bg=+4.062) mse=7.204(obj=5.417 bg=7.273)  lr=9.98e-04  tot=4.4min
+22:54:38  [  9/100]  train nll=+3.996(obj=+3.362 bg=+4.021) mse=7.233(obj=5.336 bg=7.308)  val nll=+3.993(obj=+3.407 bg=+4.016) mse=7.272(obj=5.388 bg=7.343)  lr=9.96e-04  tot=4.9min
+22:54:38    ↳ saved (val_nll=3.9933)

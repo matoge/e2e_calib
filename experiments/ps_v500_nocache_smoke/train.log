@@ -1,0 +1,6 @@
+18:12:50  loading cache /mnt/nvme6t/e2e_calib_cache/pandaset_v3_full (V3 full-image)
+18:12:50    perturbation: ±0.5 deg / ±0.2 m   crop_px=[128, 384] (full-image px → 64)
+18:12:50  train cache loaded: 84480 instances
+18:12:50  val cache loaded: 14400 instances
+18:12:50  object-level split: train=88992 val=9888 (seed=42)
+18:12:50  params: 0.98M
