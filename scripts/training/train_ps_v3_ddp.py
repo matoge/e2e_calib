@@ -111,9 +111,19 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
         return float(e.mean()), float(_np.median(e)), float(_np.percentile(e, 95))
     obj_mse, obj_med, obj_p95 = _stats(obj_errs)
     bg_mse,  bg_med,  bg_p95  = _stats(bg_errs)
+    # epoch-level sps: total samples pushed through forward / wall time (per-rank)
+    _dt_total = max(time.time() - _t_start, 1e-6)
+    _bs = 0
+    try:
+        # imgs still in scope from last iter; fall back to 0 if empty loader
+        _bs = int(imgs.shape[0])
+    except Exception:
+        _bs = 0
+    sps_rank_epoch = (n * _bs) / _dt_total if n > 0 else 0.0
     return (total_nll / max(n,1), total_mse / max(n,1),
             obj_nll, bg_nll, obj_mse, bg_mse,
-            obj_med, obj_p95, bg_med, bg_p95)
+            obj_med, obj_p95, bg_med, bg_p95,
+            sps_rank_epoch)
 
 
 def main(cfg=None):
@@ -238,20 +248,26 @@ def main(cfg=None):
         if hasattr(train_loader, 'set_epoch'):
             train_loader.set_epoch(epoch)
         (tr_nll, tr_mse, tr_obj, tr_bg, tr_obj_mse, tr_bg_mse,
-         tr_obj_med, tr_obj_p95, tr_bg_med, tr_bg_p95) = epoch_loop(
+         tr_obj_med, tr_obj_p95, tr_bg_med, tr_bg_p95, tr_sps_rank) = epoch_loop(
             model, train_loader, optimizer, accel, True)
         with torch.no_grad():
             (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
-             va_obj_med, va_obj_p95, va_bg_med, va_bg_p95) = epoch_loop(
+             va_obj_med, va_obj_p95, va_bg_med, va_bg_p95, va_sps_rank) = epoch_loop(
                 model, val_loader, optimizer, accel, False)
         scheduler.step()
         # tr/va numbers are PER-RANK means; for reporting we average across ranks.
-        # gather_for_metrics works on tensors; use a small tensor here.
+        # sps is also per-rank; global sps = mean-across-ranks × num_processes
+        # (each rank processes its own shard at ~rank_sps; total throughput adds).
         stats = torch.tensor([tr_nll, va_nll, tr_mse, va_mse,
-                               tr_obj, tr_bg, va_obj, va_bg],
+                               tr_obj, tr_bg, va_obj, va_bg,
+                               tr_sps_rank, va_sps_rank],
                               device=accel.device)
         stats_all = accel.gather(stats.unsqueeze(0)).mean(dim=0).tolist()
-        tr_nll, va_nll, tr_mse, va_mse, tr_obj, tr_bg, va_obj, va_bg = stats_all
+        (tr_nll, va_nll, tr_mse, va_mse,
+         tr_obj, tr_bg, va_obj, va_bg,
+         tr_sps_rank_mean, va_sps_rank_mean) = stats_all
+        tr_sps_global = tr_sps_rank_mean * accel.num_processes
+        va_sps_global = va_sps_rank_mean * accel.num_processes
 
         if accel.is_main_process:
             history['ep'].append(epoch)
@@ -260,6 +276,7 @@ def main(cfg=None):
             log(f"[{epoch:3d}/{epochs}]  "
                 f"train nll={tr_nll:+.3f}(obj={tr_obj:+.3f} bg={tr_bg:+.3f}) mse={tr_mse:.2f}  "
                 f"val nll={va_nll:+.3f}(obj={va_obj:+.3f} bg={va_bg:+.3f}) mse={va_mse:.2f}  "
+                f"sps(global)={tr_sps_global:.0f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  tot={(time.time()-t0)/60:.1f}min")
             if va_nll < best_val:
                 best_val = va_nll
@@ -275,6 +292,13 @@ def main(cfg=None):
                     rs('mse_px', 'val',   iteration=epoch, value=va_mse)
                     rs('lr', 'lr', iteration=epoch, value=scheduler.get_last_lr()[0])
                     rs('best', 'best_val_nll', iteration=epoch, value=best_val)
+                    # throughput: per-rank and global — lets us sanity-check
+                    # DDP scaling (global should be ~num_processes × rank) and
+                    # compare runs with different world sizes in the same panel
+                    rs('sps', 'train_rank',   iteration=epoch, value=tr_sps_rank_mean)
+                    rs('sps', 'train_global', iteration=epoch, value=tr_sps_global)
+                    rs('sps', 'val_rank',     iteration=epoch, value=va_sps_rank_mean)
+                    rs('sps', 'val_global',   iteration=epoch, value=va_sps_global)
                 except Exception:
                     pass
         accel.wait_for_everyone()
