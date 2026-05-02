@@ -28,19 +28,87 @@ def _full_proj(inst):
     return img, uv, vis, is_obj, IH, IW
 
 
+CUBOID_EDGES = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+
+
+def project_cuboids(cubs, T_gt, K):
+    """Project each cuboid's 8 corners. Returns list of dicts {uv: (8,2), z: (8,), label}."""
+    out = []
+    for c in cubs:
+        pos = np.asarray(c['pos'], dtype=np.float32)
+        dims = np.asarray(c['dims'], dtype=np.float32)
+        yaw = float(c.get('yaw', 0.0))
+        l2, w2, h2 = dims[0]/2, dims[1]/2, dims[2]/2
+        corners = np.array([
+            [+l2, +w2, -h2], [+l2, -w2, -h2], [-l2, -w2, -h2], [-l2, +w2, -h2],
+            [+l2, +w2, +h2], [+l2, -w2, +h2], [-l2, -w2, +h2], [-l2, +w2, +h2],
+        ], dtype=np.float32)
+        cy, sn = np.cos(yaw), np.sin(yaw)
+        R = np.array([[cy, -sn, 0], [sn, cy, 0], [0, 0, 1]], dtype=np.float32)
+        corners_local = (R @ corners.T).T + pos[None, :]
+        homo = np.column_stack([corners_local, np.ones(8, dtype=np.float32)])
+        corners_cam = (T_gt @ homo.T).T[:, :3]
+        z = corners_cam[:, 2]
+        uv = ((K @ corners_cam.T)[:2] / np.maximum(corners_cam[:, 2:].T, 1e-6)).T
+        out.append({'uv': uv.astype(np.float32), 'z': z.astype(np.float32),
+                    'label': c.get('label', '')})
+    return out
+
+
+def draw_cuboids(ax, cubs_proj, color='lime', lw=1.2, alpha=0.85,
+                  uv_offset=(0, 0), uv_scale=1.0):
+    """Draw 12-edge wireframes. uv_offset/scale lets us re-use for crop coords:
+    crop_uv = (full_uv - (u0, v0)) * (S / cs).
+    Skips a cuboid entirely if ANY corner is behind the camera — projecting a
+    near-zero-z corner produces +/- inf pixel coords that would auto-expand the
+    axes and squeeze the image into a corner."""
+    u_off, v_off = uv_offset
+    for cp in cubs_proj:
+        uv = cp['uv']
+        z = cp['z']
+        if (z <= 0.5).any():
+            continue
+        u = (uv[:, 0] - u_off) * uv_scale
+        v = (uv[:, 1] - v_off) * uv_scale
+        for i, j in CUBOID_EDGES:
+            ax.plot([u[i], u[j]], [v[i], v[j]],
+                    color=color, lw=lw, alpha=alpha,
+                    solid_capstyle='round', clip_on=True)
+
+
+def patch_entropy(crop_uint8: np.ndarray) -> tuple[float, float]:
+    """Returns (Shannon entropy in bits 0..8, Laplacian-variance proxy for sharpness).
+    crop_uint8: (H, W, C) or (H, W), uint8."""
+    if crop_uint8.dtype != np.uint8:
+        crop_uint8 = np.clip(crop_uint8, 0, 255).astype(np.uint8)
+    gray = crop_uint8.mean(axis=-1).astype(np.uint8) if crop_uint8.ndim == 3 else crop_uint8
+    hist, _ = np.histogram(gray.ravel(), bins=256, range=(0, 256))
+    p = hist[hist > 0].astype(np.float64) / hist.sum()
+    H = float(-(p * np.log2(p)).sum())
+    # cheap sharpness proxy: variance of 5-tap discrete Laplacian (no scipy dep)
+    g = gray.astype(np.float32)
+    lap = (-4.0 * g[1:-1, 1:-1]
+           + g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:])
+    return H, float(lap.var())
+
+
 def render_pair(ds, idx, out_path, S=64):
     img_crop, true_uvd, dist_uvd, vfp = ds[idx]
     box = getattr(ds, '_last_crop', None)
     inst = ds._load_inst(idx)
     full, uv, vis, is_obj, IH, IW = _full_proj(inst)
+    cubs_proj = project_cuboids(inst.get('cuboids', []),
+                                  inst['T_gt'].numpy(), inst['K_full'].numpy())
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(18, 7), dpi=110,
                                     gridspec_kw={'width_ratios': [16, 9]})
     axL.imshow(full)
+    axL.set_xlim(0, IW); axL.set_ylim(IH, 0)  # lock before cuboid plot to prevent off-image lines from expanding axes
     m = vis & ~is_obj
     axL.scatter(uv[m, 0], uv[m, 1], c='yellow', s=2, marker='x', linewidths=0.4, alpha=0.5)
     m = vis & is_obj
     axL.scatter(uv[m, 0], uv[m, 1], c='lime', s=10, marker='x', linewidths=0.9)
+    draw_cuboids(axL, cubs_proj, color='lime', lw=1.2, alpha=0.85)
     if box is not None:
         u0, v0, cs = box['u0'], box['v0'], box['cs']
         axL.add_patch(plt.Rectangle((u0, v0), cs, cs, fill=False, ec='red', lw=2))
@@ -55,6 +123,7 @@ def render_pair(ds, idx, out_path, S=64):
         crop_np = crop_t.numpy()  # imshow handles uint8 natively
     else:
         crop_np = np.clip(crop_t.float().numpy(), 0, 1)
+    H_bits, lap_var = patch_entropy(crop_np)
     axR.imshow(crop_np)
     t = true_uvd.numpy(); d = dist_uvd.numpy()
     is_obj_pt = d[:, 3] > 0.5
@@ -70,8 +139,13 @@ def render_pair(ds, idx, out_path, S=64):
         axR.plot([d[j, 0], t[j, 0]], [d[j, 1], t[j, 1]],
                  '-', color=('orange' if is_obj_pt[j] else 'deepskyblue'),
                  lw=0.5, alpha=0.5)
+    if box is not None and cubs_proj:
+        scale = S / float(box['cs'])
+        draw_cuboids(axR, cubs_proj, color='lime', lw=1.0, alpha=0.85,
+                     uv_offset=(box['u0'], box['v0']), uv_scale=scale)
     axR.set_xlim(0, S); axR.set_ylim(S, 0); axR.axis('off')
-    axR.set_title(f'GETITEM crop  N={len(t)} obj={int(is_obj_pt.sum())}  vfp={float(vfp):.0f}',
+    axR.set_title(f'GETITEM crop  N={len(t)} obj={int(is_obj_pt.sum())}  '
+                  f'H={H_bits:.2f}b  lapV={lap_var:.0f}  vfp={float(vfp):.0f}',
                   fontsize=10)
     axR.legend(loc='upper right', fontsize=7, framealpha=0.6)
     plt.tight_layout()
@@ -100,6 +174,7 @@ def main():
                                    max_crop_px=args.max_crop_px, oversample=1)
     idxs = list(range(len(ds))); _r.Random(args.seed).shuffle(idxs)
     print(f'cache: {cache}  insts: {len(ds)}  rendering {args.n} → {out}')
+    chosen = []
     saved = 0
     for idx in idxs:
         if saved >= args.n: break
@@ -109,7 +184,11 @@ def main():
         except Exception as e:
             continue
         print(f'  pre_{saved:02d}: idx={idx}  scene={s} frame={fr}  N={n_tot} obj={n_obj}')
+        chosen.append(int(idx))
         saved += 1
+    # persist chosen idxs so mid-training vis can render the SAME samples
+    import json
+    (out / 'sample_idxs.json').write_text(json.dumps(chosen))
 
 
 if __name__ == '__main__':
