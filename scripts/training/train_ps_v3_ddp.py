@@ -211,6 +211,12 @@ def main(cfg=None):
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", False),
                           deform_mode=c.get("deform_mode", "none"))
+    # torch.compile BEFORE accel.prepare so DDP wraps the compiled graph.
+    # mode='reduce-overhead' is the sweet spot: CUDA graph capture for static
+    # shapes, minimal compile time (~30-60s vs max-autotune's 5+ min).
+    if c.get('compile', False):
+        log(f"torch.compile(mode='reduce-overhead') — first 1-2 steps will be slow (graph capture)")
+        model = torch.compile(model, mode='reduce-overhead')
     optimizer = torch.optim.AdamW(model.parameters(), lr=c["lr"], weight_decay=1e-3)
 
     # Single prepare() pass — Accelerate wraps model w/ DDP, sampler w/ Distributed
@@ -343,6 +349,10 @@ if __name__ == "__main__":
     ap.add_argument('--n-layers', type=int, default=None)
     ap.add_argument('--img-size', type=int, default=None)
     ap.add_argument('--convnext', action='store_true')
+    ap.add_argument('--compile', action='store_true',
+                    help='wrap model with torch.compile(mode="reduce-overhead") '
+                         'BEFORE accel.prepare so DDP wraps the compiled graph. '
+                         'First 1-2 steps slow (CUDA graph capture).')
     ap.add_argument('--deform-mode', default=None)
     ap.add_argument('--train-size', type=int, default=None)
     ap.add_argument('--val-size', type=int, default=None)
@@ -368,6 +378,7 @@ if __name__ == "__main__":
     if args.n_layers is not None: cfg['n_layers'] = args.n_layers
     if args.img_size is not None: cfg['img_size'] = args.img_size
     if args.convnext: cfg['use_convnext'] = True
+    if args.compile:  cfg['compile'] = True
     if args.deform_mode is not None: cfg['deform_mode'] = args.deform_mode
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
