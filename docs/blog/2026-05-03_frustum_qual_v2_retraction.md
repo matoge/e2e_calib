@@ -12,6 +12,7 @@
 - I rebuilt the eval with a seed-locked fetcher, re-scored 164 validation instances, re-rendered the top-8 wins and top-8 losses, and pixel-verified every image against the score table.
 - **The "crowd helps, sparse hurts" story is wrong.** The real split is about **baseline difficulty**: frustum attention almost always wins when the no-frustum baseline already struggles (err<sub>w/o</sub> > 2 px), and loses on easy samples where it over-corrects.
 - As a side effect I confirmed Waymo v3's episode-level train/val split (679 / 119 / 0 overlap) and kicked two 200-epoch DDP runs on `/dev/shm`.
+- New §1.5 has pictures of **what the frustum encoder actually picks** (cell grid, 3×3 UV search box, 4×4 stratified sub-grid, 32 neighbors per query) on PandaSet / nuScenes / Waymo — including why the same encoder starves on sparse LiDAR.
 
 This post is partly a technical writeup and partly a reminder — for myself and anyone reading this later — that "good-looking qualitative figures" are the single most seductive way to fool yourself in calibration research.
 
@@ -27,6 +28,58 @@ Two runs:
 - **v10b — frustum OFF**: global cross-attention, everything else identical.
 
 Both trained 100 epochs on PandaSet. Evaluated on 164 held-out per-instance crops.
+
+---
+
+## 1.5 How does "frustum attention" actually pick its points? (A picture is worth the next 10 tables)
+
+Because the retracted §9.6 story hinged on claims like *"frustum helps crowded scenes / hurts sparse ones,"* it's worth spelling out — with the live-forward renderer from `scripts/visualization/vis_frustum_neighbors.py` — what the encoder is physically looking at when it says "the neighbors of this cell."
+
+### The cell grid and the cell-query
+
+- The 64 px crop is split into a **16 × 16 grid of cells** (4 px per cell).
+- An occupied cell produces **exactly one cell-query**: the raw LiDAR point whose projected `(u,v)` is closest to that cell's center. So a crop has up to 256 cell-queries.
+- That cell-query is what the downstream cross-attn sees as "the point." It is emphatically *not* a grid-center virtual point — it is a real LiDAR return, with a real 3D depth `D`.
+
+### The candidate neighborhood (per cell-query)
+
+All units are **cell units** (so the rule is invariant to input resolution — S=64/128/256 behave identically because `cell_px = img_size / grid_n`):
+
+1. **UV search box:** `±r_uv_cells = ±1.5` cells around the cell-query → a **3 × 3 cells** window (the query's own cell + its 8 UV-neighbors). This is the red square in the figures below.
+2. **Stratified sub-sampling:** that 3×3 window is split into a **4 × 4 stratified sub-grid** (each sub-cell ≈ 0.75 cell wide). At most **one random in-box point per sub-cell** → up to **16 stratified neighbors**. This enforces spatial diversity: a single dense cluster cannot swallow the whole budget.
+3. **Random top-up:** **16 additional random** in-box points, drawn without stratification, to give dense regions extra weight.
+4. **Total:** **k = 32 candidate neighbors per cell-query**, pulled from the dense raw cloud `uvd_full` (≤ 1024 padded points per crop).
+5. **Depth filter (still a hyperparameter, not settled):** candidates with `|Δd| > r_d` from the cell-query depth are dropped. Default today is `r_d = 0.4 m`. On sparse-LiDAR datasets this filter is too aggressive (see next section).
+
+All 32 neighbors are passed into a 2-layer Point-Transformer block (the v10-era encoder, see `docs/local_point_feature_aggregation.md` §3), which does *soft-weighted* aggregation rather than PointNet++'s max-pool. That matters for the "frustum over-corrects when baseline is easy" story in §4.
+
+### Legend (applies to all three panels below)
+
+| marker | meaning |
+|---|---|
+| ★ green | the **cell-query** (the one LiDAR point that this cell is responsible for) |
+| ○ yellow | every LiDAR point in the crop (`uvd_full`) |
+| ○ cyan | the **≤ 32 neighbors** the encoder actually picked for this query |
+| magenta filled square | the query's own cell |
+| red square | the **±1.5-cell UV search box** (3×3 cells) |
+| magenta lines | the 16×16 cell grid |
+
+### The three canonical datasets, same legend, very different pictures
+
+![PandaSet 64-beam — dense](../assets/frustum/sel_ps_with_depth.png)
+*Fig A — **PandaSet, 64-beam (dense).** The red 3×3 UV box contains O(20) yellow points; after the depth filter and the 4×4 stratified sub-sampler we still land ~8 cyan neighbors per query. Geometry is well-defined locally: the frustum encoder has plenty to summarize.*
+
+![nuScenes 32-beam — sparse](../assets/frustum/sel_ns_with_depth.png)
+*Fig B — **nuScenes, 32-beam (sparse).** Same encoder, same hyperparameters. Many red boxes contain LiDAR returns that belong to completely different depth layers (32-beam sweeps depth hard across UV neighbors). After the `|Δd| < 0.4 m` filter, **most queries end up with 0 cyan points**. Empirically μ ≈ 0 / 2 max neighbors per query — the per-cell feature degenerates to "nothing was close enough in depth, good luck."*
+
+![Waymo — middle ground](../assets/frustum/sel_wm_with_depth.png)
+*Fig C — **Waymo.** Intermediate density, intermediate neighbor yield (μ ≈ 4.8 / 16 max with depth filter, μ ≈ 20.9 without). This is why Waymo is the next ablation dataset: it probes the middle of the dense↔sparse axis where the depth-filter hypothesis bites.*
+
+### What this means for the retraction story
+
+The v2 eval in §4 was run on **PandaSet only** (Fig A regime — dense, well-fed frustum). So when I say "frustum over-corrects when the baseline is easy," that is specifically about **Fig A-like crops**. In the Fig B (nuScenes) regime the story is probably different — the encoder is starving, not over-correcting — and I have no pixel-verified numbers for that case yet. Do not generalize the "baseline-difficulty splits win/loss" pattern beyond the density regime it was measured in.
+
+This, incidentally, is the second reason to be suspicious of "frustum helps crowded scenes." The *wrong axis* isn't just n<sub>obj</sub> per crop — it's **beam density of the LiDAR that made the crop**. v721 on Waymo will give us the first non-PandaSet data point on that axis.
 
 ---
 
@@ -180,6 +233,7 @@ Both 200-epoch DDP runs (v721 frustum-on, v721b frustum-off) are now rolling on 
 2. **Always assert header == table on qualitative PNGs.** One `assert round(title_err, 2) == round(table_err, 2)` in the render loop would have caught this a day earlier.
 3. **Baseline-conditioned ablations beat scene-conditioned ones.** The question is never "does X help crowded scenes." It's "does X help the cases where we were already getting it right, or the cases where we weren't?"
 4. **Retract fast, retract visibly.** The v1 §9.6 commit is still in git history for provenance, but the doc on main is now v2, explicitly tagged "retracted v1 — see commit 1d34f2b."
+5. **Render the neighborhood, not just the loss.** Before declaring anything about frustum behavior on a new dataset, run `scripts/visualization/vis_frustum_neighbors.py` on that dataset once (see §1.5). If the cyan point count per red box is ~0 (nuScenes pattern) the encoder is starving, and val-NLL alone will not tell you that — it'll just say "frustum helped less than on PandaSet." Starvation and over-correction are different failure modes and deserve different fixes.
 
 ---
 
