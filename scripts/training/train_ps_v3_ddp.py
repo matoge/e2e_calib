@@ -251,6 +251,15 @@ def main(cfg=None):
         except Exception:
             cml_logger = None
 
+    # Pre-training cache sanity vis (rank-0 only, then rendezvous).
+    if accel.is_main_process:
+        try:
+            from scripts.util.midtrain_vis import vis_pretrain_run
+            vis_pretrain_run(exp_dir, cache, cml_logger=cml_logger, n=10, log=log)
+        except Exception as _e:
+            log(f"vis_pretrain skipped: {_e}")
+    accel.wait_for_everyone()
+
     for epoch in range(1, epochs+1):
         # DistributedSampler needs set_epoch for proper shuffling across epochs;
         # Accelerate exposes the underlying sampler via train_loader.sampler.
@@ -310,6 +319,20 @@ def main(cfg=None):
                     rs('sps', 'val_global',   iteration=epoch, value=va_sps_global)
                 except Exception:
                     pass
+            # Per-10-epoch debug images (rank-0 only; needs the unwrapped model
+            # so forward signature matches the dataset-level call in the util).
+            if epoch % 10 == 0 or epoch == epochs:
+                try:
+                    from scripts.util.midtrain_vis import midtrain_vis
+                    midtrain_vis(
+                        accel.unwrap_model(model), exp_dir, cache, epoch,
+                        img_size=c["img_size"],
+                        min_crop_px=c.get("min_crop_px", 128),
+                        max_crop_px=c.get("max_crop_px", 384),
+                        cml_logger=cml_logger, device=accel.device,
+                        amp_dtype=torch.float16, n=10, log=log)
+                except Exception as _e:
+                    log(f"vis_ep{epoch:03d} skipped: {_e}")
         accel.wait_for_everyone()
 
     log(f"Best val NLL: {best_val:.4f}  |  time: {(time.time()-t0)/60:.1f}min")
