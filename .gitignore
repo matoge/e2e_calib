@@ -3,6 +3,7 @@ sim3d_val.pt
 *.onnx
 *.png
 !docs/assets/*.png
+!docs/assets/**/*.png
 !docs/images/*.png
 !docs/images/**/*.png
 *.ply
