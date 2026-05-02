@@ -1,14 +1,22 @@
 """V3 cache: full-image (decoded JPG) + per-frame metadata.
 
 No crop pre-baked. Per (scene, cam, frame) we save:
-  img:       (3, IH, IW) uint8                 — decoded image
+  jpg_bytes: raw JPEG bytes (~200KB, 30x smaller than decoded uint8)
+  IH, IW:    image dims
   pts:       (N_vis, 3) float32                — visible (in-image) lidar pts (world)
   cam_pos:   (3,)                              — camera world position
   R_gt:      (3, 3)                            — cam-to-world rotation
   T_gt:      (4, 4)                            — world-to-cam (inv pose)
   K_full:    (3, 3)                            — intrinsic
-  cuboids:   list[dict] of useful labels       — for is_obj computation per-crop at __getitem__ time
+  uv_full:   (N_vis, 2) float32                — GT-projected (u,v) in full-image px
+  z_cam:     (N_vis,)   float32                — GT camera-frame depth
+  is_obj:    (N_vis,)   float32                — 1.0 if pt lies in ANY cuboid else 0
+  cuboids:   list[dict] of useful labels       — kept for debugging / refined masks
   scene/cam/frame                              — provenance
+
+NOTE: uv_full/z_cam/is_obj were moved from __getitem__ to build time on
+2026-05 after profiling: is_obj on 13k pts × 160 cubs was 412 ms/call,
+dominating SPS at 90 workers. Pre-computing → __getitem__ drops to ~20ms.
 
 Storage (front_camera, 103 scenes, ~80 frames each):
   ~80 frames × 6.2 MB image + ~0.4 MB lidar ≈ 7 MB/frame
@@ -26,6 +34,7 @@ from scipy.spatial.transform import Rotation
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from datasets.pandaset import (USEFUL_LABELS, _quat_pos_to_mat, _project)
+from datasets.pandaset_full import _is_obj_per_point
 
 
 def _load_pkl(path: Path):
@@ -112,6 +121,13 @@ def _process_scene(args_tuple):
                                     ]).as_matrix().astype(np.float32)
         T_gt = np.linalg.inv(pose_mat).astype(np.float32)
 
+        # Pre-compute per-point caches used at __getitem__ time.
+        # Without these, each __getitem__ call spends ~412ms in is_obj
+        # on 13k pts × 160 cubs — dominating DataLoader SPS by 10x+.
+        uv_vis = uv[vis].astype(np.float32)                        # (N_vis, 2)
+        z_vis  = z[vis].astype(np.float32)                         # (N_vis,)
+        is_obj_vis = _is_obj_per_point(pts_vis, cub_list)          # (N_vis,) float32
+
         inst = dict(
             jpg_bytes = jpg_bytes,
             IH        = int(IH),
@@ -121,6 +137,9 @@ def _process_scene(args_tuple):
             R_gt     = torch.from_numpy(R_gt),
             T_gt     = torch.from_numpy(T_gt),
             K_full   = torch.from_numpy(K.astype(np.float32)),
+            uv_full  = torch.from_numpy(uv_vis),
+            z_cam    = torch.from_numpy(z_vis),
+            is_obj   = torch.from_numpy(is_obj_vis),
             cuboids  = cub_list,
             scene    = scene_name,
             cam      = cam_name,
