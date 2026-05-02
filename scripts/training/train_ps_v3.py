@@ -38,6 +38,9 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     obj_nll_s, obj_n = 0.0, 0
     bg_nll_s,  bg_n  = 0.0, 0
     obj_errs, bg_errs = [], []  # collect per-point L2 to compute median/p95
+    import time as _time
+    _t_start = _time.time()
+    _last_log_step = 0
     for imgs, true_uvd, dist_uvd, pad_mask, vfp in loader:
         # dataset returns uint8 to cut IPC 4x; convert to float on GPU
         imgs     = imgs.to(DEVICE, non_blocking=True).float().div_(255.0)
@@ -69,6 +72,11 @@ def epoch_loop(model, loader, optimizer, scaler, train):
                 bg_nll_s  += gaussian2d_nll(params[is_bg],  gt[is_bg]).item();  bg_n  += 1
                 bg_errs.append((params[is_bg][..., :2].float() - gt[is_bg]).norm(dim=-1).detach())
         total_nll += loss.item(); total_mse += mse; n += 1
+        if train and (n - _last_log_step >= 100):
+            _dt = _time.time() - _t_start
+            sps = n * imgs.shape[0] / _dt if _dt > 0 else 0
+            print(f"  step {n}  loss={loss.item():+.3f}  sps={sps:.0f}", flush=True)
+            _last_log_step = n
     obj_nll = obj_nll_s / max(obj_n, 1)
     bg_nll  = bg_nll_s  / max(bg_n,  1)
     # full per-point distribution stats — gives mean/median/p95 that line up
@@ -114,6 +122,11 @@ def main(cfg=None):
               persistent_workers=(nw > 0),
               prefetch_factor=pf if nw > 0 else None,
               collate_fn=collate_full)
+    val_nw = min(4, nw)  # val_loader runs sequentially; idle workers waste RAM
+    val_kw = dict(num_workers=val_nw, pin_memory=True,
+                  persistent_workers=(val_nw > 0),
+                  prefetch_factor=pf if val_nw > 0 else None,
+                  collate_fn=collate_full)
     import random as _r
     if zod_src:
         from datasets.zod_full import ZODCalibDataset
@@ -137,7 +150,8 @@ def main(cfg=None):
                       min_crop_px=c.get('min_crop_px', 128),
                       max_crop_px=c.get('max_crop_px', 512),
                       frame_stride=c.get('frame_stride', 1),
-                      grid_n=c.get('grid_n', 16))
+                      grid_n=c.get('grid_n', 16),
+                      oversample=c.get('oversample', 12))
         log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
             f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
         tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
@@ -171,9 +185,9 @@ def main(cfg=None):
         # deterministic first-N (sequential) so val NLL is comparable across runs
         val_subset = Subset(val_ds, list(range(val_size)))
         log(f"  val subsample: {val_size}/{len(val_ds)} (deterministic first-N)")
-        val_loader = DataLoader(val_subset, batch_size=c["batch_size"], shuffle=False, **kw)
+        val_loader = DataLoader(val_subset, batch_size=c["batch_size"], shuffle=False, **val_kw)
     else:
-        val_loader   = DataLoader(val_ds,   batch_size=c["batch_size"], shuffle=False, **kw)
+        val_loader   = DataLoader(val_ds,   batch_size=c["batch_size"], shuffle=False, **val_kw)
 
     model = CalibNetDepth(img_size=c["img_size"], in_channels=c["in_channels"],
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
@@ -489,6 +503,7 @@ if __name__ == "__main__":
     if args.lr      is not None: cfg['lr']     = args.lr
     if args.lr_min  is not None: cfg['lr_min'] = args.lr_min
     if args.frame_stride and args.frame_stride > 1: cfg['frame_stride'] = args.frame_stride
+    if args.oversample is not None: cfg['oversample'] = args.oversample
     if args.grid_n is not None: cfg['grid_n'] = args.grid_n
     if args.workers is not None: cfg['num_workers'] = args.workers
     if args.min_crop_px is not None: cfg['min_crop_px'] = args.min_crop_px
