@@ -556,35 +556,52 @@ frustum encoder is decisive:
   neighbors distributed on a depth gradient. That's a **geometric
   signal that is strictly unavailable to the image-only path**.
 - Top 5 win samples all end at err < 1 px with frustum (idx 119, 49, 92,
-  148, 19), starting from err ∈ [2.7, 4.1] px without it. The flip is
-  object-coherent: arrows on the object mass snap to one consistent
-  direction instead of fanning out.
+  148, 19), starting from err ∈ [2.7, 4.1] px without it. This is the
+  aggregate evidence from the 164-inst val sweep. The flip is *not*
+  necessarily visible in the quiver renders below — see the "Honest
+  caveat" block — the visibility threshold for the arrow plot is around
+  baseline err ≳ 4 px, and these wins sit right at the edge.
 
-Key visual evidence (each panel: left = w/o frustum, right = w/ frustum):
+Key visual evidence (each panel: left = w/o frustum, right = w/ frustum).
 
-**idx 119 — 4.06 → 0.73 px, n_obj=137.** Textbook "depth-slab
-disambiguation" case. Left: object arrows fan in 3 different
-directions. Right: all arrows on the object mass converge to the GT
-green ×, with ground arrows staying separate.
+**Honest caveat on reading these panels.** For the "wins" samples below,
+the numeric error is reported in crop pixels at img_size = 64. But the
+crop was originally 128 – 384 px and was downsampled to 64 for the
+network; the arrow quiver is drawn on the original-resolution backdrop,
+not on the 64 × 64 output. For wins where the no-frustum baseline is
+already at err ∈ [2, 5] px (evaluated at img_size = 64), both panels
+will look qualitatively similar because a 4-px arrow at 64 × 64 is a
+sub-car-length arrow on the original backdrop. **The justification for
+calling these "wins" is the per-sample aggregate number, not a
+direction-flip visible by eye.** See the "Failure mode 2" panels below
+for a contrasting case (err_no = 0.44 vs err_fr = 4.25) where the arrow
+difference is visually obvious — that gap only becomes visible around
+Δ ≥ 4 px of baseline error.
+
+**idx 119 — err 4.06 → 0.73 px, n_obj=137.** Close bus, dense
+footprint. The textbook "dense object + depth-slab disambiguation"
+regime by construction (high n_obj, on-ground + on-vehicle-surface
+points in the same UV cells). Both panels *look* similar by eye (arrows
+on the bus hit the green × in both); the 4× numeric improvement is
+below arrow-visibility threshold.
 
 ![help_idx0119](assets/frustum/qual/help_idx0119.png)
 
-**idx 49 — 3.07 → 0.69 px, n_obj=123.** Left: object + ground arrows
-indistinguishable. Right: a clean split line between object-surface
-arrows and ground-beneath arrows.
+**idx 49 — err 3.07 → 0.69 px, n_obj=123.** Same regime: dense
+on-ground object, Δ < 3 px, not visually obvious.
 
 ![help_idx0049](assets/frustum/qual/help_idx0049.png)
 
-**idx 92 — 2.81 → 0.63 px, n_obj=91.** Close pedestrian, shadow
-overlapping feet on ground. Left pipeline treats shadow-at-same-UV as
-part of the object; right separates them correctly.
+**idx 92 — err 2.81 → 0.63 px, n_obj=91.** Same regime, close
+pedestrian.
 
 ![help_idx0092](assets/frustum/qual/help_idx0092.png)
 
-**idx 83 — 8.36 → 3.90 px, n_obj=60.** Extreme case: left pipeline is
-~8 px off on a side-view vehicle; right cuts that to < 4 px. Not
-"solved" yet but the arrow coherence on the vehicle is qualitatively
-different.
+**idx 83 — err 8.36 → 3.90 px, n_obj=60.** The largest-Δ win sample
+(Δ = +4.46 px) and the one where the image difference is most likely
+to be readable by eye — `err_no = 8.36 px` is big enough that the
+arrows on the no-frustum side should be visibly longer than on the
+frustum side.
 
 ![help_idx0083](assets/frustum/qual/help_idx0083.png)
 
