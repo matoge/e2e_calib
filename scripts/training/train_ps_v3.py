@@ -285,6 +285,9 @@ def main(cfg=None):
         for idx in idxs[:200]:
             if saved >= n: break
             try:
+                # Pin np.random per idx so the crop box (u0, v0, cs) and the
+                # perturbation are identical across epochs — vis stays comparable.
+                _np.random.seed(int(idx))
                 img, true_uvd, dist_uvd, vfp, uvd_full_v, pad_full_v = ds[idx]
             except Exception:
                 continue
@@ -443,6 +446,13 @@ def main(cfg=None):
                 rs('mse_px', 'val_bg_p95',     iteration=epoch, value=va_bg_p95)
                 rs('lr', 'lr', iteration=epoch, value=scheduler.get_last_lr()[0])
                 rs('best', 'best_val_nll', iteration=epoch, value=best_val)
+                # epoch wall-clock + sps (samples/sec across train epoch)
+                if 'epoch_t0' in globals():
+                    pass  # placeholder
+                _ep_dt = time.time() - _ep_start
+                _ep_sps = (len(train_loader) * c["batch_size"]) / max(_ep_dt, 1e-6)
+                rs('sps', 'train_epoch', iteration=epoch, value=_ep_sps)
+                rs('time', 'epoch_sec',  iteration=epoch, value=_ep_dt)
             except Exception:
                 pass
 

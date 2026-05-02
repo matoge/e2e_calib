@@ -93,7 +93,8 @@ def _ann_to_cuboid(ann) -> dict:
 
 
 def _convert_scene(args_tuple):
-    scene_token, out_dir, data_root, cams_keep, stride, max_frames, gid_start = args_tuple
+    (scene_token, out_dir, data_root, cams_keep, stride, max_frames, gid_start,
+     tile_layout) = args_tuple
     scene = _CTX['scenes'][scene_token]
     scene_name = scene['name']
     out_dir = Path(out_dir)
@@ -169,21 +170,47 @@ def _convert_scene(args_tuple):
             vis = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW) & (uv[:, 1] >= 0) & (uv[:, 1] < IH)
             if vis.sum() < 16: continue
             pts_vis = pts_world[vis]
+            uv_vis  = uv[vis].astype(np.float32)
+            z_vis   = z[vis].astype(np.float32)
 
-            inst = dict(
-                jpg_bytes = jpg_bytes,
-                IH = int(IH), IW = int(IW),
-                pts      = torch.from_numpy(pts_vis),
-                cam_pos  = torch.from_numpy(cam_pos),
-                R_gt     = torch.from_numpy(R_gt),
-                T_gt     = torch.from_numpy(T_gt),
-                K_full   = torch.from_numpy(K),
-                cuboids  = cubs,
+            # is_obj on visible pts (cuboid membership in world frame)
+            from datasets.pandaset_full import _is_obj_per_point
+            is_obj_vis = _is_obj_per_point(pts_vis, cubs).astype(np.float32)
+
+            common_inst = dict(
+                cam_pos = torch.from_numpy(cam_pos),
+                R_gt    = torch.from_numpy(R_gt),
+                T_gt    = torch.from_numpy(T_gt),
+                K_full  = torch.from_numpy(K),
+                cuboids = cubs,
                 scene = scene_name, cam = ch, frame = int(fi),
             )
-            torch.save(inst, inst_dir / f'{gid:08d}.pt')
-            gid += 1
-            written += 1
+
+            if tile_layout is None:
+                inst = dict(common_inst)
+                inst.update(dict(
+                    jpg_bytes = jpg_bytes,
+                    IH = int(IH), IW = int(IW),
+                    pts      = torch.from_numpy(pts_vis),
+                    uv_full  = torch.from_numpy(uv_vis),
+                    z_cam    = torch.from_numpy(z_vis),
+                    is_obj   = torch.from_numpy(is_obj_vis),
+                ))
+                torch.save(inst, inst_dir / f'{gid:08d}.pt')
+                gid += 1
+                written += 1
+            else:
+                from scripts.preprocessing._tile_split import cut_inst_to_tiles
+                tw, th, st, pad, y0, q = tile_layout
+                tile_files = cut_inst_to_tiles(
+                    jpg_bytes=jpg_bytes, IW=int(IW), IH=int(IH),
+                    pts_vis=pts_vis, uv_vis=uv_vis, z_vis=z_vis,
+                    is_obj_vis=is_obj_vis, common_inst=common_inst,
+                    tile_w=tw, tile_h=th, stride=st, pad_px=pad,
+                    y_start=y0, jpg_quality=q,
+                    out_dir=inst_dir, gid_base=gid)
+                gid += 1
+                written += len(tile_files)
 
     return scene_name, written
 
@@ -200,7 +227,22 @@ def main():
     ap.add_argument('--stride',      type=int, default=1, help='1 → 2Hz (native), 2 → 1Hz')
     ap.add_argument('--val-frac',    type=float, default=0.15)
     ap.add_argument('--seed',        type=int, default=42)
+    # Tile mode: build N tiles/frame instead of 1 full frame per cam.
+    ap.add_argument('--tile', action='store_true')
+    ap.add_argument('--tile-w',       type=int, default=512)
+    ap.add_argument('--tile-h',       type=int, default=512)
+    ap.add_argument('--tile-stride',  type=int, default=384)
+    ap.add_argument('--tile-pad',     type=int, default=64)
+    ap.add_argument('--tile-y-start', type=int, default=0,  help='NS images are 900 tall — keep 0')
+    ap.add_argument('--tile-jpg-q',   type=int, default=90)
     args = ap.parse_args()
+
+    tile_layout = None
+    if args.tile:
+        tile_layout = (args.tile_w, args.tile_h, args.tile_stride,
+                       args.tile_pad, args.tile_y_start, args.tile_jpg_q)
+        print(f'TILE mode: tile={args.tile_w}×{args.tile_h} stride={args.tile_stride} '
+              f'pad={args.tile_pad} y_start={args.tile_y_start}', flush=True)
 
     cams_keep = tuple(args.cams.split(','))
     for c in cams_keep:
@@ -219,7 +261,7 @@ def main():
 
     gid_stride = 4000  # ~40 frames × 6 cams = 240 per scene, buffer
     argv = [(s['token'], str(out_dir), args.data_root, cams_keep, args.stride,
-             args.max_frames, i * gid_stride)
+             args.max_frames, i * gid_stride, tile_layout)
             for i, s in enumerate(scenes_sorted)]
 
     t0 = time.time()

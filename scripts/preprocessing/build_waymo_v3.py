@@ -139,7 +139,8 @@ def list_frame_timestamps(seg_name: str) -> list[int]:
 
 def process_seg(args_tuple):
     """Optimized: read each parquet ONCE per segment, loop frames in memory."""
-    (seg_name, out_dir, max_frames, gid_start, cams_keep, stride) = args_tuple
+    (seg_name, out_dir, max_frames, gid_start, cams_keep, stride,
+     tile_layout) = args_tuple
     out_dir = Path(out_dir)
     inst_dir = out_dir / 'inst'
     inst_dir.mkdir(parents=True, exist_ok=True)
@@ -200,29 +201,47 @@ def process_seg(args_tuple):
             # Transform vehicle-frame boxes at this ts → cv2-cam-frame AABBs
             cuboids = boxes_cam_frame(boxes_by_ts.get(ts, []), T_c_v)
 
-            # Pandaset-compat schema: pts treated as if in WORLD frame,
-            # T_gt = identity (cam at origin). Perturbation logic still works.
-            inst = dict(
-                jpg_bytes = jpg_bytes,
-                IH=int(IH), IW=int(IW),
-                pts      = torch.from_numpy(pts_cam),                 # treat as world
+            # is_obj on visible pts (cuboid AABB membership in cam frame)
+            from datasets.pandaset_full import _is_obj_per_point
+            is_obj_vis = _is_obj_per_point(pts_cam, cuboids).astype(np.float32)
+
+            common_inst = dict(
                 cam_pos  = torch.zeros(3, dtype=torch.float32),
                 R_gt     = torch.eye(3, dtype=torch.float32),
                 T_gt     = torch.eye(4, dtype=torch.float32),
                 K_full   = torch.from_numpy(K),
                 cuboids  = cuboids,
-                # legacy waymo extras (kept for vis convenience)
-                pts_cam   = torch.from_numpy(pts_cam),
-                uv_full   = torch.from_numpy(uv),
-                z_cam     = torch.from_numpy(zc),
-                laser     = torch.from_numpy(laser),
-                # provenance
                 scene = seg_name, cam = int(cam_id), frame = int(ts),
                 seg=seg_name, ts=int(ts), cam_id=int(cam_id),
             )
-            torch.save(inst, inst_dir / f'{gid:08d}.pt')
-            gid += 1
-            written += 1
+
+            if tile_layout is None:
+                inst = dict(common_inst)
+                inst.update(dict(
+                    jpg_bytes = jpg_bytes,
+                    IH=int(IH), IW=int(IW),
+                    pts      = torch.from_numpy(pts_cam),
+                    pts_cam  = torch.from_numpy(pts_cam),
+                    uv_full  = torch.from_numpy(uv),
+                    z_cam    = torch.from_numpy(zc),
+                    is_obj   = torch.from_numpy(is_obj_vis),
+                    laser    = torch.from_numpy(laser),
+                ))
+                torch.save(inst, inst_dir / f'{gid:08d}.pt')
+                gid += 1
+                written += 1
+            else:
+                from scripts.preprocessing._tile_split import cut_inst_to_tiles
+                tw, th, st, pad, y0, q = tile_layout
+                tile_files = cut_inst_to_tiles(
+                    jpg_bytes=jpg_bytes, IW=int(IW), IH=int(IH),
+                    pts_vis=pts_cam, uv_vis=uv, z_vis=zc,
+                    is_obj_vis=is_obj_vis, common_inst=common_inst,
+                    tile_w=tw, tile_h=th, stride=st, pad_px=pad,
+                    y_start=y0, jpg_quality=q,
+                    out_dir=inst_dir, gid_base=gid)
+                gid += 1
+                written += len(tile_files)
     return seg_name, written
 
 
@@ -234,7 +253,21 @@ def main():
     ap.add_argument('--max-frames', type=int, default=None)
     ap.add_argument('--cams', default='1', help='comma-separated cam ids; default front-only "1"; all = "1,2,3,4,5"')
     ap.add_argument('--stride', type=int, default=1, help='frame stride (5 → 2Hz from 10Hz)')
+    ap.add_argument('--tile', action='store_true')
+    ap.add_argument('--tile-w',       type=int, default=512)
+    ap.add_argument('--tile-h',       type=int, default=512)
+    ap.add_argument('--tile-stride',  type=int, default=384)
+    ap.add_argument('--tile-pad',     type=int, default=64)
+    ap.add_argument('--tile-y-start', type=int, default=200,
+                    help='Waymo front-cam 1280 tall — skip ~200 sky')
+    ap.add_argument('--tile-jpg-q',   type=int, default=90)
     args = ap.parse_args()
+    tile_layout = None
+    if args.tile:
+        tile_layout = (args.tile_w, args.tile_h, args.tile_stride,
+                       args.tile_pad, args.tile_y_start, args.tile_jpg_q)
+        print(f'TILE mode: tile={args.tile_w}×{args.tile_h} stride={args.tile_stride} '
+              f'pad={args.tile_pad} y_start={args.tile_y_start}', flush=True)
     cams_keep = tuple(int(c) for c in args.cams.split(','))
 
     segs_dir = WAYMO_DIR / 'lidar'
@@ -246,7 +279,8 @@ def main():
     Path(args.out).mkdir(parents=True, exist_ok=True)
     gid_stride = 5000   # ~200 frames × 5 cams = 1000 per seg, 5x buffer
 
-    argv = [(seg, args.out, args.max_frames, i * gid_stride, cams_keep, args.stride)
+    argv = [(seg, args.out, args.max_frames, i * gid_stride, cams_keep, args.stride,
+             tile_layout)
             for i, seg in enumerate(segs)]
     t0 = time.time()
     written_total = 0

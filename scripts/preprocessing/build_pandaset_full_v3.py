@@ -44,8 +44,12 @@ def _load_pkl(path: Path):
     return pickle.load(open(path, 'rb'))
 
 
+_TILE_LAYOUT = None  # set by main() when --tile; None = full-frame mode
+
+
 def _process_scene(args_tuple):
-    (scene_root, scene_name, cam_name, out_dir, min_pts, gid_start, stride) = args_tuple
+    (scene_root, scene_name, cam_name, out_dir, min_pts, gid_start, stride,
+     tile_layout) = args_tuple
     sc_dir = Path(scene_root) / scene_name
     cam_dir = sc_dir / 'camera' / cam_name
     if not cam_dir.exists():
@@ -128,27 +132,94 @@ def _process_scene(args_tuple):
         z_vis  = z[vis].astype(np.float32)                         # (N_vis,)
         is_obj_vis = _is_obj_per_point(pts_vis, cub_list)          # (N_vis,) float32
 
-        inst = dict(
-            jpg_bytes = jpg_bytes,
-            IH        = int(IH),
-            IW        = int(IW),
-            pts      = torch.from_numpy(pts_vis),
+        K_t = K.astype(np.float32)
+        common_inst = dict(
             cam_pos  = torch.from_numpy(cam_pos),
             R_gt     = torch.from_numpy(R_gt),
             T_gt     = torch.from_numpy(T_gt),
-            K_full   = torch.from_numpy(K.astype(np.float32)),
-            uv_full  = torch.from_numpy(uv_vis),
-            z_cam    = torch.from_numpy(z_vis),
-            is_obj   = torch.from_numpy(is_obj_vis),
+            K_full   = torch.from_numpy(K_t),
             cuboids  = cub_list,
             scene    = scene_name,
             cam      = cam_name,
             frame    = int(fi),
         )
-        fname = f'{gid:08d}.pt'
-        torch.save(inst, Path(out_dir) / fname)
-        out_files.append(fname)
-        gid += 1
+
+        if tile_layout is None:
+            # Full-frame mode (legacy): single inst per frame
+            inst = dict(common_inst)
+            inst.update(dict(
+                jpg_bytes = jpg_bytes,
+                IH        = int(IH),
+                IW        = int(IW),
+                pts      = torch.from_numpy(pts_vis),
+                uv_full  = torch.from_numpy(uv_vis),
+                z_cam    = torch.from_numpy(z_vis),
+                is_obj   = torch.from_numpy(is_obj_vis),
+            ))
+            fname = f'{gid:08d}.pt'
+            torch.save(inst, Path(out_dir) / fname)
+            out_files.append(fname)
+            gid += 1
+        else:
+            # Tile mode: N tiles per frame, each tile a self-contained inst.
+            # Decode parent JPEG once via TurboJPEG (fall back to PIL), then
+            # crop each tile + re-encode small JPEG.
+            tw, th, x_starts, y_starts, pad_px, jpg_q = tile_layout
+            try:
+                import turbojpeg as _tj
+                _TJ = _tj.TurboJPEG()
+                img_full_arr = np.asarray(_TJ.decode(jpg_bytes,
+                                                       pixel_format=_tj.TJPF_RGB))
+                _encode = lambda arr: _TJ.encode(arr, quality=jpg_q,
+                                                   pixel_format=_tj.TJPF_RGB)
+            except Exception:
+                img_full_arr = np.asarray(Image.open(img_path).convert('RGB'))
+                def _encode(arr, q=jpg_q):
+                    import io as _io
+                    buf = _io.BytesIO()
+                    Image.fromarray(arr).save(buf, format='JPEG', quality=q)
+                    return buf.getvalue()
+
+            tile_id = 0
+            for ty in y_starts:
+                for tx in x_starts:
+                    # Keep tile + pad_px ring of pts. in_box=1 → strict tile (eligible
+                    # crop pivots), 0 → padding ring (frustum context only). K_full is
+                    # NOT shifted because distortion (Waymo KB / NS / ZOD) is centered
+                    # on the original principal point — shifting cx/cy would corrupt
+                    # the distortion model. Dataset subtracts (tile_u0, tile_v0) at
+                    # access time, after the (un)distort projection step.
+                    in_pad = ((uv_vis[:, 0] >= tx - pad_px) & (uv_vis[:, 0] < tx + tw + pad_px) &
+                              (uv_vis[:, 1] >= ty - pad_px) & (uv_vis[:, 1] < ty + th + pad_px))
+                    pts_t    = pts_vis[in_pad]
+                    uv_t     = uv_vis[in_pad]                         # parent-image coords
+                    z_t      = z_vis[in_pad]
+                    is_obj_t = is_obj_vis[in_pad]
+                    in_box_t = ((uv_t[:, 0] >= tx) & (uv_t[:, 0] < tx + tw) &
+                                (uv_t[:, 1] >= ty) & (uv_t[:, 1] < ty + th)).astype(np.float32)
+
+                    tile_arr = img_full_arr[ty:ty + th, tx:tx + tw].copy()
+                    tile_jpg = _encode(tile_arr)
+
+                    inst = dict(common_inst)
+                    inst.update(dict(
+                        jpg_bytes = tile_jpg,
+                        IH        = int(th),
+                        IW        = int(tw),
+                        tile_u0   = int(tx),                          # parent-image origin
+                        tile_v0   = int(ty),
+                        tile_id   = int(tile_id),
+                        pts       = torch.from_numpy(pts_t),
+                        uv_full   = torch.from_numpy(uv_t),           # parent-image coords
+                        z_cam     = torch.from_numpy(z_t),
+                        is_obj    = torch.from_numpy(is_obj_t),
+                        in_box    = torch.from_numpy(in_box_t),       # 1.0 = strict tile
+                    ))
+                    fname = f'{gid:08d}_t{tile_id}.pt'
+                    torch.save(inst, Path(out_dir) / fname)
+                    out_files.append(fname)
+                    tile_id += 1
+            gid += 1
 
     return scene_name, out_files
 
@@ -164,7 +235,34 @@ def main():
     ap.add_argument('--min-pts', type=int,   default=8)
     ap.add_argument('--max-scenes', type=int, default=None)
     ap.add_argument('--stride', type=int, default=1, help='frame stride (5 → 2Hz)')
+    # Tile mode (sliding-window): build N tiles/frame instead of 1 full frame.
+    # All units are full-image (1920×1080) px.
+    ap.add_argument('--tile', action='store_true',
+                     help='enable sliding-window tile output (5×2=10 tiles/frame)')
+    ap.add_argument('--tile-w',       type=int, default=512)
+    ap.add_argument('--tile-h',       type=int, default=512)
+    ap.add_argument('--tile-stride',  type=int, default=384, help='step between tile origins (overlap = tile_w - stride)')
+    ap.add_argument('--tile-pad',     type=int, default=64,  help='padding for pts/cuboid filter on tile edge (~10%% of tile side)')
+    ap.add_argument('--tile-y-start', type=int, default=200, help='skip this many top-image px (sky)')
+    ap.add_argument('--tile-jpg-q',   type=int, default=90)
     args = ap.parse_args()
+
+    tile_layout = None
+    if args.tile:
+        IW, IH = 1920, 1080
+        tw, th, st = args.tile_w, args.tile_h, args.tile_stride
+        x_starts = list(range(0, IW - tw + 1, st))
+        if x_starts[-1] != IW - tw: x_starts.append(IW - tw)
+        ys = []
+        y = args.tile_y_start
+        while y + th <= IH:
+            ys.append(y); y += st
+        if not ys or ys[-1] != IH - th: ys.append(IH - th)
+        tile_layout = (tw, th, x_starts, ys, args.tile_pad, args.tile_jpg_q)
+        print(f'TILE mode: {len(x_starts)}×{len(ys)} = {len(x_starts)*len(ys)} tiles/frame, '
+              f'tile={tw}×{th}, stride={st}, pad={args.tile_pad}, '
+              f'y_start={args.tile_y_start}, q={args.tile_jpg_q}', flush=True)
+        print(f'  x_starts={x_starts}\n  y_starts={ys}', flush=True)
 
     out_dir = Path(args.out)
     inst_dir = out_dir / 'inst'
@@ -186,11 +284,11 @@ def main():
     t0 = time.time()
     if args.workers <= 1:
         for si, sc in enumerate(scenes):
-            _, fnames = _process_scene((str(root), sc, args.cam, str(inst_dir), args.min_pts, si * gid_stride, args.stride))
+            _, fnames = _process_scene((str(root), sc, args.cam, str(inst_dir), args.min_pts, si * gid_stride, args.stride, tile_layout))
             (val_files if sc in val_scenes else train_files).extend(fnames)
             print(f'[{si+1}/{len(scenes)}] {sc} +{len(fnames)} ({time.time()-t0:.0f}s)', flush=True)
     else:
-        argv = [(str(root), sc, args.cam, str(inst_dir), args.min_pts, si * gid_stride, args.stride)
+        argv = [(str(root), sc, args.cam, str(inst_dir), args.min_pts, si * gid_stride, args.stride, tile_layout)
                 for si, sc in enumerate(scenes)]
         with ProcessPoolExecutor(max_workers=args.workers) as ex:
             futures = {ex.submit(_process_scene, a): a[1] for a in argv}

@@ -157,11 +157,30 @@ class PandaSetCalibDatasetFull(Dataset):
         else:
             is_obj_full = _is_obj_per_point(pts, cubs).astype(bool)
 
+        # Tile-mode insts: uv_full is in PARENT-image coords + (tile_u0, tile_v0)
+        # is the tile origin. Subtract once → everything downstream operates in
+        # tile-local coords (0..tile_w, 0..tile_h). For full-frame insts these
+        # keys are absent and we treat (0, 0) as the origin.
+        tile_u0 = int(inst.get('tile_u0', 0))
+        tile_v0 = int(inst.get('tile_v0', 0))
+        if tile_u0 or tile_v0:
+            uv_full = uv_full - np.array([tile_u0, tile_v0], dtype=np.float32)
+        # in_box: 1.0 if a pt is strictly inside the tile (not in the padding
+        # ring). Pivot candidates must be in_box to keep the random crop inside
+        # the tile image. The padding-ring pts stay around as frustum context
+        # only — if absent (legacy full-frame insts) treat all valid pts as
+        # in_box.
+        if 'in_box' in inst:
+            in_box = inst['in_box'].numpy().astype(bool)
+        else:
+            in_box = np.ones(len(uv_full), dtype=bool)
+
         valid_in_image = ((z > 0.5) &
                           (uv_full[:,0] >= 0) & (uv_full[:,0] < IW) &
                           (uv_full[:,1] >= 0) & (uv_full[:,1] < IH))
-        obj_idxs = np.where(is_obj_full & valid_in_image)[0]
-        bg_mask  = (~is_obj_full) & valid_in_image
+        # Pivots: must be valid AND in_box. Frustum context still uses all pts.
+        obj_idxs = np.where(is_obj_full & valid_in_image & in_box)[0]
+        bg_mask  = (~is_obj_full) & valid_in_image & in_box
         # 10x5 grid for bg-pivot stratification
         GU, GV = 10, 5
         cell_w = IW / GU; cell_h = IH / GV
@@ -224,6 +243,11 @@ class PandaSetCalibDatasetFull(Dataset):
             z_off = pts_cam_off[:, 2]
             uv_off_c = (pts_cam_off[:, :2] * (np.array([K[0,0], K[1,1]], dtype=np.float32))) / \
                        np.maximum(z_off[:, None], 1e-6) + np.array([K[0,2], K[1,2]], dtype=np.float32)
+            # Tile mode: K_full is unchanged (parent coords) so the freshly-projected
+            # uv_off_c lives in parent image coords. Subtract the tile origin so it
+            # matches the already-tile-local uv_full / u0 / v0.
+            if tile_u0 or tile_v0:
+                uv_off_c = uv_off_c - np.array([tile_u0, tile_v0], dtype=np.float32)
 
             in_crop_off = ((uv_off_c[:, 0] >= u0) & (uv_off_c[:, 0] < u0 + cs) &
                            (uv_off_c[:, 1] >= v0) & (uv_off_c[:, 1] < v0 + cs) &
