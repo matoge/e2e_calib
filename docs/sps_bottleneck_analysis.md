@@ -52,7 +52,7 @@ Memory: 128 GB DDR5-5600  2ch × 1 socket = 89.6 GB/s
 | HT worker | 192 | 32 | 6× |
 | **メモリ帯域 (理論)** | **256 GB/s** (6ch×2 DDR4-2666) | 89.6 GB/s (2ch DDR5-5600) | **2.9×** |
 | L3 合計 | 66 MiB | 36 MiB | 1.8× |
-| AVX-512 | あり | **無し** | TJ/NumPy einsum で 1.5〜2× |
+| AVX-512 | あり | **無し** | このワークロードでは無効 — §4.4 で実測 |
 | NUMA | 2 node | 1 node | — |
 
 ## 3. ボトルネック遷移
@@ -141,17 +141,45 @@ Platinum 8168 の理論帯域は 256 GB/s × 2 socket = 512 GB/s だが、
 - batch=128 × 384×384×3 = 56 MB/batch を IPC で経路 (shm_fd or pickle)
 - 実測 batch 50 個 / 1 sec → IPC で 2.8 GB/s の shm copy
 
+### 4.4 AVX-512 は効くのか？ → **ほぼ効かない**（実測）
+
+AVX-512 を有効/無効で同じ bench を回して比較（`MKL_ENABLE_INSTRUCTIONS=AVX2
+OPENBLAS_CORETYPE=HASWELL` で強制 AVX2 化）:
+
+| 演算 | AVX-512 ON | AVX-512 OFF | 差分 |
+|---|---:|---:|---:|
+| einsum (is_obj 形状 M=160, N=13k) | 302 ms | 308 ms | +2%（効かない）|
+| numpy matmul (BLAS) | 6.6 ms | 8.4 ms | +27% |
+| SGEMM 2048³ (MKL 単 core) | 2263 GFLOPS | 2026 GFLOPS | +12% |
+| **TurboJPEG full decode**   | **6.60 ms** | **6.59 ms** | **0%** |
+| **TurboJPEG crop+decode 384** | **4.40 ms** | **4.39 ms** | **0%** |
+| PIL full decode | 10.2 ms | 10.7 ms | +5% |
+
+**核心**:
+- **libjpeg-turbo は AVX-512 を実装していない**（SSE2/SSE4/AVX2 止まり、公式 README
+  に明記）。dgx2 の 3.2× PIL 速度は AVX-512 ではなく **SIMD IDCT + MMX color convert**
+  由来 — つまり i9 でも同じ速度で TJ decode できる。
+- numpy einsum は C の naive loop で vectorize 不十分。BLAS に落ちない形状なので
+  AVX-512 恩恵ゼロ。
+- MKL SGEMM は +12〜27% 効くが、我々の `__getitem__` で大きな SGEMM は呼ばない
+  （2k×3 matmul は小さすぎて BLAS 呼び出しオーバーヘッドの方が大きい）。
+
+**結論**: DataLoader の 3500 sps に対する AVX-512 寄与は **≤5%、実質ゼロ**。
+主因は純粋に「96 コア × DDR4 6ch×2socket の帯域」であって、命令セットではない。
+
 ### 4.3 i9 だとどうなるか（予測）
 
 i9-13900K でこの bench を走らせた場合:
 - physical cores 24 → max w=24
-- 1 core perf は i9 5.5GHz > Xeon 2.7GHz で **~1.5×** ( AVX-512 無しで相殺)
-- 1-worker sps ≈ 94 × 1.5 = 140 sps
-- 24-worker 線形外挿 → 3400 sps …ただし帯域 89.6 GB/s で **1 GB/s・worker で頭打ち**
-- 実効 **~900〜1200 sps 上限** と予測（dgx2 の 1/3）
+- 1 core perf は i9 5.5GHz vs Xeon 8168 2.7GHz のクロック差で **~2×**。
+  AVX-512 は TJ/einsum に効かないので相殺効かず、i9 の方が **1 core では速い**。
+- 1-worker sps ≈ 94 × 2.0 = 190 sps
+- 24-worker 線形外挿 → 4500 sps …ただし帯域 89.6 GB/s で **~3.7 GB/s・worker で頭打ち**
+- 実効 **~1000〜1500 sps 上限** と予測（dgx2 の 1/3）
 
-**i9 はコア少ない + 帯域 1/3 で、二重に負ける**。Xeon Platinum の 6ch DDR4 が
-「数が多いワーカー全員にデータを供給できる」のが本質的な優位性。
+**i9 は 1 core だけなら dgx2 より速いが、24 コアしかなく帯域 1/3 で、スケール段階で負ける**。
+Xeon Platinum の本質的優位性は「命令セット」ではなく「**6ch DDR4 × 2 socket の帯域が
+96 ワーカー全員にデータ供給できること**」。
 
 ## 5. 更に詰める余地
 
