@@ -87,7 +87,8 @@ class PandaSetCalibDatasetFull(Dataset):
                  max_tries: int = 8,
                  oversample: int = 12,
                  frame_stride: int = 1,
-                 grid_n: int = 16):
+                 grid_n: int = 16,
+                 n_full: int = 1024):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
         meta = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
@@ -104,6 +105,7 @@ class PandaSetCalibDatasetFull(Dataset):
         self.max_tries = int(max_tries)
         self.oversample = int(oversample)
         self.grid_n     = int(grid_n)
+        self.n_full     = int(n_full)
 
     def __len__(self):
         return len(self.fnames) * self.oversample
@@ -243,20 +245,23 @@ class PandaSetCalibDatasetFull(Dataset):
             dist_uvd = np.concatenate([uv_off_loc, dist_m[:, None], is_obj[:, None]], axis=1)
 
             if img_full is None:
-                # TurboJPEG partial decode of just the crop region (~3-5ms for 384px MCU-aligned)
+                # TurboJPEG partial decode of just the crop region (~3-5ms for 384px MCU-aligned).
+                # DDAD stores PNG bytes in 'jpg_bytes' — TJ chokes on those, fall back to PIL.
+                blob = inst['jpg_bytes']
+                is_jpeg = (len(blob) > 2 and blob[0] == 0xff and blob[1] == 0xd8)
                 ju0 = (u0 // _MCU) * _MCU
                 jv0 = (v0 // _MCU) * _MCU
                 ju1 = min(IW, ((u0 + cs + _MCU - 1) // _MCU) * _MCU)
                 jv1 = min(IH, ((v0 + cs + _MCU - 1) // _MCU) * _MCU)
                 jw, jh = ju1 - ju0, jv1 - jv0
-                if _HAVE_TJ:
-                    cropped = _tj.transform(inst['jpg_bytes'], crop=True, x=ju0, y=jv0,
+                if _HAVE_TJ and is_jpeg:
+                    cropped = _tj.transform(blob, crop=True, x=ju0, y=jv0,
                                              w=jw, h=jh, perfect=False)
                     arr = np.asarray(_tj.decompress(cropped, pixelformat=_tj.PF.RGB))[:jh, :jw]
                 else:
                     import io
                     from PIL import Image as _PILImage
-                    full = np.asarray(_PILImage.open(io.BytesIO(inst['jpg_bytes'])).convert('RGB'),
+                    full = np.asarray(_PILImage.open(io.BytesIO(blob)).convert('RGB'),
                                       dtype=np.uint8)
                     arr = full[jv0:jv1, ju0:ju1]
                 # Slice to exact (cs, cs) inside the MCU-padded region
@@ -270,19 +275,59 @@ class PandaSetCalibDatasetFull(Dataset):
             img_crop = img_crop.clamp_(0, 255).to(torch.uint8)
 
             vfp = float(K[0, 0]) * S / cs
+
+            # Dense raw point cloud for frustum encoder per-cell context
+            # (uv_off in local crop px, depth normalized /100 to match dist_uvd convention).
+            uv_full_loc = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
+                                     (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1).astype(np.float32)
+            d_full = (z_off[in_crop_off] / 100.0).astype(np.float32)
+            uvd_full_raw = np.concatenate([uv_full_loc, d_full[:, None]], axis=1)
+            n_raw = uvd_full_raw.shape[0]
+            n_full = self.n_full
+            uvd_full_pad = np.zeros((n_full, 3), dtype=np.float32)
+            pad_full = np.ones(n_full, dtype=bool)
+            if n_raw <= n_full:
+                uvd_full_pad[:n_raw] = uvd_full_raw
+                pad_full[:n_raw] = False
+            else:
+                # stratified G×G subsample (one per cell-near-center, then random fill)
+                G = int(np.sqrt(n_full))
+                cell_S2 = float(S) / G
+                cj2 = np.clip((uv_full_loc[:, 0] / cell_S2).astype(np.int32), 0, G - 1)
+                ck2 = np.clip((uv_full_loc[:, 1] / cell_S2).astype(np.int32), 0, G - 1)
+                cid2 = ck2 * G + cj2
+                du = uv_full_loc[:, 0] - (cj2 + 0.5) * cell_S2
+                dv = uv_full_loc[:, 1] - (ck2 + 0.5) * cell_S2
+                d2_2 = du * du + dv * dv
+                ord2 = np.lexsort((d2_2, cid2))
+                _, fp = np.unique(cid2[ord2], return_index=True)
+                kept = ord2[fp]
+                if len(kept) < n_full:
+                    rest = np.setdiff1d(np.arange(n_raw), kept, assume_unique=False)
+                    if len(rest):
+                        fill = np.random.choice(rest, size=min(n_full - len(kept), len(rest)),
+                                                replace=False)
+                        kept = np.concatenate([kept, fill])
+                kept = kept[:n_full]
+                uvd_full_pad[:len(kept)] = uvd_full_raw[kept]
+                pad_full[:len(kept)] = False
+
             self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
                                     scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
             return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
-                    torch.tensor(vfp, dtype=torch.float32))
+                    torch.tensor(vfp, dtype=torch.float32),
+                    torch.from_numpy(uvd_full_pad), torch.from_numpy(pad_full))
 
         return self[random.randint(0, len(self) - 1)]
 
 
 def collate_full(batch):
-    """Pad ragged uvd tensors and stack img/vfp."""
-    imgs, trues, dists, vfps = zip(*batch)
+    """Pad ragged uvd tensors and stack img/vfp + uvd_full/pad_full (REQUIRED for frustum)."""
+    imgs, trues, dists, vfps, uvd_fulls, pad_fulls = zip(*batch)
     imgs = torch.stack(imgs)            # (B, 3, S, S)
     vfps = torch.stack(vfps)            # (B,)
+    uvd_full_t = torch.stack(uvd_fulls)  # (B, n_full, 3)
+    pad_full_t = torch.stack(pad_fulls)  # (B, n_full)
     Nmax = max(t.shape[0] for t in trues)
     B = len(trues)
     Cdim = trues[0].shape[1]
@@ -294,4 +339,4 @@ def collate_full(batch):
         true_p[k, :n] = t
         dist_p[k, :n] = d
         pad[k, :n] = False
-    return imgs, true_p, dist_p, pad, vfps
+    return imgs, true_p, dist_p, pad, vfps, uvd_full_t, pad_full_t

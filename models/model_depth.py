@@ -73,14 +73,64 @@ class FrameTokenEncoder(nn.Module):
 
 
 class FrustumLocalEncoder(nn.Module):
-    """Local neighborhood feature via box-filter + top-k + MaxPool (PointNet2 style).
+    """Per-cell local-neighborhood feature for the LiDAR query stream.
 
-    For each point i, finds neighbors j where |Δu| < r_uv AND |Δv| < r_uv AND |Δd| < r_d,
-    takes the k UV-nearest, applies shared MLP on relative (Δu, Δv, Δd), MaxPool.
+    PURPOSE
+    -------
+    The cross-attention transformer is good at long-range image↔point reasoning,
+    but a single query token (one LiDAR point per occupied cell) carries no
+    information about *what's around it in 3D*. This encoder fills that gap by
+    summarizing, for every query, the local 3D neighborhood structure visible
+    in the dense raw point cloud of the same crop. Conceptually it is the
+    PointNet++ "set-abstraction" trick: per-point local feature = MLP +
+    permutation-invariant pool over a small neighborhood.
+
+    GEOMETRY
+    --------
+    The crop has been resized to (img_size × img_size) pixels and binned into a
+    grid_n × grid_n grid, so each cell is `cell_px = img_size / grid_n` wide.
+    The dataset supplies:
+      • query_uvd   (B, N_q, 3)  one LiDAR point per occupied cell, near cell center
+      • full_uvd    (B, N_kv, 3) the dense raw LiDAR points inside the crop
+                                  (≈ hundreds–thousands), padded to a fixed N_kv
+      • full_pad_mask (B, N_kv)   True = padded slot to ignore
+    Coordinates: u, v in crop pixels [0, img_size]; d = depth_meters / 100
+    (matching dist_uvd's convention so r_d=0.004 ≈ 0.4m).
+
+    NEIGHBORHOOD SELECTION
+    ----------------------
+    For each query Qi, build a 3D box around it of half-width
+        Δu, Δv  ≤  r_uv_cells * cell_px         (image-plane radius)
+        Δd      ≤  r_d                          (depth radius)
+    `r_uv_cells` is in *cell units* (default 1.5 = own cell + ~half of each
+    8-neighbor) so the same hyper-parameter behaves identically across S=64,
+    S=128, S=256 once grid_n is fixed. From the points landing in that box,
+    keep the `k` nearest in (Δu, Δv) — top-k on UV distance only.
+
+    AGGREGATION
+    -----------
+    The k chosen neighbors carry features (Δu, Δv, Δd) relative to the query
+    (intentionally relative, not absolute, so the MLP is translation-invariant
+    in image plane). A 3-layer MLP lifts each to d_out, then channel-wise
+    MaxPool over the k neighbors gives the per-query feature, summed into the
+    transformer's query stream. Padded / no-neighbor cases produce a zero
+    feature (graceful, but logged in vis tools).
+
+    SCALING / ASSUMPTIONS
+    ---------------------
+    - r_uv_cells × cell_px is the only image-plane scale knob. Don't pass a
+      fixed pixel value — it would silently break when img_size or grid_n
+      changes (this is what bit v504r for a month).
+    - full_uvd MUST be passed; silent fallback to query-self pooling has been
+      removed and the call now raises if missing.
+    - The encoder is geometry-only (no image features, no learned positions).
+      Image context comes from cross-attention later in the network.
     """
-    def __init__(self, d_out: int = D_DIM, r_uv: float = 8.0, r_d: float = 0.004, k: int = 8):
+    def __init__(self, d_out: int = D_DIM, r_uv_cells: float = 1.5, r_d: float = 0.004,
+                 k: int = 8, grid_n: int = 16):
         super().__init__()
-        self.r_uv = r_uv
+        self.r_uv_cells = r_uv_cells   # neighborhood radius in cell units (1.0 = own cell, 1.5 = own + 8-neighbors)
+        self.grid_n = grid_n
         self.r_d  = r_d
         self.k    = k
         self.mlp = nn.Sequential(
@@ -90,9 +140,10 @@ class FrustumLocalEncoder(nn.Module):
         )
 
     def forward(self, query_uvd: torch.Tensor,
-                full_uvd: torch.Tensor = None,
-                full_pad_mask: torch.Tensor = None,
-                query_pad_mask: torch.Tensor = None) -> torch.Tensor:
+                full_uvd: torch.Tensor,
+                full_pad_mask: torch.Tensor,
+                query_pad_mask: torch.Tensor = None,
+                img_size: int = 64) -> torch.Tensor:
         """Local-feature encoding.
 
         For each *query* point, find neighbors in *full_uvd* via box filter
@@ -100,26 +151,31 @@ class FrustumLocalEncoder(nn.Module):
 
         Args:
             query_uvd:      (B, N_q, 3)  U,V in [0,img_size], D in [0,1]
-            full_uvd:       (B, N_kv, 3)  context point cloud. If None, falls
-                             back to legacy single-set behavior (full = query).
+            full_uvd:       (B, N_kv, 3)  REQUIRED dense raw point cloud.
             full_pad_mask:  (B, N_kv) bool — True = padded entry to ignore
             query_pad_mask: (B, N_q)  bool — kept for API compat; not used here
+            img_size:       crop pixel side at the resolution `query_uvd` lives in.
 
         Returns:
             (B, N_q, d_out) — local feature per query point
         """
-        if full_uvd is None:
-            full_uvd = query_uvd
-            if full_pad_mask is None:
-                full_pad_mask = query_pad_mask
+        if full_uvd is None or full_pad_mask is None:
+            raise ValueError(
+                "FrustumLocalEncoder.forward: full_uvd AND full_pad_mask are required. "
+                "Silent fallback to query-self pooling was removed — it broke a month "
+                "of v504r training (frustum encoded zero local context)."
+            )
+        cell_px = float(img_size) / float(self.grid_n)
+        r_uv = self.r_uv_cells * cell_px
+
         B, N_q, _ = query_uvd.shape
         N_kv = full_uvd.shape[1]
 
         # relative coords: rel[b, i, j] = full_uvd[b, j] - query_uvd[b, i]
         rel = full_uvd.unsqueeze(1) - query_uvd.unsqueeze(2)   # (B, N_q, N_kv, 3)
 
-        in_box = ((rel[..., 0].abs() < self.r_uv) &
-                  (rel[..., 1].abs() < self.r_uv) &
+        in_box = ((rel[..., 0].abs() < r_uv) &
+                  (rel[..., 1].abs() < r_uv) &
                   (rel[..., 2].abs() < self.r_d))
         # exclude exact self-coord matches (when query is a subset of full)
         self_match = ((rel[..., 0] == 0) & (rel[..., 1] == 0) & (rel[..., 2] == 0))
@@ -194,16 +250,16 @@ class LocalNeighborhood3D(nn.Module):
         return torch.stack([x, y, z], dim=-1)        # (B, N, 3) in metres
 
     def forward(self, query_uvd: torch.Tensor,
-                full_uvd: torch.Tensor = None,
+                full_uvd: torch.Tensor,
+                full_pad_mask: torch.Tensor,
                 vfp: torch.Tensor = None,
                 img_size: int = 64,
-                full_pad_mask: torch.Tensor = None,
                 query_pad_mask: torch.Tensor = None) -> torch.Tensor:
-        if full_uvd is None:
-            full_uvd = query_uvd
-            if full_pad_mask is None:
-                full_pad_mask = query_pad_mask
-
+        if full_uvd is None or full_pad_mask is None:
+            raise ValueError(
+                "LocalNeighborhood3D.forward: full_uvd AND full_pad_mask are required. "
+                "Silent fallback to query-self pooling was removed."
+            )
         Pq = self._to_3d(query_uvd, vfp, img_size)         # (B, N_q, 3)
         Pk = self._to_3d(full_uvd,  vfp, img_size)         # (B, N_kv, 3)
         rel = Pk.unsqueeze(1) - Pq.unsqueeze(2)             # (B, N_q, N_kv, 3) metres
@@ -254,7 +310,8 @@ class CalibNetDepth(nn.Module):
     def __init__(self, d: int = D_DIM, img_size: int = 128, in_channels: int = 1,
                  n_layers: int = 3, self_first: bool = False, kv_self_attn: bool = False,
                  cross_temp: float = 1.0, use_convnext: bool = False,
-                 use_frustum: bool = False, r_uv: float = 8.0, r_d: float = 0.004, k_nb: int = 8,
+                 use_frustum: bool = False, r_uv_cells: float = 1.5, r_d: float = 0.004,
+                 k_nb: int = 8, frustum_grid_n: int = 16,
                  deform_mode: str = 'none', deform_n_points: int = 4,
                  use_frame_token: bool = False, frame_token_side: int = 8,
                  use_lidar_kv: bool = False, use_pose_emb: bool = False,
@@ -279,7 +336,8 @@ class CalibNetDepth(nn.Module):
                                                     k_per_scale=local_3d_k)
             self._is_3d_local = True
         else:
-            self.frustum_enc = (FrustumLocalEncoder(d, r_uv=r_uv, r_d=r_d, k=k_nb)
+            self.frustum_enc = (FrustumLocalEncoder(d, r_uv_cells=r_uv_cells, r_d=r_d,
+                                                     k=k_nb, grid_n=frustum_grid_n)
                                 if use_frustum else None)
             self._is_3d_local = False
         self.frame_enc   = FrameTokenEncoder(d, m_side=frame_token_side) if use_frame_token else None
@@ -363,21 +421,25 @@ class CalibNetDepth(nn.Module):
 
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
+            if distorted_uvd_full is None or pad_full is None:
+                raise ValueError(
+                    "CalibNetDepth.forward: distorted_uvd_full + pad_full are REQUIRED "
+                    "when use_frustum=True or use_3d_local=True. The dataset/collate "
+                    "must surface the dense raw point cloud per crop. Silent fallback "
+                    "removed (broken frustum invalidated v504r runs)."
+                )
             if getattr(self, '_is_3d_local', False):
-                q = q + self.frustum_enc(distorted_uvd, vfp=vfp,
-                                          img_size=self.img_size,
-                                          full_uvd=distorted_uvd_full,
-                                          full_pad_mask=pad_full,
-                                          query_pad_mask=key_padding_mask)
-            else:
-                # KEY: pass dense uvd_full as the context source so per-cell
-                # PointNet (= MLP + MaxPool over r_uv-box neighborhood) actually
-                # has neighbors to pool. Without full_uvd, frustum falls back
-                # to query-self where neighbors are 0-1 per query (= no signal).
                 q = q + self.frustum_enc(distorted_uvd,
                                           full_uvd=distorted_uvd_full,
                                           full_pad_mask=pad_full,
+                                          vfp=vfp, img_size=self.img_size,
                                           query_pad_mask=key_padding_mask)
+            else:
+                q = q + self.frustum_enc(distorted_uvd,
+                                          full_uvd=distorted_uvd_full,
+                                          full_pad_mask=pad_full,
+                                          query_pad_mask=key_padding_mask,
+                                          img_size=self.img_size)
 
         # pose_emb: per-sample (SE3=0 for calib) + log(vfp) → D-dim bias.
         # Broadcast added to Q (per-point) AND to KV (image tokens, lidar tokens).

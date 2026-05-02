@@ -41,16 +41,19 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     import time as _time
     _t_start = _time.time()
     _last_log_step = 0
-    for imgs, true_uvd, dist_uvd, pad_mask, vfp in loader:
+    for imgs, true_uvd, dist_uvd, pad_mask, vfp, uvd_full, pad_full in loader:
         # dataset returns uint8 to cut IPC 4x; convert to float on GPU
         imgs     = imgs.to(DEVICE, non_blocking=True).float().div_(255.0)
         true_uvd = true_uvd.to(DEVICE, non_blocking=True)
         dist_uvd = dist_uvd.to(DEVICE, non_blocking=True)
         pad_mask = pad_mask.to(DEVICE, non_blocking=True)
         vfp      = vfp.to(DEVICE, non_blocking=True)
+        uvd_full = uvd_full.to(DEVICE, non_blocking=True)
+        pad_full = pad_full.to(DEVICE, non_blocking=True)
         gt       = true_uvd[..., :2] - dist_uvd[..., :2]
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp)
+            params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
+                            distorted_uvd_full=uvd_full, pad_full=pad_full)
             valid  = ~pad_mask
             loss   = gaussian2d_nll(params[valid], gt[valid])
         if train:
@@ -270,7 +273,7 @@ def main(cfg=None):
         for idx in idxs[:200]:
             if saved >= n: break
             try:
-                img, true_uvd, dist_uvd, vfp = ds[idx]
+                img, true_uvd, dist_uvd, vfp, uvd_full_v, pad_full_v = ds[idx]
             except Exception:
                 continue
             is_obj = dist_uvd[:, 3].numpy() > 0.5
@@ -286,7 +289,9 @@ def main(cfg=None):
                 p = model(img_gpu,
                           dist_uvd.unsqueeze(0).to(DEVICE)[..., :3],
                           key_padding_mask=pad,
-                          vfp=vfp.view(1).to(DEVICE))[0].float().cpu().numpy()
+                          vfp=vfp.view(1).to(DEVICE),
+                          distorted_uvd_full=uvd_full_v.unsqueeze(0).to(DEVICE),
+                          pad_full=pad_full_v.unsqueeze(0).to(DEVICE))[0].float().cpu().numpy()
             true_uv = true_uvd[:,:2].numpy(); dist_uv = dist_uvd[:,:2].numpy()
             pred_uv = dist_uv + p[:,:2]
             err_b_obj = float(_np.linalg.norm(dist_uv[is_obj] - true_uv[is_obj], axis=1).mean())
