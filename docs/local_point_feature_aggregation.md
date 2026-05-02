@@ -290,7 +290,61 @@ ahead.
   via the new `uvd_full / pad_full` pair (`datasets/pandaset_full.py`,
   `scripts/training/train_ps_v3.py`).
 
-## 9. Code
+## 9. Ablation — does the frustum encoder actually help?
+
+All of §3–§7 justify *how* the encoder is designed. This section is the
+end-to-end answer to "does turning it off hurt val NLL?", run on PandaSet
+on dgx2 4× V100, per-rank bs=64 / global=256, FP16 mixed precision,
+identical everything else except `--no-frustum`.
+
+![val_nll, 100EP, frustum on vs off](assets/frustum/val_nll_frustum_ablation_100ep.png)
+
+| run | frustum | epochs | best val NLL | ClearML task id |
+|-----|---------|-------:|-------------:|------------------|
+| `ps_ddp_v10_bs64_100ep_frustum`   | **on**  | 100 | **1.5874** | `7570aa2cc45643ddba0ba501dbc275df` |
+| `ps_ddp_v10b_bs64_100ep_nofrustum`| off     | 100 |   1.7052 | `ea8c83efbec54c55936d1a8c472a2be8` |
+| `ps_ddp_v10c_bs64_200ep_frustum_long` | on (200EP) | 200 (in progress) | **1.4877 @ EP110** and still dropping | `aca6e76f5bef4733bfbc3564e2678263` |
+
+**Δ(val NLL) = +0.1178, i.e. the frustum encoder is 6.9 % better** at
+matched compute. The two runs share every other knob (seed, LR schedule,
+crop range, augmentation σ, DDP topology); the only difference is whether
+`CalibNetDepth.frustum_enc` is instantiated and whether
+`distorted_uvd_full` / `pad_full` flow into it.
+
+Shape of the curves (right panel):
+
+* Both runs start at ≈ 3.5 val NLL and track each other for the first
+  ~15 epochs — the encoder contributes almost nothing while the cross-
+  attention is still learning coarse projection.
+* From ~EP 20 onward the blue (frustum) curve is consistently below the
+  red one; the gap is steady at ~0.1–0.2 NLL and widens slightly in the
+  tail.
+* Neither run has flattened at EP 100 — the 200EP `v10c` long-train
+  confirms this: same config as `v10` but with 200EP cosine schedule
+  reaches **val NLL 1.488 at EP 110** (below v10's EP100 best) and was
+  still improving at last scrape. A longer schedule is clearly leaving
+  accuracy on the table; 100EP is an underfit comparison, not a plateau.
+
+Interpretation, cross-referenced with the per-dataset vis in §2 and the
+one-layer-mean vs two-layer argument in §3:
+
+* The 6.9 % gap is on the lower end of what PointNet++ vs no-local papers
+  show, and that's expected — PandaSet has a 128-line lidar in front,
+  so each query cell is already relatively well-populated. Sparse lidar
+  datasets (Waymo rear quadrants, ZOD) should show a bigger gap; that's
+  the next ablation target.
+* The fact that the gap opens *after* EP 15 and not before suggests the
+  encoder is not just giving the model a richer positional prior — it's
+  providing information the cross-attention can't recover from coarse-
+  scale image features alone. This matches the "own-UV-cell is too
+  coarse for object-scale depth discontinuities" argument in §1.
+
+For the qualitative "*which* scenes benefit" split (per-sample Δ on the
+same val indices with frustum-on vs frustum-off models) — see the
+follow-up `docs/frustum_qualitative_compare.md` once those vis runs
+land.
+
+## 10. Code
 
 * Encoder: [`models/model_depth.py::FrustumLocalEncoder`](../models/model_depth.py)
 * Model wiring: [`models/model_depth.py::CalibNetDepth.forward`](../models/model_depth.py)
