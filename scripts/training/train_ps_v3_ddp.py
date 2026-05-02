@@ -65,14 +65,17 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
     obj_errs, bg_errs = [], []
     _t_start = time.time()
     _last_log_step = 0
-    for imgs, true_uvd, dist_uvd, pad_mask, vfp in loader:
+    for imgs, true_uvd, dist_uvd, pad_mask, vfp, dist_uvd_full, pad_full in loader:
         # accel.prepare already puts tensors in device via DataLoader wrap, but
         # the collate returns uint8 images — convert to float on-device here.
         imgs     = imgs.float().div_(255.0)
         gt       = true_uvd[..., :2] - dist_uvd[..., :2]
         # Accelerate manages autocast via its mixed_precision plugin; we just
         # call the model normally.
-        params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp)
+        # NOTE: dist_uvd_full / pad_full are REQUIRED when frustum_enc is
+        # enabled (model raises otherwise). Harmless extra kwargs when off.
+        params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
+                       distorted_uvd_full=dist_uvd_full[..., :3], pad_full=pad_full)
         valid  = ~pad_mask
         loss   = gaussian2d_nll(params[valid], gt[valid])
         if train:
@@ -209,7 +212,7 @@ def main(cfg=None):
     model = CalibNetDepth(img_size=c["img_size"], in_channels=c["in_channels"],
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
                           use_convnext=c.get("use_convnext", False),
-                          use_frustum=c.get("use_frustum", False),
+                          use_frustum=c.get("use_frustum", True),
                           deform_mode=c.get("deform_mode", "none"))
     # torch.compile BEFORE accel.prepare so DDP wraps the compiled graph.
     # mode='reduce-overhead' is the sweet spot: CUDA graph capture for static
@@ -356,6 +359,8 @@ if __name__ == "__main__":
     ap.add_argument('--deform-mode', default=None)
     ap.add_argument('--train-size', type=int, default=None)
     ap.add_argument('--val-size', type=int, default=None)
+    ap.add_argument('--no-frustum', action='store_true',
+                    help='disable FrustumLocalEncoder (ablation vs CFG default)')
     ap.add_argument('--clearml', action='store_true')
     ap.add_argument('--why',     default='')
     args = ap.parse_args()
@@ -382,6 +387,7 @@ if __name__ == "__main__":
     if args.deform_mode is not None: cfg['deform_mode'] = args.deform_mode
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
+    if args.no_frustum: cfg['use_frustum'] = False
 
     # ClearML init happens before main so the task is available to cml_logger
     if args.clearml:
