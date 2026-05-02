@@ -257,8 +257,15 @@ def main(cfg=None):
                                                   min_crop_px=c.get('min_crop_px', 128),
                                                   max_crop_px=c.get('max_crop_px', 384),
                                                   oversample=1)
-        import random as _r, numpy as _np
-        idxs = list(range(len(ds))); _r.Random(epoch).shuffle(idxs)
+        import random as _r, numpy as _np, json as _json
+        # prefer idxs picked by vis_pretrain so pretrain & ep panels show the same samples
+        sample_idx_fp = exp_dir / 'vis_pretrain' / 'sample_idxs.json'
+        if sample_idx_fp.exists():
+            idxs = _json.loads(sample_idx_fp.read_text())
+            obj_filter = False  # already curated
+        else:
+            idxs = list(range(len(ds))); _r.Random(0).shuffle(idxs)
+            obj_filter = True
         S = int(c['img_size']); saved = 0
         for idx in idxs[:200]:
             if saved >= n: break
@@ -267,10 +274,11 @@ def main(cfg=None):
             except Exception:
                 continue
             is_obj = dist_uvd[:, 3].numpy() > 0.5
-            if not is_obj.any(): continue
-            d_obj = dist_uvd[is_obj, :2].numpy()
-            if max(float(d_obj[:,0].max()-d_obj[:,0].min()),
-                   float(d_obj[:,1].max()-d_obj[:,1].min())) < 16: continue
+            if obj_filter:
+                if not is_obj.any(): continue
+                d_obj = dist_uvd[is_obj, :2].numpy()
+                if max(float(d_obj[:,0].max()-d_obj[:,0].min()),
+                       float(d_obj[:,1].max()-d_obj[:,1].min())) < 16: continue
             Nmax = true_uvd.shape[0]
             pad = torch.zeros(1, Nmax, dtype=torch.bool, device=DEVICE)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16), torch.no_grad():
@@ -285,23 +293,60 @@ def main(cfg=None):
             err_a_obj = float(_np.linalg.norm(pred_uv[is_obj] - true_uv[is_obj], axis=1).mean())
             err_b_bg  = float(_np.linalg.norm(dist_uv[~is_obj] - true_uv[~is_obj], axis=1).mean()) if (~is_obj).any() else float('nan')
             err_a_bg  = float(_np.linalg.norm(pred_uv[~is_obj] - true_uv[~is_obj], axis=1).mean()) if (~is_obj).any() else float('nan')
-            fig, ax = plt.subplots(figsize=(4, 4), dpi=96)
-            ax.imshow(_np.clip(img.permute(1,2,0).cpu().numpy(), 0, 1))
-            uc = pred_uv[:,0]-dist_uv[:,0]; vc = pred_uv[:,1]-dist_uv[:,1]
+            # 2-panel: full image + crop tile (matches vis_pretrain layout for cross-ep tracking)
+            from scripts.visualization.vis_pretrain import (
+                _full_proj as _vp_full_proj, project_cuboids as _vp_proj_cubs,
+                draw_cuboids as _vp_draw_cubs, patch_entropy as _vp_entropy)
+            inst = ds._load_inst(idx)
+            box  = getattr(ds, '_last_crop', None)
+            full, uv_full, vis_full, is_obj_full, IH_f, IW_f = _vp_full_proj(inst)
+            cubs_proj = _vp_proj_cubs(inst.get('cuboids', []),
+                                       inst['T_gt'].numpy(), inst['K_full'].numpy())
+            crop_np = img.permute(1, 2, 0).cpu().numpy()
+            H_bits, lap_var = _vp_entropy(crop_np)
+
+            fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5), dpi=96,
+                                            gridspec_kw={'width_ratios': [16, 9]})
+            axL.imshow(full)
+            axL.set_xlim(0, IW_f); axL.set_ylim(IH_f, 0)  # lock axes BEFORE cuboid lines
+            mfb = vis_full & ~is_obj_full
+            axL.scatter(uv_full[mfb, 0], uv_full[mfb, 1], c='yellow', s=2, marker='x',
+                        linewidths=0.4, alpha=0.5)
+            mfo = vis_full & is_obj_full
+            axL.scatter(uv_full[mfo, 0], uv_full[mfo, 1], c='lime', s=10, marker='x',
+                        linewidths=0.9)
+            _vp_draw_cubs(axL, cubs_proj, color='lime', lw=1.0, alpha=0.8)
+            if box is not None:
+                axL.add_patch(plt.Rectangle((box['u0'], box['v0']), box['cs'], box['cs'],
+                                             fill=False, ec='red', lw=2))
+            axL.set_xlim(0, IW_f); axL.set_ylim(IH_f, 0); axL.axis('off')
+            axL.set_title(f'FULL  scene={inst.get("scene")} f={inst.get("frame")}  '
+                          f'cubs={len(inst.get("cuboids", []))}', fontsize=8)
+
+            axR.imshow(crop_np)
+            uc = pred_uv[:, 0] - dist_uv[:, 0]; vc = pred_uv[:, 1] - dist_uv[:, 1]
             if (~is_obj).any():
-                ax.quiver(dist_uv[~is_obj,0], dist_uv[~is_obj,1], uc[~is_obj], vc[~is_obj],
-                          angles='xy', scale_units='xy', scale=1, color='deepskyblue',
-                          width=0.004, headwidth=3.5, headlength=4, alpha=0.55, zorder=2)
+                axR.quiver(dist_uv[~is_obj, 0], dist_uv[~is_obj, 1], uc[~is_obj], vc[~is_obj],
+                           angles='xy', scale_units='xy', scale=1, color='deepskyblue',
+                           width=0.004, headwidth=3.5, headlength=4, alpha=0.55, zorder=2)
             if is_obj.any():
-                ax.quiver(dist_uv[is_obj,0], dist_uv[is_obj,1], uc[is_obj], vc[is_obj],
-                          angles='xy', scale_units='xy', scale=1, color='orange',
-                          width=0.006, headwidth=3.5, headlength=4, alpha=0.95, zorder=4)
-            ax.scatter(true_uv[is_obj,0], true_uv[is_obj,1], c='lime', s=14, marker='x', linewidths=0.9, zorder=5)
-            ax.scatter(true_uv[~is_obj,0], true_uv[~is_obj,1], c='yellow', s=6, marker='x', linewidths=0.5, alpha=0.5, zorder=3)
-            ax.set_xlim(0, S); ax.set_ylim(S, 0); ax.axis('off')
-            ax.set_title(f"ep{epoch:03d} obj:{err_b_obj:.2f}→{err_a_obj:.2f} bg:{err_b_bg:.2f}→{err_a_bg:.2f}px", fontsize=6)
+                axR.quiver(dist_uv[is_obj, 0], dist_uv[is_obj, 1], uc[is_obj], vc[is_obj],
+                           angles='xy', scale_units='xy', scale=1, color='orange',
+                           width=0.006, headwidth=3.5, headlength=4, alpha=0.95, zorder=4)
+            axR.scatter(true_uv[is_obj, 0], true_uv[is_obj, 1], c='lime', s=14,
+                        marker='x', linewidths=0.9, zorder=5)
+            axR.scatter(true_uv[~is_obj, 0], true_uv[~is_obj, 1], c='yellow', s=6,
+                        marker='x', linewidths=0.5, alpha=0.5, zorder=3)
+            if box is not None and cubs_proj:
+                _vp_draw_cubs(axR, cubs_proj, color='lime', lw=0.9, alpha=0.85,
+                              uv_offset=(box['u0'], box['v0']),
+                              uv_scale=S / float(box['cs']))
+            axR.set_xlim(0, S); axR.set_ylim(S, 0); axR.axis('off')
+            axR.set_title(f'ep{epoch:03d}  obj:{err_b_obj:.2f}→{err_a_obj:.2f} '
+                          f'bg:{err_b_bg:.2f}→{err_a_bg:.2f}px  H={H_bits:.2f}b  lapV={lap_var:.0f}',
+                          fontsize=8)
             plt.tight_layout(pad=0.2)
-            fp = out / f'val_{saved:02d}.png'
+            fp = out / f'val_{saved:02d}_idx{idx:06d}.png'
             plt.savefig(fp, dpi=96, bbox_inches='tight'); plt.close(fig)
             if cml_logger is not None:
                 try: cml_logger.report_image(f'vis_ep', f'sample_{saved:02d}', iteration=epoch, local_path=str(fp))
