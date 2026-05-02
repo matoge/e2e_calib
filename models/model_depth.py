@@ -238,7 +238,8 @@ class FrustumLocalEncoder(nn.Module):
             K_ = K_.view(B, N_q, K_total, h, dh)
             V_ = V_.view(B, N_q, K_total, h, dh)
             attn_logits = (Q.unsqueeze(2) * K_).sum(-1) * scale    # (B, Nq, K, h)
-            attn_logits = attn_logits.masked_fill(valid_mask, -1e9)
+            # FP16-safe: dtype-appropriate -inf, otherwise -1e9 underflows on V100
+            attn_logits = attn_logits.masked_fill(valid_mask, torch.finfo(attn_logits.dtype).min)
             attn = attn_logits.softmax(dim=2)
             out_h = (attn.unsqueeze(-1) * V_).sum(2)               # (B, Nq, h, dh)
             update = layer['out_proj'](out_h.flatten(-2))          # (B, Nq, d_local)
@@ -328,7 +329,7 @@ class LocalNeighborhood3D(nn.Module):
             rel_top = rel.gather(2, idx_exp)                          # (B, N_q, k, 3)
             valid = d_masked.gather(2, idx) < r                       # (B, N_q, k)
             feat = mlp(rel_top)                                       # (B, N_q, k, d_per)
-            feat = feat.masked_fill(~valid.unsqueeze(-1), -1e9)
+            feat = feat.masked_fill(~valid.unsqueeze(-1), torch.finfo(feat.dtype).min)
             feat, _ = feat.max(dim=2)                                 # (B, N_q, d_per)
             feat = feat.masked_fill(
                 ~valid.any(dim=-1, keepdim=True), 0.0)

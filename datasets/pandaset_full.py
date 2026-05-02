@@ -16,20 +16,35 @@ from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
 try:
     import turbojpeg as _tj
+    # PyTurboJPEG class API. One instance per worker process (not thread-safe
+    # across workers, but torch DataLoader forks one process per worker so
+    # each gets its own). Bench on dgx2 (Xeon 8168): PIL full decode 14.5ms,
+    # TJ full decode 6.9ms, TJ crop+decode (384px) 4.5ms → 3.2× vs PIL.
+    _TJ_INST = _tj.TurboJPEG()
+    _TJ_PF_RGB = _tj.TJPF_RGB
     _HAVE_TJ = True
-    _MCU = 16
 except Exception:
     _tj = None
+    _TJ_INST = None
+    _TJ_PF_RGB = None
     _HAVE_TJ = False
+# MCU block size for JPEG; used for crop-aligned partial decode.
+# 16px matches 4:2:0 chroma subsampling. Crop x,y must be multiples of
+# _MCU; width/height are trimmed to image bounds by libjpeg-turbo.
+_MCU = 16
 
 
 def decode_inst_img(inst: dict) -> torch.Tensor:
     """Return (3, H, W) uint8 torch tensor regardless of cache schema.
     New schema: inst['jpg_bytes'] + inst['IH']/['IW'].  Legacy: inst['img']."""
     if 'jpg_bytes' in inst:
-        import io
-        from PIL import Image as _PIL
-        arr = np.asarray(_PIL.open(io.BytesIO(inst['jpg_bytes'])).convert('RGB'), dtype=np.uint8)
+        if _HAVE_TJ:
+            arr = np.asarray(_TJ_INST.decode(inst['jpg_bytes'], pixel_format=_TJ_PF_RGB))
+        else:
+            import io
+            from PIL import Image as _PIL
+            arr = np.asarray(_PIL.open(io.BytesIO(inst['jpg_bytes'])).convert('RGB'),
+                             dtype=np.uint8)
         return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
     return inst['img']
 
@@ -245,7 +260,7 @@ class PandaSetCalibDatasetFull(Dataset):
             dist_uvd = np.concatenate([uv_off_loc, dist_m[:, None], is_obj[:, None]], axis=1)
 
             if img_full is None:
-                # TurboJPEG partial decode of just the crop region (~3-5ms for 384px MCU-aligned).
+                # TurboJPEG partial decode of just the crop region (~4.5ms for 384px MCU-aligned).
                 # DDAD stores PNG bytes in 'jpg_bytes' — TJ chokes on those, fall back to PIL.
                 blob = inst['jpg_bytes']
                 is_jpeg = (len(blob) > 2 and blob[0] == 0xff and blob[1] == 0xd8)
@@ -255,9 +270,8 @@ class PandaSetCalibDatasetFull(Dataset):
                 jv1 = min(IH, ((v0 + cs + _MCU - 1) // _MCU) * _MCU)
                 jw, jh = ju1 - ju0, jv1 - jv0
                 if _HAVE_TJ and is_jpeg:
-                    cropped = _tj.transform(blob, crop=True, x=ju0, y=jv0,
-                                             w=jw, h=jh, perfect=False)
-                    arr = np.asarray(_tj.decompress(cropped, pixelformat=_tj.PF.RGB))[:jh, :jw]
+                    cropped = _TJ_INST.crop(blob, ju0, jv0, jw, jh, preserve=False)
+                    arr = np.asarray(_TJ_INST.decode(cropped, pixel_format=_TJ_PF_RGB))[:jh, :jw]
                 else:
                     import io
                     from PIL import Image as _PILImage
