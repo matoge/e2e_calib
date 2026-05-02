@@ -138,7 +138,7 @@ class FrustumLocalEncoder(nn.Module):
         valid    = uv_d2.gather(2, topk_idx) < 1e8               # (B, N_q, k)
 
         feat = self.mlp(topk_rel)                                # (B, N_q, k, d_out)
-        feat = feat.masked_fill(~valid.unsqueeze(-1), -1e9)
+        feat = feat.masked_fill(~valid.unsqueeze(-1), torch.finfo(feat.dtype).min)
         feat, _ = feat.max(dim=2)                                # (B, N_q, d_out)
         feat = feat.masked_fill(~valid.any(dim=-1, keepdim=True), 0.0)
         return feat
@@ -223,7 +223,7 @@ class LocalNeighborhood3D(nn.Module):
             rel_top = rel.gather(2, idx_exp)                          # (B, N_q, k, 3)
             valid = d_masked.gather(2, idx) < r                       # (B, N_q, k)
             feat = mlp(rel_top)                                       # (B, N_q, k, d_per)
-            feat = feat.masked_fill(~valid.unsqueeze(-1), -1e9)
+            feat = feat.masked_fill(~valid.unsqueeze(-1), torch.finfo(feat.dtype).min)
             feat, _ = feat.max(dim=2)                                 # (B, N_q, d_per)
             feat = feat.masked_fill(
                 ~valid.any(dim=-1, keepdim=True), 0.0)

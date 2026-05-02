@@ -13,6 +13,17 @@ from torch.utils.data import DataLoader, Subset
 torch.set_float32_matmul_precision("high")
 DEVICE = torch.device("cuda")
 
+# Auto-select AMP dtype: BF16 needs compute-cap >= 8.0 (Ampere+) for native
+# Tensor Core support. On Volta/Turing (V100/T4/RTX20xx) BF16 autocast falls
+# through to FP32 Tensor Cores - losing 8-10x throughput vs FP16 TC.
+# Blackwell/Hopper/Ada/Ampere (sm80+) -> BF16 (wider exponent, no loss scaling).
+if torch.cuda.is_available():
+    _cc_major = torch.cuda.get_device_capability(0)[0]
+    _AMP_DTYPE = torch.bfloat16 if _cc_major >= 8 else torch.float16
+else:
+    _AMP_DTYPE = torch.bfloat16
+_NEED_SCALER = (_AMP_DTYPE == torch.float16)
+
 CFG = dict(
     name          = "ps_v3_full",
     n_layers      = 2,
@@ -49,7 +60,7 @@ def epoch_loop(model, loader, optimizer, scaler, train):
         pad_mask = pad_mask.to(DEVICE, non_blocking=True)
         vfp      = vfp.to(DEVICE, non_blocking=True)
         gt       = true_uvd[..., :2] - dist_uvd[..., :2]
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=_AMP_DTYPE):
             params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp)
             valid  = ~pad_mask
             loss   = gaussian2d_nll(params[valid], gt[valid])
@@ -195,6 +206,7 @@ def main(cfg=None):
                           use_frustum=c.get("use_frustum", False),
                           deform_mode=c.get("deform_mode", "none")).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
+    log(f"amp_dtype={_AMP_DTYPE} scaler_enabled={_NEED_SCALER} device={torch.cuda.get_device_name(0)} cc={torch.cuda.get_device_capability(0)}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=c["lr"], weight_decay=1e-3)
     epochs    = c["epochs"]
@@ -204,7 +216,7 @@ def main(cfg=None):
         t = (e-5)/max(1,epochs-5)
         return lr_min_r + (1-lr_min_r)*0.5*(1+math.cos(math.pi*t))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    scaler    = torch.GradScaler(device="cuda")
+    scaler    = torch.GradScaler(device="cuda", enabled=_NEED_SCALER)
     best_val  = float("inf")
     ckpt      = exp_dir / "best_model.pt"
     t0        = time.time()
@@ -281,7 +293,7 @@ def main(cfg=None):
                        float(d_obj[:,1].max()-d_obj[:,1].min())) < 16: continue
             Nmax = true_uvd.shape[0]
             pad = torch.zeros(1, Nmax, dtype=torch.bool, device=DEVICE)
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16), torch.no_grad():
+            with torch.autocast(device_type='cuda', dtype=_AMP_DTYPE), torch.no_grad():
                 img_gpu = img.unsqueeze(0).to(DEVICE).float().div_(255.0)
                 p = model(img_gpu,
                           dist_uvd.unsqueeze(0).to(DEVICE)[..., :3],
