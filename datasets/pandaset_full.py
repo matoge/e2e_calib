@@ -185,7 +185,7 @@ class PandaSetCalibDatasetFull(Dataset):
             u0 = int(np.clip(pu - cs/2, 0, IW - cs))
             v0 = int(np.clip(pv - cs/2, 0, IH - cs))
 
-            # Pre-filter to crop+10% padding using cached uv_full → cap at 2000 pts
+            # Pre-filter to crop+10% padding using cached uv_full → cap to n_full
             pad_px = int(cs * 0.10)
             in_pad = ((uv_full[:, 0] >= u0 - pad_px) & (uv_full[:, 0] < u0 + cs + pad_px) &
                       (uv_full[:, 1] >= v0 - pad_px) & (uv_full[:, 1] < v0 + cs + pad_px) &
@@ -193,8 +193,8 @@ class PandaSetCalibDatasetFull(Dataset):
             cand_idx = np.where(in_pad)[0]
             if len(cand_idx) < self.min_pts:
                 continue
-            if len(cand_idx) > 2000:
-                cand_idx = np.random.choice(cand_idx, size=2000, replace=False)
+            if len(cand_idx) > self.n_full:
+                cand_idx = np.random.choice(cand_idx, size=self.n_full, replace=False)
             pts_c = pts[cand_idx]                       # (M<=2000, 3)
             uv_gt_c = uv_full[cand_idx]                 # (M, 2) full-image px
 

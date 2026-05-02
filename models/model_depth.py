@@ -127,7 +127,7 @@ class FrustumLocalEncoder(nn.Module):
       Image context comes from cross-attention later in the network.
     """
     def __init__(self, d_out: int = D_DIM, r_uv_cells: float = 1.5, r_d: float = 0.004,
-                 k: int = 8, grid_n: int = 16):
+                 k: int = 16, grid_n: int = 16):
         super().__init__()
         self.r_uv_cells = r_uv_cells   # neighborhood radius in cell units (1.0 = own cell, 1.5 = own + 8-neighbors)
         self.grid_n = grid_n
@@ -183,15 +183,29 @@ class FrustumLocalEncoder(nn.Module):
         if full_pad_mask is not None:
             in_box = in_box & ~full_pad_mask.unsqueeze(1)        # (B, 1, N_kv)
 
-        uv_d2 = rel[..., 0] ** 2 + rel[..., 1] ** 2              # (B, N_q, N_kv)
-        uv_d2 = uv_d2.masked_fill(~in_box, 1e9)
+        # Density-invariant sampling: pick up to k points uniformly at random
+        # from the box, NOT the k UV-nearest. UV-nearest biases toward dense
+        # clusters (Waymo: all k crammed within ~1px of query), random covers
+        # the full box radius even when point density varies wildly across
+        # datasets / depths. Trick: assign random scores, mask out-of-box to
+        # -1, top-k largest scores = random k from the in-box set.
+        rand_score = torch.rand_like(in_box, dtype=rel.dtype)
+        rand_score = rand_score.masked_fill(~in_box, -1.0)       # (B, N_q, N_kv)
 
         k = min(self.k, N_kv)
-        _, topk_idx = uv_d2.topk(k, dim=-1, largest=False)       # (B, N_q, k)
+        _, topk_idx = rand_score.topk(k, dim=-1, largest=True)   # (B, N_q, k)
 
         idx_exp  = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3)
         topk_rel = rel.gather(2, idx_exp)                        # (B, N_q, k, 3)
-        valid    = uv_d2.gather(2, topk_idx) < 1e8               # (B, N_q, k)
+        valid    = rand_score.gather(2, topk_idx) >= 0           # (B, N_q, k)
+
+        # Debug instrumentation: stash the live selection so vis tools can read
+        # exactly what this forward picked. Always written, only consumed when
+        # a caller looks at it. Detached so they don't pin compute graphs.
+        self._last_topk_idx = topk_idx.detach()
+        self._last_valid    = valid.detach()
+        self._last_r_uv_px  = float(r_uv)
+        self._last_cell_px  = float(cell_px)
 
         feat = self.mlp(topk_rel)                                # (B, N_q, k, d_out)
         feat = feat.masked_fill(~valid.unsqueeze(-1), -1e9)
@@ -311,7 +325,7 @@ class CalibNetDepth(nn.Module):
                  n_layers: int = 3, self_first: bool = False, kv_self_attn: bool = False,
                  cross_temp: float = 1.0, use_convnext: bool = False,
                  use_frustum: bool = False, r_uv_cells: float = 1.5, r_d: float = 0.004,
-                 k_nb: int = 8, frustum_grid_n: int = 16,
+                 k_nb: int = 16, frustum_grid_n: int = 16,
                  deform_mode: str = 'none', deform_n_points: int = 4,
                  use_frame_token: bool = False, frame_token_side: int = 8,
                  use_lidar_kv: bool = False, use_pose_emb: bool = False,
