@@ -138,8 +138,8 @@ With that in place I re-scored all 164 instances and re-rendered the top-8 wins 
 
 I originally expected `n_obj` (number of annotated objects in the crop) to be the splitting variable. It isn't:
 
-- **Wins** span n<sub>obj</sub> ∈ {3, 8, 9, 12, 30, 75, 134, 169}.
-- **Losses** span n<sub>obj</sub> ∈ {21, 35, 55, 60, 149, 149, 149, 169}.
+- **Wins** span n<sub>obj</sub> ∈ \[3, 8, 9, 12, 30, 75, 134, 169\].
+- **Losses** span n<sub>obj</sub> ∈ \[21, 35, 55, 60, 149, 149, 149, 169\].
 
 Both buckets cover sparse and crowded alike. The real split is on baseline difficulty:
 
