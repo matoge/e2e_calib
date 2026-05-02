@@ -518,192 +518,155 @@ objects). Sparse crops (< 30 pts) and already-solved samples (err_no
 < 1 px) regress slightly; the regression is inside the noise band
 for downstream bundle adjustment.
 
-### 9.6 Where the frustum encoder wins, loses, or doesn't matter — memo
+### 9.6 Where the frustum encoder wins, loses, or doesn't matter — pixel-verified
 
-This is a running memo of scene-level intuitions. To be split out into its
-own doc once the picture stabilizes; for now kept here so §9 scalar
-numbers stay grounded in what they actually represent. (Sourced from
-the 164-inst per-sample sweep in §9.5 / `docs/frustum_qualitative_compare.md`.)
+**v2 rewrite (2026-05-03).** The prior §9.6 (kept in git history, v1)
+used `frustum_qualitative_compare.py`, which re-read `val_ds[i]` three
+times per sample — once to score w/o frustum, once to score w/ frustum,
+once to render — so the two scores + the render were all on
+*different* stochastic crops/perturbations because
+`PandaSetCalibDatasetFull.__getitem__` draws fresh `np.random` numbers
+every call. Per-sample Δ's from v1 were therefore noise measurements,
+not model measurements; top-K lists shifted under re-runs (idx 119
+showed up as the #1 win in v1 and as the #3 hurt in v2 — same
+sample, opposite sign). **All v1 per-sample interpretations are
+retracted.**
 
-All references below link to per-sample render PNGs produced by
-`/tmp/frustum_qualitative_compare.py`. In every panel the left half is
-**w/o frustum (v10b)** and the right half is **w/ frustum (v10)**;
-orange arrows = per-point predicted flow, green × = GT target UV, cyan
-= BG points. Look at the *consistency* of orange arrows on the object
-mass between the two halves — the frustum effect is not about arrow
-length, it's about arrows on the same object pointing the same way.
+The v2 pipeline (`/tmp/frustum_qualitative_compare_v2.py`) fetches one
+deterministic `(img, pts_uvd, grid_bin, target_uv_obj)` tuple per val
+index (seed-fixed `np.random` + `random` around each `val_ds[i]` call,
+state restored afterward), reuses that cached tuple for both model
+inferences and for the render, and scores over the 164 unique val
+insts. Aggregate: mean obj-L2 err **w/o frustum = 2.082 px**, **w/
+frustum = 1.819 px**, Δ = **+0.263 px** mean improvement
+(`/tmp/frustum_v2_run.log`). Checkpoints: 140/142 state_dict keys
+differ between `ps_ddp_v10/best_model.pt` (w/ frustum) and
+`ps_ddp_v10b/best_model.pt` (w/o frustum); per-sample prediction-diff
+max spans 1.6–4.4 px, i.e. the models really do differ — it isn't a
+load-path identity collision.
 
-**Wins — "dense object footprint + object-surface-vs-ground depth
-ambiguity"**
+Every panel below is at `img_size = 64` crop resolution, with
+**orange = per-point predicted flow on object points** (after
+projecting crop-perturbed UV back toward the GT UV), **green × = GT
+target UV**, **cyan = BG flow**. Left = w/o frustum (v10b), right =
+w/ frustum (v10).
 
-Qualitative val sweep (v10 vs v10b, 164 unique insts, see
-`docs/frustum_qualitative_compare.md`) isolates the regime where the
-frustum encoder is decisive:
+#### Wins — 8 samples where the frustum encoder pulls err down
 
-- n_obj ≈ 60–140 points per crop. The object silhouette is sampled by
-  many cells, so the local neighborhood (k = 32 random neighbors from
-  the dense uvd_full pool) spans both *on-object* and *on-ground* points
-  inside the ±depth slab.
-- The cross-attn query, without frustum, sees only its own UV location
-  and an averaged image response at that UV. When the object is close
-  and its silhouette overlaps the ground at similar UV (side-view cars,
-  pedestrians, cones), the per-point target flow direction is different
-  between "object surface" and "ground beneath at same UV" — and the
-  image encoder alone cannot make that split.
-- With frustum: the query also sees, via 2-layer PT attention, the
-  *pattern* of neighbor depths around it. Points on the object surface
-  have neighbors at a consistent depth ≈ d_self; ground points have
-  neighbors distributed on a depth gradient. That's a **geometric
-  signal that is strictly unavailable to the image-only path**.
-- Top 5 win samples all end at err < 1 px with frustum (idx 119, 49, 92,
-  148, 19), starting from err ∈ [2.7, 4.1] px without it. This is the
-  aggregate evidence from the 164-inst val sweep. The flip is *not*
-  necessarily visible in the quiver renders below — see the "Honest
-  caveat" block — the visibility threshold for the arrow plot is around
-  baseline err ≳ 4 px, and these wins sit right at the edge.
+Top 8 by Δ = err_no − err_fr, n_obj = # object points contributing to
+the crop's obj-L2.
 
-Key visual evidence (each panel: left = w/o frustum, right = w/ frustum).
+| idx | err w/o | err w/ | Δ | n_obj | pixel-level what happens |
+|-----|---------|--------|-------|-------|---------------------------|
+| 129 | 9.81 | 6.16 | +3.65 | 3 | sparse far-range points; w/o over-shoots downward, w/ keeps direction but halves magnitude |
+| 131 | 5.59 | 2.12 | +3.47 | 134 | dense SUV flank (side-view vehicle) — w/ applies a **uniform horizontal-left shift across all 134 surface points** that lines them up with the green × grid |
+| 93 | 4.78 | 1.48 | +3.30 | 13 | curb-line pedestrian group — w/o shoves them upward off the sidewalk, w/ replaces that with a small diagonal that lands on the green × |
+| 72 | 6.99 | 3.93 | +3.06 | 67 | w/o's arrows are nearly vertical, w/ rotates the whole object-mass flow to a down-right diagonal that matches the GT cluster |
+| 79 | 3.71 | 0.86 | +2.85 | 1 | isolated single point — w/o lands ~4 px upper-left, w/ snaps almost onto the green × |
+| 7  | 5.86 | 3.16 | +2.70 | 75 | 75 upward-pointing arrows — w/ **keeps the direction** (still up) but halves the length, meeting the GT closer |
+| 97 | 4.09 | 1.69 | +2.40 | 64 | 64 diagonal arrows toward upper-left — again same direction, reduced magnitude |
+| 70 | 2.93 | 0.81 | +2.11 | 95 | 95 object points shifted uniformly left, landing exactly on the green × row |
 
-**Honest caveat on reading these panels.** For the "wins" samples below,
-the numeric error is reported in crop pixels at img_size = 64. But the
-crop was originally 128 – 384 px and was downsampled to 64 for the
-network; the arrow quiver is drawn on the original-resolution backdrop,
-not on the 64 × 64 output. For wins where the no-frustum baseline is
-already at err ∈ [2, 5] px (evaluated at img_size = 64), both panels
-will look qualitatively similar because a 4-px arrow at 64 × 64 is a
-sub-car-length arrow on the original backdrop. **The justification for
-calling these "wins" is the per-sample aggregate number, not a
-direction-flip visible by eye.** See the "Failure mode 2" panels below
-for a contrasting case (err_no = 0.44 vs err_fr = 4.25) where the arrow
-difference is visually obvious — that gap only becomes visible around
-Δ ≥ 4 px of baseline error.
+**Pattern across all 8 wins.** Frustum is not flipping arrow direction
+— the image path already has the direction roughly right. Frustum is
+either (a) **modulating magnitude** (idx 7, 97, 131, 70: "same
+direction, smaller") or (b) **rotating direction to the true target
+cluster** (idx 72, 93). Both are consistent with the §2 thesis:
+per-point depth-slab neighborhoods disambiguate which of several
+co-located (same-UV) targets each query point should snap to, and the
+correction shows up as a coherent, shared flow field over the whole
+object mass — **not** point-by-point denoising.
 
-**idx 119 — err 4.06 → 0.73 px, n_obj=137.** Close bus, dense
-footprint. The textbook "dense object + depth-slab disambiguation"
-regime by construction (high n_obj, on-ground + on-vehicle-surface
-points in the same UV cells). Both panels *look* similar by eye (arrows
-on the bus hit the green × in both); the 4× numeric improvement is
-below arrow-visibility threshold.
+The highest-impact wins concentrate at **dense, close, on-ground
+objects** (n_obj ∈ 64–134; idx 131, 70, 97, 72, 7): the regime where
+object surface and ground share UV cells and the image encoder alone
+cannot split them.
 
-![help_idx0119](assets/frustum/qual/help_idx0119.png)
+![help_idx0131](assets/frustum/qual_v2/help_idx0131.png)
+![help_idx0070](assets/frustum/qual_v2/help_idx0070.png)
+![help_idx0097](assets/frustum/qual_v2/help_idx0097.png)
+![help_idx0072](assets/frustum/qual_v2/help_idx0072.png)
+![help_idx0007](assets/frustum/qual_v2/help_idx0007.png)
+![help_idx0093](assets/frustum/qual_v2/help_idx0093.png)
+![help_idx0079](assets/frustum/qual_v2/help_idx0079.png)
+![help_idx0129](assets/frustum/qual_v2/help_idx0129.png)
 
-**idx 49 — err 3.07 → 0.69 px, n_obj=123.** Same regime: dense
-on-ground object, Δ < 3 px, not visually obvious.
+#### Losses — 8 samples where the frustum encoder pushes err up
 
-![help_idx0049](assets/frustum/qual/help_idx0049.png)
+| idx | err w/o | err w/ | Δ | n_obj | pixel-level what happens |
+|-----|---------|--------|-------|-------|---------------------------|
+| 87  | 2.41 | 4.90 | −2.50 | 35  | w/o has small downward arrows that land near the green × row; w/ swings those to big diagonal-right arrows that over-shoot into empty asphalt |
+| 13  | 3.62 | 5.68 | −2.06 | 4   | only 4 obj points (lamp cluster at night); w/ *erases* the w/o's small correction and leaves them farther off |
+| 119 | 0.88 | 2.72 | −1.85 | 169 | **w/o is already near-perfect (0.88 px)**; w/ applies a structured upward bias across 169 points — classical over-correction |
+| 34  | 0.50 | 2.15 | −1.64 | 30  | same pattern: w/o = 0.50 px (basically done); w/ drifts the whole cluster diagonally away |
+| 149 | 0.73 | 2.21 | −1.47 | 78  | side-view red sedan, w/o arrows collapse to green × along the car body; w/ inflates them into a coherent diagonal-down bias |
+| 62  | 1.80 | 3.16 | −1.37 | 121 | w/o horizontal-left flow lands on targets; w/ **same direction but stronger**, overshooting the GT row |
+| 140 | 0.71 | 2.01 | −1.30 | 149 | rear-of-car view at close range, w/o near-zero residual; w/ introduces a coherent diagonal bias |
+| 69  | 0.77 | 1.84 | −1.07 | 68  | brake-light cluster, w/o at 0.77 px; w/ rotates the flow slightly and amplifies |
 
-**idx 92 — err 2.81 → 0.63 px, n_obj=91.** Same regime, close
-pedestrian.
+**Pattern across all 8 losses.** **6 of 8 losses have err_w/o < 2 px**
+— they are "already-solved" samples where the image path has
+essentially converged on the correct UV. In this regime the frustum
+signal is a **structured over-correction**: arrows remain coherent
+across the object mass (not noisy), but their common direction /
+magnitude is wrong. The two exceptions (idx 87 with err_w/o = 2.41 px,
+idx 13 with n_obj = 4) are borderline and consistent with the
+statistical tail rather than a separate failure mode.
 
-![help_idx0092](assets/frustum/qual/help_idx0092.png)
+The "sparse-crop noise" failure mode posited in v1 (idx 45 @ n_obj = 5,
+idx 74 @ n_obj = 29) does *not* show up as a dominant loss pattern in
+the seed-fixed v2 eval. The losses are not about neighbor noise —
+they are about the encoder applying a correction to a crop that
+doesn't need one. A useful way to see this: among the 8 losses, the
+median n_obj is 68 (same order as the wins), so **n_obj is not a
+separator** between wins and losses. **err_w/o < 2 px** is.
 
-**idx 83 — err 8.36 → 3.90 px, n_obj=60.** The largest-Δ win sample
-(Δ = +4.46 px) and the one where the image difference is most likely
-to be readable by eye — `err_no = 8.36 px` is big enough that the
-arrows on the no-frustum side should be visibly longer than on the
-frustum side.
+![hurt_idx0119](assets/frustum/qual_v2/hurt_idx0119.png)
+![hurt_idx0034](assets/frustum/qual_v2/hurt_idx0034.png)
+![hurt_idx0149](assets/frustum/qual_v2/hurt_idx0149.png)
+![hurt_idx0140](assets/frustum/qual_v2/hurt_idx0140.png)
+![hurt_idx0069](assets/frustum/qual_v2/hurt_idx0069.png)
+![hurt_idx0062](assets/frustum/qual_v2/hurt_idx0062.png)
+![hurt_idx0087](assets/frustum/qual_v2/hurt_idx0087.png)
+![hurt_idx0013](assets/frustum/qual_v2/hurt_idx0013.png)
 
-![help_idx0083](assets/frustum/qual/help_idx0083.png)
+#### How the mean +0.263 px is shaped
 
-**Losses — two disjoint failure modes**
+- Wins concentrate at **high-err samples** (err_w/o ∈ 2.9 – 9.8 px,
+  Δ ∈ +2.1 – +3.6 px).
+- Losses concentrate at **already-converged samples** (err_w/o < 2 px
+  in 6/8 cases, Δ ∈ −1.1 – −2.5 px).
+- Mean + 0.263 px is the asymmetric sum of "large-gain when it matters,
+  small-loss when it doesn't."
+- **Operational implication**: in a calibration pipeline the tail
+  matters far more than the median — a 9.8 px outlier dragged down to
+  6.2 px prevents downstream BA from diverging; a 0.5 px sample
+  drifting to 2.2 px is still inside the per-frame noise band for
+  pose fit. Frustum-on is favored for deployment.
 
-**Failure mode 1 — sparse object crop (n_obj < 30).**
+#### Retracted v1 interpretations
 
-With k = 32 uniform-random neighbors from a small pool, the
-neighborhood becomes noise — many of the "neighbors" are just the same
-few points resampled with replacement, or points from neighboring cells
-that don't actually share the object's depth slab. The frustum signal
-degenerates into a high-variance random feature that the cross-attn
-then conditions on.
+- The v1 "Failure mode 1 — sparse object crop (n_obj < 30)" pattern
+  (idx 45, 74, 124) is not reproduced here. v1's idx 45 had
+  `n_obj = 5` under one random crop and would have had a very
+  different n_obj under the re-read used for rendering. The v2 sample
+  at idx 45 is not in either top-8 list.
+- The v1 "idx 119 = textbook win, 4.06 → 0.73 px, n_obj = 137" is
+  inverted: with the seed-fixed crop, idx 119 has n_obj = 169 and
+  err_w/o = 0.88, err_w/ = 2.72 — **frustum loses this sample by 1.85
+  px**. This single flip (help-#1 in v1 → hurt-#3 in v2) is the
+  clearest evidence that v1's ranking was dominated by render-time
+  crop randomness.
 
-*idx 45 — 1.00 → 2.76 px, n_obj=5.* 5 points total — you can barely
-see the object. Right panel arrows have no coherent direction because
-the "neighborhood" is re-sampling the same 5 pts with noise.
+#### Caveats still applicable in v2
 
-![hurt_idx0045](assets/frustum/qual/hurt_idx0045.png)
-
-*idx 124 — 13.43 → 19.44 px, n_obj=20.* Both pipelines are already
-broken (err > 10 px); the sparse signal on right just *moves the
-error* rather than improving it.
-
-![hurt_idx0124](assets/frustum/qual/hurt_idx0124.png)
-
-*idx 74 — 3.10 → 5.11 px, n_obj=29.* Borderline n_obj; right panel
-shows the characteristic "neighbor noise" failure — arrows on the
-object mass point in 4–5 different directions.
-
-![hurt_idx0074](assets/frustum/qual/hurt_idx0074.png)
-
-Worth noting: the no-frustum baseline on these is already near-random
-(err > 3 px on idx 124 / 74), so the absolute Δ is not a fair
-comparison — both pipelines are below the reliability floor.
-
-**Failure mode 2 — already-solved sample (err_no-frust < 1 px).**
-
-When the image cross-attn has already converged on a near-perfect
-projection for this crop (typically pedestrians on flat ground,
-well-lit, no occlusion), the frustum signal is a mild over-
-regularization: the query defers slightly to its neighborhood and picks
-up a 1–3 px systematic bias from points that are still a fraction of a
-cell away (cell_px = 4 at S = 64, grid_n = 16).
-
-*idx 41 — 0.44 → 4.25 px, n_obj=107.* Left panel: arrows already
-almost vanish (near-zero residual). Right panel: a small but
-*consistent* directional bias appears across the entire object mass
-— this is the frustum neighborhood "averaging in" a 1-cell offset.
-
-![hurt_idx0041](assets/frustum/qual/hurt_idx0041.png)
-
-*idx 118 — 0.91 → 3.52 px, n_obj=97.* Same pattern; coherent bias,
-not noise — the encoder is being harmful in a structured way.
-
-![hurt_idx0118](assets/frustum/qual/hurt_idx0118.png)
-
-*idx 34 — 0.85 → 2.63 px, n_obj=55.* Same pattern at lower n_obj.
-
-![hurt_idx0034](assets/frustum/qual/hurt_idx0034.png)
-
-**Doesn't matter — "BG-only or uniformly dense terrain"**
-
-The 164-inst sweep also has a large middle bucket (~100 samples) where
-|Δ| < 0.3 px in either direction. These are predominantly background-
-only crops (no cuboid overlap) or uniformly dense foreground where the
-cross-attn already has enough local image evidence. Consistent with
-the §2 observation that the encoder is not a positional prior — it's
-a *disambiguator* that activates only when local depth structure
-carries information the image can't.
-
-Two examples of this "flat" bucket that happened to land in the hurt
-tail by noise rather than by actual harm:
-
-*idx 2 — 2.66 → 4.22 px, n_obj=87.* Both halves look qualitatively
-almost identical; the Δ here is really sampling variance, not a
-structured failure.
-
-![hurt_idx0002](assets/frustum/qual/hurt_idx0002.png)
-
-*idx 112 — 1.37 → 2.86 px, n_obj=76.* Same story.
-
-![hurt_idx0112](assets/frustum/qual/hurt_idx0112.png)
-
-**Takeaways for when to keep it on**
-
-- Dense-lidar + object-centric: unambiguous keep (PandaSet: +6.9 %
-  val NLL; §9 top table).
-- Sparse-lidar: likely bigger gap than PandaSet (§2 hypothesis), but
-  with a higher-variance tail on low-n_obj crops. Worth running ZOD /
-  Waymo-rear ablation with the same per-sample Δ analysis.
-- No observed failure mode in the regime that matters for downstream
-  bundle adjustment (high-n_obj, moderate-err). The hurt bucket lives
-  entirely at the edges.
-
-Memo status: *scene-bucket intuitions*, not yet a statistical statement.
-Next steps are (a) repeat on ZOD / Waymo-rear, (b) quantify per-bucket
-Δ distribution (not just per-sample ranks), (c) check whether the
-"already-solved → small regression" failure mode shrinks with the
-200EP long-train (v10c best = 1.02 NLL, the image-only path has had
-more capacity to converge — may leave less room for frustum to
-over-regularize).
+- n_obj counts are specific to the seed-fixed crop, not a scene-level
+  invariant.
+- All evaluation is on PandaSet val (164 insts, cam=front). Sparse-lidar
+  (ZOD, Waymo-rear) repetition is planned as part of the v721 /
+  v721b 200ep DDP sweep (Waymo episode-split, 679 train scenes vs 119
+  val scenes, 0 overlap). v721/v721b logs will be landed here once the
+  runs finish.
 
 ## 10. Code
 
