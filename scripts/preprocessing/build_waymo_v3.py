@@ -14,7 +14,10 @@ NO pose stored: perturbation at __getitem__ uses pt_cam directly:
     pt_cam_off = (R_off @ pt_cam.T + t_off).T
     uv_off = K @ pt_cam_off / pt_cam_off[:,2]
 
-is_obj will be added later (needs cuboid → cam transform, deferred).
+Cuboids are read from lidar_box.parquet, transformed vehicle → waymo cam
+→ cv2 cam (to match stored pts frame), and stored as axis-aligned AABB
+(yaw=0) in cam frame. Matches scripts/preprocessing/inject_waymo_cuboids.py
+logic so build + inject produce identical output.
 
 Usage:
   python build_waymo_v3.py --max-segs 5      # smoke
@@ -33,24 +36,97 @@ from datasets.waymo_lcp import (CAM_NAMES, ALL_LASERS, ensure_lcp,
 from datasets.waymo import WAYMO_DIR
 
 
-def get_cam_intrinsics(seg_name: str):
-    """Per-camera intrinsics for a segment. Returns dict[cam_id] -> K(3,3)."""
+def get_cam_calib(seg_name: str):
+    """Per-camera intrinsics + extrinsics for a segment.
+
+    Returns dict[cam_id] -> (K(3,3), T_c_v(4,4)) where T_c_v is vehicle → waymo cam.
+    The stored extrinsic is T_v_c (waymo cam → vehicle), so we invert.
+    """
     cc = pd.read_parquet(WAYMO_DIR / 'camera_calibration' / f'{seg_name}.parquet')
     out = {}
     for _, r in cc.iterrows():
         cam_id = int(r['key.camera_name'])
-        intr   = np.asarray(r['[CameraCalibrationComponent].intrinsic.f_u'])  # might be different
-        # Try standard fields
-        try:
-            fu, fv = float(r['[CameraCalibrationComponent].intrinsic.f_u']), float(r['[CameraCalibrationComponent].intrinsic.f_v'])
-            cu, cv = float(r['[CameraCalibrationComponent].intrinsic.c_u']), float(r['[CameraCalibrationComponent].intrinsic.c_v'])
-            K = np.array([[fu, 0, cu], [0, fv, cv], [0, 0, 1]], dtype=np.float32)
-            out[cam_id] = K
-        except KeyError:
-            # Fallback: print actual columns
-            print(f"calibration columns: {list(r.index)}")
-            raise
+        fu = float(r['[CameraCalibrationComponent].intrinsic.f_u'])
+        fv = float(r['[CameraCalibrationComponent].intrinsic.f_v'])
+        cu = float(r['[CameraCalibrationComponent].intrinsic.c_u'])
+        cv = float(r['[CameraCalibrationComponent].intrinsic.c_v'])
+        K = np.array([[fu, 0, cu], [0, fv, cv], [0, 0, 1]], dtype=np.float32)
+        T_v_c = np.asarray(r['[CameraCalibrationComponent].extrinsic.transform']).reshape(4, 4)
+        T_c_v = np.linalg.inv(T_v_c).astype(np.float32)
+        out[cam_id] = (K, T_c_v)
     return out
+
+
+def _box_corners_vehicle(pos: np.ndarray, dims: np.ndarray, yaw: float) -> np.ndarray:
+    """Official Waymo corner ordering (matches box_utils.get_upright_3d_box_corners):
+    bottom face CCW (-h2): [+l,+w], [-l,+w], [-l,-w], [+l,-w]
+    top face CCW (+h2):    same xy ordering.
+    """
+    l, w, h = dims
+    l2, w2, h2 = l / 2, w / 2, h / 2
+    cor = np.array([[ l2,  w2, -h2], [-l2,  w2, -h2], [-l2, -w2, -h2], [ l2, -w2, -h2],
+                    [ l2,  w2,  h2], [-l2,  w2,  h2], [-l2, -w2,  h2], [ l2, -w2,  h2]],
+                   dtype=np.float32)
+    cy, sn = np.cos(yaw), np.sin(yaw)
+    R = np.array([[cy, -sn, 0], [sn, cy, 0], [0, 0, 1]], dtype=np.float32)
+    return (R @ cor.T).T + pos[None, :]
+
+
+# waymo cam (x=fwd, y=left, z=up) → cv2 cam (x=right, y=down, z=fwd)
+# cv2_x = -waymo_y, cv2_y = -waymo_z, cv2_z = +waymo_x.
+_M_W2CV = np.array([[ 0, -1,  0],
+                    [ 0,  0, -1],
+                    [ 1,  0,  0]], dtype=np.float32)
+
+
+def read_boxes_by_ts(seg_name: str) -> dict:
+    """Read lidar_box.parquet once per seg, grouped by ts."""
+    box_path = WAYMO_DIR / 'lidar_box' / f'{seg_name}.parquet'
+    if not box_path.exists():
+        return {}
+    box_df = pq.read_table(box_path).to_pandas()
+    cols = ['[LiDARBoxComponent].box.center.x',
+            '[LiDARBoxComponent].box.center.y',
+            '[LiDARBoxComponent].box.center.z',
+            '[LiDARBoxComponent].box.size.x',
+            '[LiDARBoxComponent].box.size.y',
+            '[LiDARBoxComponent].box.size.z',
+            '[LiDARBoxComponent].box.heading']
+    out = {}
+    for _, r in box_df.iterrows():
+        ts = int(r['key.frame_timestamp_micros'])
+        cx, cy, cz, sx, sy, sz, h = r[cols]
+        out.setdefault(ts, []).append({
+            'pos_v':   np.array([cx, cy, cz], dtype=np.float32),
+            'dims_v':  np.array([sx, sy, sz], dtype=np.float32),
+            'heading': float(h),
+        })
+    return out
+
+
+def boxes_cam_frame(boxes_at_ts: list, T_c_v: np.ndarray) -> list:
+    """Transform vehicle-frame boxes → cv2-cam-frame AABB (yaw=0) list.
+
+    Matches scripts/preprocessing/inject_waymo_cuboids.py exactly.
+    """
+    cuboids = []
+    for b in boxes_at_ts:
+        corners_v = _box_corners_vehicle(b['pos_v'], b['dims_v'], b['heading'])
+        ones = np.ones((corners_v.shape[0], 1), dtype=np.float32)
+        corners_cam_w = (T_c_v @ np.concatenate([corners_v, ones], axis=-1).T).T[:, :3]
+        # Skip boxes with any corner behind (or too near) the camera plane
+        if (corners_cam_w[:, 0] <= 0.5).any():
+            continue
+        corners_cam = corners_cam_w @ _M_W2CV.T
+        if corners_cam[:, 2].max() < 0.5:
+            continue
+        mn = corners_cam.min(axis=0); mx = corners_cam.max(axis=0)
+        pos_cam  = ((mn + mx) / 2.0).astype(np.float32)
+        dims_cam = (mx - mn).astype(np.float32)
+        if pos_cam[2] < 0.5:
+            continue
+        cuboids.append({'pos': pos_cam, 'dims': dims_cam, 'yaw': 0.0})
+    return cuboids
 
 
 def list_frame_timestamps(seg_name: str) -> list[int]:
@@ -68,7 +144,8 @@ def process_seg(args_tuple):
     inst_dir = out_dir / 'inst'
     inst_dir.mkdir(parents=True, exist_ok=True)
 
-    K_per_cam = get_cam_intrinsics(seg_name)
+    calib_per_cam = get_cam_calib(seg_name)            # cam_id → (K, T_c_v)
+    boxes_by_ts   = read_boxes_by_ts(seg_name)          # ts → [box dicts]
     lcp_path = ensure_lcp(seg_name)
 
     cam_filter = [('key.camera_name', 'in', list(cams_keep))]
@@ -113,12 +190,15 @@ def process_seg(args_tuple):
             # the header for IW/IH. Was: 50ms × 5 cam × 20 frame = 5s/seg wasted.
             with Image.open(io.BytesIO(jpg_bytes)) as _im:
                 IW, IH = _im.size
-            K = K_per_cam[cam_id]
+            K, T_c_v = calib_per_cam[cam_id]
             fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
             xc = (uv[:, 0] - cx) * depth / fx
             yc = (uv[:, 1] - cy) * depth / fy
             zc = depth
             pts_cam = np.stack([xc, yc, zc], axis=-1).astype(np.float32)
+
+            # Transform vehicle-frame boxes at this ts → cv2-cam-frame AABBs
+            cuboids = boxes_cam_frame(boxes_by_ts.get(ts, []), T_c_v)
 
             # Pandaset-compat schema: pts treated as if in WORLD frame,
             # T_gt = identity (cam at origin). Perturbation logic still works.
@@ -130,7 +210,7 @@ def process_seg(args_tuple):
                 R_gt     = torch.eye(3, dtype=torch.float32),
                 T_gt     = torch.eye(4, dtype=torch.float32),
                 K_full   = torch.from_numpy(K),
-                cuboids  = [],
+                cuboids  = cuboids,
                 # legacy waymo extras (kept for vis convenience)
                 pts_cam   = torch.from_numpy(pts_cam),
                 uv_full   = torch.from_numpy(uv),
