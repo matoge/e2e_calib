@@ -1,0 +1,8 @@
+15:29:08  loading cache /mnt/nvme6t/e2e_calib_cache/nuscenes_v3_full (V3 full-image)
+15:29:08    perturbation: ±0.5 deg / ±0.2 m   crop_px=[128, 512] (full-image px → 256)
+15:29:08  train cache loaded: 211152 instances
+15:29:08  val cache loaded: 37188 instances
+15:29:08  object-level split: train=223506 val=24834 (seed=42)
+15:29:08    val subsample: 3000/24834 (deterministic first-N)
+15:29:08  params: 1.62M
+15:29:17  vis_pretrain → experiments/v602_nuscenes_img256_g32/vis_pretrain

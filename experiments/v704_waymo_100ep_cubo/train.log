@@ -1,0 +1,10 @@
+22:12:13  loading cache /mnt/nvme6t/e2e_calib_cache/waymo_v3_full (V3 full-image)
+22:12:13    perturbation: ±1.0 deg / ±0.2 m   crop_px=[128, 384] (full-image px → 256)
+22:12:13  train cache loaded: 5052 instances
+22:12:13  val cache loaded: 888 instances
+22:12:13  object-level split: train=5346 val=594 (seed=42)
+22:12:13  params: 1.62M
+22:12:19  vis_pretrain → experiments/v704_waymo_100ep_cubo/vis_pretrain
+22:12:59  [  1/100]  train nll=+4.721(obj=+4.972 bg=+4.663) mse=7.59(obj=8.45/m7.47/95p18.6 bg=7.38/m6.62/95p15.7)  val nll=+4.500(obj=+4.904 bg=+4.403) mse=6.99(obj=8.27/m7.07/95p17.9 bg=6.67/m5.80/95p15.1)  lr=4.00e-04  tot=0.8min
+22:12:59    ↳ saved (val_nll=4.5004)
+22:13:33  [  2/100]  train nll=+4.668(obj=+4.947 bg=+4.605) mse=7.56(obj=8.46/m7.61/95p17.7 bg=7.34/m6.65/95p15.2)  val nll=+4.567(obj=+4.908 bg=+4.488) mse=7.41(obj=8.50/m7.30/95p20.6 bg=7.14/m6.47/95p14.7)  lr=6.00e-04  tot=1.3min

@@ -93,7 +93,8 @@ def patch_entropy(crop_uint8: np.ndarray) -> tuple[float, float]:
 
 
 def render_pair(ds, idx, out_path, S=64):
-    img_crop, true_uvd, dist_uvd, vfp = ds[idx]
+    out = ds[idx]
+    img_crop, true_uvd, dist_uvd, vfp = out[:4]   # tolerate 6-tuple (uvd_full, pad_full ignored here)
     box = getattr(ds, '_last_crop', None)
     inst = ds._load_inst(idx)
     full, uv, vis, is_obj, IH, IW = _full_proj(inst)

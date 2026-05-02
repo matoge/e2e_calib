@@ -127,32 +127,46 @@ class FrustumLocalEncoder(nn.Module):
       Image context comes from cross-attention later in the network.
     """
     def __init__(self, d_out: int = D_DIM, r_uv_cells: float = 1.5, r_d: float = 0.004,
-                 k: int = 16, grid_n: int = 16):
+                 k: int = 32, grid_n: int = 16,
+                 d_local: int = 32, n_heads: int = 2, n_layers: int = 2):
         super().__init__()
-        self.r_uv_cells = r_uv_cells   # neighborhood radius in cell units (1.0 = own cell, 1.5 = own + 8-neighbors)
+        self.r_uv_cells = r_uv_cells   # neighborhood radius in cell units (1.5 = own cell + 8-neighbors)
         self.grid_n = grid_n
         self.r_d  = r_d
-        self.k    = k
-        self.mlp = nn.Sequential(
-            nn.Linear(3, 32), nn.GELU(),
-            nn.Linear(32, d_out), nn.GELU(),
-            nn.Linear(d_out, d_out),
-        )
+        self.k    = k                  # random sample size; no stratified bookkeeping
+        self.d_local = d_local
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        assert d_local % n_heads == 0
+        # Single down-projection D → d_local (once, at the start) and single up-
+        # projection d_local → D (once, at the end). Everything in between runs
+        # at d_local. PT blocks are residual + Pre-LN, K/V freshly projected from
+        # rel each layer; KV fused into one 3 → 2·d_local matmul.
+        self.in_proj  = nn.Linear(d_out, d_local)
+        self.layers   = nn.ModuleList([
+            nn.ModuleDict(dict(
+                ln_q  = nn.LayerNorm(d_local),
+                q_proj = nn.Linear(d_local, d_local),
+                kv_proj = nn.Linear(3, 2 * d_local),
+                out_proj = nn.Linear(d_local, d_local),
+            )) for _ in range(n_layers)
+        ])
+        self.out_proj = nn.Linear(d_local, d_out)
 
     def forward(self, query_uvd: torch.Tensor,
                 full_uvd: torch.Tensor,
                 full_pad_mask: torch.Tensor,
+                query_token: torch.Tensor,
                 query_pad_mask: torch.Tensor = None,
                 img_size: int = 64) -> torch.Tensor:
-        """Local-feature encoding.
-
-        For each *query* point, find neighbors in *full_uvd* via box filter
-        + top-k UV-nearest, MLP on relative (Δu, Δv, Δd), MaxPool.
+        """Per-query mini cross-attn over k random in-box neighbors.
 
         Args:
             query_uvd:      (B, N_q, 3)  U,V in [0,img_size], D in [0,1]
             full_uvd:       (B, N_kv, 3)  REQUIRED dense raw point cloud.
             full_pad_mask:  (B, N_kv) bool — True = padded entry to ignore
+            query_token:    (B, N_q, d_out)  per-point feature from upstream
+                            (point_mlp). Used as Q in the local cross-attn.
             query_pad_mask: (B, N_q)  bool — kept for API compat; not used here
             img_size:       crop pixel side at the resolution `query_uvd` lives in.
 
@@ -183,21 +197,18 @@ class FrustumLocalEncoder(nn.Module):
         if full_pad_mask is not None:
             in_box = in_box & ~full_pad_mask.unsqueeze(1)        # (B, 1, N_kv)
 
-        # Density-invariant sampling: pick up to k points uniformly at random
-        # from the box, NOT the k UV-nearest. UV-nearest biases toward dense
-        # clusters (Waymo: all k crammed within ~1px of query), random covers
-        # the full box radius even when point density varies wildly across
-        # datasets / depths. Trick: assign random scores, mask out-of-box to
-        # -1, top-k largest scores = random k from the in-box set.
+        # Density-invariant: k random points from the in-box set. Stratified
+        # sub-cell guarantee was dropped because the 16-iter Python loop cost
+        # ~25 ms in launch overhead, dwarfing the actual work; with k=32 random
+        # samples the per-sub-cell coverage is statistically fine.
         rand_score = torch.rand_like(in_box, dtype=rel.dtype)
-        rand_score = rand_score.masked_fill(~in_box, -1.0)       # (B, N_q, N_kv)
-
-        k = min(self.k, N_kv)
-        _, topk_idx = rand_score.topk(k, dim=-1, largest=True)   # (B, N_q, k)
+        rand_score = rand_score.masked_fill(~in_box, -1.0)
+        kk = min(self.k, N_kv)
+        _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)  # (B, N_q, k)
+        valid       = rand_score.gather(2, topk_idx) >= 0
 
         idx_exp  = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3)
         topk_rel = rel.gather(2, idx_exp)                        # (B, N_q, k, 3)
-        valid    = rand_score.gather(2, topk_idx) >= 0           # (B, N_q, k)
 
         # Debug instrumentation: stash the live selection so vis tools can read
         # exactly what this forward picked. Always written, only consumed when
@@ -207,10 +218,34 @@ class FrustumLocalEncoder(nn.Module):
         self._last_r_uv_px  = float(r_uv)
         self._last_cell_px  = float(cell_px)
 
-        feat = self.mlp(topk_rel)                                # (B, N_q, k, d_out)
-        feat = feat.masked_fill(~valid.unsqueeze(-1), -1e9)
-        feat, _ = feat.max(dim=2)                                # (B, N_q, d_out)
-        feat = feat.masked_fill(~valid.any(dim=-1, keepdim=True), 0.0)
+        # ── 2-layer Point-Transformer-style local attention, all at d_local ──
+        h, dl = self.n_heads, self.d_local
+        dh = dl // h
+        K_total = topk_rel.size(2)
+        scale = dh ** -0.5
+        any_valid = valid.any(dim=-1, keepdim=True)               # (B, Nq, 1)
+        valid_mask = ~valid.unsqueeze(-1)                          # (B, Nq, K, 1)
+
+        # one-time down-projection D → d_local
+        x = self.in_proj(query_token)                              # (B, Nq, d_local)
+
+        # stack of PT blocks: residual + Pre-LN, fresh K/V from rel each layer
+        for layer in self.layers:
+            x_n = layer['ln_q'](x)                                 # Pre-LN
+            Q = layer['q_proj'](x_n).view(B, N_q, h, dh)           # (B, Nq, h, dh)
+            KV = layer['kv_proj'](topk_rel)                        # (B, Nq, K, 2·dl)
+            K_, V_ = KV.chunk(2, dim=-1)
+            K_ = K_.view(B, N_q, K_total, h, dh)
+            V_ = V_.view(B, N_q, K_total, h, dh)
+            attn_logits = (Q.unsqueeze(2) * K_).sum(-1) * scale    # (B, Nq, K, h)
+            attn_logits = attn_logits.masked_fill(valid_mask, -1e9)
+            attn = attn_logits.softmax(dim=2)
+            out_h = (attn.unsqueeze(-1) * V_).sum(2)               # (B, Nq, h, dh)
+            update = layer['out_proj'](out_h.flatten(-2))          # (B, Nq, d_local)
+            x = x + update                                          # residual
+
+        feat = self.out_proj(x)                                    # 32 → D, ONCE
+        feat = feat.masked_fill(~any_valid, 0.0)                   # all-pad guard
         return feat
 
 
@@ -452,6 +487,7 @@ class CalibNetDepth(nn.Module):
                 q = q + self.frustum_enc(distorted_uvd,
                                           full_uvd=distorted_uvd_full,
                                           full_pad_mask=pad_full,
+                                          query_token=q,
                                           query_pad_mask=key_padding_mask,
                                           img_size=self.img_size)
 

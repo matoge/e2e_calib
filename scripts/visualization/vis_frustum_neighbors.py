@@ -30,8 +30,9 @@ def render(crop_img, dist_uvd, uvd_full, pad_full, S, grid_n, r_uv_cells, r_d, k
     q_t = torch.from_numpy(dist_uvd[:, :3].astype(np.float32))[None]   # (1, Nq, 3)
     f_t = torch.from_numpy(uvd_full.astype(np.float32))[None]          # (1, Nkv, 3)
     p_t = torch.from_numpy(pad_full.astype(bool))[None]                # (1, Nkv)
+    qtok = torch.zeros(1, q_t.shape[1], D_DIM)                         # placeholder Q-token
     with torch.no_grad():
-        _ = enc(q_t, full_uvd=f_t, full_pad_mask=p_t, img_size=S)
+        _ = enc(q_t, full_uvd=f_t, full_pad_mask=p_t, query_token=qtok, img_size=S)
     topk = enc._last_topk_idx[0].cpu().numpy()    # (Nq, k)
     valid = enc._last_valid[0].cpu().numpy()      # (Nq, k)
     r_uv_px = enc._last_r_uv_px
@@ -93,17 +94,33 @@ def render(crop_img, dist_uvd, uvd_full, pad_full, S, grid_n, r_uv_cells, r_d, k
                                     fill=False, ec='red', lw=1.4, alpha=0.85, zorder=3))
         ax.scatter([u], [v], c='lime', s=110, marker='x', linewidths=2.4, zorder=5)
         nb_q = topk[qi][valid[qi]]
+        dz_list = []
         if len(nb_q):
             nb_uv = fm[nb_q]
-            ax.scatter(nb_uv[:, 0], nb_uv[:, 1], s=70,
-                       facecolors='none', edgecolors='cyan', linewidths=1.8, zorder=6)
-            for nu, nv, nz in nb_uv:
-                ax.plot([u, nu], [v, nv], '-', color='cyan', lw=1.0, alpha=0.8, zorder=4)
+            qd = qm[qi, 2]                        # query depth (normalized /100)
+            dzs = nb_uv[:, 2] - qd                # Δd per neighbor (normalized)
+            dz_list = [(d * 100) for d in dzs]    # in metres
+            # color by |Δd|, scale 0..r_d  (= 0..0.4m)
+            from matplotlib import cm
+            norm_dz = np.clip(np.abs(dzs) / r_d, 0, 1)
+            colors = cm.cool(norm_dz)
+            ax.scatter(nb_uv[:, 0], nb_uv[:, 1], s=70, marker='o',
+                       facecolors='none', edgecolors=colors, linewidths=1.8, zorder=6)
+            for j, (nu, nv, nz) in enumerate(nb_uv):
+                ax.plot([u, nu], [v, nv], '-', color=colors[j], lw=0.9, alpha=0.85, zorder=4)
+                ax.text(nu + 0.4, nv - 0.4, f'{(nz-qd)*100:+.1f}m',
+                        fontsize=5.5, color='white', zorder=7,
+                        bbox=dict(facecolor='black', alpha=0.5, pad=0.5, lw=0))
         zoom = 3 * cell_px
         ax.set_xlim(max(0, u - zoom), min(S, u + zoom))
         ax.set_ylim(min(S, v + zoom), max(0, v - zoom))
-        ax.set_title(f'q[{qi}] cell({ci},{cj}) @({u:.1f},{v:.1f}) z={qm[qi,2]*100:.1f}m  '
-                     f'nb={int(valid[qi].sum())}', fontsize=8)
+        nb_n = int(valid[qi].sum())
+        dz_str = ''
+        if dz_list:
+            dz_arr = np.array(dz_list)
+            dz_str = f'  |Δd|μ={np.abs(dz_arr).mean():.2f}m max={np.abs(dz_arr).max():.2f}m'
+        ax.set_title(f'q[{qi}] cell({ci},{cj}) z={qm[qi,2]*100:.1f}m  nb={nb_n}{dz_str}',
+                     fontsize=7)
         ax.axis('off')
 
     for j in range(1 + len(highlight_idxs), len(axes)):

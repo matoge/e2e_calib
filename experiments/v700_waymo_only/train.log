@@ -1,0 +1,41 @@
+18:46:07  loading cache /mnt/nvme6t/e2e_calib_cache/waymo_v3_full (V3 full-image)
+18:46:07    perturbation: ±1.0 deg / ±0.2 m   crop_px=[128, 384] (full-image px → 256)
+18:46:07  train cache loaded: 5052 instances
+18:46:07  val cache loaded: 888 instances
+18:46:07  object-level split: train=5346 val=594 (seed=42)
+18:46:07  params: 1.62M
+18:46:13  vis_pretrain → experiments/v700_waymo_only/vis_pretrain
+18:46:34  [  1/20]  train nll=+4.668(obj=+0.000 bg=+4.669) mse=7.36(obj=nan/mnan/95pnan bg=7.35/m6.48/95p16.1)  val nll=+4.435(obj=+0.000 bg=+4.435) mse=6.89(obj=nan/mnan/95pnan bg=6.87/m6.11/95p14.5)  lr=4.00e-04  tot=0.4min
+18:46:34    ↳ saved (val_nll=4.4354)
+18:46:50  [  2/20]  train nll=+4.800(obj=+0.000 bg=+4.801) mse=7.71(obj=nan/mnan/95pnan bg=7.70/m6.96/95p15.9)  val nll=+4.292(obj=+0.000 bg=+4.289) mse=6.34(obj=nan/mnan/95pnan bg=6.31/m5.49/95p13.8)  lr=6.00e-04  tot=0.7min
+18:46:50    ↳ saved (val_nll=4.2916)
+18:47:07  [  3/20]  train nll=+4.910(obj=+0.000 bg=+4.910) mse=8.08(obj=nan/mnan/95pnan bg=8.07/m7.33/95p16.7)  val nll=+4.889(obj=+0.000 bg=+4.887) mse=7.44(obj=nan/mnan/95pnan bg=7.43/m6.72/95p15.6)  lr=8.00e-04  tot=1.0min
+18:47:23  [  4/20]  train nll=+5.271(obj=+0.000 bg=+5.271) mse=8.20(obj=nan/mnan/95pnan bg=8.19/m7.34/95p17.5)  val nll=+4.653(obj=+0.000 bg=+4.654) mse=7.60(obj=nan/mnan/95pnan bg=7.59/m6.98/95p16.0)  lr=1.00e-03  tot=1.3min
+18:47:40  [  5/20]  train nll=+4.713(obj=+0.000 bg=+4.713) mse=7.71(obj=nan/mnan/95pnan bg=7.71/m6.92/95p16.3)  val nll=+4.388(obj=+0.000 bg=+4.389) mse=6.52(obj=nan/mnan/95pnan bg=6.51/m5.74/95p13.8)  lr=1.00e-03  tot=1.5min
+18:47:57  [  6/20]  train nll=+4.634(obj=+0.000 bg=+4.634) mse=7.36(obj=nan/mnan/95pnan bg=7.35/m6.56/95p15.6)  val nll=+4.399(obj=+0.000 bg=+4.398) mse=7.03(obj=nan/mnan/95pnan bg=7.02/m6.13/95p15.3)  lr=9.89e-04  tot=1.8min
+18:48:13  [  7/20]  train nll=+4.420(obj=+0.000 bg=+4.420) mse=6.76(obj=nan/mnan/95pnan bg=6.75/m6.01/95p14.5)  val nll=+4.328(obj=+0.000 bg=+4.328) mse=6.43(obj=nan/mnan/95pnan bg=6.41/m5.70/95p13.7)  lr=9.57e-04  tot=2.1min
+18:48:29  [  8/20]  train nll=+4.486(obj=+0.000 bg=+4.486) mse=6.90(obj=nan/mnan/95pnan bg=6.89/m6.12/95p14.8)  val nll=+4.444(obj=+0.000 bg=+4.445) mse=7.32(obj=nan/mnan/95pnan bg=7.30/m6.65/95p14.9)  lr=9.05e-04  tot=2.4min
+18:48:46  [  9/20]  train nll=+4.362(obj=+0.000 bg=+4.362) mse=6.68(obj=nan/mnan/95pnan bg=6.67/m5.96/95p14.3)  val nll=+4.310(obj=+0.000 bg=+4.309) mse=6.61(obj=nan/mnan/95pnan bg=6.60/m5.95/95p13.2)  lr=8.35e-04  tot=2.6min
+18:49:02  [ 10/20]  train nll=+4.215(obj=+0.000 bg=+4.215) mse=6.38(obj=nan/mnan/95pnan bg=6.36/m5.65/95p13.7)  val nll=+4.346(obj=+0.000 bg=+4.345) mse=6.74(obj=nan/mnan/95pnan bg=6.72/m5.91/95p14.3)  lr=7.50e-04  tot=2.9min
+18:49:02  vis_ep010: saved 0 → experiments/v700_waymo_only/vis_ep010
+18:49:18  [ 11/20]  train nll=+4.280(obj=+0.000 bg=+4.281) mse=6.51(obj=nan/mnan/95pnan bg=6.50/m5.80/95p13.7)  val nll=+4.785(obj=+0.000 bg=+4.785) mse=7.82(obj=nan/mnan/95pnan bg=7.82/m7.47/95p14.2)  lr=6.55e-04  tot=3.2min
+18:49:35  [ 12/20]  train nll=+4.244(obj=+0.000 bg=+4.244) mse=6.38(obj=nan/mnan/95pnan bg=6.38/m5.73/95p13.6)  val nll=+4.125(obj=+0.000 bg=+4.126) mse=5.84(obj=nan/mnan/95pnan bg=5.81/m5.06/95p12.8)  lr=5.52e-04  tot=3.5min
+18:49:35    ↳ saved (val_nll=4.1252)
+18:49:52  [ 13/20]  train nll=+4.046(obj=+0.000 bg=+4.046) mse=5.96(obj=nan/mnan/95pnan bg=5.96/m5.32/95p12.6)  val nll=+3.936(obj=+0.000 bg=+3.936) mse=5.79(obj=nan/mnan/95pnan bg=5.77/m5.19/95p12.4)  lr=4.48e-04  tot=3.7min
+18:49:52    ↳ saved (val_nll=3.9363)
+18:50:08  [ 14/20]  train nll=+4.040(obj=+0.000 bg=+4.040) mse=5.94(obj=nan/mnan/95pnan bg=5.93/m5.33/95p12.5)  val nll=+4.242(obj=+0.000 bg=+4.245) mse=6.78(obj=nan/mnan/95pnan bg=6.77/m6.28/95p13.4)  lr=3.46e-04  tot=4.0min
+18:50:24  [ 15/20]  train nll=+3.921(obj=+0.000 bg=+3.921) mse=5.66(obj=nan/mnan/95pnan bg=5.65/m5.09/95p12.0)  val nll=+3.848(obj=+0.000 bg=+3.848) mse=5.42(obj=nan/mnan/95pnan bg=5.42/m5.00/95p11.0)  lr=2.50e-04  tot=4.3min
+18:50:24    ↳ saved (val_nll=3.8478)
+18:50:41  [ 16/20]  train nll=+3.825(obj=+0.000 bg=+3.824) mse=5.39(obj=nan/mnan/95pnan bg=5.39/m4.93/95p11.0)  val nll=+3.800(obj=+0.000 bg=+3.800) mse=5.33(obj=nan/mnan/95pnan bg=5.32/m4.96/95p11.1)  lr=1.66e-04  tot=4.6min
+18:50:41    ↳ saved (val_nll=3.8000)
+18:50:57  [ 17/20]  train nll=+3.850(obj=+0.000 bg=+3.850) mse=5.44(obj=nan/mnan/95pnan bg=5.44/m4.97/95p11.2)  val nll=+3.695(obj=+0.000 bg=+3.696) mse=5.06(obj=nan/mnan/95pnan bg=5.05/m4.65/95p10.5)  lr=9.56e-05  tot=4.8min
+18:50:57    ↳ saved (val_nll=3.6949)
+18:51:14  [ 18/20]  train nll=+3.721(obj=+0.000 bg=+3.721) mse=5.11(obj=nan/mnan/95pnan bg=5.10/m4.67/95p10.4)  val nll=+3.646(obj=+0.000 bg=+3.646) mse=5.00(obj=nan/mnan/95pnan bg=5.00/m4.55/95p10.7)  lr=4.33e-05  tot=5.1min
+18:51:14    ↳ saved (val_nll=3.6461)
+18:51:30  [ 19/20]  train nll=+3.677(obj=+0.000 bg=+3.677) mse=5.01(obj=nan/mnan/95pnan bg=5.01/m4.59/95p10.1)  val nll=+3.698(obj=+0.000 bg=+3.697) mse=5.08(obj=nan/mnan/95pnan bg=5.07/m4.66/95p10.3)  lr=1.10e-05  tot=5.4min
+18:51:47  [ 20/20]  train nll=+3.610(obj=+0.000 bg=+3.610) mse=4.86(obj=nan/mnan/95pnan bg=4.85/m4.47/95p9.8)  val nll=+3.599(obj=+0.000 bg=+3.599) mse=4.83(obj=nan/mnan/95pnan bg=4.84/m4.36/95p10.1)  lr=1.00e-07  tot=5.7min
+18:51:47    ↳ saved (val_nll=3.5989)
+18:51:47  vis_ep020: saved 0 → experiments/v700_waymo_only/vis_ep020
+18:51:47  Best val NLL: 3.5989  |  time: 5.7min
+18:51:48  vis: skipped due to error: Input type (unsigned char) and bias type (c10::BFloat16) should be the same
+18:51:48  Report saved → report.html
