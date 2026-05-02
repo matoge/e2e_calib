@@ -1,0 +1,48 @@
+# infra/Dockerfile.train
+#
+# e2e_calib の学習コンテナ。
+# - base: nvcr.io/nvidia/pytorch:24.02-py3 (CUDA 12.3, torch 2.2, Python 3.10)
+# - 追加で accelerate / clearml / (任意で) 軽量系の python パッケージを入れる
+# - ClearML agent (docker mode) から呼び出すことを前提にしており、
+#   agent がソースを checkout → このイメージで実行する
+#
+# 使い方:
+#   # ローカルビルド (dgx2 など agent ホスト側で一度だけ):
+#     docker build -f infra/Dockerfile.train -t e2e-calib-train:local .
+#
+#   # ClearML agent 経由 (推奨):
+#     ./infra/submit_clearml_task.sh  # → dgx2-gpu キューに task 発行
+#
+#   # 手動 (デバッグ):
+#     docker run --rm --gpus all --shm-size=64g \
+#       -v /mnt/fsx:/mnt/fsx -v $(pwd):/workspace \
+#       e2e-calib-train:local \
+#       accelerate launch --num_processes=8 scripts/training/train_ps_v3_ddp.py ...
+
+FROM nvcr.io/nvidia/pytorch:24.02-py3
+
+# system
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git tini tzdata rsync openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+ENV TZ=Asia/Tokyo
+
+# python deps — base image はすでに torch/torchvision/numpy/scipy を持っているので
+# 足りないぶんだけ追加する。 accelerate と clearml は必須。
+COPY infra/requirements.train.txt /tmp/requirements.train.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.train.txt
+
+# ClearML agent が mount する workspace を標準的な場所にしておく。
+# agent docker mode は git clone 先を /root/... 配下に置くので、
+# ここは主に「ローカルで docker run したときの便利 cwd」用。
+WORKDIR /workspace
+
+# accelerate 設定: 8 GPU DDP, bf16, no mixed precision bucketing issue
+ENV ACCELERATE_USE_CPU=false \
+    ACCELERATE_USE_DEEPSPEED=false \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# tini は PID1。 これで SIGTERM がきちんと届く (ClearML agent が task を止めるときに必須)
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bash"]

@@ -1,0 +1,15 @@
+# infra/requirements.train.txt
+#
+# nvcr.io/nvidia/pytorch:24.02-py3 に追加でインストールする python パッケージ。
+# base image にすでに以下が入っているので重複は入れない:
+#   torch, torchvision, numpy, scipy, pillow, opencv-python(headless), tqdm
+#
+# ここでは DDP + ClearML + 自前コードが直接 import するものだけを pin する。
+
+accelerate==0.34.2
+clearml==1.16.4
+einops==0.8.0
+pyyaml>=6.0
+# dataset 側で使っている: pandaset v3 (fsx cache) / waymo v3 cache は pt を直読なので追加依存なし
+# 可視化系 (matplotlib等) は base image 標準に任せる。 eval/render 時だけ使うため学習 image に
+# は含めないポリシー (将来必要なら infra/Dockerfile.eval を別立てする)。
