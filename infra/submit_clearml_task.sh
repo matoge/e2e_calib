@@ -105,6 +105,12 @@ fi
 #   accelerate launch ... <target-script> ... に渡す argparse 契約。
 ORIG_SCRIPT="$SCRIPT"
 LAUNCHER_PREFIX_ARGS=""
+# Auto-disable launcher for yokohama1 (single 5080) — DDP wrapper not needed,
+# and the launcher's --target-script forwarding has been flaky on this path.
+if [[ "$QUEUE" == yokohama1-* ]]; then
+  USE_LAUNCHER=0
+  echo "[info] yokohama1 queue detected → USE_LAUNCHER=0 (single-GPU direct run)"
+fi
 if [[ "$USE_LAUNCHER" == "1" ]]; then
   LAUNCHER_PATH="scripts/training/launch_ddp_ps.py"
   if [[ -f "$LAUNCHER_PATH" ]]; then
