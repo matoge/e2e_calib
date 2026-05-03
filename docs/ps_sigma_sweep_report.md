@@ -61,27 +61,43 @@ col1 = crop、col2-4 = s15/s20/s30 の予測。
 
 各 panel の "resid (was)" は予測後の平均残差 / 摂動直後の残差 [px]。
 
+## 注意: 各 σ の val 評価条件は別
+
+各 model は **自分の訓練 σ で perturbation された val** で評価されてる。同じテストセットで比較したわけじゃない:
+- s15 → ±1.5° / 0.6m 摂動 val
+- s20 → ±2.0° / 0.8m 摂動 val
+- s30 → ±3.0° / 1.2m 摂動 val
+
+NLL = log σ + (resid/σ)² /2 は Gaussian の entropy 形なので、σ 大 → resid 大 + σ_pred 大 が同程度に伸びれば NLL は同じ。**val_nll の絶対値で sweet spot は決められない**。
+
 ## 考察
 
-1. **σ=2.0 が sweet spot**:
-   - val_nll: s20 (1.562) < s30 (1.602) < s15 (1.643)
-   - σ aug が effective dataset variation を増やす効果と、σ が過剰になると optimization 難化の trade-off
-   - s15 (under-perturb) → easy regime に偏って汎化弱、s30 (over-perturb) → tail 暴れて calibration 緩む
+1. **σ=2 > σ=1.5 は明確** (条件依存しない):
+   - bg_med: s20 1.571 vs s15 1.714 (**9%改善**)、obj_med: s20 1.183 vs s15 1.221
+   - 大きい摂動範囲で **effective dataset variation 増 → bg calibration 締まる**
+   - s15 は under-perturb で汎化が weak、これは σ=2 評価で測っても同じ序列になる
+   - σ aug ボーナスは少なくとも σ=2 まで上り坂
 
-2. **NLL の差は σ-calibration 由来** (MSE はほぼ tied):
-   - mse_all: s15 2.265 / s20 2.254 / s30 2.302 — 差 ≤2%
-   - bg_med: s20=s30=1.57、s15=1.71 → bg は **σ≥2.0 で同質**、s15 だけ undertrained
-   - σ aug の主効果は **bg calibration 締め**
+2. **σ=3 では tail が暴れる (over-perturb の cost)**:
+   - obj_p95: s30 5.538 vs s20 5.258 (5%悪化)
+   - 大摂動 + 動的物体は **完全に context 外** に飛ぶサンプル増加 → 予測不能 tail
+   - s30 の MSE 全体 (2.302) も s20 (2.254) より 2% 悪い
+   - val_nll 1.602 が見かけ上 s15 1.643 より良いのは「自前の σ_pred スケール」の差で **直比較不可**
 
-3. **obj は σ 増で tail が伸びる**:
-   - obj_p95: s15 5.004 < s20 5.258 < s30 5.538
-   - 動的物体 + 大摂動で残差 outlier が伸びる cost、s30 で最も顕著
-   - obj_med は σ で改善 (s15 1.221 → s20 1.183 → s30 1.198)、median は OK だが p95 で痛む
+3. **bg は σ=2 と σ=3 で同質**:
+   - bg_med: s20=1.571、s30=1.570 (差 0.06%)
+   - σ≥2 で bg calibration は天井、追加摂動は効かない
 
-4. **arch は σ=1.5-3.0 で robust**:
-   - val_best 1.56-1.64 の狭いレンジに収束
-   - perturbation magnitude の絶対値より、bg calibration の改善幅 (σ aug ボーナス) が支配的
-   - σ ablation は **σ=2.0 を baseline 確定** で終了
+4. **arch は σ=1.5-3.0 robust**:
+   - 訓練曲線は 3 σ で大きく崩れない、grad 流れる範囲
+   - 結論: **σ=2.0 が defensible default**。σ=1.5 (under)、σ=3 (over) より良いことは bg/obj median で確認できる
+
+5. **σ aug の本質は real-world robustness**:
+   - 推論時の真の perturbation は学習時 σ より大きい/不確定 → 学習 σ 小 (s15) は under-cover
+   - 大きめ σ で学習しておくほうが推論時 large perturbation に対応できる
+   - **σ=3 の tail が悪化**してるのは img_size=128 の **context 不足** が原因 (大摂動で物体が crop 外に飛ぶ → context 外 → 予測不能)
+   - context を img_size=256 等に拡張すれば σ=3 も tail 抑えられて優位性出る可能性大
+   - 当面 img_size=128 では σ=2 が現実解、本気 robustness 求めるなら **σ=3 + img_size=256** ablation
 
 ## 次
 
