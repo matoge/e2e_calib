@@ -391,6 +391,7 @@ def main(cfg=None):
 
     cur_sigma = None
     for epoch in range(1, epochs+1):
+        _ep_start = time.time()
         if sigma_schedule is not None:
             new_sigma = _sigma_for_epoch(epoch)
             if new_sigma != cur_sigma:

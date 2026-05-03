@@ -15,6 +15,10 @@ CACHES = [
     ('pandaset_v3_tiled', '/mnt/nvme6t/e2e_calib_cache/pandaset_v3_tiled'),
     ('nuscenes_v3_tiled', '/mnt/nvme6t/e2e_calib_cache/nuscenes_v3_tiled'),
     ('waymo_v3_tiled',    '/mnt/nvme6t/e2e_calib_cache/waymo_v3_tiled'),
+    ('pandaset_v3_full',  '/mnt/nvme6t/e2e_calib_cache/pandaset_v3_full'),
+    ('nuscenes_v3_full',  '/mnt/nvme6t/e2e_calib_cache/nuscenes_v3_full'),
+    ('waymo_v3_full',     '/mnt/nvme6t/e2e_calib_cache/waymo_v3_full'),
+    ('ddad_v3_full',      '/mnt/nvme6t/e2e_calib_cache/ddad_v3_full'),
 ]
 
 
@@ -37,7 +41,7 @@ def main():
     ap.add_argument('--only', choices=['ps', 'ns', 'wm'], help='upload only one')
     ap.add_argument('--project', default='e2e_calib/data')
     args = ap.parse_args()
-    keys = {'ps': 'pandaset', 'ns': 'nuscenes', 'wm': 'waymo'}
+    keys = {'ps': 'pandaset', 'ns': 'nuscenes', 'wm': 'waymo', 'dd': 'ddad'}
     for name, path in CACHES:
         if args.only and keys[args.only] not in name:
             continue
