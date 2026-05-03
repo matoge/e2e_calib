@@ -17,3 +17,5 @@ logs/
 dist/
 build/
 .DS_Store
+experiments/*/best_model.pt
+experiments/*/train.log
