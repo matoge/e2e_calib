@@ -31,21 +31,37 @@
 | 90 | 1.696 | 1.585 | — |
 | **100** | **1.678** | **1.562** | (走行中) |
 
+## MSE-px 内訳 (last epoch)
+
+| | nll | mse_all | obj_mean | obj_med | obj_p95 | bg_med |
+|---|---:|---:|---:|---:|---:|---:|
+| s15 100ep | 1.678 | 2.265 | 1.757 | 1.221 | 5.004 | 1.714 |
+| **s20 100ep** | **1.562** | **2.254** | 1.783 | **1.183** | 5.258 | **1.571** |
+| s30 (ep14) | 3.100 | 4.342 | 3.967 | 2.973 | 10.407 | 3.348 |
+
 ## 考察
 
-1. **σ=2.0 が σ=1.5 より良い val_nll**:
-   - val_best: s20=1.562 < s15=1.643 (5% 改善)
-   - 大きい perturbation = より広い residual 分布で学習 → 汎化伸びる
-   - σ=1.5 は under-perturb で easy regime に偏る可能性
+1. **NLL で s20 win、MSE では tied**:
+   - nll: s20 1.562 < s15 1.678 (7% 改善)
+   - mse_all: 2.254 ≈ 2.265 (差 0.5%、誤差範囲)
+   - **NLL の差は MSE じゃなく σ-calibration 由来** (NLL = log σ + (resid/σ)² / 2)
 
-2. **収束軌道はほぼ重なる**:
-   - 5-50ep までは s15 と s20 はほぼ同じ val_nll、後半でわずかに s20 が上回る
-   - arch (deform_sl + frustum + n4) は perturbation 1.5-2.0° の範囲に **robust**
-   - ablation で σ 細かく振る必要なし、σ=2.0 を baseline 一本に確定
+2. **bg で s20 が一段良い**:
+   - bg_med: s20 **1.571** vs s15 1.714 (**9% 改善**)
+   - 大きい train σ → bg lidar の幅広 alignment scenario → calibration 締まる
 
-3. **s30 (1Hz, ep14)**:
-   - 序盤 (ep14) では s20/s15 と同程度、過大な σ で破綻はしてない
-   - ETA 完走まで ~1.5h、結果次第で σ ceiling 確認
+3. **obj は mixed**:
+   - obj_med: s20 1.183 < s15 1.221 (s20 わずかに win)
+   - obj_p95: s20 5.258 > s15 5.004 (s15 win、tail 強い)
+   - 大きい train σ で obj outlier (動的物体?) tail が伸びる cost
+
+4. **arch は σ 1.5-2.0 robust**:
+   - 軌道ほぼ重なる、後半でわずかに s20 リード
+   - σ ablation はこれで終了、**σ=2.0 を stage 1 baseline 確定**
+
+5. **s30 (ep14)**:
+   - 序盤遅れて見えるが過大 σ なので妥当、収束は ep30+
+   - ETA 完走まで ~1h、σ ceiling 確認
 
 ## 次
 
