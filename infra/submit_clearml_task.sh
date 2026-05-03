@@ -168,12 +168,22 @@ echo "       ct_args : $CT_ARGS"
 #   -v /mnt/fsx:/mnt/fsx  データセットキャッシュ (dgx1 には存在しないので無害にスキップ)
 #   -v /home/hfunaya/cache:/home/hfunaya/cache  dgx1 用キャッシュ
 #   -v /dev/shm:/dev/shm  /dev/shm 上のキャッシュも共有
+#   -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1
+#       container 内 python env をそのまま使う。 nvcr.io/nvidia/pytorch:24.02
+#       base image は pip freeze すると `aiohttp @ file:///rapids/...` みたいな
+#       ローカルパス参照を吐くため、 agent が新しい venv を作って再インストール
+#       しようとすると Local file not found で落ちる。 image の site-packages
+#       を丸ごと使う前提で SKIP_PIP_VENV_INSTALL=1 を立てる (agent 0.17.1 /
+#        v3.0.0 両方サポート)。
+#   -e CLEARML_AGENT_GIT_USER / GIT_PASS (optional)
+#       SSH 経由の git@github.com:matoge/... clone 用の PAT を持たせたい場合。
+#       既に image 側に ~/.ssh が焼いてあれば不要。
 clearml-task \
   --project     "$PROJECT" \
   --name        "$NAME" \
   --queue       "$QUEUE" \
   --docker      "$DOCKER_IMAGE" \
-  --docker_args "--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /home/hfunaya/cache:/home/hfunaya/cache -v /dev/shm:/dev/shm --ipc=host" \
+  --docker_args "--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /home/hfunaya/cache:/home/hfunaya/cache -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
   --script      "$SCRIPT" \
   --cwd         "." \
   --packages    "clearml" \
