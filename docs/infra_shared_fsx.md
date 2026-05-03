@@ -287,10 +287,15 @@ ALLOW_REMOTE_ONLY=1 ./infra/submit_clearml_task.sh \
 ```
 
 queue は `dgx{1,2,3,4}-gpu` から選ぶ。 `--cache` 未指定なら
-`submit_clearml_task.sh` が queue に応じて自動で注入する:
+`submit_clearml_task.sh` が自動で `/mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full`
+(Lustre 共有) を注入する。
 
-- `dgx1-gpu` → `/home/hfunaya/cache/pandaset_v3_full` (host-local rsync)
-- `dgx2/3/4-gpu` → `/mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full` (Lustre 共有)
+> **注**: 2026-05-03 初版では「dgx1 は Lustre 無し」という誤った前提で
+> queue 別の cache path 出し分けを入れていたが、実際は dgx1 も Lustre を
+> マウント済み (`192.168.1.1@o2ib:...:/lustre on /mnt/fsx type lustre`)
+> なので廃止した。host-local な `/home/hfunaya/cache/pandaset_v3_full`
+> (dgx1 に 1.2 GB 残っている) は過去 rsync の残骸で、当面削除もしないが
+> 参照もしない。
 
 ### 11.4 どんなデータが使えるか知りたい (家から)
 
@@ -318,8 +323,9 @@ for d in ds_list:
 3. 典型的な失敗:
    - `git clone` が 403: branch を push してない / private repo の場合は
      agent 側に `~/.ssh` or `CLEARML_AGENT_GIT_USER/PASS` が要る
-   - `bind mount fails: /home/hfunaya/cache`: queue を `dgx1-gpu` 以外にしたのに
-     submit_clearml_task.sh が古い (queue-aware mount が入っていない) → `git pull`
+   - `bind mount fails`: docker_args の `-v` にホスト側に存在しないパスが入っている。
+     2026-05-03 版以降の `submit_clearml_task.sh` なら `/mnt/fsx` と `/dev/shm` しか
+     mount しない (全 DGX で valid)。古い版を使っていたら `git pull`。
    - `Local file not found: aiohttp @ file:///rapids/...`: container で agent が
      pip を再インストールしようとしている。 docker_args に
      `-e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1` が入っているか確認

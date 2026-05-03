@@ -123,19 +123,15 @@ if [[ "$USE_LAUNCHER" == "1" ]]; then
 fi
 
 # PS の cache デフォルト自動注入 (ARGS の --cache が無い場合のみ)。
-#   - dgx1-gpu queue は /home/hfunaya/cache/pandaset_v3_full (host-local rsync)。
-#   - dgx2/3/4-gpu queue は /mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full (共有 Lustre)。
-#   - 他 queue / default は Lustre 側に倒す (docs/infra_shared_fsx.md §2)。
+#   dgx1-4 すべて Lustre (/mnt/fsx) マウント済みなので全 queue 共通で
+#   /mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full を使う。
+#   (以前 "dgx1 だけ Lustre 無し" と書いていたが誤り。2026-05-03 訂正。)
 # --args 側で明示的に --cache 渡せば override される。
 if [[ "$ORIG_SCRIPT" == *train_ps_v3_ddp.py* || "$ORIG_SCRIPT" == scripts/training/train_ps_v3_ddp.py ]]; then
   if [[ "$ARGS" != *"--cache"* ]]; then
-    if [[ "$QUEUE" == "dgx1-gpu" ]]; then
-      DEFAULT_PS_CACHE="/home/hfunaya/cache/pandaset_v3_full"
-    else
-      DEFAULT_PS_CACHE="/mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full"
-    fi
+    DEFAULT_PS_CACHE="/mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full"
     ARGS="--cache $DEFAULT_PS_CACHE $ARGS"
-    echo "[info] auto-inject (queue=$QUEUE): --cache $DEFAULT_PS_CACHE"
+    echo "[info] auto-inject: --cache $DEFAULT_PS_CACHE"
   fi
 fi
 # prepend launcher-specific flags (if any)
@@ -188,10 +184,7 @@ echo "       ct_args : $CT_ARGS"
 # docker_args の中身:
 #   --shm-size=64g  DDP で NCCL shared memory をケチると落ちる
 #   --gpus all      container に全 GPU 見せる (accelerate 側で num_processes で制限)
-#   -v /mnt/fsx:/mnt/fsx  データセットキャッシュ (dgx1 には存在しないので無害にスキップ)
-#   -v /home/hfunaya/cache:/home/hfunaya/cache  dgx1 用キャッシュ (dgx1-gpu queue 時のみ)
-#       → dgx2/3/4 には /home/hfunaya/cache が存在せず、 docker run -v が
-#         「bind source path does not exist」で落ちるので queue で出し分ける。
+#   -v /mnt/fsx:/mnt/fsx  データセットキャッシュ (dgx1-4 全て Lustre マウント済み)
 #   -v /dev/shm:/dev/shm  /dev/shm 上のキャッシュも共有
 #   -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1
 #       container 内 python env をそのまま使う。 nvcr.io/nvidia/pytorch:24.02
@@ -203,22 +196,12 @@ echo "       ct_args : $CT_ARGS"
 #   -e CLEARML_AGENT_GIT_USER / GIT_PASS (optional)
 #       SSH 経由の git@github.com:matoge/... clone 用の PAT を持たせたい場合。
 #       既に image 側に ~/.ssh が焼いてあれば不要。
-
-# queue-aware docker_args: dgx1 のみ host-local cache mount を足す。
-# 他 queue (dgx2/3/4) は Lustre のみで完結させる。
-DOCKER_ARGS_COMMON="--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace"
-if [[ "$QUEUE" == "dgx1-gpu" ]]; then
-  DOCKER_ARGS="$DOCKER_ARGS_COMMON -v /home/hfunaya/cache:/home/hfunaya/cache"
-else
-  DOCKER_ARGS="$DOCKER_ARGS_COMMON"
-fi
-
 clearml-task \
   --project     "$PROJECT" \
   --name        "$NAME" \
   --queue       "$QUEUE" \
   --docker      "$DOCKER_IMAGE" \
-  --docker_args "$DOCKER_ARGS" \
+  --docker_args "--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
   --script      "$SCRIPT" \
   --cwd         "." \
   --packages    "clearml" \
