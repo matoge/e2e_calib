@@ -452,7 +452,10 @@ class CalibNetDepth(nn.Module):
 
         if deform_mode != 'none':
             assert not self_first, "deform_mode is incompatible with self_first=True"
-            from model_deform import CrossAttentionBlockDeform, CrossAttentionBlockDeformML
+            try:
+                from .model_deform import CrossAttentionBlockDeform, CrossAttentionBlockDeformML
+            except ImportError:
+                from model_deform import CrossAttentionBlockDeform, CrossAttentionBlockDeformML
             if deform_mode == 'sl':
                 Block = CrossAttentionBlockDeform
                 kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp,
