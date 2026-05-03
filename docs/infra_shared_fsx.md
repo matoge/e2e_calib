@@ -116,11 +116,49 @@ curl -s -X POST http://172.16.200.217:18008/queues.create \
 # 4. agent 起動
 ssh dgx3 "cd ~/mcp_hub && docker compose -f docker-compose.clearml-agent.yml up -d"
 
-# 5. 学習 image ビルド (初回のみ)
-ssh dgx3 "cd ~/git/e2e_calib && docker build -f infra/Dockerfile.train -t e2e-calib-train:local ."
+# 5. 学習 image を fsx 経由で配布 (初回のみ)
+#    各ノードで build し直すと 4× の pull 時間がかかるので、
+#    1 ノード (dgx2 想定) で build → `docker save` → Lustre 上の tar を
+#    dgx{1,3,4} で `docker load` する。 詳細は §5.1。
+./infra/distribute_docker_image.sh     # dgx2 で実行
 ```
 
 agent container には **必ず `/mnt/fsx:/mnt/fsx` を bind mount** する。dgx2 の compose は `CLEARML_AGENT_DOCKER_HOST_MOUNT=/mnt/fsx:/mnt/fsx` を env で指定している。
+
+### 5.1 Docker image の統一配布 (fsx 経由)
+
+4 DGX 全台で同じ `e2e-calib-train:local` を使いたい。 registry を立てるのは大げさなので、
+Lustre を transport にする:
+
+```
+dgx2 (builder)                            dgx1 / dgx3 / dgx4 (consumers)
+├─ docker build -f infra/Dockerfile.train   ├─ docker load -i /mnt/fsx/tmp/hfunaya/images/...tar
+├─ docker save → /mnt/fsx/.../images/*.tar  │
+└─ (tar は Lustre 上に残す、再利用可)      └─ 以降は build 不要
+```
+
+配布ヘルパー: `infra/distribute_docker_image.sh`
+
+```bash
+# 1) dgx2 で一度だけ build
+ssh dgx2 "cd ~/git/e2e_calib && docker build -f infra/Dockerfile.train -t e2e-calib-train:local ."
+
+# 2) dgx2 で save → 他 3 台に load
+ssh dgx2 "cd ~/git/e2e_calib && ./infra/distribute_docker_image.sh"
+
+# 3) 確認
+for h in dgx1 dgx2 dgx3 dgx4; do ssh $h "docker images e2e-calib-train:local"; done
+```
+
+- tar の置き場: `/mnt/fsx/tmp/hfunaya/images/e2e-calib-train_local.tar` (`:` は `_` に置換)
+- サイズ目安: nvcr.io/nvidia/pytorch:24.02-py3 ベースで **~8-10 GB** (save 後、非圧縮)
+- Dockerfile を変更したら再 build + 再配布。 tar は **git-ignore / 生成物**、 同名 overwrite で更新。
+- dgx1 には Lustre が繋がっているので tar は Lustre に置いたままで `docker load` で OK。
+
+**ヒント**: image 更新は数ヶ月に 1 回程度の頻度で十分。 python pkg を増やしたい時は
+通常 `requirements.train.txt` への追記 → rebuild。
+`CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1` により agent は venv 再生成しないので、
+**image 側 site-packages が効く**。
 
 ## 6. HEATRUN (開発機) からの submit
 
