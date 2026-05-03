@@ -212,3 +212,102 @@ oversample=30 でも warmup 50 batch で 1.0s = 瞬間 6400 sps だった。
 - i9 で同じコード走らせたら帯域 1/3 × コア 1/4 で **3500 → ~1000 sps に落ちる見込み**
 - 4000+ sps 実用域へ行くには **shared-memory キャッシュ**か
   **学習側 batch=256 で worker あたり fetch 率半減**が次手
+
+## 8. 8-rank DDP contention 再ベンチ (2026-05-03, post-TJ-fix)
+
+### 8.1 TurboJPEG install trap
+
+§3.3 の TJ は実は **動いてなかった**。`pandaset_full.py` の import は:
+
+```python
+try:
+    import turbojpeg as _tj
+    _HAVE_TJ = True
+except Exception:
+    _HAVE_TJ = False
+```
+
+pypi に `turbojpeg` (= Dobatymo/turbojpeg-python) と `PyTurboJPEG` の2パッケージが
+あり、前者は namespace `turbojpeg` を同名で奪うが TurboJPEG class を持たない。
+よって `import turbojpeg` が成功しても、実行時 `turbojpeg.TurboJPEG()` で
+AttributeError → **silent fallback で PIL が走り続けていた**。
+
+加えて container 内の `libturbojpeg.so` が無く、正しい PyTurboJPEG を入れても
+`OSError: libturbojpeg.so.0: cannot open shared object file` で落ちる。
+
+**修正:**
+
+```bash
+pip uninstall -y turbojpeg PyTurboJPEG
+pip install PyTurboJPEG
+conda install -c conda-forge libjpeg-turbo   # → lib/libturbojpeg.so
+```
+
+### 8.2 decode micro-bench（500×500 tile、1 プロセス）
+
+| path | time/call | 備考 |
+|---|---:|---|
+| PIL `Image.open(BytesIO).convert('RGB')` | **1.34 ms** | libjpeg ベース、Python allocator 経由 |
+| PyTurboJPEG `decode()` full | **1.01 ms** | **1.33× (§3.3 の 3.2× より小さい)** |
+
+**3.2× が 1.33× に縮んだ理由**:
+§3.3 は 1920×1080 の full image を crop+decode する想定で、TJ の部分 decode が
+効いていた。現 V3 tile cache は既に **500×500 pre-crop** 済みの jpg を保持する
+ため、decode 量自体が小さく、PIL と TJ の差が SIMD IDCT 効果のみになる。
+
+`__getitem__` 全体では: **6.52 ms → 4.66 ms (-28%)** 改善。
+
+### 8.3 8-rank concurrent workers sweep（dgx2, waymo_v3_tiled）
+
+dgx2: **96 phys × 2 HT = 192 logical**。
+vLLM が GPU 0-7 を占有していたため、ベンチは **GPU 8-15 に taskset 12 cpus/rank**
+（rank r → cpus r×12 .. r×12+11、spawn, skip-single, n_batches=100, bs=64, prefetch=4）。
+
+| workers/rank | TJ OFF (baseline) | TJ ON | diff |
+|---:|---:|---:|---:|
+| 8 | 7,488 sps | — | — |
+| 10 | 8,002 sps | **9,948 sps** | **+24% ← 最大** |
+| 11 | 9,082 sps | — | — |
+| 12 | **9,882 sps** ← TJ OFF peak | 7,317 sps | **−26% (regression)** |
+| 14 | 8,204 sps | 8,094 sps | 〜flat |
+| 16 | — | 7,757 sps | — |
+
+### 8.4 "TJ ON で w=12 が退化した" の解釈
+
+TJ OFF の curve は **w=12 で 9,882 sps ピーク → w=14 で 8,204 sps 減衰** という
+凸形。これは普通の worker 増→並列 decode 増→帯域飽和で頭打ちの形。
+
+TJ ON は **同じ曲線の"帯域飽和が w=10 側に前倒しになった"と解釈できる**:
+- TJ ON では 1 worker あたりの decode が速い (−28%) → 同じ wall-time で読む byte/s が増える
+- w=10 で既に帯域・LLC が埋まる → w=12 で**帯域争奪 + LLC miss** が起きる
+- TJ OFF の "PIL decode が遅くて帯域に余裕がある w=12" とは相対的に負ける
+
+§4.1 の「実効 ~350 GB/s で律速」仮説と consistent。TJ ON で **同じ sps レベルに
+より少ない worker で到達する** = CPU 節約できるが、上限値は同じ。
+
+### 8.5 final recommended config
+
+```python
+# train_ps_v3_ddp.py 8-rank DDP on dgx2-class (Xeon 8168×2 or 9654×1):
+num_workers    = 10    # TJ ON ピーク、overshoot しない
+pin_memory     = True
+prefetch_factor = 4
+batch_size     = 64    # per-rank. 8-rank world → 512 global
+```
+
+per-rank **1,244 sps × 8 ranks = ~10,000 sps/node**。
+これは §7 の 3,500 sps（single-rank baseline）から **2.8×** 相当、
+かつ 1 epoch (~90k samples) ≈ **9 秒** で回る。
+
+### 8.6 takeaway
+
+1. **install 時 silent fallback で年単位バグ化する落とし穴**:
+   `_HAVE_TJ` を try/except で隠すのではなく、`import turbojpeg; turbojpeg.TurboJPEG()`
+   まで smoke test してから `_HAVE_TJ=True` とすべき。（§3.3 の時点では CI が無く、
+   PIL fallback で sps が出ていたため気づかなかった）
+2. **TJ はこの cache schema では 1.33× しか効かない**: 小タイル pre-crop cache では
+   decode 比率が低く、Python allocator + IPC + pts/is_obj 読みの比率が高い。
+3. **w を 1 増やせば sps が上がる時代は終わった**: 8-rank DDP では **per-rank workers
+   を 10〜11 に絞る**のが帯域上有利。過去の「w=90, single rank」幻想は捨てる。
+4. 次に効くのは §5 の shared-memory `inst` cache (全 worker で jpg bytes を共有する)。
+   TJ 単独改善ではもう追加 gain は出ない。
