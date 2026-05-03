@@ -165,7 +165,8 @@ def main(cfg=None):
                       max_crop_px=c.get('max_crop_px', 512),
                       frame_stride=c.get('frame_stride', 1),
                       grid_n=c.get('grid_n', 16),
-                      oversample=c.get('oversample', 12))
+                      oversample=c.get('oversample', 12),
+                      zoom_aug=c.get('zoom_aug', False))
         log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
             f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
         tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
@@ -558,6 +559,11 @@ if __name__ == "__main__":
                          'extra_kv to deform-CA — instead of adding scattered '
                          'frustum tokens to q. Hybrid: DA on image + regular '
                          'softmax CA on the dense LiDAR map.')
+    ap.add_argument('--zoom-aug', action='store_true',
+                    help='depth-dependent zoom-in aug: shrink cs by up to '
+                         'scale_max(z) (1.0@z=20m → 2.0@z>=100m). Synthesizes '
+                         'telephoto views of distant objects to fill the '
+                         'high-resolution far-object regime native lens lacks.')
     ap.add_argument('--train-size', type=int, default=None,
                     help='per-epoch random subsample of train set (caps wall-time). '
                          'e.g. 20000 → 78 batches @ bs=256 → ~14s/ep')
@@ -595,6 +601,7 @@ if __name__ == "__main__":
     if args.convnext: cfg['use_convnext'] = True
     if args.deform_mode is not None: cfg['deform_mode'] = args.deform_mode
     if args.frustum_dense: cfg['frustum_dense'] = True
+    if args.zoom_aug: cfg['zoom_aug'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
     if args.curriculum:

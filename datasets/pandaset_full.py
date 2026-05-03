@@ -103,7 +103,8 @@ class PandaSetCalibDatasetFull(Dataset):
                  oversample: int = 12,
                  frame_stride: int = 1,
                  grid_n: int = 16,
-                 n_full: int = 1024):
+                 n_full: int = 1024,
+                 zoom_aug: bool = False):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
         meta = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
@@ -121,6 +122,12 @@ class PandaSetCalibDatasetFull(Dataset):
         self.oversample = int(oversample)
         self.grid_n     = int(grid_n)
         self.n_full     = int(n_full)
+        # depth-dependent zoom-in aug. When True, far pivots (z>=20m) randomly
+        # shrink cs by up to scale_max(z): 1.0 at 20m → 2.0 at 100m+. This
+        # synthesizes "telephoto view of distant objects" without needing
+        # wider source crops — fills the high-resolution far-object regime
+        # that PS / Waymo data lacks at native lens.
+        self.zoom_aug  = bool(zoom_aug)
 
     def __len__(self):
         return len(self.fnames) * self.oversample
@@ -216,6 +223,19 @@ class PandaSetCalibDatasetFull(Dataset):
                 cs_lo, cs_hi = self.min_crop_px, self.max_crop_px
             cs = int(np.random.randint(cs_lo, cs_hi + 1))
             cs = min(cs, IW, IH)
+            # Depth-dependent zoom-in aug: shrink cs by up to scale_max(z) so the
+            # final image has the same content but VFP-equivalent of "viewing
+            # this region from `scale` x farther". scale_max(z) goes from 1.0 at
+            # z<20m (no zoom) up to 2.0 at z>=100m. Far pivots only — close-up
+            # zoom on near objects creates artifacts (see project_uvemb_query
+            # _curriculum stage 4 design rationale).
+            if getattr(self, 'zoom_aug', False) and piv_z >= 20.0:
+                t = min(1.0, (piv_z - 20.0) / 80.0)         # 0 at 20m, 1 at 100m+
+                scale_max = 1.0 + t * 1.0                   # 1.0 → 2.0
+                # 20m → 1.0–1.2 (effectively 0.05–0.20), 100m → 1.0–2.0
+                cap = 1.0 + t * (scale_max - 1.0)
+                scale = float(np.random.uniform(1.0, max(1.0, scale_max)))
+                cs = max(self.min_crop_px // 4, int(cs / scale))
             u0 = int(np.clip(pu - cs/2, 0, IW - cs))
             v0 = int(np.clip(pv - cs/2, 0, IH - cs))
 
