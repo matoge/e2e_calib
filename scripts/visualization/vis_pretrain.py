@@ -23,6 +23,12 @@ def _full_proj(inst):
     pcam = (T_gt @ homo.T)[:3].T
     z = pcam[:, 2]
     uv = ((K @ pcam.T)[:2] / np.maximum(pcam[:, 2:].T, 1e-6)).T
+    # Tile inst: K_full stays in PARENT coords (distortion-safe), so projection
+    # lands at parent-image uv. Subtract (tile_u0, tile_v0) to bring into the
+    # tile-local canvas the renderer is showing.
+    tile_u0 = int(inst.get('tile_u0', 0)); tile_v0 = int(inst.get('tile_v0', 0))
+    if tile_u0 or tile_v0:
+        uv = uv - np.array([tile_u0, tile_v0], dtype=uv.dtype)
     vis = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW) & (uv[:, 1] >= 0) & (uv[:, 1] < IH)
     is_obj = _is_obj_per_point(pts, cubs).astype(bool)
     return img, uv, vis, is_obj, IH, IW
@@ -31,9 +37,16 @@ def _full_proj(inst):
 CUBOID_EDGES = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
 
 
-def project_cuboids(cubs, T_gt, K):
-    """Project each cuboid's 8 corners. Returns list of dicts {uv: (8,2), z: (8,), label}."""
+def project_cuboids(cubs, T_gt, K, tile_u0: int = 0, tile_v0: int = 0):
+    """Project each cuboid's 8 corners. Returns list of dicts {uv: (8,2), z: (8,), label}.
+
+    For tile insts, K stays in parent-image coords (distortion-safe), so the
+    projected uv must be brought into tile-local coords by subtracting the
+    tile origin. Pass tile_u0/v0 from inst.get('tile_u0', 0) when drawing on
+    a tile canvas.
+    """
     out = []
+    off = np.array([tile_u0, tile_v0], dtype=np.float32)
     for c in cubs:
         pos = np.asarray(c['pos'], dtype=np.float32)
         dims = np.asarray(c['dims'], dtype=np.float32)
@@ -50,6 +63,7 @@ def project_cuboids(cubs, T_gt, K):
         corners_cam = (T_gt @ homo.T).T[:, :3]
         z = corners_cam[:, 2]
         uv = ((K @ corners_cam.T)[:2] / np.maximum(corners_cam[:, 2:].T, 1e-6)).T
+        uv = uv - off
         out.append({'uv': uv.astype(np.float32), 'z': z.astype(np.float32),
                     'label': c.get('label', '')})
     return out
