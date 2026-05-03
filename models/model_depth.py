@@ -152,6 +152,12 @@ class FrustumLocalEncoder(nn.Module):
             )) for _ in range(n_layers)
         ])
         self.out_proj = nn.Linear(d_local, d_out)
+        # learnable per-cell UV embedding for dense mode. Even cells with no
+        # LiDAR get a position-informative token (so the model can ask "what's
+        # around UV (u,v)?" without needing a real point there). Sized
+        # (1, gh*gw, d_out) so it broadcasts across batch.
+        self.cell_uv_embed = nn.Parameter(torch.zeros(1, grid_n * grid_n, d_out))
+        nn.init.trunc_normal_(self.cell_uv_embed, std=0.02)
 
     def forward(self, query_uvd: torch.Tensor,
                 full_uvd: torch.Tensor,
@@ -248,6 +254,51 @@ class FrustumLocalEncoder(nn.Module):
         feat = self.out_proj(x)                                    # 32 → D, ONCE
         feat = feat.masked_fill(~any_valid, 0.0)                   # all-pad guard
         return feat
+
+    def forward_dense(self, full_uvd: torch.Tensor,
+                       full_pad_mask: torch.Tensor,
+                       img_size: int = 64) -> torch.Tensor:
+        """Dense gh×gw lidar map: query at every cell center, output (B, gh*gw, D).
+
+        Empty cells (no LiDAR within ±r_uv_cells) get a zero geometry feature,
+        but the learnable per-cell UV embedding is still added — so even
+        no-LiDAR cells carry useful position information for downstream
+        cross-attention. Use this when the lidar stream is treated as a 2D
+        KV map (alongside coarse_feat / fine_feat) rather than scattered
+        per-pivot tokens.
+
+        Args:
+            full_uvd, full_pad_mask: same as forward()
+            img_size: crop pixel side
+        Returns:
+            (B, gh*gw, D)  with cell_uv_embed already added.
+        """
+        B = full_uvd.shape[0]
+        device = full_uvd.device
+        cell_px = float(img_size) / float(self.grid_n)
+        # build (gh*gw, 3) cell-center queries: u,v at cell center, d=0
+        cy, cx = torch.meshgrid(
+            torch.arange(self.grid_n, device=device, dtype=full_uvd.dtype),
+            torch.arange(self.grid_n, device=device, dtype=full_uvd.dtype),
+            indexing='ij',
+        )
+        u = (cx + 0.5) * cell_px
+        v = (cy + 0.5) * cell_px
+        d = torch.zeros_like(u)
+        cell_uvd = torch.stack([u, v, d], dim=-1).reshape(1, -1, 3).expand(B, -1, -1)
+        # query_token: zero — we want pure local-pt aggregation, no upstream MLP.
+        # The PT block will lift the local Δ-uvd into d_local. Empty cells fall
+        # through the masked_fill at the end and stay zero.
+        D = self.in_proj.in_features
+        zero_q_token = torch.zeros(B, cell_uvd.shape[1], D,
+                                    device=device, dtype=full_uvd.dtype)
+        feat = self.forward(query_uvd=cell_uvd, full_uvd=full_uvd,
+                             full_pad_mask=full_pad_mask,
+                             query_token=zero_q_token, img_size=img_size)
+        # add learnable per-cell UV embedding so even all-zero (empty) cells
+        # carry their position
+        feat = feat + self.cell_uv_embed
+        return feat                                                # (B, gh*gw, D)
 
 
 class LocalNeighborhood3D(nn.Module):
@@ -362,6 +413,7 @@ class CalibNetDepth(nn.Module):
                  cross_temp: float = 1.0, use_convnext: bool = False,
                  use_frustum: bool = False, r_uv_cells: float = 1.5, r_d: float = 0.004,
                  k_nb: int = 16, frustum_grid_n: int = 16,
+                 frustum_dense: bool = False,
                  deform_mode: str = 'none', deform_n_points: int = 4,
                  use_frame_token: bool = False, frame_token_side: int = 8,
                  use_lidar_kv: bool = False, use_pose_emb: bool = False,
@@ -394,6 +446,7 @@ class CalibNetDepth(nn.Module):
         self._use_frame_token  = use_frame_token
         self._frame_token_side = frame_token_side
         self._use_lidar_kv = use_lidar_kv
+        self._frustum_dense = frustum_dense and use_frustum and not use_3d_local
         self._use_pose_emb = use_pose_emb
         self.pose_emb = PoseEmb(d) if use_pose_emb else None
 
@@ -484,6 +537,13 @@ class CalibNetDepth(nn.Module):
                                           full_pad_mask=pad_full,
                                           vfp=vfp, img_size=self.img_size,
                                           query_pad_mask=key_padding_mask)
+            elif self._frustum_dense:
+                # dense gh*gw lidar map → keep separately, fed as extra_kv to
+                # the cross-attention later (NOT added to q).
+                self._lidar_kv_dense = self.frustum_enc.forward_dense(
+                    full_uvd=distorted_uvd_full,
+                    full_pad_mask=pad_full,
+                    img_size=self.img_size)
             else:
                 q = q + self.frustum_enc(distorted_uvd,
                                           full_uvd=distorted_uvd_full,
@@ -507,11 +567,20 @@ class CalibNetDepth(nn.Module):
             coarse_feat = coarse_feat + pe_2d
             fine_feat   = fine_feat   + pe_2d
 
-        # extra_kv (lidar bank): copy of initial Q (= per-point features after
-        # PointMLP+Frustum+pose_emb), held constant across layers as KV-side
-        # complement to image tokens. Mask follows the per-point pad mask.
-        extra_kv = q if self._use_lidar_kv else None
-        extra_kv_mask = key_padding_mask if self._use_lidar_kv else None
+        # extra_kv (lidar bank): two modes —
+        #   _use_lidar_kv (legacy):   copy of initial Q (per-pivot features)
+        #   _frustum_dense:           gh*gw dense lidar map from forward_dense,
+        #                             every cell gets a token (zero LiDAR + UV emb
+        #                             for empty cells). This is the "dense LiDAR
+        #                             map as KV channel" route — empty cells
+        #                             still carry their position embedding so DA
+        #                             can attend by UV alone.
+        if self._frustum_dense and getattr(self, '_lidar_kv_dense', None) is not None:
+            extra_kv = self._lidar_kv_dense
+            extra_kv_mask = None       # all cells valid (UV emb is always there)
+        else:
+            extra_kv = q if self._use_lidar_kv else None
+            extra_kv_mask = key_padding_mask if self._use_lidar_kv else None
 
         # ML mode: every block sees both levels; SL / none: alternate coarse→fine
         if self._deform_mode == 'ml':

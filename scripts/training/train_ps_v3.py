@@ -207,6 +207,7 @@ def main(cfg=None):
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", False),
+                          frustum_dense=c.get("frustum_dense", False),
                           deform_mode=c.get("deform_mode", "none")).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     log(f"amp_dtype={_AMP_DTYPE} scaler_enabled={_NEED_SCALER} device={torch.cuda.get_device_name(0)} cc={torch.cuda.get_device_capability(0)}")
@@ -551,6 +552,12 @@ if __name__ == "__main__":
                     help='use ConvNeXt backbone (=all_v1 1.62M config)')
     ap.add_argument('--deform-mode', default=None,
                     help="deformable cross-attn: 'none' (default) | 'sl' single-level | 'ml' multi-level")
+    ap.add_argument('--frustum-dense', action='store_true',
+                    help='emit dense gh*gw LiDAR map (zero-pad empty cells + '
+                         'learnable per-cell UV embedding) and feed it as '
+                         'extra_kv to deform-CA — instead of adding scattered '
+                         'frustum tokens to q. Hybrid: DA on image + regular '
+                         'softmax CA on the dense LiDAR map.')
     ap.add_argument('--train-size', type=int, default=None,
                     help='per-epoch random subsample of train set (caps wall-time). '
                          'e.g. 20000 → 78 batches @ bs=256 → ~14s/ep')
@@ -586,6 +593,8 @@ if __name__ == "__main__":
     if args.n_layers is not None: cfg['n_layers'] = args.n_layers
     if args.img_size is not None: cfg['img_size'] = args.img_size
     if args.convnext: cfg['use_convnext'] = True
+    if args.deform_mode is not None: cfg['deform_mode'] = args.deform_mode
+    if args.frustum_dense: cfg['frustum_dense'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
     if args.curriculum:

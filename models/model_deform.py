@@ -179,9 +179,25 @@ class CrossAttentionBlockDeform(nn.Module):
             self.norm_kv_sa = nn.LayerNorm(d)
         self._kv_self_attn = kv_self_attn
         self._cross_temp   = cross_temp  # unused for deformable, kept for API parity
+        # extra-KV branch: regular softmax cross-attention on a sparse / dense
+        # token bank (e.g. dense LiDAR map at gh×gw, or radar tokens). Output
+        # is summed with the DA output before the SA stage. Created always so
+        # .to(device) works correctly; if extra_kv is never passed at forward
+        # time the module just sits unused (~30k params, negligible).
+        self.extra_kv_attn = nn.MultiheadAttention(d, n_heads, batch_first=True,
+                                                    dropout=0.1)
+        self.norm_extra_kv = nn.LayerNorm(d)
 
-    def forward(self, q, feat, uv_01, key_padding_mask=None, self_first=False):
-        """q (B,N,D), feat (B,D,H,W), uv_01 (B,N,2) in [0,1]."""
+    def forward(self, q, feat, uv_01, key_padding_mask=None, self_first=False,
+                 extra_kv=None, extra_kv_mask=None):
+        """q (B,N,D), feat (B,D,H,W), uv_01 (B,N,2) in [0,1].
+
+        extra_kv (B,N_kv,D): optional secondary KV bank attended to with regular
+            softmax cross-attention. Result summed with the DA output. Use for
+            dense LiDAR map (gh*gw, with empty cells carrying UV emb) or radar
+            tokens — anything that should attend by content rather than via
+            uv-anchored deformable sampling.
+        """
         B, D_, H, W = feat.shape
         kv = feat.flatten(2).permute(0, 2, 1)    # (B, HW, D)
 
@@ -198,6 +214,12 @@ class CrossAttentionBlockDeform(nn.Module):
 
         ca = self.cross_attn(nq, ref, nkv, spatial_shapes, level_start_index,
                               input_padding_mask=None)
+        # parallel softmax CA on extra_kv (e.g. dense LiDAR map gh×gw cells).
+        if extra_kv is not None:
+            n_extra = self.norm_extra_kv(extra_kv)
+            ca_extra, _ = self.extra_kv_attn(nq, n_extra, n_extra,
+                                              key_padding_mask=extra_kv_mask)
+            ca = ca + ca_extra        # sum DA + regular attn outputs
 
         if self_first:
             # (keep parity with CrossAttentionBlockCov: under self_first the SA
