@@ -241,18 +241,21 @@ def main(cfg=None):
     if zod_src:
         log("vis_pretrain skipped (ZOD direct-read; full-image vis not yet wired)")
     else:
+        # subprocess (NOT in-process import) so ClearML-agent's argparse
+        # monkeypatch can't leak parent's empty Args/* params into vis_pretrain.
+        # Argparse errors there were causing parent to die via SystemExit(2).
+        import subprocess as _sp, sys as _sys
         try:
-            from scripts.visualization.vis_pretrain import main as _vis_pretrain
-            import sys as _sys
-            _argv = _sys.argv[:]
-            _sys.argv = ['vis_pretrain', '--cache', cache, '--out', str(exp_dir / 'vis_pretrain'), '--n', '10']
-            _vis_pretrain(); _sys.argv = _argv
+            _sp.run([_sys.executable, 'scripts/visualization/vis_pretrain.py',
+                     '--cache', cache, '--out', str(exp_dir / 'vis_pretrain'),
+                     '--n', '10'], check=False, env={**os.environ,
+                                                        'CLEARML_TASK_ID': ''})
             log(f"vis_pretrain → {exp_dir / 'vis_pretrain'}")
             if cml_logger is not None:
                 for p in sorted((exp_dir / 'vis_pretrain').glob('*.png')):
                     try: cml_logger.report_image('vis_pretrain', p.stem, iteration=0, local_path=str(p))
                     except Exception: pass
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             log(f"vis_pretrain skipped: {e}")
 
     def _midtrain_vis(epoch: int, n: int = 10):
