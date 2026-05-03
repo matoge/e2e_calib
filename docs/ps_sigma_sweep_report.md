@@ -68,3 +68,15 @@
 - **stage 1 hybrid KV (`--frustum-dense`) を σ=2.0 で 100ep 走らせる**: dense LiDAR-map + UV emb + DA/regular hybrid CA。s20 baseline 1.562 と同等以上に収束するか
 - target val_nll: **≤ 1.56** が hybrid KV 採用ライン
 - それ以下なら stage 2 (mixed Q) → stage 3 (UV-only Q) へ進める
+
+## Learning curves
+
+![](assets/sigma_compare/learning_curves.png)
+
+s20 (赤) が訓練・val 両方で一貫して s15 (青) より下を走る。s30 (緑、ep14 まで) はまだ序盤、収束待ち。
+
+## Sample-level prediction compare (best model each)
+
+![](assets/sigma_compare/sample_compare.png)
+
+各 row = 同じ val sample。col1 = crop、col2-4 = s15/s20/s30 の予測 (cyan=distorted, lime=obj-distorted, yellow+ = GT, red× = pred)。各 panel に "resid (was)" として「予測後の残差 / 摂動直後の残差」を px で表示。s30 はまだ training 進行中なので残差大きい。
