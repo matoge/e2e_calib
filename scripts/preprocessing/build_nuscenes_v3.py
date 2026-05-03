@@ -66,7 +66,8 @@ def _worker_init(meta_dir: str):
         if len(parts) < 2:
             continue
         ch = parts[1]
-        if ch in CAM_CHANNELS or ch == 'LIDAR_TOP':
+        if (ch in CAM_CHANNELS or ch == 'LIDAR_TOP'
+                or ch.startswith('RADAR_')):
             sd_by.setdefault(d['sample_token'], {})[ch] = d
     _CTX['sd_by'] = sd_by
     ann_by = {}
@@ -128,6 +129,36 @@ def _convert_scene(args_tuple):
             continue
         h = np.hstack([pts_lid, np.ones((len(pts_lid), 1), dtype=pts_lid.dtype)])
         pts_world = (T_lid2w @ h.T).T[:, :3].astype(np.float32)
+        is_radar_lid = np.zeros(len(pts_world), dtype=np.float32)
+
+        # 5 radars in world frame. Continental ARS 408 → essentially 2D (z≈0
+        # in sensor frame), but the world transform plants them at ~ego height.
+        # Useful for the residual net: sparse but velocity/RCS-rich; treat them
+        # as additional pts that flow through the same crop/frustum logic.
+        radar_chs = ('RADAR_FRONT', 'RADAR_FRONT_LEFT', 'RADAR_FRONT_RIGHT',
+                     'RADAR_BACK_LEFT', 'RADAR_BACK_RIGHT')
+        radar_pts_list = []
+        try:
+            from nuscenes.utils.data_classes import RadarPointCloud
+            RadarPointCloud.disable_filters()  # raw, no dyn_prop / RCS filter
+            for rch in radar_chs:
+                sd_r = sd_map.get(rch)
+                if sd_r is None: continue
+                T_r2w = _T_sensor_to_world(_CTX['cal'][sd_r['calibrated_sensor_token']],
+                                            _CTX['ego'][sd_r['ego_pose_token']])
+                rp = RadarPointCloud.from_file(str(Path(data_root) / sd_r['filename']))
+                pts_r = rp.points[:3].T.astype(np.float32)             # (N,3) sensor frame
+                if len(pts_r) == 0: continue
+                hr = np.hstack([pts_r, np.ones((len(pts_r), 1), dtype=np.float32)])
+                pts_r_w = (T_r2w @ hr.T).T[:, :3].astype(np.float32)
+                radar_pts_list.append(pts_r_w)
+        except Exception:
+            pass  # devkit missing or radar PCD unreadable; skip silently
+        if radar_pts_list:
+            pts_radar_world = np.concatenate(radar_pts_list, axis=0)
+            pts_world = np.concatenate([pts_world, pts_radar_world], axis=0)
+            is_radar_lid = np.concatenate([is_radar_lid,
+                                            np.ones(len(pts_radar_world), dtype=np.float32)])
 
         # cuboids for this sample (world frame)
         cubs = []
@@ -169,11 +200,14 @@ def _convert_scene(args_tuple):
             uv = ((K @ pcam.T)[:2] / np.maximum(pcam[:, 2:].T, 1e-6)).T
             vis = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW) & (uv[:, 1] >= 0) & (uv[:, 1] < IH)
             if vis.sum() < 16: continue
-            pts_vis = pts_world[vis]
-            uv_vis  = uv[vis].astype(np.float32)
-            z_vis   = z[vis].astype(np.float32)
+            pts_vis    = pts_world[vis]
+            uv_vis     = uv[vis].astype(np.float32)
+            z_vis      = z[vis].astype(np.float32)
+            is_radar_v = is_radar_lid[vis].astype(np.float32)
 
-            # is_obj on visible pts (cuboid membership in world frame)
+            # is_obj on visible pts (cuboid membership in world frame).
+            # Radar pts technically can fall inside a cuboid too — keep the
+            # same test; if it surprises later we can mask radar out here.
             from datasets.pandaset_full import _is_obj_per_point
             is_obj_vis = _is_obj_per_point(pts_vis, cubs).astype(np.float32)
 
@@ -195,6 +229,7 @@ def _convert_scene(args_tuple):
                     uv_full  = torch.from_numpy(uv_vis),
                     z_cam    = torch.from_numpy(z_vis),
                     is_obj   = torch.from_numpy(is_obj_vis),
+                    is_radar = torch.from_numpy(is_radar_v),
                 ))
                 torch.save(inst, inst_dir / f'{gid:08d}.pt')
                 gid += 1
@@ -205,7 +240,8 @@ def _convert_scene(args_tuple):
                 tile_files = cut_inst_to_tiles(
                     jpg_bytes=jpg_bytes, IW=int(IW), IH=int(IH),
                     pts_vis=pts_vis, uv_vis=uv_vis, z_vis=z_vis,
-                    is_obj_vis=is_obj_vis, common_inst=common_inst,
+                    is_obj_vis=is_obj_vis, is_radar_vis=is_radar_v,
+                    common_inst=common_inst,
                     tile_w=tw, tile_h=th, stride=st, pad_px=pad,
                     y_start=y0, jpg_quality=q,
                     out_dir=inst_dir, gid_base=gid)
