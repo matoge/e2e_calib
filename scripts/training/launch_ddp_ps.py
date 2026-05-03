@@ -53,6 +53,8 @@ def _parse_known(argv):
             mp = a.split("=", 1)[1]; i += 1
         elif a == "--target-script":
             target = argv[i + 1]; i += 2
+        elif a.startswith("--target-script="):
+            target = a.split("=", 1)[1]; i += 1
         else:
             passthrough.append(a); i += 1
     if num_gpus is None:
