@@ -22,10 +22,13 @@
 FROM nvcr.io/nvidia/pytorch:24.02-py3
 
 # system
+# NOTE: DEBIAN_FRONTEND + TZ must be set *before* apt-get install,
+# otherwise tzdata prompts for geographic area interactively and the build hangs.
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Tokyo
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git tini tzdata rsync openssh-client \
     && rm -rf /var/lib/apt/lists/*
-ENV TZ=Asia/Tokyo
 
 # python deps — base image はすでに torch/torchvision/numpy/scipy を持っているので
 # 足りないぶんだけ追加する。 accelerate と clearml は必須。

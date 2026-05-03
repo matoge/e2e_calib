@@ -33,10 +33,16 @@ set -euo pipefail
 NAME=""
 PROJECT="e2e_calib"
 SCRIPT=""
-QUEUE="dgx2-gpu"
+QUEUE="dgx1-gpu"        # default dgx1-gpu (host-pip agent v3.0.0 in docker mode).
+                         # dgx2-gpu / dgx3-gpu / dgx4-gpu は --queue で切替。
 ARGS=""
 DOCKER_IMAGE="e2e-calib-train:local"
-NUM_PROCESSES=8  # GPU 数。 dgx1/2/3/4 は全部 8GPU 前提
+NUM_PROCESSES=4          # GPU 数。 smoke/short run は 4 GPU、 200ep 本番は 8 に上げる
+USE_LAUNCHER=1           # 1 → scripts/training/launch_ddp_ps.py を噛ませて
+                         #     container 内で accelerate launch --num_processes=N を
+                         #     起動する。 clearml-task は `python <script>` を直叩き
+                         #     するので、 ここを 0 にすると DDP は effectively
+                         #     num_processes=1 で回る (比較/デバッグ時のみ)。
 
 usage() {
   cat <<EOF
@@ -65,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --args)         ARGS="$2";          shift 2 ;;
     --image)        DOCKER_IMAGE="$2";  shift 2 ;;
     --num-gpus)     NUM_PROCESSES="$2"; shift 2 ;;
+    --no-launcher)  USE_LAUNCHER=0;     shift 1 ;;
     -h|--help)      usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
@@ -73,6 +80,68 @@ done
 [[ -z "$NAME"   ]] && { echo "[err] --name required" >&2;   usage; }
 [[ -z "$SCRIPT" ]] && { echo "[err] --script required" >&2; usage; }
 [[ ! -f "$SCRIPT" ]] && { echo "[err] script not found: $SCRIPT" >&2; exit 2; }
+
+# --- DDP launcher auto-wrap ---------------------------------------------------
+# clearml-task v3 は --script をそのまま `python <script>` で叩くので、
+# accelerate launch が発火しない (結果 num_processes=1)。 USE_LAUNCHER=1 なら
+# scripts/training/launch_ddp_ps.py を代わりに --script に渡し、
+# --args に num-gpus=N / target-script=<orig> を先頭追記する。
+#
+# - launcher を噛ませない方がいいケース (= 単一プロセス script / デバッグ) は
+#   --no-launcher で opt-out。
+# - orig script を `target-script=<path>` で渡すのは、 launcher 側でそのまま
+#   accelerate launch ... <target-script> ... に渡す argparse 契約。
+ORIG_SCRIPT="$SCRIPT"
+LAUNCHER_PREFIX_ARGS=""
+if [[ "$USE_LAUNCHER" == "1" ]]; then
+  LAUNCHER_PATH="scripts/training/launch_ddp_ps.py"
+  if [[ ! -f "$LAUNCHER_PATH" ]]; then
+    echo "[err] launcher not found: $LAUNCHER_PATH" >&2
+    echo "      (disable with --no-launcher to submit $SCRIPT directly)" >&2
+    exit 2
+  fi
+  SCRIPT="$LAUNCHER_PATH"
+  LAUNCHER_PREFIX_ARGS="--num-gpus $NUM_PROCESSES --target-script $ORIG_SCRIPT"
+  echo "[info] launcher wrap: $ORIG_SCRIPT → $SCRIPT (num_processes=$NUM_PROCESSES)"
+fi
+
+# PS の cache デフォルト自動注入 (ARGS の --cache が無い場合のみ)。
+# dgx1 では /home/hfunaya/cache/pandaset_v3_full に rsync 済み。
+# dgx2 / dgx3 等、別ホストに投げるときは --args 側で明示的に --cache 渡せば
+# override される (launcher 側の _default_cache_if_missing も no-op)。
+if [[ "$ORIG_SCRIPT" == *train_ps_v3_ddp.py* || "$ORIG_SCRIPT" == scripts/training/train_ps_v3_ddp.py ]]; then
+  if [[ "$ARGS" != *"--cache"* ]]; then
+    ARGS="--cache /home/hfunaya/cache/pandaset_v3_full $ARGS"
+    echo "[info] auto-inject: --cache /home/hfunaya/cache/pandaset_v3_full"
+  fi
+fi
+# prepend launcher-specific flags (if any)
+if [[ -n "$LAUNCHER_PREFIX_ARGS" ]]; then
+  ARGS="$LAUNCHER_PREFIX_ARGS $ARGS"
+fi
+
+# clearml-task v3 `--args` は argparse 形式 (key=value スペース区切り)。
+# なので "--config X --epochs 2 --smoke" を "config=X epochs=2 smoke=True" に変換する。
+# flag-only (--smoke) は store_true 扱いで value=True を付ける。
+CT_ARGS=""
+tokens=( $ARGS )
+i=0
+while [[ $i -lt ${#tokens[@]} ]]; do
+  t="${tokens[$i]}"
+  if [[ "$t" == --* ]]; then
+    key="${t#--}"
+    next="${tokens[$((i+1))]:-}"
+    if [[ -z "$next" || "$next" == --* ]]; then
+      CT_ARGS="$CT_ARGS ${key}=True"
+      i=$((i+1))
+    else
+      CT_ARGS="$CT_ARGS ${key}=${next}"
+      i=$((i+2))
+    fi
+  else
+    i=$((i+1))
+  fi
+done
 
 # accelerate で包む entry point。 script 側で accelerate.Accelerator() を
 # 使っている前提。 torchrun を自前で書きたい場合は下を書き換え。
@@ -84,19 +153,29 @@ echo "       project : $PROJECT"
 echo "       queue   : $QUEUE"
 echo "       image   : $DOCKER_IMAGE"
 echo "       entry   : $ENTRY"
+echo "       ct_args : $CT_ARGS"
 
 # clearml-task CLI
-# --docker-args:
+# 注意点 (2026-05-03 実地調査):
+#   - `--docker_args` は underscore。 hyphen 版 (`--docker-args`) は
+#     installed clearml-task では unrecognized arg になる。
+#   - `--cwd .` を省くと populate.py:186 で self.cwd=None → TypeError。
+#   - `--packages` が無いと repo の requirements.txt が無いケースで落ちる。
+#     agent image 側で入ってる前提なら空文字でよいが、互換性のため clearml を明示。
+# docker_args の中身:
 #   --shm-size=64g  DDP で NCCL shared memory をケチると落ちる
-#   --gpus all      container に全 GPU 見せる
-#   -v /mnt/fsx:/mnt/fsx  データセットキャッシュ
+#   --gpus all      container に全 GPU 見せる (accelerate 側で num_processes で制限)
+#   -v /mnt/fsx:/mnt/fsx  データセットキャッシュ (dgx1 には存在しないので無害にスキップ)
+#   -v /home/hfunaya/cache:/home/hfunaya/cache  dgx1 用キャッシュ
 #   -v /dev/shm:/dev/shm  /dev/shm 上のキャッシュも共有
 clearml-task \
-  --project  "$PROJECT" \
-  --name     "$NAME" \
-  --queue    "$QUEUE" \
-  --docker   "$DOCKER_IMAGE" \
-  --docker-args "--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host" \
-  --script   "$SCRIPT" \
-  --args     $ARGS \
+  --project     "$PROJECT" \
+  --name        "$NAME" \
+  --queue       "$QUEUE" \
+  --docker      "$DOCKER_IMAGE" \
+  --docker_args "--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /home/hfunaya/cache:/home/hfunaya/cache -v /dev/shm:/dev/shm --ipc=host" \
+  --script      "$SCRIPT" \
+  --cwd         "." \
+  --packages    "clearml" \
+  --args        $CT_ARGS \
   --skip-task-init
