@@ -44,10 +44,27 @@ def project_cuboids(cubs, T_gt, K, tile_u0: int = 0, tile_v0: int = 0):
     projected uv must be brought into tile-local coords by subtracting the
     tile origin. Pass tile_u0/v0 from inst.get('tile_u0', 0) when drawing on
     a tile canvas.
+
+    Dedupe near-duplicate annotations: PandaSet ships occasional same-label
+    cuboids within ~0.5m of each other (annotation tooling artifact).
+    Drawing both produces visible "double wireframe" overlap.
     """
+    # dedupe: same label + center within 0.5m → keep first only
+    seen = []
+    cubs_d = []
+    for c in cubs:
+        pos = np.asarray(c['pos'], dtype=np.float32)
+        lbl = c.get('label', '')
+        is_dup = False
+        for sp, sl in seen:
+            if sl == lbl and float(np.linalg.norm(pos - sp)) < 0.5:
+                is_dup = True; break
+        if not is_dup:
+            seen.append((pos, lbl))
+            cubs_d.append(c)
     out = []
     off = np.array([tile_u0, tile_v0], dtype=np.float32)
-    for c in cubs:
+    for c in cubs_d:
         pos = np.asarray(c['pos'], dtype=np.float32)
         dims = np.asarray(c['dims'], dtype=np.float32)
         yaw = float(c.get('yaw', 0.0))
@@ -115,7 +132,9 @@ def render_pair(ds, idx, out_path, S=64):
     inst = ds._load_inst(idx)
     full, uv, vis, is_obj, IH, IW = _full_proj(inst)
     cubs_proj = project_cuboids(inst.get('cuboids', []),
-                                  inst['T_gt'].numpy(), inst['K_full'].numpy())
+                                  inst['T_gt'].numpy(), inst['K_full'].numpy(),
+                                  tile_u0=int(inst.get('tile_u0', 0)),
+                                  tile_v0=int(inst.get('tile_v0', 0)))
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(18, 7), dpi=110,
                                     gridspec_kw={'width_ratios': [16, 9]})
