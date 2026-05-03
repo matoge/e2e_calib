@@ -2,6 +2,42 @@
 
 `waymo_to_pandaset.py` 変換器の実装ノート。**`[CameraImageComponent].pose` の解釈に落とし穴あり**。
 
+## V3 cache: `build_waymo_v3.py`
+
+直接 v2 parquet を読む V3 build。`waymo_to_pandaset.py` を介さない。
+PandaSet-compat schema (`scripts/preprocessing/build_pandaset_full_v3.py` と同一)、
+`pts` は cam frame、`T_gt = identity`、`R_gt = I`、`cam_pos = 0`。
+
+### Full-frame mode (1 inst/frame/cam)
+
+```bash
+python scripts/preprocessing/build_waymo_v3.py \
+    --workers 8 --cams 1,2,3,4,5 --stride 10 \
+    --out /path/to/waymo_v3_full
+```
+
+各 inst:
+- `jpg_bytes` (~400KB)、`IH=1280, IW=1920`
+- `pts` / `pts_cam` (N, 3) cam-frame、`uv_full` (N, 2)、`z_cam` (N,)、`is_obj` (N,)
+- `cuboids` (cam-frame AABB list)、`K_full` (3, 3)
+
+### Tile mode (sliding window、5×3=15 tile/frame for front)
+
+`--tile` で 1 frame を 5×3 tile (512×512、stride=384、`y_start=200` で空切り) に分割。
+`PandaSetCalibDatasetFull` がそのまま読める形式 (`tile_u0, tile_v0, in_box` 付き)。
+
+```bash
+python scripts/preprocessing/build_waymo_v3.py --tile --stride 10 \
+    --workers 32 --cams 1,2,3,4,5 \
+    --out /path/to/waymo_v3_tiled \
+    [--tile-w 512 --tile-h 512 --tile-stride 384 --tile-pad 64
+     --tile-y-start 200 --tile-jpg-q 90]
+```
+
+ストレージ: 5 cam × 798 seg × ~20 frame × ~15 tile/frame ≈ 1.2M tile inst (~120GB)。
+parquet IO 重いので NVMe 必須 (HDD だと 5h+ かかる)。1TB メモリ機なら `--workers 32` 余裕。
+ヘルパー: `_tile_split.py::cut_inst_to_tiles` を共有 (PS / NS / Waymo build 全部 同実装)。
+
 ## ⚠ 落とし穴: `[CameraImageComponent].pose` は cam pose ではない
 
 Waymo OD v2 parquet `camera_image` 内の各 row には:
