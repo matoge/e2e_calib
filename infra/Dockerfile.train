@@ -24,16 +24,29 @@ FROM nvcr.io/nvidia/pytorch:24.02-py3
 # system
 # NOTE: DEBIAN_FRONTEND + TZ must be set *before* apt-get install,
 # otherwise tzdata prompts for geographic area interactively and the build hangs.
+# libturbojpeg0-dev: provides libturbojpeg.so (+ .so.0 symlink) required by
+# PyTurboJPEG at ctypes-load time. Without it, PyTurboJPEG() raises
+# `OSError: libturbojpeg.so.0: cannot open shared object file` and the
+# DataLoader silently falls back to PIL — losing §8.5 TJ-ON perf.
+# See docs/sps_bottleneck_analysis.md §8.1.
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Tokyo
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git tini tzdata rsync openssh-client \
+        libturbojpeg0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # python deps — base image はすでに torch/torchvision/numpy/scipy を持っているので
 # 足りないぶんだけ追加する。 accelerate と clearml は必須。
 COPY infra/requirements.train.txt /tmp/requirements.train.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.train.txt
+
+# Smoke-test: fail the build if PyTurboJPEG cannot initialize. Catches two
+# common failure modes that previously silent-fell-back to PIL:
+#   1. Wrong PyPI package (turbojpeg instead of PyTurboJPEG) → no TurboJPEG class
+#   2. Missing libturbojpeg.so.0 → OSError at ctypes load
+# See docs/sps_bottleneck_analysis.md §8.6 takeaway #1.
+RUN python -c "from turbojpeg import TurboJPEG; TurboJPEG(); print('[ok] PyTurboJPEG initialized')"
 
 # ClearML agent が mount する workspace を標準的な場所にしておく。
 # agent docker mode は git clone 先を /root/... 配下に置くので、

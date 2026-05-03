@@ -10,6 +10,13 @@ accelerate==0.34.2
 clearml==1.16.4
 einops==0.8.0
 pyyaml>=6.0
-# dataset 側で使っている: pandaset v3 (fsx cache) / waymo v3 cache は pt を直読なので追加依存なし
+# dataset 側で使っている: pandaset v3 (fsx cache) / waymo v3 cache は pt を直読。
+# ただし V3 tile cache は JPEG bytes を .pt 内に保持しており、__getitem__ 側で
+# PyTurboJPEG で decode する。base image には無いので明示的に入れる。
+# NOTE: PyPI 名前衝突注意 — `turbojpeg` (Dobatymo/turbojpeg-python) は
+# `TurboJPEG` class を持たず、pandaset_full.py の optional-import が silent
+# fallback で PIL 経路に落ちる。必ず `PyTurboJPEG` (Lilohuang/PyTurboJPEG) を
+# pin する。詳細は docs/sps_bottleneck_analysis.md §8.1。
+PyTurboJPEG==1.7.5
 # 可視化系 (matplotlib等) は base image 標準に任せる。 eval/render 時だけ使うため学習 image に
 # は含めないポリシー (将来必要なら infra/Dockerfile.eval を別立てする)。
