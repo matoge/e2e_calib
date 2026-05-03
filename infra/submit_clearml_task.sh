@@ -209,6 +209,7 @@ if [[ "$QUEUE" == yokohama1-* ]]; then
     --queue       "$QUEUE" \
     --script      "$SCRIPT" \
     --cwd         "." \
+    --packages    "clearml" \
     --args        $CT_ARGS \
     --skip-task-init
 else
