@@ -79,7 +79,19 @@ done
 
 [[ -z "$NAME"   ]] && { echo "[err] --name required" >&2;   usage; }
 [[ -z "$SCRIPT" ]] && { echo "[err] --script required" >&2; usage; }
-[[ ! -f "$SCRIPT" ]] && { echo "[err] script not found: $SCRIPT" >&2; exit 2; }
+# script 存在チェックは repo が手元にある場合のみ。
+# clearml-task は --repo 指定があれば agent 側で clone するので、
+# 家や CI からの submit で "repo 持ってないが投げる" 場合は -f チェックを skip。
+if [[ -f "$SCRIPT" ]]; then
+  :
+elif [[ "${ALLOW_REMOTE_ONLY:-0}" == "1" ]]; then
+  echo "[info] script not present locally (ALLOW_REMOTE_ONLY=1): $SCRIPT — assuming agent will clone" >&2
+else
+  echo "[err] script not found: $SCRIPT" >&2
+  echo "      (set ALLOW_REMOTE_ONLY=1 to skip local existence check,"      >&2
+  echo "       e.g. when submitting from a machine that does not have the repo cloned)" >&2
+  exit 2
+fi
 
 # --- DDP launcher auto-wrap ---------------------------------------------------
 # clearml-task v3 は --script をそのまま `python <script>` で叩くので、
@@ -95,9 +107,14 @@ ORIG_SCRIPT="$SCRIPT"
 LAUNCHER_PREFIX_ARGS=""
 if [[ "$USE_LAUNCHER" == "1" ]]; then
   LAUNCHER_PATH="scripts/training/launch_ddp_ps.py"
-  if [[ ! -f "$LAUNCHER_PATH" ]]; then
+  if [[ -f "$LAUNCHER_PATH" ]]; then
+    :
+  elif [[ "${ALLOW_REMOTE_ONLY:-0}" == "1" ]]; then
+    echo "[info] launcher not present locally (ALLOW_REMOTE_ONLY=1): $LAUNCHER_PATH — assuming agent will clone" >&2
+  else
     echo "[err] launcher not found: $LAUNCHER_PATH" >&2
-    echo "      (disable with --no-launcher to submit $SCRIPT directly)" >&2
+    echo "      (disable with --no-launcher to submit $SCRIPT directly," >&2
+    echo "       or set ALLOW_REMOTE_ONLY=1 if submitting without a local repo)" >&2
     exit 2
   fi
   SCRIPT="$LAUNCHER_PATH"
@@ -106,13 +123,19 @@ if [[ "$USE_LAUNCHER" == "1" ]]; then
 fi
 
 # PS の cache デフォルト自動注入 (ARGS の --cache が無い場合のみ)。
-# dgx1 では /home/hfunaya/cache/pandaset_v3_full に rsync 済み。
-# dgx2 / dgx3 等、別ホストに投げるときは --args 側で明示的に --cache 渡せば
-# override される (launcher 側の _default_cache_if_missing も no-op)。
+#   - dgx1-gpu queue は /home/hfunaya/cache/pandaset_v3_full (host-local rsync)。
+#   - dgx2/3/4-gpu queue は /mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full (共有 Lustre)。
+#   - 他 queue / default は Lustre 側に倒す (docs/infra_shared_fsx.md §2)。
+# --args 側で明示的に --cache 渡せば override される。
 if [[ "$ORIG_SCRIPT" == *train_ps_v3_ddp.py* || "$ORIG_SCRIPT" == scripts/training/train_ps_v3_ddp.py ]]; then
   if [[ "$ARGS" != *"--cache"* ]]; then
-    ARGS="--cache /home/hfunaya/cache/pandaset_v3_full $ARGS"
-    echo "[info] auto-inject: --cache /home/hfunaya/cache/pandaset_v3_full"
+    if [[ "$QUEUE" == "dgx1-gpu" ]]; then
+      DEFAULT_PS_CACHE="/home/hfunaya/cache/pandaset_v3_full"
+    else
+      DEFAULT_PS_CACHE="/mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full"
+    fi
+    ARGS="--cache $DEFAULT_PS_CACHE $ARGS"
+    echo "[info] auto-inject (queue=$QUEUE): --cache $DEFAULT_PS_CACHE"
   fi
 fi
 # prepend launcher-specific flags (if any)
@@ -166,7 +189,9 @@ echo "       ct_args : $CT_ARGS"
 #   --shm-size=64g  DDP で NCCL shared memory をケチると落ちる
 #   --gpus all      container に全 GPU 見せる (accelerate 側で num_processes で制限)
 #   -v /mnt/fsx:/mnt/fsx  データセットキャッシュ (dgx1 には存在しないので無害にスキップ)
-#   -v /home/hfunaya/cache:/home/hfunaya/cache  dgx1 用キャッシュ
+#   -v /home/hfunaya/cache:/home/hfunaya/cache  dgx1 用キャッシュ (dgx1-gpu queue 時のみ)
+#       → dgx2/3/4 には /home/hfunaya/cache が存在せず、 docker run -v が
+#         「bind source path does not exist」で落ちるので queue で出し分ける。
 #   -v /dev/shm:/dev/shm  /dev/shm 上のキャッシュも共有
 #   -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1
 #       container 内 python env をそのまま使う。 nvcr.io/nvidia/pytorch:24.02
@@ -178,12 +203,22 @@ echo "       ct_args : $CT_ARGS"
 #   -e CLEARML_AGENT_GIT_USER / GIT_PASS (optional)
 #       SSH 経由の git@github.com:matoge/... clone 用の PAT を持たせたい場合。
 #       既に image 側に ~/.ssh が焼いてあれば不要。
+
+# queue-aware docker_args: dgx1 のみ host-local cache mount を足す。
+# 他 queue (dgx2/3/4) は Lustre のみで完結させる。
+DOCKER_ARGS_COMMON="--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace"
+if [[ "$QUEUE" == "dgx1-gpu" ]]; then
+  DOCKER_ARGS="$DOCKER_ARGS_COMMON -v /home/hfunaya/cache:/home/hfunaya/cache"
+else
+  DOCKER_ARGS="$DOCKER_ARGS_COMMON"
+fi
+
 clearml-task \
   --project     "$PROJECT" \
   --name        "$NAME" \
   --queue       "$QUEUE" \
   --docker      "$DOCKER_IMAGE" \
-  --docker_args "--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /home/hfunaya/cache:/home/hfunaya/cache -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
+  --docker_args "$DOCKER_ARGS" \
   --script      "$SCRIPT" \
   --cwd         "." \
   --packages    "clearml" \

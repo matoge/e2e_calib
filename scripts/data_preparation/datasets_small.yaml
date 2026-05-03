@@ -1,0 +1,39 @@
+# Subset of datasets.yaml used for the first pass of live registration.
+# Excludes the 637k-file waymo_v3_tiled and nested waymo raw parquet
+# because du -sb / find on those takes minutes. Run this first, then the
+# heavy ones separately via datasets_large.yaml.
+
+- name: waymo_v3_full
+  path: /mnt/fsx/tmp/hfunaya/cache/waymo_v3_full
+  tags: [waymo, full-frame, v3]
+  description: Waymo OD v2 full-frame cache (no tiling). Used for bench / full-image evaluation.
+
+- name: waymo_v3_bench
+  path: /mnt/fsx/tmp/hfunaya/cache/waymo_v3_bench
+  tags: [waymo, bench, v3]
+  description: Waymo V3 bench subset (~10 GB).
+
+- name: nuscenes_v3_tiled
+  path: /mnt/fsx/tmp/hfunaya/cache/nuscenes_v3_tiled/nuscenes_v3_tiled
+  tags: [nuscenes, tile, v3]
+  description: NuScenes tile cache (nested under nuscenes_v3_tiled/nuscenes_v3_tiled/).
+
+- name: pandaset_v3_full
+  path: /mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full
+  tags: [pandaset, full-frame, v3]
+  description: Pandaset V3 full-frame cache.
+
+- name: pandaset_raw
+  path: /mnt/fsx/tmp/hfunaya/pandaset
+  tags: [pandaset, raw]
+  description: Pandaset raw dataset.
+
+- name: zod_raw
+  path: /mnt/fsx/tmp/hfunaya/zod
+  tags: [zod, raw]
+  description: ZOD raw dataset (2.1 GB).
+
+- name: ddad_raw
+  path: /mnt/fsx/tmp/hfunaya/ddad
+  tags: [ddad, raw]
+  description: DDAD raw dataset.

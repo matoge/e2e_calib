@@ -1,0 +1,45 @@
+# ~/mcp_hub/docker-compose.clearml-agent.yml
+#
+# ClearML agent を docker で常駐化する。
+# 既存の clearml.conf (https://clearml.budda.site) にそのまま接続し、
+# dgx2-gpu キューを listen する。
+#
+# 仕組み:
+#   - allegroai/clearml-agent:latest の entrypoint は
+#       python3 -m clearml_agent daemon --docker $CLEARML_AGENT_DEFAULT_BASE_DOCKER --force-current-version $CLEARML_AGENT_EXTRA_ARGS
+#     を呼ぶ。 `command:` での上書きは効かないので、queue は
+#     CLEARML_AGENT_EXTRA_ARGS="--queue dgx2-gpu --gpus all" で渡す。
+#   - docker-in-docker モードで子 task コンテナを起動するので
+#     host の /var/run/docker.sock を bind mount する。
+#
+# 他 DGX に展開する場合は CLEARML_WORKER_ID と EXTRA_ARGS の --queue
+# をホストごとに変える (dgx1-gpu / dgx3-gpu / dgx4-gpu)。
+
+services:
+  clearml-agent:
+    image: allegroai/clearml-agent:latest
+    container_name: clearml-agent-dgx2
+    privileged: true
+    network_mode: host
+    environment:
+      CLEARML_WORKER_ID: dgx2-gpu
+      # entrypoint が解釈する: docker 実行用ベースイメージ
+      CLEARML_AGENT_DEFAULT_BASE_DOCKER: "nvcr.io/nvidia/pytorch:24.02-py3"
+      # entrypoint に末尾 append される追加引数。 queue 指定はここに書く
+      CLEARML_AGENT_EXTRA_ARGS: "--queue dgx2-gpu --gpus all --foreground"
+      NVIDIA_VISIBLE_DEVICES: all
+      CLEARML_AGENT_DOCKER_HOST_MOUNT: /mnt/fsx:/mnt/fsx
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME}/clearml.conf:/root/clearml.conf:ro
+      - ${HOME}/.ssh:/root/.ssh:ro
+      - /mnt/fsx:/mnt/fsx
+      - /dev/shm:/dev/shm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

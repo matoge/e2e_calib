@@ -1,0 +1,88 @@
+# ClearML Dataset manifest for /mnt/fsx/tmp/hfunaya caches.
+#
+# Run from HEATRUN (or any host with clearml.conf):
+#   python scripts/data_preparation/register_dataset.py --config scripts/data_preparation/datasets.yaml
+#
+# Each entry is registered with add_external_files (no physical upload,
+# just a manifest of file:///mnt/fsx/... URIs). See register_dataset.py.
+#
+# Naming convention:
+#   {dataset}_{fmt}_{variant}   e.g. waymo_v3_tiled, nuscenes_v3_tiled
+# Project:
+#   all under  e2e_calib/datasets  (override per-entry if needed)
+
+- name: waymo_v3_tiled
+  path: /mnt/fsx/tmp/hfunaya/e2e_calib_cache/waymo_v3_tiled
+  tags: [waymo, tile, v3, 5cam, stride10]
+  description: |
+    Waymo OD v2 tile cache, generated 2026-05-03 via build_waymo_v3.py.
+    Source raw:  /mnt/fsx/tmp/hfunaya/waymo_v2/training  (798 seg)
+    Source lcp:  /mnt/fsx/tmp/hfunaya/waymo_lcp          (symlinks to lidar_camera_projection)
+    Tile params: 512x512, stride=384, pad=64, y_start=200
+    Cameras:     1,2,3,4,5  (front + 4 side)
+    Frame stride: 10  (=> 1 Hz effective)
+    Schema:      jpg_bytes + pts (cam-frame) + uv_full + z_cam + is_obj
+                  + tile_u0/v0/id + in_box + cuboids + K_full
+    Build host:  dgx2  (workers=32, ~35min on Lustre)
+
+- name: waymo_v3_tiled_old
+  path: /mnt/fsx/tmp/hfunaya/cache/waymo_v3_tiled
+  tags: [waymo, tile, v3, legacy]
+  description: |
+    Older Waymo tile cache (284 GB, root-owned, 2026-05-03 13:57).
+    Kept for provenance; use waymo_v3_tiled for new runs.
+
+- name: waymo_v3_full
+  path: /mnt/fsx/tmp/hfunaya/cache/waymo_v3_full
+  tags: [waymo, full-frame, v3]
+  description: |
+    Waymo OD v2 full-frame cache (no tiling). Used for bench /
+    full-image evaluation.
+
+- name: waymo_v3_bench
+  path: /mnt/fsx/tmp/hfunaya/cache/waymo_v3_bench
+  tags: [waymo, bench, v3]
+  description: Waymo V3 bench subset (~10 GB).
+
+- name: nuscenes_v3_tiled
+  path: /mnt/fsx/tmp/hfunaya/cache/nuscenes_v3_tiled/nuscenes_v3_tiled
+  tags: [nuscenes, tile, v3]
+  description: |
+    NuScenes tile cache (nested under nuscenes_v3_tiled/nuscenes_v3_tiled/;
+    kept as-is to preserve existing training script paths).
+
+- name: pandaset_v3_full
+  path: /mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full
+  tags: [pandaset, full-frame, v3]
+  description: Pandaset V3 full-frame cache.
+
+- name: pandaset_mc_s64_lazy
+  path: /mnt/fsx/tmp/hfunaya/e2e_calib_cache/pandaset_mc_s64_lazy
+  tags: [pandaset, multi-cam, s64, lazy]
+  description: |
+    Pandaset multi-camera s=64 lazy cache. Used by train_ps_v3_ddp.py
+    via --cache. Non-lazy companion file is pandaset_mc_s64_cache.pt.
+
+- name: waymo_v2_raw
+  path: /mnt/fsx/tmp/hfunaya/waymo_v2/training
+  tags: [waymo, raw, v2, parquet]
+  description: |
+    Waymo Open Dataset v2 raw parquet (7 components:
+    camera_image, lidar, lidar_box, lidar_camera_projection,
+    camera_calibration, lidar_calibration, vehicle_pose).
+    Source of truth for waymo_v3_* caches.
+
+- name: pandaset_raw
+  path: /mnt/fsx/tmp/hfunaya/pandaset
+  tags: [pandaset, raw]
+  description: Pandaset raw dataset.
+
+- name: ddad_raw
+  path: /mnt/fsx/tmp/hfunaya/ddad
+  tags: [ddad, raw]
+  description: DDAD raw dataset.
+
+- name: zod_raw
+  path: /mnt/fsx/tmp/hfunaya/zod
+  tags: [zod, raw]
+  description: ZOD raw dataset (2.1 GB).

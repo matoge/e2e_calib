@@ -1,0 +1,23 @@
+# Tiny subset for pipeline verification — only the small caches.
+# Big ones (waymo_v3_full 159k files, waymo_v3_tiled 637k files, ddad 257G)
+# are handled separately because add_external_files on large trees is slow.
+
+- name: waymo_v3_bench
+  path: /mnt/fsx/tmp/hfunaya/cache/waymo_v3_bench
+  tags: [waymo, bench, v3]
+  description: Waymo V3 bench subset (~10 GB).
+
+- name: pandaset_v3_full
+  path: /mnt/fsx/tmp/hfunaya/cache/pandaset_v3_full
+  tags: [pandaset, full-frame, v3]
+  description: Pandaset V3 full-frame cache.
+
+- name: zod_raw
+  path: /mnt/fsx/tmp/hfunaya/zod
+  tags: [zod, raw]
+  description: ZOD raw dataset (2.1 GB).
+
+- name: pandaset_raw
+  path: /mnt/fsx/tmp/hfunaya/pandaset
+  tags: [pandaset, raw]
+  description: Pandaset raw dataset (81 GB).
