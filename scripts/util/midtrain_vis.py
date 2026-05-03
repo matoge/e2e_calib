@@ -149,7 +149,9 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
             box = getattr(ds, '_last_crop', None)
             full, uv_full, vis_full, is_obj_full, IH_f, IW_f = _vp_full_proj(inst)
             cubs_proj = _vp_proj_cubs(inst.get('cuboids', []),
-                                        inst['T_gt'].numpy(), inst['K_full'].numpy())
+                                        inst['T_gt'].numpy(), inst['K_full'].numpy(),
+                                        tile_u0=int(inst.get('tile_u0', 0)),
+                                        tile_v0=int(inst.get('tile_v0', 0)))
             crop_np = img.permute(1, 2, 0).cpu().numpy()
             H_bits, lap_var = _vp_entropy(crop_np)
 
