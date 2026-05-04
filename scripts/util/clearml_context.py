@@ -46,8 +46,16 @@ def init_with_context(project: str, name: str, cfg: dict,
     'why this run exists' question needs at glance, anchored at submit time.
     """
     from clearml import Task
+    # Disable matplotlib auto-track: ClearML wraps plt.savefig and uploads each
+    # figure as a Plot entry, using the figure title as the storage path. Our
+    # vis titles contain ":" "→" and spaces → URL-encoded as 0x3a / %E2%86%92,
+    # which the files_server returns 401 for. Result: every Plot in the UI
+    # shows as a broken image. We already report vis explicitly via
+    # cml_logger.report_image (clean paths, lands in Debug Samples), so the
+    # auto-track is pure duplication that adds dead links.
     task = Task.init(project_name=project, task_name=name,
-                     reuse_last_task_id=reuse_last_task_id, output_uri=True)
+                     reuse_last_task_id=reuse_last_task_id, output_uri=True,
+                     auto_connect_frameworks={'matplotlib': False})
     # Important: connect MUTATES cfg in place — on remote runs ClearML re-fills
     # the dict's keys with stored hyperparam values. Don't shallow-copy here,
     # or the caller's dict misses the re-fill.
