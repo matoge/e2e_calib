@@ -77,6 +77,8 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
         # call the model normally.
         # NOTE: bucket_uvd / bucket_valid are REQUIRED when frustum_enc is
         # enabled (model raises otherwise). Harmless extra kwargs when off.
+        # API renamed 2026-05-04 (commit 01abd02) — flat distorted_uvd_full
+        # → bucketed (G², K, 3) layout.
         params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
                        bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
         valid  = ~pad_mask
@@ -99,7 +101,9 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
                 bg_nll_s  += gaussian2d_nll(params[is_bg],  gt[is_bg]).item();  bg_n  += 1
                 bg_errs.append((params[is_bg][..., :2].float() - gt[is_bg]).norm(dim=-1).detach())
         total_nll += loss.item(); total_mse += mse; n += 1
-        if train and accel.is_main_process and (n - _last_log_step >= 100):
+        # Lowered from 100 to 25 so short runs (smoke / small train-size) still
+        # see step-level sps. Otherwise users report "SPS not appearing".
+        if train and accel.is_main_process and (n - _last_log_step >= 25):
             _dt = time.time() - _t_start
             # sps is PER-PROCESS here; multiply by num_processes for global throughput
             sps_per = n * imgs.shape[0] / _dt if _dt > 0 else 0
