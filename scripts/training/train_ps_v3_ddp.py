@@ -28,7 +28,7 @@ from models.model_depth import CalibNetDepth
 from models.model_cov import gaussian2d_nll
 from torch.utils.data import DataLoader, Subset
 
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 
 torch.set_float32_matmul_precision("high")
@@ -135,7 +135,13 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
 def main(cfg=None):
     c = cfg if cfg is not None else CFG
     # One Accelerator per process; mixed_precision comes from accelerate launch.
-    accel = Accelerator()
+    # find_unused_parameters=True: CalibNetDepth (frustum_enc ON, n_layers=2)
+    # has branches whose params may not receive grads in every forward (e.g.
+    # fully-masked pad_full batches, cond heads that short-circuit). Without
+    # this flag DDP AllReduce hangs at the first backward. 2026-05-04 verified
+    # on dgx2 4×V100.
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accel = Accelerator(kwargs_handlers=[ddp_kwargs])
     set_seed(c.get('split_seed', 42) + accel.process_index)
 
     exp_dir = Path("experiments") / c["name"]
