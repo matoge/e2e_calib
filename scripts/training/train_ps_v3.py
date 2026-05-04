@@ -375,8 +375,16 @@ def main(cfg=None):
                           fontsize=8)
             plt.tight_layout(pad=0.2)
             fp = out / f'val_{saved:02d}_idx{idx:06d}.png'
-            plt.savefig(fp, dpi=96, bbox_inches='tight'); plt.close(fig)
+            plt.savefig(fp, dpi=96, bbox_inches='tight')
             if cml_logger is not None:
+                # Plots tab — clean title/series (no Unicode → no path 401)
+                try: cml_logger.report_matplotlib_figure(
+                        title='vis_ep', series=f'sample_{saved:02d}',
+                        iteration=epoch, figure=fig, report_image=True)
+                except Exception: pass
+            plt.close(fig)
+            if cml_logger is not None:
+                # Debug Samples tab
                 try: cml_logger.report_image(f'vis_ep', f'sample_{saved:02d}', iteration=epoch, local_path=str(fp))
                 except Exception: pass
             saved += 1
