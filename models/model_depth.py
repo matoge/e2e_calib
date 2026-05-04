@@ -457,12 +457,18 @@ class CalibNetDepth(nn.Module):
                 kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp,
                           n_points=deform_n_points)
             else:  # 'ml' — multi-level deformable
+                # Stage 1 dual-DA: when frustum_dense, treat dense LiDAR map as
+                # an additional level (in addition to coarse+fine image), so
+                # both image and lidar go through the SAME deformable attention.
+                # n_levels = 3 in that case, otherwise 2.
+                ml_levels = 3 if frustum_dense else 2
                 Block = CrossAttentionBlockDeformML
                 kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp,
-                          n_levels=2, n_points=deform_n_points)
+                          n_levels=ml_levels, n_points=deform_n_points)
                 # learnable resolution (level) embedding shared across blocks
-                self.level_embed = nn.Parameter(torch.zeros(2, d))
+                self.level_embed = nn.Parameter(torch.zeros(ml_levels, d))
                 nn.init.normal_(self.level_embed, std=0.02)
+                self._ml_levels = ml_levels
         elif self_first:
             Block = TransformerDecoderBlock
             kw = {}
@@ -578,15 +584,30 @@ class CalibNetDepth(nn.Module):
         #                             still carry their position embedding so DA
         #                             can attend by UV alone.
         if self._frustum_dense and getattr(self, '_lidar_kv_dense', None) is not None:
-            extra_kv = self._lidar_kv_dense
-            extra_kv_mask = None       # all cells valid (UV emb is always there)
+            # In ML mode, the dense LiDAR is fed as an additional DA level (see
+            # below) — extra_kv path is skipped so we don't double-count.
+            if self._deform_mode == 'ml':
+                extra_kv, extra_kv_mask = None, None
+            else:
+                extra_kv = self._lidar_kv_dense
+                extra_kv_mask = None
         else:
             extra_kv = q if self._use_lidar_kv else None
             extra_kv_mask = key_padding_mask if self._use_lidar_kv else None
 
         # ML mode: every block sees both levels; SL / none: alternate coarse→fine
         if self._deform_mode == 'ml':
-            feat_all = (coarse_feat, fine_feat)
+            # Stage 1 dual-DA: when frustum_dense is on, append dense LiDAR as
+            # 3rd level. _lidar_kv_dense is (B, gh*gw, D); reshape to (B, D, gh, gw).
+            if self._frustum_dense and getattr(self, '_lidar_kv_dense', None) is not None:
+                lkv = self._lidar_kv_dense
+                B_, NHW, D_ = lkv.shape
+                gn = int(NHW ** 0.5)
+                assert gn * gn == NHW, f"lidar_kv_dense not square grid: NHW={NHW}"
+                lidar_2d = lkv.permute(0, 2, 1).reshape(B_, D_, gn, gn).contiguous()
+                feat_all = (coarse_feat, fine_feat, lidar_2d)
+            else:
+                feat_all = (coarse_feat, fine_feat)
             # same feat tuple at every layer; each block refines uv
             feats_by_layer = [feat_all] * max(self.n_layers, 2)
         else:
