@@ -68,17 +68,17 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
     obj_errs, bg_errs = [], []
     _t_start = time.time()
     _last_log_step = 0
-    for imgs, true_uvd, dist_uvd, pad_mask, vfp, dist_uvd_full, pad_full in loader:
+    for imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid in loader:
         # accel.prepare already puts tensors in device via DataLoader wrap, but
         # the collate returns uint8 images — convert to float on-device here.
         imgs     = imgs.float().div_(255.0)
         gt       = true_uvd[..., :2] - dist_uvd[..., :2]
         # Accelerate manages autocast via its mixed_precision plugin; we just
         # call the model normally.
-        # NOTE: dist_uvd_full / pad_full are REQUIRED when frustum_enc is
+        # NOTE: bucket_uvd / bucket_valid are REQUIRED when frustum_enc is
         # enabled (model raises otherwise). Harmless extra kwargs when off.
         params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
-                       distorted_uvd_full=dist_uvd_full[..., :3], pad_full=pad_full)
+                       bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
         valid  = ~pad_mask
         loss   = gaussian2d_nll(params[valid], gt[valid])
         if train:
