@@ -405,6 +405,11 @@ def main(cfg=None):
                 return s[2], s[3]
         return sigma_schedule[-1][2], sigma_schedule[-1][3]
 
+    # ep0 baseline: untrained-model prediction (random init) so Plots/Debug
+    # Samples have an "anchor" frame to compare ep10/20/... against.
+    try: _midtrain_vis(0, n=10)
+    except Exception as _e: log(f"vis_ep000 skipped: {_e}")
+
     cur_sigma = None
     for epoch in range(1, epochs+1):
         _ep_start = time.time()
