@@ -159,7 +159,8 @@ def main(cfg=None):
                                     oversample=c.get('oversample', 4), **ds_kw)
     else:
         log(f"loading cache {cache} (V3 full-image)")
-        ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
+        ds_kw = dict(img_size=c['img_size'],
+                      max_offset_m=c.get('max_offset_m', 0.20),
                       max_rot_deg=c.get('max_rot_deg', 0.5),
                       min_crop_px=c.get('min_crop_px', 128),
                       max_crop_px=c.get('max_crop_px', 512),
