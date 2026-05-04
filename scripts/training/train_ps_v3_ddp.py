@@ -48,7 +48,10 @@ CFG = dict(
     split_seed    = 42,
     min_crop_px   = 128,
     max_crop_px   = 512,
-    cache         = '/mnt/nvme6t/e2e_calib_cache/pandaset_v3_full',
+    # --cache は必須。 host ごとに path が違うので default は設けない
+    # (旧: /mnt/nvme6t/... は dgx1/2 で存在せず、別 dataset に silent
+    #  fall-through する事故を起こしていた。 2026-05-04 撤去)。
+    cache         = None,
 )
 
 
@@ -156,7 +159,13 @@ def main(cfg=None):
     log(f"accelerate: num_processes={accel.num_processes} mixed_precision={accel.mixed_precision} "
         f"device={accel.device}")
 
-    cache = c.get('cache', '/mnt/nvme6t/e2e_calib_cache/pandaset_mc_s64_lazy')
+    cache = c.get('cache')
+    if not cache:
+        raise SystemExit(
+            "[train_ps_v3_ddp] --cache is required. "
+            "Host-specific silent fallback was removed (2026-05-04): "
+            "explicitly pass --cache /path/to/v3_cache."
+        )
     nw = c.get('num_workers', 16)
     pf = c.get('prefetch_factor', 4)
     kw = dict(num_workers=nw, pin_memory=True,
