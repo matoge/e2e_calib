@@ -425,6 +425,13 @@ def main(cfg=None):
     cur_sigma = None
     for epoch in range(1, epochs+1):
         _ep_start = time.time()
+        # Stage 2 query drop schedule: linear 0.2 → 0.8 over training.
+        if c.get('query_drop', False):
+            t = max(0.0, min(1.0, (epoch - 1) / max(1, epochs - 1)))
+            qdp = 0.2 + 0.6 * t
+            model.query_drop_prob = float(qdp)
+            if epoch == 1 or (epoch % 10 == 0):
+                log(f"  query_drop_prob={qdp:.2f}")
         if sigma_schedule is not None:
             new_sigma = _sigma_for_epoch(epoch)
             if new_sigma != cur_sigma:
@@ -599,6 +606,11 @@ if __name__ == "__main__":
                     help='Stage 1: VCPE (Virtual Camera Pose Embedding) — '
                          'MLP([SE3, log(vfp)]) → broadcast to Q + KV. SE3=0 '
                          'in calib regime, varies in cross-frame.')
+    ap.add_argument('--query-drop', action='store_true',
+                    help='Stage 2 (mixed Q): random Bernoulli zero-out of '
+                         'query depth (d) so the model learns UV-only Q. '
+                         'Schedule: 0.2 → 0.8 over training epochs. '
+                         'Combine with --use-pose-emb --frustum-dense for full stage 2.')
     ap.add_argument('--zoom-aug', action='store_true',
                     help='depth-dependent zoom-in aug: shrink cs by up to '
                          'scale_max(z) (1.0@z=20m → 2.0@z>=100m). Synthesizes '
@@ -644,6 +656,7 @@ if __name__ == "__main__":
     if args.frustum_dense: cfg['frustum_dense'] = True
     if args.use_lidar_kv:  cfg['use_lidar_kv']  = True
     if args.use_pose_emb:  cfg['use_pose_emb']  = True
+    if args.query_drop:    cfg['query_drop']    = True
     if args.zoom_aug: cfg['zoom_aug'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size

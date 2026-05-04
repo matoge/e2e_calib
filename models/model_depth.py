@@ -529,6 +529,16 @@ class CalibNetDepth(nn.Module):
         uvd_norm = torch.cat([uv_01, distorted_uvd[..., 2:3]], dim=-1)
         d3       = distorted_uvd[..., 2:3]
 
+        # Stage 2 (mixed Q): randomly zero out depth for some queries so the
+        # model learns to handle UV-only Q. query_drop_prob is set externally
+        # (training loop) — 0 means no drop, 1 means all queries become UV-only.
+        # Applied only in training mode.
+        qdp = float(getattr(self, 'query_drop_prob', 0.0))
+        if self.training and qdp > 0.0:
+            # Bernoulli per (B, N) — independent per query position
+            mask = torch.bernoulli(torch.full_like(d3, 1.0 - qdp)).to(d3.dtype)
+            uvd_norm = torch.cat([uv_01, d3 * mask], dim=-1)
+
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
             if bucket_uvd is None or bucket_valid is None:
