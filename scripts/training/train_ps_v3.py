@@ -377,14 +377,16 @@ def main(cfg=None):
             fp = out / f'val_{saved:02d}_idx{idx:06d}.png'
             plt.savefig(fp, dpi=96, bbox_inches='tight')
             if cml_logger is not None:
-                # Plots tab — clean title/series (no Unicode → no path 401)
+                # Plots tab (interactive=True default, report_image=False so it
+                # ONLY goes to Plots as plotly — Debug Samples gets the explicit
+                # report_image call below)
                 try: cml_logger.report_matplotlib_figure(
                         title='vis_ep', series=f'sample_{saved:02d}',
-                        iteration=epoch, figure=fig, report_image=True)
+                        iteration=epoch, figure=fig)
                 except Exception: pass
             plt.close(fig)
             if cml_logger is not None:
-                # Debug Samples tab
+                # Debug Samples tab — separate report_image with PNG file
                 try: cml_logger.report_image(f'vis_ep', f'sample_{saved:02d}', iteration=epoch, local_path=str(fp))
                 except Exception: pass
             saved += 1
