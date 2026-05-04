@@ -39,7 +39,10 @@ def main():
                     help='skip single-thread baseline (avoids parent bloat)')
     ap.add_argument('--world-size', type=int, default=1,
                     help='informational only: multiply sps to get global estimate')
+    ap.add_argument('--pin-memory', default='true', choices=['true', 'false'],
+                    help='DataLoader pin_memory flag (true/false); default matches training')
     args = ap.parse_args()
+    pin_memory = (args.pin_memory == 'true')
 
     # Must set start method before any fork/spawn happens.
     mp.set_start_method(args.start_method, force=True)
@@ -68,10 +71,11 @@ def main():
 
     # Multi-worker DataLoader (matches training rank config)
     print(f'\n=== DataLoader workers={args.workers} batch={args.batch_size} '
-          f'prefetch={args.prefetch} start={args.start_method} ===')
+          f'prefetch={args.prefetch} start={args.start_method} '
+          f'pin_memory={pin_memory} ===')
     loader = DataLoader(ds, batch_size=args.batch_size, num_workers=args.workers,
                          prefetch_factor=args.prefetch, persistent_workers=True,
-                         collate_fn=collate_full, pin_memory=True, shuffle=True)
+                         collate_fn=collate_full, pin_memory=pin_memory, shuffle=True)
     it = iter(loader)
     t_warmup = time.time()
     _ = next(it)  # warmup: workers spin up + first prefetch
