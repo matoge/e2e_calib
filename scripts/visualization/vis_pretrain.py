@@ -8,6 +8,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import numpy as np, torch
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from pathlib import Path
 from datasets.pandaset_full import PandaSetCalibDatasetFull, _is_obj_per_point, decode_inst_img
 
@@ -92,8 +93,12 @@ def draw_cuboids(ax, cubs_proj, color='lime', lw=1.2, alpha=0.85,
     crop_uv = (full_uv - (u0, v0)) * (S / cs).
     Skips a cuboid entirely if ANY corner is behind the camera — projecting a
     near-zero-z corner produces +/- inf pixel coords that would auto-expand the
-    axes and squeeze the image into a corner."""
+    axes and squeeze the image into a corner.
+
+    Optimized: collect all 12 edges from all cuboids into one LineCollection
+    instead of N×12 individual plt.plot() calls. ~10× faster for vis."""
     u_off, v_off = uv_offset
+    segs = []
     for cp in cubs_proj:
         uv = cp['uv']
         z = cp['z']
@@ -102,9 +107,12 @@ def draw_cuboids(ax, cubs_proj, color='lime', lw=1.2, alpha=0.85,
         u = (uv[:, 0] - u_off) * uv_scale
         v = (uv[:, 1] - v_off) * uv_scale
         for i, j in CUBOID_EDGES:
-            ax.plot([u[i], u[j]], [v[i], v[j]],
-                    color=color, lw=lw, alpha=alpha,
-                    solid_capstyle='round', clip_on=True)
+            segs.append(((u[i], v[i]), (u[j], v[j])))
+    if not segs:
+        return
+    lc = LineCollection(segs, colors=color, linewidths=lw, alpha=alpha,
+                        capstyle='round', clip_on=True)
+    ax.add_collection(lc)
 
 
 def patch_entropy(crop_uint8: np.ndarray) -> tuple[float, float]:
@@ -185,7 +193,7 @@ def render_pair(ds, idx, out_path, S=64):
                   fontsize=10)
     axR.legend(loc='upper right', fontsize=7, framealpha=0.6)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=110, bbox_inches='tight'); plt.close()
+    plt.savefig(out_path, dpi=110); plt.close()  # bbox_inches='tight' is slow; tight_layout above is enough
     return inst.get('scene'), int(inst.get('frame', -1)), int((d[:, 3] > 0.5).sum()), len(t)
 
 

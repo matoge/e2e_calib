@@ -384,7 +384,7 @@ def main(cfg=None):
                           fontsize=8)
             plt.tight_layout(pad=0.2)
             fp = out / f'val_{saved:02d}_idx{idx:06d}.png'
-            plt.savefig(fp, dpi=96, bbox_inches='tight')
+            plt.savefig(fp, dpi=96)  # bbox_inches='tight' adds 200-400ms; rely on tight_layout above
             if cml_logger is not None:
                 # Plots tab (interactive=True default, report_image=False so it
                 # ONLY goes to Plots as plotly — Debug Samples gets the explicit
