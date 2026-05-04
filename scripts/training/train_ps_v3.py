@@ -219,6 +219,8 @@ def main(cfg=None):
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", False),
                           frustum_dense=c.get("frustum_dense", False),
+                          use_lidar_kv=c.get("use_lidar_kv", False),
+                          use_pose_emb=c.get("use_pose_emb", False),
                           deform_mode=c.get("deform_mode", "none")).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     log(f"amp_dtype={_AMP_DTYPE} scaler_enabled={_NEED_SCALER} device={torch.cuda.get_device_name(0)} cc={torch.cuda.get_device_capability(0)}")
@@ -588,6 +590,15 @@ if __name__ == "__main__":
                          'extra_kv to deform-CA — instead of adding scattered '
                          'frustum tokens to q. Hybrid: DA on image + regular '
                          'softmax CA on the dense LiDAR map.')
+    ap.add_argument('--use-lidar-kv', action='store_true',
+                    help='Stage 1 (hybrid KV): add a lidar bank to KV using '
+                         'initial Q copy as per-pivot lidar features. '
+                         'Combined with --use-pose-emb gives the unified '
+                         'KV concat per docs/model_progression.md.')
+    ap.add_argument('--use-pose-emb', action='store_true',
+                    help='Stage 1: VCPE (Virtual Camera Pose Embedding) — '
+                         'MLP([SE3, log(vfp)]) → broadcast to Q + KV. SE3=0 '
+                         'in calib regime, varies in cross-frame.')
     ap.add_argument('--zoom-aug', action='store_true',
                     help='depth-dependent zoom-in aug: shrink cs by up to '
                          'scale_max(z) (1.0@z=20m → 2.0@z>=100m). Synthesizes '
@@ -631,6 +642,8 @@ if __name__ == "__main__":
     if args.convnext: cfg['use_convnext'] = True
     if args.deform_mode is not None: cfg['deform_mode'] = args.deform_mode
     if args.frustum_dense: cfg['frustum_dense'] = True
+    if args.use_lidar_kv:  cfg['use_lidar_kv']  = True
+    if args.use_pose_emb:  cfg['use_pose_emb']  = True
     if args.zoom_aug: cfg['zoom_aug'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
