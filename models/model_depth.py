@@ -191,30 +191,37 @@ class FrustumLocalEncoder(nn.Module):
         B, N_q, _ = query_uvd.shape
         N_kv = full_uvd.shape[1]
 
-        # relative coords: rel[b, i, j] = full_uvd[b, j] - query_uvd[b, i]
-        rel = full_uvd.unsqueeze(1) - query_uvd.unsqueeze(2)   # (B, N_q, N_kv, 3)
-
-        in_box = ((rel[..., 0].abs() < r_uv) &
-                  (rel[..., 1].abs() < r_uv) &
-                  (rel[..., 2].abs() < self.r_d))
-        # exclude exact self-coord matches (when query is a subset of full)
-        self_match = ((rel[..., 0] == 0) & (rel[..., 1] == 0) & (rel[..., 2] == 0))
-        in_box = in_box & ~self_match
+        # ── Cheap in_box check via cell-id arithmetic ──
+        # UV cell-id match (own cell + 8-neighbor ring for r_uv_cells=1.5)
+        # is the spatial neighborhood. Depth filter (old r_d=0.004) was
+        # silently nuking ALL lidar in dense mode (query_d=0 vs lidar
+        # range>0.005 always exceeds r_d=0.004) — dropped 2026-05-04.
+        # Cell matching alone naturally bounds depth via camera geometry.
+        # No (B, Nq, Nkv, 3) float `rel` tensor is materialized; topk_rel
+        # forms only (B, Nq, k, 3) after the topk via gather.
+        r_cells = int(self.r_uv_cells)   # 1 for r_uv_cells=1.5 (own + 8-nb)
+        q_cu = (query_uvd[..., 0] / cell_px).long().unsqueeze(-1)   # (B, Nq, 1)
+        q_cv = (query_uvd[..., 1] / cell_px).long().unsqueeze(-1)
+        p_cu = (full_uvd[..., 0] / cell_px).long().unsqueeze(1)     # (B, 1, Nkv)
+        p_cv = (full_uvd[..., 1] / cell_px).long().unsqueeze(1)
+        in_box = ((q_cu - p_cu).abs() <= r_cells) & ((q_cv - p_cv).abs() <= r_cells)
         if full_pad_mask is not None:
             in_box = in_box & ~full_pad_mask.unsqueeze(1)        # (B, 1, N_kv)
 
-        # Density-invariant: k random points from the in-box set. Stratified
-        # sub-cell guarantee was dropped because the 16-iter Python loop cost
-        # ~25 ms in launch overhead, dwarfing the actual work; with k=32 random
-        # samples the per-sub-cell coverage is statistically fine.
-        rand_score = torch.rand_like(in_box, dtype=rel.dtype)
+        # Density-invariant: k random points from the in-box set.
+        rand_score = torch.rand(B, N_q, N_kv, device=query_uvd.device, dtype=query_uvd.dtype)
         rand_score = rand_score.masked_fill(~in_box, -1.0)
         kk = min(self.k, N_kv)
         _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)  # (B, N_q, k)
         valid       = rand_score.gather(2, topk_idx) >= 0
 
+        # Form rel for the k chosen pts only (B, Nq, k, 3) — small tensor.
+        # full_uvd.unsqueeze(1).expand(...) is a stride-0 VIEW (no allocation);
+        # gather reads at idx and materializes the (B, Nq, k, 3) result only.
         idx_exp  = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3)
-        topk_rel = rel.gather(2, idx_exp)                        # (B, N_q, k, 3)
+        full_exp = full_uvd.unsqueeze(1).expand(-1, N_q, -1, -1)
+        topk_full = full_exp.gather(2, idx_exp)                  # (B, N_q, k, 3)
+        topk_rel = topk_full - query_uvd.unsqueeze(2)            # (B, N_q, k, 3)
 
         # Debug instrumentation: stash the live selection so vis tools can read
         # exactly what this forward picked. Always written, only consumed when
