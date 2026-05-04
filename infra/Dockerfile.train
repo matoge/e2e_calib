@@ -1,64 +1,86 @@
 # infra/Dockerfile.train
 #
-# e2e_calib の学習コンテナ。
-# - base: nvcr.io/nvidia/pytorch:24.02-py3 (CUDA 12.3, torch 2.2, Python 3.10)
-# - 追加で accelerate / clearml / (任意で) 軽量系の python パッケージを入れる
-# - ClearML agent (docker mode) から呼び出すことを前提にしており、
-#   agent がソースを checkout → このイメージで実行する
+# e2e_calib の学習 + ClearML-agent オールインワン image。
+# 1 つの Dockerfile から ARG で base を切替、SM70 (V100/Volta、dgx2/sakurai2)
+# と SM120 (Blackwell、yokohama1 RTX 5080) の 2 image を build する。
 #
-# 使い方:
-#   # ローカルビルド (dgx2 など agent ホスト側で一度だけ):
-#     docker build -f infra/Dockerfile.train -t e2e-calib-train:local .
+# build:
+#   # SM70 / V100 系 (dgx, sakurai2)
+#   docker build -f infra/Dockerfile.train \
+#     --build-arg BASE_IMAGE=nvcr.io/nvidia/pytorch:24.02-py3 \
+#     -t e2e-calib-train:sm70 .
 #
-#   # ClearML agent 経由 (推奨):
-#     ./infra/submit_clearml_task.sh  # → dgx2-gpu キューに task 発行
+#   # SM120 / Blackwell (yokohama1 RTX 5080)
+#   docker build -f infra/Dockerfile.train \
+#     --build-arg BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3 \
+#     -t e2e-calib-train:sm120 .
 #
-#   # 手動 (デバッグ):
-#     docker run --rm --gpus all --shm-size=64g \
-#       -v /mnt/fsx:/mnt/fsx -v $(pwd):/workspace \
-#       e2e-calib-train:local \
-#       accelerate launch --num_processes=8 scripts/training/train_ps_v3_ddp.py ...
+# 起動モード:
+#   # (a) train 直叩き
+#   docker run --rm --gpus all --shm-size=64g -v $(pwd):/workspace \
+#     e2e-calib-train:sm120 \
+#     python scripts/training/train_ps_v3.py --convnext --img-size 128 ...
+#
+#   # (b) ClearML agent daemon (queue ワーカ常駐)
+#   docker run -d --gpus all --shm-size=64g \
+#     -v $HOME/clearml.conf:/root/clearml.conf:ro \
+#     -v /mnt/nvme6t:/mnt/nvme6t \
+#     -e CLEARML_AGENT_DAEMON=1 -e CLEARML_AGENT_QUEUE=yokohama1-gpu \
+#     e2e-calib-train:sm120
+#
+# 注意: SM70 base (24.02) は Blackwell (sm_120) を含まないので yokohama1 では
+# 起動するけど CUDA カーネル launch で illegal instruction or unsupported arch
+# になる。逆に SM120 base (25.06) は V100 (sm_70) もカバーしているので互換性は
+# ある (ただし image size が大きくなる)。host の GPU 世代に合わせて build 推奨。
 
-FROM nvcr.io/nvidia/pytorch:24.02-py3
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:24.02-py3
+FROM ${BASE_IMAGE}
 
-# system
-# NOTE: DEBIAN_FRONTEND + TZ must be set *before* apt-get install,
-# otherwise tzdata prompts for geographic area interactively and the build hangs.
+# DEBIAN_FRONTEND + TZ must be set *before* apt-get install, otherwise
+# tzdata prompts for geographic area interactively and the build hangs.
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Tokyo
+
 # libturbojpeg0-dev: provides libturbojpeg.so (+ .so.0 symlink) required by
 # PyTurboJPEG at ctypes-load time. Without it, PyTurboJPEG() raises
 # `OSError: libturbojpeg.so.0: cannot open shared object file` and the
 # DataLoader silently falls back to PIL — losing §8.5 TJ-ON perf.
 # See docs/sps_bottleneck_analysis.md §8.1.
-ENV DEBIAN_FRONTEND=noninteractive \
-    TZ=Asia/Tokyo
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git tini tzdata rsync openssh-client \
+        git tini tzdata rsync openssh-client curl ca-certificates \
         libturbojpeg0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # python deps — base image はすでに torch/torchvision/numpy/scipy を持っているので
-# 足りないぶんだけ追加する。 accelerate と clearml は必須。
+# 足りないぶんだけ追加。clearml-agent も同梱して agent daemon mode で起動可能に。
 COPY infra/requirements.train.txt /tmp/requirements.train.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.train.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.train.txt \
+    && pip install --no-cache-dir clearml-agent
 
-# Smoke-test: fail the build if PyTurboJPEG cannot initialize. Catches two
-# common failure modes that previously silent-fell-back to PIL:
-#   1. Wrong PyPI package (turbojpeg instead of PyTurboJPEG) → no TurboJPEG class
-#   2. Missing libturbojpeg.so.0 → OSError at ctypes load
-# See docs/sps_bottleneck_analysis.md §8.6 takeaway #1.
+# Smoke-test: fail the build if PyTurboJPEG cannot initialize.
 RUN python -c "from turbojpeg import TurboJPEG; TurboJPEG(); print('[ok] PyTurboJPEG initialized')"
 
-# ClearML agent が mount する workspace を標準的な場所にしておく。
-# agent docker mode は git clone 先を /root/... 配下に置くので、
-# ここは主に「ローカルで docker run したときの便利 cwd」用。
+# Smoke-test: confirm torch finds at least one CUDA device class. Doesn't
+# require a GPU at build time (CUDA driver layer probe), just verifies the
+# torch+cuda stack imports cleanly.
+RUN python -c "import torch; print(f'[ok] torch={torch.__version__} cuda={torch.version.cuda}')"
+
 WORKDIR /workspace
 
-# accelerate 設定: 8 GPU DDP, bf16, no mixed precision bucketing issue
 ENV ACCELERATE_USE_CPU=false \
     ACCELERATE_USE_DEEPSPEED=false \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# tini は PID1。 これで SIGTERM がきちんと届く (ClearML agent が task を止めるときに必須)
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# Entry: dual mode.
+#   CLEARML_AGENT_DAEMON=1 → spin up clearml-agent on the queue named in
+#                            CLEARML_AGENT_QUEUE (must mount clearml.conf at
+#                            /root/clearml.conf). foreground so docker --rm /
+#                            -d work cleanly.
+#   else                  → exec the CMD verbatim. Useful for direct training
+#                            runs or interactive shells.
+COPY infra/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
