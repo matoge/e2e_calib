@@ -59,7 +59,8 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                  img_size: int, min_crop_px: int, max_crop_px: int,
                  cml_logger=None, device: str = 'cuda',
                  amp_dtype=torch.float16, n: int = 10,
-                 zod_src: str | None = None, log=print) -> None:
+                 zod_src: str | None = None, log=print,
+                 max_rot_deg: float = 1.5, max_offset_m: float = 0.6) -> None:
     """Render N obj-centered val tiles with current model output to
     `exp_dir/vis_ep{epoch:03d}/`.
 
@@ -81,6 +82,8 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                              img_size=img_size,
                              min_crop_px=min_crop_px,
                              max_crop_px=max_crop_px,
+                             max_rot_deg=max_rot_deg,
+                             max_offset_m=max_offset_m,
                              oversample=1)
     else:
         from datasets.pandaset_full import PandaSetCalibDatasetFull
@@ -88,6 +91,8 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                                        img_size=img_size,
                                        min_crop_px=min_crop_px,
                                        max_crop_px=max_crop_px,
+                                       max_rot_deg=max_rot_deg,
+                                       max_offset_m=max_offset_m,
                                        oversample=1)
 
     sample_idx_fp = exp_dir / 'vis_pretrain' / 'sample_idxs.json'
@@ -108,6 +113,10 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
             if saved >= n:
                 break
             try:
+                # Pin np.random per idx so the crop box (u0, v0, cs) and the
+                # extrinsic perturbation are identical across epochs/eval runs —
+                # vis stays comparable. train_ps_v3._midtrain_vis does the same.
+                _np.random.seed(int(idx))
                 img, true_uvd, dist_uvd, vfp, uvd_full_v, pad_full_v = ds[idx]
             except Exception:
                 continue
