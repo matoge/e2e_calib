@@ -10,11 +10,12 @@ accelerate==0.34.2
 clearml==1.16.4
 einops==0.8.0
 pyyaml>=6.0
-# numpy>=2.0 必須: waymo_v3_tiled / pandaset_v3_full cache の inst/*.pt は
-# numpy 2.x で pickle されており (np.ndarray の内部 module が `numpy._core`)、
-# numpy 1.x 環境で torch.load すると ModuleNotFoundError: numpy._core で死ぬ。
-# nvcr.io/nvidia/pytorch:24.02 (torch 2.3.0a0) は numpy 2.x と binary compat。
-numpy>=2.0,<3.0
+# numpy は base image の 1.24.4 を使う。 nvcr.io/nvidia/pytorch:24.02 の
+# torch 2.3.0a0 は numpy 1.x ABI でビルドされており、numpy 2.x を強制的に
+# 入れると `UserWarning: _ARRAY_API not found` で torch.tensor/from_numpy 等が
+# 半死する (2026-05-04 実証)。
+# V3 cache (numpy 2.x pickled) の load は datasets/pandaset_full.py 側の
+# pickle_shim (`numpy._core` → `numpy.core`) で吸収する。
 # dataset 側で使っている: pandaset v3 (fsx cache) / waymo v3 cache は pt を直読。
 # ただし V3 tile cache は JPEG bytes を .pt 内に保持しており、__getitem__ 側で
 # PyTurboJPEG で decode する。base image には無いので明示的に入れる。

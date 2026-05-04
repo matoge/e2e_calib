@@ -10,6 +10,32 @@ Per __getitem__:
 import random
 from pathlib import Path
 import numpy as np
+
+# ── numpy 1.x ↔ 2.x pickle compat shim ────────────────────────────────────
+# V3 cache (waymo_v3_tiled, pandaset_v3_full) was pickled on a host with
+# numpy 2.x. The payload references `numpy._core.*` (private module introduced
+# in numpy 2.0). When we unpickle on the training container (nvcr 24.02 →
+# numpy 1.24.4, path not bumpable because torch 2.3.0a0 was built against the
+# numpy 1.x ABI), unpickle fails with `ModuleNotFoundError: numpy._core`.
+# Register `numpy._core` as an alias for `numpy.core` at import time so
+# `torch.load(..., weights_only=False)` finds the expected callables.
+# Restricted to the modules that actually appear in our cache payloads
+# (multiarray / umath / numeric) — other submodules lazily resolve if/when
+# a future cache version pickles new types.
+import sys as _sys
+try:
+    import numpy.core as _np_core
+    _sys.modules.setdefault("numpy._core", _np_core)
+    for _sub in ("multiarray", "umath", "numeric", "_multiarray_umath",
+                 "fromnumeric", "_methods"):
+        try:
+            _m = __import__(f"numpy.core.{_sub}", fromlist=[_sub])
+            _sys.modules.setdefault(f"numpy._core.{_sub}", _m)
+        except Exception:
+            pass
+except Exception:
+    pass
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
