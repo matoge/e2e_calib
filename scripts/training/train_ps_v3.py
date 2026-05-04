@@ -578,7 +578,8 @@ if __name__ == "__main__":
     ap.add_argument('--curriculum', default=None,
                     help='sigma curriculum spec, semicolon-separated stages '
                          'e.g. "1-25:0.5,0.05;26-60:1.0,0.10;61-100:2.0,0.20"')
-    ap.add_argument('--clearml', action='store_true')
+    ap.add_argument('--clearml', action=argparse.BooleanOptionalAction, default=True,
+                    help='log to ClearML (default: on). --no-clearml to disable.')
     ap.add_argument('--queue', default=None,
                     help='ClearML queue name. If set, Task.init then '
                          'execute_remotely() — local process exits, agent on '
