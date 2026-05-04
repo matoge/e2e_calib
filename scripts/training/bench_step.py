@@ -60,7 +60,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--batch', type=int, default=128)
     ap.add_argument('--n-pivots', type=int, default=256, help='per-batch query points (= dist_uvd N)')
-    ap.add_argument('--n-full', type=int, default=1024, help='full lidar pts (= uvd_full N_kv)')
+    ap.add_argument('--n-full', type=int, default=1024, help='full lidar pts (no longer used directly; bucket grid is G²·K)')
+    ap.add_argument('--k-per-cell', type=int, default=8, help='lidar pts per cell in the bucket grid')
+    ap.add_argument('--grid-n', type=int, default=16, help='cell grid size (G)')
     ap.add_argument('--img-size', type=int, default=128)
     ap.add_argument('--n-layers', type=int, default=4)
     ap.add_argument('--no-convnext', action='store_true')
@@ -89,11 +91,14 @@ def main():
     ], dim=-1)
     pad = torch.zeros(B, N, dtype=torch.bool, device=DEV)
     vfp = torch.full((B,), 1500.0, device=DEV)
-    uvd_full = torch.cat([
-        torch.rand(B, args.n_full, 2, device=DEV) * args.img_size,
-        torch.rand(B, args.n_full, 1, device=DEV) * 0.5,
+    G = args.grid_n
+    K = args.k_per_cell
+    bucket_uvd = torch.cat([
+        torch.rand(B, G * G, K, 2, device=DEV) * args.img_size,
+        torch.rand(B, G * G, K, 1, device=DEV) * 0.5,
     ], dim=-1)
-    pad_full = torch.zeros(B, args.n_full, dtype=torch.bool, device=DEV)
+    # ~half the slots populated on average — realistic
+    bucket_valid = torch.rand(B, G * G, K, device=DEV) < 0.5
 
     # Hook timers
     t = CudaTimer()
@@ -127,7 +132,7 @@ def main():
     def step():
         with torch.autocast(device_type='cuda', dtype=amp_dtype, enabled=(amp_dtype != torch.float32)):
             out = m(img, dist_uvd, key_padding_mask=pad, vfp=vfp,
-                    distorted_uvd_full=uvd_full, pad_full=pad_full)
+                    bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
         out.sum().backward()
         m.zero_grad(set_to_none=True)
 

@@ -160,75 +160,72 @@ class FrustumLocalEncoder(nn.Module):
         nn.init.trunc_normal_(self.cell_uv_embed, std=0.02)
 
     def forward(self, query_uvd: torch.Tensor,
-                full_uvd: torch.Tensor,
-                full_pad_mask: torch.Tensor,
+                bucket_uvd: torch.Tensor,
+                bucket_valid: torch.Tensor,
                 query_token: torch.Tensor,
                 query_pad_mask: torch.Tensor = None,
                 img_size: int = 64) -> torch.Tensor:
-        """Per-query mini cross-attn over k random in-box neighbors.
+        """Per-query mini cross-attn over neighbors gathered from a (G², K)
+        cell-bucketed lidar grid built in the dataloader.
 
         Args:
-            query_uvd:      (B, N_q, 3)  U,V in [0,img_size], D in [0,1]
-            full_uvd:       (B, N_kv, 3)  REQUIRED dense raw point cloud.
-            full_pad_mask:  (B, N_kv) bool — True = padded entry to ignore
-            query_token:    (B, N_q, d_out)  per-point feature from upstream
-                            (point_mlp). Used as Q in the local cross-attn.
-            query_pad_mask: (B, N_q)  bool — kept for API compat; not used here
-            img_size:       crop pixel side at the resolution `query_uvd` lives in.
+            query_uvd:    (B, N_q, 3)            U,V in [0,img_size], D in [0,1]
+            bucket_uvd:   (B, G², K_per_cell, 3) lidar pts pre-binned by cell
+            bucket_valid: (B, G², K_per_cell)    bool — True = real pt, False = pad
+            query_token:  (B, N_q, d_out)        per-point feature (PointMLP)
+            query_pad_mask: (B, N_q)             unused, kept for API compat
+            img_size:     crop side in the resolution `query_uvd` lives in.
 
         Returns:
-            (B, N_q, d_out) — local feature per query point
+            (B, N_q, d_out) — local feature per query point.
+
+        Pre-bucketing in the dataloader (vanilla numpy scatter) means we no
+        longer materialize the (B, Nq, Nkv, 3) `rel` tensor or do brute-force
+        topk over Nkv. Each query reads exactly 9·K candidates.
         """
-        if full_uvd is None or full_pad_mask is None:
-            raise ValueError(
-                "FrustumLocalEncoder.forward: full_uvd AND full_pad_mask are required. "
-                "Silent fallback to query-self pooling was removed — it broke a month "
-                "of v504r training (frustum encoded zero local context)."
-            )
         cell_px = float(img_size) / float(self.grid_n)
-        r_uv = self.r_uv_cells * cell_px
-
+        G = self.grid_n
+        K_pc = bucket_uvd.shape[2]
         B, N_q, _ = query_uvd.shape
-        N_kv = full_uvd.shape[1]
 
-        # ── Cheap in_box check via cell-id arithmetic ──
-        # UV cell-id match (own cell + 8-neighbor ring for r_uv_cells=1.5)
-        # is the spatial neighborhood. Depth filter (old r_d=0.004) was
-        # silently nuking ALL lidar in dense mode (query_d=0 vs lidar
-        # range>0.005 always exceeds r_d=0.004) — dropped 2026-05-04.
-        # Cell matching alone naturally bounds depth via camera geometry.
-        # No (B, Nq, Nkv, 3) float `rel` tensor is materialized; topk_rel
-        # forms only (B, Nq, k, 3) after the topk via gather.
-        r_cells = int(self.r_uv_cells)   # 1 for r_uv_cells=1.5 (own + 8-nb)
-        q_cu = (query_uvd[..., 0] / cell_px).long().unsqueeze(-1)   # (B, Nq, 1)
-        q_cv = (query_uvd[..., 1] / cell_px).long().unsqueeze(-1)
-        p_cu = (full_uvd[..., 0] / cell_px).long().unsqueeze(1)     # (B, 1, Nkv)
-        p_cv = (full_uvd[..., 1] / cell_px).long().unsqueeze(1)
-        in_box = ((q_cu - p_cu).abs() <= r_cells) & ((q_cv - p_cv).abs() <= r_cells)
-        if full_pad_mask is not None:
-            in_box = in_box & ~full_pad_mask.unsqueeze(1)        # (B, 1, N_kv)
+        # ── Gather 3×3 neighbor cells per query ──
+        q_cu = (query_uvd[..., 0] / cell_px).long().clamp(0, G - 1)   # (B, Nq)
+        q_cv = (query_uvd[..., 1] / cell_px).long().clamp(0, G - 1)
+        # offsets: (du, dv) for the 9 cells in row-major order
+        du = torch.arange(-1, 2, device=query_uvd.device)             # (3,)
+        dv = torch.arange(-1, 2, device=query_uvd.device)
+        du9 = du.repeat(3)                                            # (9,)  -1,0,1,-1,0,1,-1,0,1
+        dv9 = dv.repeat_interleave(3)                                 # (9,)  -1,-1,-1,0,0,0,1,1,1
+        nb_cu = (q_cu.unsqueeze(-1) + du9).clamp(0, G - 1)            # (B, Nq, 9)
+        nb_cv = (q_cv.unsqueeze(-1) + dv9).clamp(0, G - 1)
+        nb_cid = nb_cv * G + nb_cu                                     # (B, Nq, 9)
 
-        # Density-invariant: k random points from the in-box set.
-        rand_score = torch.rand(B, N_q, N_kv, device=query_uvd.device, dtype=query_uvd.dtype)
-        rand_score = rand_score.masked_fill(~in_box, -1.0)
-        kk = min(self.k, N_kv)
-        _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)  # (B, N_q, k)
-        valid       = rand_score.gather(2, topk_idx) >= 0
+        # gather (B, Nq, 9, K, 3) and (B, Nq, 9, K)
+        nb_idx_exp = nb_cid.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, K_pc, 3)
+        bucket_uvd_exp = bucket_uvd.unsqueeze(1).expand(-1, N_q, -1, -1, -1)
+        cands = bucket_uvd_exp.gather(2, nb_idx_exp)                   # (B, Nq, 9, K, 3)
+        nb_v_exp = nb_cid.unsqueeze(-1).expand(-1, -1, -1, K_pc)
+        bucket_v_exp = bucket_valid.unsqueeze(1).expand(-1, N_q, -1, -1)
+        cand_valid = bucket_v_exp.gather(2, nb_v_exp)                  # (B, Nq, 9, K)
+        # flatten neighbor + slot dims
+        cands = cands.reshape(B, N_q, 9 * K_pc, 3)                     # (B, Nq, 72, 3)
+        cand_valid = cand_valid.reshape(B, N_q, 9 * K_pc)              # (B, Nq, 72)
 
-        # Form rel for the k chosen pts only (B, Nq, k, 3) — small tensor.
-        # full_uvd.unsqueeze(1).expand(...) is a stride-0 VIEW (no allocation);
-        # gather reads at idx and materializes the (B, Nq, k, 3) result only.
-        idx_exp  = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3)
-        full_exp = full_uvd.unsqueeze(1).expand(-1, N_q, -1, -1)
-        topk_full = full_exp.gather(2, idx_exp)                  # (B, N_q, k, 3)
-        topk_rel = topk_full - query_uvd.unsqueeze(2)            # (B, N_q, k, 3)
+        # rel relative to query
+        rel_all = cands - query_uvd.unsqueeze(2)                       # (B, Nq, 72, 3)
 
-        # Debug instrumentation: stash the live selection so vis tools can read
-        # exactly what this forward picked. Always written, only consumed when
-        # a caller looks at it. Detached so they don't pin compute graphs.
+        # Density-invariant: k random points from the valid set.
+        rand_score = torch.rand(B, N_q, 9 * K_pc, device=query_uvd.device, dtype=query_uvd.dtype)
+        rand_score = rand_score.masked_fill(~cand_valid, -1.0)
+        kk = min(self.k, 9 * K_pc)
+        _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)        # (B, N_q, k)
+        valid = rand_score.gather(2, topk_idx) >= 0
+        idx_exp = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3)
+        topk_rel = rel_all.gather(2, idx_exp)                          # (B, N_q, k, 3)
+
+        # Debug instrumentation
         self._last_topk_idx = topk_idx.detach()
         self._last_valid    = valid.detach()
-        self._last_r_uv_px  = float(r_uv)
         self._last_cell_px  = float(cell_px)
 
         # ── 2-layer Point-Transformer-style local attention, all at d_local ──
@@ -262,48 +259,40 @@ class FrustumLocalEncoder(nn.Module):
         feat = feat.masked_fill(~any_valid, 0.0)                   # all-pad guard
         return feat
 
-    def forward_dense(self, full_uvd: torch.Tensor,
-                       full_pad_mask: torch.Tensor,
+    def forward_dense(self, bucket_uvd: torch.Tensor,
+                       bucket_valid: torch.Tensor,
                        img_size: int = 64) -> torch.Tensor:
         """Dense gh×gw lidar map: query at every cell center, output (B, gh*gw, D).
 
-        Empty cells (no LiDAR within ±r_uv_cells) get a zero geometry feature,
-        but the learnable per-cell UV embedding is still added — so even
-        no-LiDAR cells carry useful position information for downstream
-        cross-attention. Use this when the lidar stream is treated as a 2D
-        KV map (alongside coarse_feat / fine_feat) rather than scattered
-        per-pivot tokens.
-
         Args:
-            full_uvd, full_pad_mask: same as forward()
-            img_size: crop pixel side
+            bucket_uvd:   (B, G², K_per_cell, 3)  pre-binned lidar grid
+            bucket_valid: (B, G², K_per_cell)     bool valid mask
+            img_size:     crop pixel side
         Returns:
             (B, gh*gw, D)  with cell_uv_embed already added.
+
+        Empty cells (no lidar) fall through to zero geometry feature; the
+        learnable per-cell UV embedding is added so even no-LiDAR cells carry
+        positional info for downstream cross-attention.
         """
-        B = full_uvd.shape[0]
-        device = full_uvd.device
+        B = bucket_uvd.shape[0]
+        device = bucket_uvd.device
         cell_px = float(img_size) / float(self.grid_n)
-        # build (gh*gw, 3) cell-center queries: u,v at cell center, d=0
         cy, cx = torch.meshgrid(
-            torch.arange(self.grid_n, device=device, dtype=full_uvd.dtype),
-            torch.arange(self.grid_n, device=device, dtype=full_uvd.dtype),
+            torch.arange(self.grid_n, device=device, dtype=bucket_uvd.dtype),
+            torch.arange(self.grid_n, device=device, dtype=bucket_uvd.dtype),
             indexing='ij',
         )
         u = (cx + 0.5) * cell_px
         v = (cy + 0.5) * cell_px
         d = torch.zeros_like(u)
         cell_uvd = torch.stack([u, v, d], dim=-1).reshape(1, -1, 3).expand(B, -1, -1)
-        # query_token: zero — we want pure local-pt aggregation, no upstream MLP.
-        # The PT block will lift the local Δ-uvd into d_local. Empty cells fall
-        # through the masked_fill at the end and stay zero.
         D = self.in_proj.in_features
         zero_q_token = torch.zeros(B, cell_uvd.shape[1], D,
-                                    device=device, dtype=full_uvd.dtype)
-        feat = self.forward(query_uvd=cell_uvd, full_uvd=full_uvd,
-                             full_pad_mask=full_pad_mask,
+                                    device=device, dtype=bucket_uvd.dtype)
+        feat = self.forward(query_uvd=cell_uvd, bucket_uvd=bucket_uvd,
+                             bucket_valid=bucket_valid,
                              query_token=zero_q_token, img_size=img_size)
-        # add learnable per-cell UV embedding so even all-zero (empty) cells
-        # carry their position
         feat = feat + self.cell_uv_embed
         return feat                                                # (B, gh*gw, D)
 
@@ -507,12 +496,14 @@ class CalibNetDepth(nn.Module):
 
     def forward(self, image: torch.Tensor, distorted_uvd: torch.Tensor,
                 key_padding_mask=None, vfp: torch.Tensor = None,
-                distorted_uvd_full: torch.Tensor = None,
-                pad_full: torch.Tensor = None):
+                bucket_uvd: torch.Tensor = None,
+                bucket_valid: torch.Tensor = None):
         """
         image           : (B, C, H, W)
         distorted_uvd   : (B, N, 3)  [U, V, D_norm]
         key_padding_mask: (B, N) bool  True = padding position
+        bucket_uvd      : (B, G², K_per_cell, 3)  pre-binned lidar grid
+        bucket_valid    : (B, G², K_per_cell)     bool valid mask
         Returns params  : (B, N, 5)  [tx, ty, log_sx, log_sy, rho]
         """
         coarse_feat, fine_feat = self.cnn(image)
@@ -534,30 +525,31 @@ class CalibNetDepth(nn.Module):
 
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
-            if distorted_uvd_full is None or pad_full is None:
+            if bucket_uvd is None or bucket_valid is None:
                 raise ValueError(
-                    "CalibNetDepth.forward: distorted_uvd_full + pad_full are REQUIRED "
-                    "when use_frustum=True or use_3d_local=True. The dataset/collate "
-                    "must surface the dense raw point cloud per crop. Silent fallback "
-                    "removed (broken frustum invalidated v504r runs)."
+                    "CalibNetDepth.forward: bucket_uvd + bucket_valid are REQUIRED "
+                    "when use_frustum=True. The dataset/collate must produce "
+                    "(B, G², K_per_cell, 3) cell-bucketed lidar (PandaSetCalibDatasetFull "
+                    "post-2026-05-04). Old (full_uvd, pad_full) flat layout removed."
                 )
             if getattr(self, '_is_3d_local', False):
+                # 3D-local path still uses the flat layout — flatten bucket to (B, G²·K, 3).
+                B_, G2, Kpc, _ = bucket_uvd.shape
+                flat_uvd = bucket_uvd.reshape(B_, G2 * Kpc, 3)
+                flat_pad = ~bucket_valid.reshape(B_, G2 * Kpc)
                 q = q + self.frustum_enc(distorted_uvd,
-                                          full_uvd=distorted_uvd_full,
-                                          full_pad_mask=pad_full,
+                                          full_uvd=flat_uvd,
+                                          full_pad_mask=flat_pad,
                                           vfp=vfp, img_size=self.img_size,
                                           query_pad_mask=key_padding_mask)
             elif self._frustum_dense:
-                # dense gh*gw lidar map → keep separately, fed as extra_kv to
-                # the cross-attention later (NOT added to q).
                 self._lidar_kv_dense = self.frustum_enc.forward_dense(
-                    full_uvd=distorted_uvd_full,
-                    full_pad_mask=pad_full,
+                    bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
                     img_size=self.img_size)
             else:
                 q = q + self.frustum_enc(distorted_uvd,
-                                          full_uvd=distorted_uvd_full,
-                                          full_pad_mask=pad_full,
+                                          bucket_uvd=bucket_uvd,
+                                          bucket_valid=bucket_valid,
                                           query_token=q,
                                           query_pad_mask=key_padding_mask,
                                           img_size=self.img_size)

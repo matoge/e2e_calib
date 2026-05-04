@@ -55,19 +55,19 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     import time as _time
     _t_start = _time.time()
     _last_log_step = 0
-    for imgs, true_uvd, dist_uvd, pad_mask, vfp, uvd_full, pad_full in loader:
+    for imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid in loader:
         # dataset returns uint8 to cut IPC 4x; convert to float on GPU
-        imgs     = imgs.to(DEVICE, non_blocking=True).float().div_(255.0)
-        true_uvd = true_uvd.to(DEVICE, non_blocking=True)
-        dist_uvd = dist_uvd.to(DEVICE, non_blocking=True)
-        pad_mask = pad_mask.to(DEVICE, non_blocking=True)
-        vfp      = vfp.to(DEVICE, non_blocking=True)
-        uvd_full = uvd_full.to(DEVICE, non_blocking=True)
-        pad_full = pad_full.to(DEVICE, non_blocking=True)
-        gt       = true_uvd[..., :2] - dist_uvd[..., :2]
+        imgs         = imgs.to(DEVICE, non_blocking=True).float().div_(255.0)
+        true_uvd     = true_uvd.to(DEVICE, non_blocking=True)
+        dist_uvd     = dist_uvd.to(DEVICE, non_blocking=True)
+        pad_mask     = pad_mask.to(DEVICE, non_blocking=True)
+        vfp          = vfp.to(DEVICE, non_blocking=True)
+        bucket_uvd   = bucket_uvd.to(DEVICE, non_blocking=True)
+        bucket_valid = bucket_valid.to(DEVICE, non_blocking=True)
+        gt           = true_uvd[..., :2] - dist_uvd[..., :2]
         with torch.autocast(device_type="cuda", dtype=_AMP_DTYPE):
             params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
-                            distorted_uvd_full=uvd_full, pad_full=pad_full)
+                            bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
             valid  = ~pad_mask
             loss   = gaussian2d_nll(params[valid], gt[valid])
         if train:
@@ -303,7 +303,7 @@ def main(cfg=None):
                 # Pin np.random per idx so the crop box (u0, v0, cs) and the
                 # perturbation are identical across epochs — vis stays comparable.
                 _np.random.seed(int(idx))
-                img, true_uvd, dist_uvd, vfp, uvd_full_v, pad_full_v = ds[idx]
+                img, true_uvd, dist_uvd, vfp, bucket_uvd_v, bucket_valid_v = ds[idx]
             except Exception:
                 continue
             is_obj = dist_uvd[:, 3].numpy() > 0.5
@@ -320,8 +320,8 @@ def main(cfg=None):
                           dist_uvd.unsqueeze(0).to(DEVICE)[..., :3],
                           key_padding_mask=pad,
                           vfp=vfp.view(1).to(DEVICE),
-                          distorted_uvd_full=uvd_full_v.unsqueeze(0).to(DEVICE),
-                          pad_full=pad_full_v.unsqueeze(0).to(DEVICE))[0].float().cpu().numpy()
+                          bucket_uvd=bucket_uvd_v.unsqueeze(0).to(DEVICE),
+                          bucket_valid=bucket_valid_v.unsqueeze(0).to(DEVICE))[0].float().cpu().numpy()
             true_uv = true_uvd[:,:2].numpy(); dist_uv = dist_uvd[:,:2].numpy()
             pred_uv = dist_uv + p[:,:2]
             err_b_obj = float(_np.linalg.norm(dist_uv[is_obj] - true_uv[is_obj], axis=1).mean())

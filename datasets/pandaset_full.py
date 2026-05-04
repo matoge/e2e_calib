@@ -130,6 +130,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  frame_stride: int = 1,
                  grid_n: int = 16,
                  n_full: int = 1024,
+                 k_per_cell: int = 8,
                  zoom_aug: bool = False):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
@@ -148,6 +149,7 @@ class PandaSetCalibDatasetFull(Dataset):
         self.oversample = int(oversample)
         self.grid_n     = int(grid_n)
         self.n_full     = int(n_full)
+        self.k_per_cell = int(k_per_cell)
         # depth-dependent zoom-in aug. When True, far pivots (z>=20m) randomly
         # shrink cs by up to scale_max(z): 1.0 at 20m → 2.0 at 100m+. This
         # synthesizes "telephoto view of distant objects" without needing
@@ -366,52 +368,54 @@ class PandaSetCalibDatasetFull(Dataset):
                                      (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1).astype(np.float32)
             d_full = (z_off[in_crop_off] / 100.0).astype(np.float32)
             uvd_full_raw = np.concatenate([uv_full_loc, d_full[:, None]], axis=1)
+
+            # ── Bucketed cell layout: pre-bin pts into a fixed (G², K) grid so
+            # the model can read 3×3 neighbor cells per query in O(K)·O(9) work
+            # instead of brute-force O(Nkv) per query. K is fixed per cell so
+            # collate is a vanilla stack — no per-batch ragged padding.
+            G = int(self.grid_n)
+            K_per_cell = int(getattr(self, 'k_per_cell', 8))
+            cell_S = float(S) / G
+            cu = np.clip((uv_full_loc[:, 0] / cell_S).astype(np.int32), 0, G - 1)
+            cv = np.clip((uv_full_loc[:, 1] / cell_S).astype(np.int32), 0, G - 1)
+            cell_id = cv * G + cu                                    # (n_raw,)
             n_raw = uvd_full_raw.shape[0]
-            n_full = self.n_full
-            uvd_full_pad = np.zeros((n_full, 3), dtype=np.float32)
-            pad_full = np.ones(n_full, dtype=bool)
-            if n_raw <= n_full:
-                uvd_full_pad[:n_raw] = uvd_full_raw
-                pad_full[:n_raw] = False
-            else:
-                # stratified G×G subsample (one per cell-near-center, then random fill)
-                G = int(np.sqrt(n_full))
-                cell_S2 = float(S) / G
-                cj2 = np.clip((uv_full_loc[:, 0] / cell_S2).astype(np.int32), 0, G - 1)
-                ck2 = np.clip((uv_full_loc[:, 1] / cell_S2).astype(np.int32), 0, G - 1)
-                cid2 = ck2 * G + cj2
-                du = uv_full_loc[:, 0] - (cj2 + 0.5) * cell_S2
-                dv = uv_full_loc[:, 1] - (ck2 + 0.5) * cell_S2
-                d2_2 = du * du + dv * dv
-                ord2 = np.lexsort((d2_2, cid2))
-                _, fp = np.unique(cid2[ord2], return_index=True)
-                kept = ord2[fp]
-                if len(kept) < n_full:
-                    rest = np.setdiff1d(np.arange(n_raw), kept, assume_unique=False)
-                    if len(rest):
-                        fill = np.random.choice(rest, size=min(n_full - len(kept), len(rest)),
-                                                replace=False)
-                        kept = np.concatenate([kept, fill])
-                kept = kept[:n_full]
-                uvd_full_pad[:len(kept)] = uvd_full_raw[kept]
-                pad_full[:len(kept)] = False
+            # Random shuffle so that "first K per cell" picks K random pts when
+            # the cell is over-full. Cheap O(n_raw) permutation.
+            shuf = np.random.permutation(n_raw)
+            sorted_idx = shuf[np.argsort(cell_id[shuf], kind='stable')]
+            sorted_uvd = uvd_full_raw[sorted_idx]                    # (n_raw, 3)
+            sorted_cid = cell_id[sorted_idx]                         # (n_raw,)
+            # within-cell rank: 0,1,2,... per cell. Take only those <K.
+            counts = np.bincount(sorted_cid, minlength=G * G)
+            cell_starts = np.zeros(G * G + 1, dtype=np.int64)
+            cell_starts[1:] = counts.cumsum()
+            intra = np.arange(n_raw, dtype=np.int64) - cell_starts[sorted_cid]
+            keep_mask = intra < K_per_cell
+            slots = intra[keep_mask]
+            cells = sorted_cid[keep_mask]
+            bucket_uvd  = np.zeros((G * G, K_per_cell, 3), dtype=np.float32)
+            bucket_valid = np.zeros((G * G, K_per_cell), dtype=bool)
+            bucket_uvd[cells, slots]  = sorted_uvd[keep_mask]
+            bucket_valid[cells, slots] = True
 
             self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
                                     scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
             return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
                     torch.tensor(vfp, dtype=torch.float32),
-                    torch.from_numpy(uvd_full_pad), torch.from_numpy(pad_full))
+                    torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid))
 
         return self[random.randint(0, len(self) - 1)]
 
 
 def collate_full(batch):
-    """Pad ragged uvd tensors and stack img/vfp + uvd_full/pad_full (REQUIRED for frustum)."""
-    imgs, trues, dists, vfps, uvd_fulls, pad_fulls = zip(*batch)
-    imgs = torch.stack(imgs)            # (B, 3, S, S)
-    vfps = torch.stack(vfps)            # (B,)
-    uvd_full_t = torch.stack(uvd_fulls)  # (B, n_full, 3)
-    pad_full_t = torch.stack(pad_fulls)  # (B, n_full)
+    """Stack img/vfp + (G², K, 3) bucketed lidar grid. Per-batch ragged padding
+    only on the per-pivot true/dist tensors; the lidar bucket is fixed-size."""
+    imgs, trues, dists, vfps, b_uvds, b_valids = zip(*batch)
+    imgs = torch.stack(imgs)              # (B, 3, S, S)
+    vfps = torch.stack(vfps)              # (B,)
+    bucket_uvd_t = torch.stack(b_uvds)    # (B, G², K, 3)
+    bucket_valid_t = torch.stack(b_valids)  # (B, G², K)
     Nmax = max(t.shape[0] for t in trues)
     B = len(trues)
     Cdim = trues[0].shape[1]
@@ -423,4 +427,4 @@ def collate_full(batch):
         true_p[k, :n] = t
         dist_p[k, :n] = d
         pad[k, :n] = False
-    return imgs, true_p, dist_p, pad, vfps, uvd_full_t, pad_full_t
+    return imgs, true_p, dist_p, pad, vfps, bucket_uvd_t, bucket_valid_t
