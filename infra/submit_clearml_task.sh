@@ -218,12 +218,21 @@ if [[ "$QUEUE" == yokohama1-* ]]; then
     --packages    "clearml" \
     --args        $CT_ARGS
 else
+  # GPU assignment: default "all" (agent picks). Override with CUDA_DEVICES=8,9,10,11
+  # env var to pin specific GPUs — useful when other tenants (vllm, etc.) are
+  # holding the low-index GPUs. 2026-05-05: vllm gemma4-31b on dgx2 GPU0-7 →
+  # accelerate picked 0-3 by default and hit OOM; CUDA_DEVICES=8,9,10,11 fixes.
+  GPU_SPEC="all"
+  if [[ -n "${CUDA_DEVICES:-}" ]]; then
+    GPU_SPEC="\"device=${CUDA_DEVICES}\""
+    echo "[info] pinning GPUs via CUDA_DEVICES=${CUDA_DEVICES}"
+  fi
   clearml-task \
     --project     "$PROJECT" \
     --name        "$NAME" \
     --queue       "$QUEUE" \
     --docker      "$DOCKER_IMAGE" \
-    --docker_args "--shm-size=64g --gpus all -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
+    --docker_args "--shm-size=64g --gpus $GPU_SPEC -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
     --script      "$SCRIPT" \
     --cwd         "." \
     --packages    "clearml" \
