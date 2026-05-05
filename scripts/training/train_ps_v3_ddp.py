@@ -28,7 +28,7 @@ from models.model_depth import CalibNetDepth
 from models.model_cov import gaussian2d_nll
 from torch.utils.data import DataLoader, Subset
 
-from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate import Accelerator
 from accelerate.utils import set_seed
 
 torch.set_float32_matmul_precision("high")
@@ -139,13 +139,19 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
 def main(cfg=None):
     c = cfg if cfg is not None else CFG
     # One Accelerator per process; mixed_precision comes from accelerate launch.
-    # find_unused_parameters=True: CalibNetDepth (frustum_enc ON, n_layers=2)
-    # has branches whose params may not receive grads in every forward (e.g.
-    # fully-masked pad_full batches, cond heads that short-circuit). Without
-    # this flag DDP AllReduce hangs at the first backward. 2026-05-04 verified
-    # on dgx2 4×V100.
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accel = Accelerator(kwargs_handlers=[ddp_kwargs])
+    # find_unused_parameters: FALSE by default (fast path). Earlier comment
+    # claimed frustum_enc ON + n_layers=2 caused AllReduce hang — that was
+    # verified on 2026-05-04 against the pre-bucket (flat distorted_uvd_full)
+    # API. After 01abd02 (bucket API) + 1868604 (DDP loop rename) the param
+    # usage pattern stabilized. 2026-05-05 regression: True caused 22× slowdown
+    # (1552 sps/global → 72 sps). If DDP actually hangs with False, add
+    # DistributedDataParallelKwargs(find_unused_parameters=True) back.
+    fup = bool(c.get('find_unused_parameters', False))
+    if fup:
+        from accelerate import DistributedDataParallelKwargs as _DDPK
+        accel = Accelerator(kwargs_handlers=[_DDPK(find_unused_parameters=True)])
+    else:
+        accel = Accelerator()
     set_seed(c.get('split_seed', 42) + accel.process_index)
 
     exp_dir = Path("experiments") / c["name"]
@@ -403,6 +409,10 @@ if __name__ == "__main__":
     ap.add_argument('--val-size', type=int, default=None)
     ap.add_argument('--no-frustum', action='store_true',
                     help='disable FrustumLocalEncoder (ablation vs CFG default)')
+    ap.add_argument('--find-unused-parameters', action='store_true',
+                    help='DDP find_unused_parameters=True. Off by default '
+                         '(2026-05-05: True caused 22× slowdown). Turn on '
+                         'only if DDP AllReduce actually hangs at backward.')
     ap.add_argument('--clearml', action='store_true')
     ap.add_argument('--why',     default='')
     args = ap.parse_args()
@@ -430,6 +440,7 @@ if __name__ == "__main__":
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
     if args.no_frustum: cfg['use_frustum'] = False
+    if args.find_unused_parameters: cfg['find_unused_parameters'] = True
 
     # ClearML init happens before main so the task is available to cml_logger
     if args.clearml:
