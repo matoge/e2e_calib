@@ -183,15 +183,16 @@ def main(cfg=None):
         log(f"train cache loaded: {len(tr_full)} instances")
         va_full = PandaSetCalibDatasetFull(cache, split='val', **ds_kw)
     log(f"val cache loaded: {len(va_full)} instances")
-    from torch.utils.data import ConcatDataset
-    full_ds = ConcatDataset([tr_full, va_full])
-    idxs = list(range(len(full_ds)))
-    _r.Random(c["split_seed"]).shuffle(idxs)
-    n_val_obj = int(len(idxs) * c["val_fraction"])
-    val_idxs, train_idxs = idxs[:n_val_obj], idxs[n_val_obj:]
-    train_ds = Subset(full_ds, train_idxs)
-    val_ds   = Subset(full_ds, val_idxs)
-    log(f"object-level split: train={len(train_ds)} val={len(val_ds)} (seed={c['split_seed']})")
+    # Sequence-level split: use the cache's pre-built train/val (scene-disjoint).
+    # The previous code re-shuffled cache_train+cache_val with seed and cut at
+    # val_fraction, which produced an OBJECT-level split (instances of the
+    # same scene leak between train/val) — caused over-optimistic in-domain
+    # val_nll because model effectively memorized scene-level features.
+    # The cache split (PandaSetCalibDatasetFull(... split='train' / 'val')) is
+    # already scene-disjoint per the build pipeline.
+    train_ds = tr_full
+    val_ds   = va_full
+    log(f"sequence-level split (cache pre-built): train={len(train_ds)} val={len(val_ds)}")
 
     # Optional per-epoch random subsample (RandomSampler with num_samples).
     # Each epoch draws this many random indices (without replacement when

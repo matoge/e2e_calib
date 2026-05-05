@@ -79,7 +79,15 @@ class MSDeformAttn(nn.Module):
         assert d_model % n_heads == 0
         self.d_model, self.n_levels, self.n_heads, self.n_points = \
             d_model, n_levels, n_heads, n_points
-        self.im2col_step = 64
+        # im2col_step = 1 keeps the CUDA kernel divisibility assert ALWAYS satisfied.
+        # Kernel asserts value.size(0) % im2col_step == 0 where value.size(0) is
+        # batch × num_query × ... — varies per batch with bucketed lidar (NS),
+        # cross-frame, and any frame-token / mixed-Q experiment.
+        # Higher values (32/64) crash on certain shapes, e.g.,
+        #   NS dual-DA value.size(0) = 8832 → 8832 % 64 = 0 OK, but other shapes fail
+        # Performance penalty vs 64: ~0-5% (kernel launch overhead, not compute).
+        # See memory `feedback_im2col_step_robust.md`. Don't bump this back up.
+        self.im2col_step = 1
 
         self.sampling_offsets  = nn.Linear(d_model, n_heads * n_levels * n_points * 2)
         self.attention_weights = nn.Linear(d_model, n_heads * n_levels * n_points)
