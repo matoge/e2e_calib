@@ -364,7 +364,9 @@ def main(cfg=None):
                 # Pin np.random per idx so the crop box (u0, v0, cs) and the
                 # perturbation are identical across epochs — vis stays comparable.
                 _np.random.seed(int(idx))
-                img, true_uvd, dist_uvd, vfp, bucket_uvd_v, bucket_valid_v = ds[idx]
+                # ds returns 7-tuple (...,pert_vec) post-2026-05-11; vis ignores pert.
+                _sample = ds[idx]
+                img, true_uvd, dist_uvd, vfp, bucket_uvd_v, bucket_valid_v = _sample[:6]
             except Exception:
                 continue
             is_obj = dist_uvd[:, 3].numpy() > 0.5
