@@ -530,6 +530,32 @@ class CalibNetDepth(nn.Module):
         self.frame_pose_head = (CLSFramePoseHead(d, n_dof=frame_pose_dof)
                                  if use_frame_pose else None)
 
+        # DDP support: freeze parameters whose forward path is never taken in
+        # the current config so find_unused_parameters=False doesn't crash.
+        # Two known dead branches:
+        #   1. CrossAttentionBlockDeform.{extra_kv_attn, norm_extra_kv} —
+        #      only run when extra_kv != None, i.e. use_lidar_kv=True or
+        #      frustum_dense=True. Unused otherwise.
+        #   2. FrustumLocalEncoder.cell_uv_embed — only touched in
+        #      forward_dense, gated on frustum_dense=True.
+        # state_dict keys preserved (requires_grad isn't saved) so existing
+        # ckpts load unchanged.
+        extra_kv_used = self._use_lidar_kv or self._frustum_dense
+        if not extra_kv_used:
+            for block_name in ('cross_coarse', 'cross_fine', 'cross_refine', 'cross_fine2'):
+                blk = getattr(self, block_name, None)
+                if blk is None:
+                    continue
+                for attr in ('extra_kv_attn', 'norm_extra_kv'):
+                    mod = getattr(blk, attr, None)
+                    if mod is not None:
+                        for p in mod.parameters():
+                            p.requires_grad_(False)
+        if not self._frustum_dense and self.frustum_enc is not None:
+            ce = getattr(self.frustum_enc, 'cell_uv_embed', None)
+            if ce is not None:
+                ce.requires_grad_(False)
+
     def set_cross_temp(self, t: float):
         for m in self.modules():
             if hasattr(m, '_cross_temp'):
