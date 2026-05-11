@@ -403,6 +403,44 @@ class PoseEmb(nn.Module):
         return self.net(x)   # (B, D)
 
 
+class CLSFramePoseHead(nn.Module):
+    """CLS-style aggregator: learnable token cross-attends to per-pt features,
+    outputs (μ, log σ) for an n_dof SE3 perturbation in the patch-local
+    pinhole-approximated frame. Body is generic; only `head` knows n_dof so
+    extending to add intrinsic params later means swapping the linear head
+    while the cross-attn aggregator can be reused.
+
+    Output: (B, n_dof) mean, (B, n_dof) log_sigma. Diagonal covariance only
+    (start simple). For full Cholesky cov, swap head dim to n_dof+n_dof*(n_dof+1)/2.
+    """
+    def __init__(self, d: int, n_dof: int = 6, n_heads: int = 4):
+        super().__init__()
+        self.n_dof = n_dof
+        self.cls = nn.Parameter(torch.randn(1, 1, d) * 0.02)
+        self.norm_q = nn.LayerNorm(d)
+        self.norm_kv = nn.LayerNorm(d)
+        self.cross = nn.MultiheadAttention(d, n_heads, batch_first=True, dropout=0.1)
+        self.drop = nn.Dropout(0.1)
+        self.norm_ffn = nn.LayerNorm(d)
+        self.ffn = nn.Sequential(
+            nn.Linear(d, 4 * d), nn.GELU(),
+            nn.Dropout(0.1), nn.Linear(4 * d, d),
+        )
+        self.head = nn.Linear(d, 2 * n_dof)
+
+    def forward(self, q: torch.Tensor, key_padding_mask=None):
+        """q: (B, N, D) per-pt features. Returns (μ, log_σ) — each (B, n_dof)."""
+        B = q.size(0)
+        cls = self.cls.expand(B, -1, -1)                              # (B, 1, D)
+        cls_attn, _ = self.cross(self.norm_q(cls),
+                                  self.norm_kv(q), self.norm_kv(q),
+                                  key_padding_mask=key_padding_mask)
+        cls = cls + self.drop(cls_attn)
+        cls = cls + self.ffn(self.norm_ffn(cls))
+        out = self.head(cls.squeeze(1))                               # (B, 2*n_dof)
+        return out[:, :self.n_dof], out[:, self.n_dof:]               # μ, log_σ
+
+
 class CalibNetDepth(nn.Module):
     def __init__(self, d: int = D_DIM, img_size: int = 128, in_channels: int = 1,
                  n_layers: int = 3, self_first: bool = False, kv_self_attn: bool = False,
@@ -415,7 +453,8 @@ class CalibNetDepth(nn.Module):
                  use_lidar_kv: bool = False, use_pose_emb: bool = False,
                  use_3d_local: bool = False,
                  local_3d_radii=(1.0, 4.0, 16.0),
-                 local_3d_k=(8, 8, 8)):
+                 local_3d_k=(8, 8, 8),
+                 use_frame_pose: bool = False, frame_pose_dof: int = 6):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -484,6 +523,12 @@ class CalibNetDepth(nn.Module):
             self.cross_fine2   = Block(d, **kw)
         self._self_first = self_first
         self._deform_mode = deform_mode
+
+        # CLS frame-level pose head: outputs (μ, log σ) for an n_dof SE3 patch
+        # perturbation. Generic body (cross-attn aggregator) + DoF-specific head.
+        # Adding intrinsic params later = swap head + jacobian, body reusable.
+        self.frame_pose_head = (CLSFramePoseHead(d, n_dof=frame_pose_dof)
+                                 if use_frame_pose else None)
 
     def set_cross_temp(self, t: float):
         for m in self.modules():
@@ -658,5 +703,10 @@ class CalibNetDepth(nn.Module):
                                     extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
             raw_cum = raw_cum + raw_i
         raw = raw_cum
+        per_pt = clamp_params(raw, self.img_size)   # (B,N,5)
 
-        return clamp_params(raw, self.img_size)   # (B,N,5)
+        if self.frame_pose_head is not None:
+            # q here is the final per-pt feature stack (B, N, D) — input to CLS.
+            mu, log_sigma = self.frame_pose_head(q, key_padding_mask=key_padding_mask)
+            return per_pt, (mu, log_sigma)
+        return per_pt
