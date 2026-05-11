@@ -46,7 +46,7 @@ CFG = dict(
 )
 
 
-def epoch_loop(model, loader, optimizer, scaler, train):
+def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
     model.train(train)
     total_nll, total_mse, n = 0.0, 0.0, 0
     obj_nll_s, obj_n = 0.0, 0
@@ -91,7 +91,7 @@ def epoch_loop(model, loader, optimizer, scaler, train):
                 resid    = pert_6vec - frame_mu
                 inv_var  = torch.exp(-2.0 * frame_logsig)
                 fr_nll   = 0.5 * (resid * resid * inv_var).sum(dim=-1) + frame_logsig.sum(dim=-1)
-                loss     = loss + float(c.get('frame_pose_weight', 0.5)) * fr_nll.mean()
+                loss     = loss + float(frame_pose_weight) * fr_nll.mean()
         if train:
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -250,7 +250,9 @@ def main(cfg=None):
                           frustum_dense=c.get("frustum_dense", False),
                           use_lidar_kv=c.get("use_lidar_kv", False),
                           use_pose_emb=c.get("use_pose_emb", False),
-                          deform_mode=c.get("deform_mode", "none")).to(DEVICE)
+                          deform_mode=c.get("deform_mode", "none"),
+                          use_frame_pose=c.get("use_frame_pose", False),
+                          frame_pose_dof=c.get("frame_pose_dof", 6)).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     log(f"amp_dtype={_AMP_DTYPE} scaler_enabled={_NEED_SCALER} device={torch.cuda.get_device_name(0)} cc={torch.cuda.get_device_capability(0)}")
 
@@ -475,13 +477,14 @@ def main(cfg=None):
                                           shuffle=False, **kw)
                 cur_sigma = new_sigma
                 log(f"  curriculum: sigma → rot={rot} t={tm}")
+        fp_w = float(c.get('frame_pose_weight', 0.5))
         (tr_nll, tr_mse, tr_obj, tr_bg, tr_obj_mse, tr_bg_mse,
          tr_obj_med, tr_obj_p95, tr_bg_med, tr_bg_p95) = epoch_loop(
-            model, train_loader, optimizer, scaler, True)
+            model, train_loader, optimizer, scaler, True, frame_pose_weight=fp_w)
         with torch.no_grad():
             (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
              va_obj_med, va_obj_p95, va_bg_med, va_bg_p95) = epoch_loop(
-                model, val_loader, optimizer, scaler, False)
+                model, val_loader, optimizer, scaler, False, frame_pose_weight=fp_w)
         scheduler.step()
         history['ep'].append(epoch)
         history['tr_nll'].append(tr_nll); history['va_nll'].append(va_nll)
@@ -640,6 +643,10 @@ if __name__ == "__main__":
                          'query depth (d) so the model learns UV-only Q. '
                          'Schedule: 0.2 → 0.8 over training epochs. '
                          'Combine with --use-pose-emb --frustum-dense for full stage 2.')
+    ap.add_argument('--use-frame-pose', action='store_true',
+                    help='enable CLS frame-pose head (patch-level 6-DoF + diagonal cov)')
+    ap.add_argument('--frame-pose-weight', type=float, default=None,
+                    help='loss weight for frame-pose NLL (default 0.5)')
     ap.add_argument('--zoom-aug', action='store_true',
                     help='depth-dependent zoom-in aug: shrink cs by up to '
                          'scale_max(z) (1.0@z=20m → 2.0@z>=100m). Synthesizes '
@@ -686,6 +693,8 @@ if __name__ == "__main__":
     if args.use_lidar_kv:  cfg['use_lidar_kv']  = True
     if args.use_pose_emb:  cfg['use_pose_emb']  = True
     if args.query_drop:    cfg['query_drop']    = True
+    if args.use_frame_pose: cfg['use_frame_pose'] = True
+    if args.frame_pose_weight is not None: cfg['frame_pose_weight'] = args.frame_pose_weight
     if args.zoom_aug: cfg['zoom_aug'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
