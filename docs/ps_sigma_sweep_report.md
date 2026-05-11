@@ -49,17 +49,16 @@ best val_nll は s20 で **1.562**、s30 が **1.602** で 2.5% 後退、s15 は
 - s15 (青) と s30 (緑) は ep70+ でほぼ重なる軌道 — **σ 不足 (s15)** と **σ 過剰 (s30)** が同程度の cost
 - val 後半の oscillation は σ=1.5/3.0 の方が大きい (perturbation 範囲の広さで variance 増)
 
-## サンプル比較 (同 val idx に各 σ best モデルを推論)
+## サンプル比較 (同 idx の `vis_ep100` を 3 σ 並列、訓練時の正規 vis)
 
-![](assets/sigma_compare/sample_compare.png)
+![](assets/sigma_compare/sample_compare_canonical.png)
 
-col1 = crop、col2-4 = s15/s20/s30 の予測。
-- cyan = distorted (perturbation 後 LiDAR uv)
-- lime = obj-distorted
-- yellow+ = GT (perturbation 無し LiDAR uv)
-- red× = model 予測
+各 row = 同じ val idx。col 1/2 = s15、col 3/4 = s20、col 5/6 = s30。
+各 σ ペア:
+- 左 panel: full frame + crop region (red box)
+- 右 panel: crop 上に予測の covariance ellipse (model output 直接、自前再描画じゃない)
 
-各 panel の "resid (was)" は予測後の平均残差 / 摂動直後の残差 [px]。
+各実験の `experiments/ps_tile_s*_100ep/vis_ep100/val_*.png` を参照、訓練時に保存された canonical vis。
 
 ## 注意: 各 σ の val 評価条件は別
 

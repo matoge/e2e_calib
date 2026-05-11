@@ -48,8 +48,13 @@ _TILE_LAYOUT = None  # set by main() when --tile; None = full-frame mode
 
 
 def _process_scene(args_tuple):
-    (scene_root, scene_name, cam_name, out_dir, min_pts, gid_start, stride,
-     tile_layout) = args_tuple
+    if len(args_tuple) == 9:
+        (scene_root, scene_name, cam_name, out_dir, min_pts, gid_start, stride,
+         tile_layout, frame_filter) = args_tuple
+    else:
+        (scene_root, scene_name, cam_name, out_dir, min_pts, gid_start, stride,
+         tile_layout) = args_tuple
+        frame_filter = None  # None = accept all
     sc_dir = Path(scene_root) / scene_name
     cam_dir = sc_dir / 'camera' / cam_name
     if not cam_dir.exists():
@@ -82,6 +87,9 @@ def _process_scene(args_tuple):
     gid = gid_start
 
     for fi in range(0, n, stride):
+        # frame_filter, when set, is a set of allowed frame indices for this scene
+        if frame_filter is not None and fi not in frame_filter:
+            continue
         cp = poses[fi]
         pose_mat = _quat_pos_to_mat(cp['heading'], cp['position'])
         cam_pos = np.array([cp['position']['x'], cp['position']['y'], cp['position']['z']],
@@ -269,7 +277,12 @@ def main():
     inst_dir.mkdir(parents=True, exist_ok=True)
 
     root = Path(args.root)
-    scenes = sorted([p.name for p in root.iterdir() if p.is_dir() and p.name.isdigit()])
+    # Accept any subdir as a scene name. PS uses '001'/'002' (digits),
+    # AV2 uses UUIDs ('00a6ffc1-...'), and converted layouts vary.
+    # Skip known non-scene helper dirs.
+    SKIP_DIRS = {'_proj_cache', '__pycache__', '.git', '.cache'}
+    scenes = sorted([p.name for p in root.iterdir()
+                      if p.is_dir() and p.name not in SKIP_DIRS and not p.name.startswith('.')])
     import random
     rng = random.Random(args.seed); rng.shuffle(scenes)
     if args.max_scenes:

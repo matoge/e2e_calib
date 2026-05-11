@@ -181,8 +181,14 @@ def main(cfg=None):
             f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
         tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
         log(f"train cache loaded: {len(tr_full)} instances")
-        va_full = PandaSetCalibDatasetFull(cache, split='val', **ds_kw)
-    log(f"val cache loaded: {len(va_full)} instances")
+        # val: oversample=1 always. Train's oversample (12) is a per-frame random
+        # crop multiplier that's pure data aug — applying it to val just inflates
+        # __len__ 12× and silently makes val passes 12× longer with no signal
+        # gain (same scenes, same files, just 12 random crops each). Bit me on
+        # NS where val len 124K → 1.49M → 22 min/ep. Force oversample=1 for val.
+        ds_kw_val = dict(ds_kw); ds_kw_val['oversample'] = 1
+        va_full = PandaSetCalibDatasetFull(cache, split='val', **ds_kw_val)
+    log(f"val cache loaded: {len(va_full)} instances (oversample=1)")
     # Sequence-level split: use the cache's pre-built train/val (scene-disjoint).
     # The previous code re-shuffled cache_train+cache_val with seed and cut at
     # val_fraction, which produced an OBJECT-level split (instances of the

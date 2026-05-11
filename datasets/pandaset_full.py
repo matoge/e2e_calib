@@ -289,8 +289,25 @@ class PandaSetCalibDatasetFull(Dataset):
             t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
             pts_cam_off = pts_c @ R_inv.T + t_inv       # (M, 3)
             z_off = pts_cam_off[:, 2]
-            uv_off_c = (pts_cam_off[:, :2] * (np.array([K[0,0], K[1,1]], dtype=np.float32))) / \
-                       np.maximum(z_off[:, None], 1e-6) + np.array([K[0,2], K[1,2]], dtype=np.float32)
+            if inst.get('is_fisheye', False) and 'distortion' in inst:
+                # Kannala-Brandt fisheye (e.g. ZOD). Pinhole projection would
+                # diverge at the edges where theta > arctan(image_diagonal/2 fx).
+                # Re-project via the same lens model the cache used at build time.
+                _dist = inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy') \
+                        else np.asarray(inst['distortion'], dtype=np.float32)
+                _x, _y, _z = pts_cam_off[:, 0], pts_cam_off[:, 1], pts_cam_off[:, 2]
+                _r = np.sqrt(_x * _x + _y * _y)
+                _theta = np.arctan2(_r, np.maximum(_z, 1e-6))
+                _t2 = _theta * _theta
+                _td = _theta * (1.0 + _dist[0] * _t2 + _dist[1] * _t2 ** 2
+                                    + _dist[2] * _t2 ** 3 + _dist[3] * _t2 ** 4)
+                _r_safe = np.where(_r > 1e-9, _r, 1.0)
+                _u = K[0, 0] * (_td * _x / _r_safe) + K[0, 2]
+                _v = K[1, 1] * (_td * _y / _r_safe) + K[1, 2]
+                uv_off_c = np.stack([_u, _v], axis=-1).astype(np.float32)
+            else:
+                uv_off_c = (pts_cam_off[:, :2] * (np.array([K[0,0], K[1,1]], dtype=np.float32))) / \
+                           np.maximum(z_off[:, None], 1e-6) + np.array([K[0,2], K[1,2]], dtype=np.float32)
             # Tile mode: K_full is unchanged (parent coords) so the freshly-projected
             # uv_off_c lives in parent image coords. Subtract the tile origin so it
             # matches the already-tile-local uv_full / u0 / v0.

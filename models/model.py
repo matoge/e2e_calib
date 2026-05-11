@@ -95,16 +95,19 @@ class _ConvNeXtBlock(nn.Module):
 class ConvNeXtBackbone(nn.Module):
     def __init__(self, d: int = D, in_channels: int = 3, n_blocks: int = 2):
         super().__init__()
-        # 64→32, 3→64
+        # 4x4 stride-4 patchify stem (ConvNeXt-Tiny standard) — img/4 → 64ch.
+        # img=128 → 32, img=64 → 16. Below stages: fine /2, coarse /2 = ÷16 total.
+        # Final feature shapes: img=128 → fine 16×16, coarse 8×8 (= same token
+        # count as img=64 with the pre-2026-05-04 stride-2 stem).
         self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 3, stride=2, padding=1),
+            nn.Conv2d(in_channels, 64, 4, stride=4),
             nn.BatchNorm2d(64), nn.GELU(),
         )
-        # 32→16, fine features
+        # /2 → fine features
         self.fine_down   = nn.Conv2d(64, d, 3, stride=2, padding=1)
         self.fine_norm   = nn.BatchNorm2d(d)
         self.fine_blocks = nn.Sequential(*[_ConvNeXtBlock(d) for _ in range(n_blocks)])
-        # 16→8, coarse features
+        # /2 → coarse features
         self.coarse_down   = nn.Conv2d(d, d, 3, stride=2, padding=1)
         self.coarse_norm   = nn.BatchNorm2d(d)
         self.coarse_blocks = nn.Sequential(*[_ConvNeXtBlock(d) for _ in range(n_blocks)])
