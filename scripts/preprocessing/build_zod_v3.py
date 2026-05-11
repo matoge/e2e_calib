@@ -76,6 +76,18 @@ def _is_obj_per_point(pts_cam: np.ndarray, cuboids: list) -> np.ndarray:
     return inside.any(axis=0).astype(np.float32)
 
 
+def _motion_check_fid(fid, sf_dir_str, max_yaw, max_spd):
+    """Module-level so ProcessPoolExecutor can pickle it. Returns fid or None."""
+    yaw, spd = _frame_motion_metrics(Path(sf_dir_str) / fid)
+    if yaw is None:
+        return None
+    if max_yaw is not None and yaw >= max_yaw:
+        return None
+    if max_spd is not None and spd >= max_spd:
+        return None
+    return fid
+
+
 def _frame_motion_metrics(frame_dir: Path):
     """Return (yaw_rate_deg_per_s, speed_kmh) at scan center.
     Returns (None, None) on missing data."""
@@ -429,14 +441,11 @@ def main():
               f'max_speed_kmh={args.max_speed_kmh}) ...', flush=True)
         # parallel scan of ego_motion.json per frame
         from concurrent.futures import ProcessPoolExecutor as _PPE
-        def _check(fid):
-            yaw, spd = _frame_motion_metrics(sf_dir / fid)
-            if yaw is None: return None
-            if args.max_yaw_rate is not None and yaw >= args.max_yaw_rate: return None
-            if args.max_speed_kmh is not None and spd >= args.max_speed_kmh: return None
-            return fid
+        from functools import partial
+        check_fn = partial(_motion_check_fid, sf_dir_str=str(sf_dir),
+                           max_yaw=args.max_yaw_rate, max_spd=args.max_speed_kmh)
         with _PPE(max_workers=12) as ex:
-            kept = [r for r in ex.map(_check, all_ids, chunksize=200) if r]
+            kept = [r for r in ex.map(check_fn, all_ids, chunksize=200) if r]
         print(f'  {len(kept)}/{len(all_ids)} pass motion filter '
               f'({len(kept)/len(all_ids)*100:.1f}%)', flush=True)
         all_ids = kept
