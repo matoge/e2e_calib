@@ -379,12 +379,16 @@ def main(cfg=None):
             pad = torch.zeros(1, Nmax, dtype=torch.bool, device=DEVICE)
             with torch.autocast(device_type='cuda', dtype=_AMP_DTYPE), torch.no_grad():
                 img_gpu = img.unsqueeze(0).to(DEVICE).float().div_(255.0)
-                p = model(img_gpu,
+                _out = model(img_gpu,
                           dist_uvd.unsqueeze(0).to(DEVICE)[..., :3],
                           key_padding_mask=pad,
                           vfp=vfp.view(1).to(DEVICE),
                           bucket_uvd=bucket_uvd_v.unsqueeze(0).to(DEVICE),
-                          bucket_valid=bucket_valid_v.unsqueeze(0).to(DEVICE))[0].float().cpu().numpy()
+                          bucket_valid=bucket_valid_v.unsqueeze(0).to(DEVICE))
+                # When use_frame_pose=True the model returns (per_pt, (μ, log_σ)).
+                # We only need per_pt's batch-0 row for vis (N, 5).
+                per_pt = _out[0] if isinstance(_out, tuple) else _out
+                p = per_pt[0].float().cpu().numpy()
             true_uv = true_uvd[:,:2].numpy(); dist_uv = dist_uvd[:,:2].numpy()
             pred_uv = dist_uv + p[:,:2]
             err_b_obj = float(_np.linalg.norm(dist_uv[is_obj] - true_uv[is_obj], axis=1).mean())
