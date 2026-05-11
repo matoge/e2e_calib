@@ -49,6 +49,7 @@ CFG = dict(
 def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
     model.train(train)
     total_nll, total_mse, n = 0.0, 0.0, 0
+    pt_nll_s, fr_nll_s, fr_n = 0.0, 0.0, 0  # split per-pt vs frame-pose NLL
     obj_nll_s, obj_n = 0.0, 0
     bg_nll_s,  bg_n  = 0.0, 0
     obj_errs, bg_errs = [], []  # collect per-point L2 to compute median/p95
@@ -83,15 +84,18 @@ def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
             else:
                 frame_mu = frame_logsig = None
             valid  = ~pad_mask
-            loss   = gaussian2d_nll(params[valid], gt[valid])
+            loss_pt = gaussian2d_nll(params[valid], gt[valid])
+            loss = loss_pt
             # Frame-pose NLL: diagonal Gaussian, 6-DoF target = (tx,ty,tz,yaw,pitch,roll)
             # — translation in meters, rotation in DEGREES (matches dataset perturbation
             # sampling + memory feedback_ypr_rotation: BA vars must be YPR, not δω).
+            loss_fr = None
             if frame_mu is not None and pert_6vec is not None:
                 resid    = pert_6vec - frame_mu
                 inv_var  = torch.exp(-2.0 * frame_logsig)
                 fr_nll   = 0.5 * (resid * resid * inv_var).sum(dim=-1) + frame_logsig.sum(dim=-1)
-                loss     = loss + float(frame_pose_weight) * fr_nll.mean()
+                loss_fr  = fr_nll.mean()
+                loss     = loss + float(frame_pose_weight) * loss_fr
         if train:
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -111,6 +115,9 @@ def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
                 bg_nll_s  += gaussian2d_nll(params[is_bg],  gt[is_bg]).item();  bg_n  += 1
                 bg_errs.append((params[is_bg][..., :2].float() - gt[is_bg]).norm(dim=-1).detach())
         total_nll += loss.item(); total_mse += mse; n += 1
+        pt_nll_s += loss_pt.item()
+        if loss_fr is not None:
+            fr_nll_s += loss_fr.item(); fr_n += 1
         if train and (n - _last_log_step >= 100):
             _dt = _time.time() - _t_start
             sps = n * imgs.shape[0] / _dt if _dt > 0 else 0
@@ -130,9 +137,12 @@ def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
         return float(e.mean()), float(_np.median(e)), float(_np.percentile(e, 95))
     obj_mse, obj_med, obj_p95 = _stats(obj_errs)
     bg_mse,  bg_med,  bg_p95  = _stats(bg_errs)
+    pt_nll  = pt_nll_s / max(n, 1)
+    fr_nll  = (fr_nll_s / max(fr_n, 1)) if fr_n > 0 else float('nan')
     return (total_nll / max(n,1), total_mse / max(n,1),
             obj_nll, bg_nll, obj_mse, bg_mse,
-            obj_med, obj_p95, bg_med, bg_p95)
+            obj_med, obj_p95, bg_med, bg_p95,
+            pt_nll, fr_nll)
 
 
 def main(cfg=None):
@@ -479,21 +489,25 @@ def main(cfg=None):
                 log(f"  curriculum: sigma → rot={rot} t={tm}")
         fp_w = float(c.get('frame_pose_weight', 0.5))
         (tr_nll, tr_mse, tr_obj, tr_bg, tr_obj_mse, tr_bg_mse,
-         tr_obj_med, tr_obj_p95, tr_bg_med, tr_bg_p95) = epoch_loop(
+         tr_obj_med, tr_obj_p95, tr_bg_med, tr_bg_p95,
+         tr_pt_nll, tr_fr_nll) = epoch_loop(
             model, train_loader, optimizer, scaler, True, frame_pose_weight=fp_w)
         with torch.no_grad():
             (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
-             va_obj_med, va_obj_p95, va_bg_med, va_bg_p95) = epoch_loop(
+             va_obj_med, va_obj_p95, va_bg_med, va_bg_p95,
+             va_pt_nll, va_fr_nll) = epoch_loop(
                 model, val_loader, optimizer, scaler, False, frame_pose_weight=fp_w)
         scheduler.step()
         history['ep'].append(epoch)
         history['tr_nll'].append(tr_nll); history['va_nll'].append(va_nll)
         history['tr_mse'].append(tr_mse); history['va_mse'].append(va_mse)
+        # Log per-pt and frame-pose NLL separately so we can verify the head
+        # is actually learning (frame nll must decrease for the head to be useful).
         log(f"[{epoch:3d}/{epochs}]  "
-            f"train nll={tr_nll:+.3f}(obj={tr_obj:+.3f} bg={tr_bg:+.3f}) "
+            f"train nll={tr_nll:+.3f}(pt={tr_pt_nll:+.3f} fr={tr_fr_nll:+.3f} obj={tr_obj:+.3f} bg={tr_bg:+.3f}) "
             f"mse={tr_mse:.2f}(obj={tr_obj_mse:.2f}/m{tr_obj_med:.2f}/95p{tr_obj_p95:.1f} "
             f"bg={tr_bg_mse:.2f}/m{tr_bg_med:.2f}/95p{tr_bg_p95:.1f})  "
-            f"val nll={va_nll:+.3f}(obj={va_obj:+.3f} bg={va_bg:+.3f}) "
+            f"val nll={va_nll:+.3f}(pt={va_pt_nll:+.3f} fr={va_fr_nll:+.3f} obj={va_obj:+.3f} bg={va_bg:+.3f}) "
             f"mse={va_mse:.2f}(obj={va_obj_mse:.2f}/m{va_obj_med:.2f}/95p{va_obj_p95:.1f} "
             f"bg={va_bg_mse:.2f}/m{va_bg_med:.2f}/95p{va_bg_p95:.1f})  "
             f"lr={scheduler.get_last_lr()[0]:.2e}  tot={(time.time()-t0)/60:.1f}min")
