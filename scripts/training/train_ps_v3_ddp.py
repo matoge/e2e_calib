@@ -68,7 +68,13 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
     obj_errs, bg_errs = [], []
     _t_start = time.time()
     _last_log_step = 0
-    for imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid in loader:
+    for batch in loader:
+        # collate_full now returns 8-tuple (pert_6vec at end). DDP path doesn't
+        # yet train the CLS frame-pose head — discard pert_6vec.
+        if len(batch) == 8:
+            imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid, _ = batch
+        else:
+            imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch
         # accel.prepare already puts tensors in device via DataLoader wrap, but
         # the collate returns uint8 images — convert to float on-device here.
         imgs     = imgs.float().div_(255.0)

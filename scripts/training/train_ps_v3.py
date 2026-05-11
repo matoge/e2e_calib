@@ -55,7 +55,14 @@ def epoch_loop(model, loader, optimizer, scaler, train):
     import time as _time
     _t_start = _time.time()
     _last_log_step = 0
-    for imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid in loader:
+    for batch in loader:
+        # collate_full returns 8-tuple post-2026-05-11 (added pert_6vec); fall back
+        # to 7-tuple unpack for backward-compat caches.
+        if len(batch) == 8:
+            imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid, pert_6vec = batch
+        else:
+            imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch
+            pert_6vec = None
         # dataset returns uint8 to cut IPC 4x; convert to float on GPU
         imgs         = imgs.to(DEVICE, non_blocking=True).float().div_(255.0)
         true_uvd     = true_uvd.to(DEVICE, non_blocking=True)
@@ -64,12 +71,27 @@ def epoch_loop(model, loader, optimizer, scaler, train):
         vfp          = vfp.to(DEVICE, non_blocking=True)
         bucket_uvd   = bucket_uvd.to(DEVICE, non_blocking=True)
         bucket_valid = bucket_valid.to(DEVICE, non_blocking=True)
+        if pert_6vec is not None:
+            pert_6vec = pert_6vec.to(DEVICE, non_blocking=True)
         gt           = true_uvd[..., :2] - dist_uvd[..., :2]
         with torch.autocast(device_type="cuda", dtype=_AMP_DTYPE):
             params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
                             bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
+            # When use_frame_pose=True, model returns (per_pt_pred, (μ, log_σ)).
+            if isinstance(params, tuple):
+                params, (frame_mu, frame_logsig) = params
+            else:
+                frame_mu = frame_logsig = None
             valid  = ~pad_mask
             loss   = gaussian2d_nll(params[valid], gt[valid])
+            # Frame-pose NLL: diagonal Gaussian, 6-DoF target = (tx,ty,tz,yaw,pitch,roll)
+            # — translation in meters, rotation in DEGREES (matches dataset perturbation
+            # sampling + memory feedback_ypr_rotation: BA vars must be YPR, not δω).
+            if frame_mu is not None and pert_6vec is not None:
+                resid    = pert_6vec - frame_mu
+                inv_var  = torch.exp(-2.0 * frame_logsig)
+                fr_nll   = 0.5 * (resid * resid * inv_var).sum(dim=-1) + frame_logsig.sum(dim=-1)
+                loss     = loss + float(c.get('frame_pose_weight', 0.5)) * fr_nll.mean()
         if train:
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()

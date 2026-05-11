@@ -96,7 +96,12 @@ def main():
     AMP = torch.bfloat16
     t0 = time.time()
     with torch.no_grad():
-        for imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid in loader:
+        for batch in loader:
+            # collate_full returns 8-tuple post-2026-05-11; eval doesn't need pert_6vec.
+            if len(batch) == 8:
+                imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid, _ = batch
+            else:
+                imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch
             imgs = imgs.to(device, non_blocking=True).float().div_(255.0)
             true_uvd = true_uvd.to(device, non_blocking=True)
             dist_uvd = dist_uvd.to(device, non_blocking=True)

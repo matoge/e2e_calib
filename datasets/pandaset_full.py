@@ -285,6 +285,12 @@ class PandaSetCalibDatasetFull(Dataset):
             ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
             R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
             cp_off = cp + t_delta
+            # 6-vec perturbation label for the optional CLS frame-pose head.
+            # Convention: YPR in DEGREES (matches dataset perturbation sampling +
+            # memory project_ypr_rotation.md), translation in meters.
+            # Layout: (t_delta_x_m, t_delta_y_m, t_delta_z_m, yaw_deg, pitch_deg, roll_deg)
+            pert_6vec = np.array([t_delta[0], t_delta[1], t_delta[2],
+                                   ypr[0], ypr[1], ypr[2]], dtype=np.float32)
             R_inv = R_off.T.astype(np.float32)
             t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
             pts_cam_off = pts_c @ R_inv.T + t_inv       # (M, 3)
@@ -420,19 +426,28 @@ class PandaSetCalibDatasetFull(Dataset):
                                     scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
             return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
                     torch.tensor(vfp, dtype=torch.float32),
-                    torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid))
+                    torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid),
+                    torch.from_numpy(pert_6vec))
 
         return self[random.randint(0, len(self) - 1)]
 
 
 def collate_full(batch):
-    """Stack img/vfp + (G², K, 3) bucketed lidar grid. Per-batch ragged padding
-    only on the per-pivot true/dist tensors; the lidar bucket is fixed-size."""
-    imgs, trues, dists, vfps, b_uvds, b_valids = zip(*batch)
-    imgs = torch.stack(imgs)              # (B, 3, S, S)
-    vfps = torch.stack(vfps)              # (B,)
-    bucket_uvd_t = torch.stack(b_uvds)    # (B, G², K, 3)
-    bucket_valid_t = torch.stack(b_valids)  # (B, G², K)
+    """Stack img/vfp + (G², K, 3) bucketed lidar grid + per-sample pert_6vec.
+    Per-batch ragged padding only on the per-pivot true/dist tensors; the
+    lidar bucket is fixed-size. pert_6vec is per-sample (B, 6) — the SE3
+    perturbation label for the optional CLS frame-pose head."""
+    # Tolerate older 6-tuple samples (no pert) for backward compat — pad with zeros.
+    imgs    = torch.stack([s[0] for s in batch])
+    trues   = [s[1] for s in batch]
+    dists   = [s[2] for s in batch]
+    vfps    = torch.stack([s[3] for s in batch])
+    b_uvds  = torch.stack([s[4] for s in batch])
+    b_valids= torch.stack([s[5] for s in batch])
+    if len(batch[0]) >= 7:
+        pert_6vec = torch.stack([s[6] for s in batch])         # (B, 6)
+    else:
+        pert_6vec = torch.zeros(len(batch), 6, dtype=torch.float32)
     Nmax = max(t.shape[0] for t in trues)
     B = len(trues)
     Cdim = trues[0].shape[1]
@@ -444,4 +459,4 @@ def collate_full(batch):
         true_p[k, :n] = t
         dist_p[k, :n] = d
         pad[k, :n] = False
-    return imgs, true_p, dist_p, pad, vfps, bucket_uvd_t, bucket_valid_t
+    return imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec
