@@ -271,16 +271,30 @@ def process_frame(args_tuple):
         if pts_lidar is None or len(pts_lidar) == 0:
             return fid, 0
 
-        # Per-point motion compensation: bring lidar pts to vehicle frame at
-        # camera shutter time. Without MC, ZOD VLS-128's 115ms scan span causes
-        # ~5-30 px projection drift at non-front edges (visible as "left shift"
-        # on moving vehicle). Bins per-point ts to 1ms (cheap) and SLERP+lerp
-        # ego pose at each bin from the 22-pose ego_motion.json track.
+        # Per-point motion compensation via ZOD SDK official function.
+        # `motion_compensate_pointwise(lidar_data, ego_motion, calib, target_ts)`
+        # interpolates per-pt ego pose from the 22-sample ego_motion track and
+        # returns the lidar points in LIDAR frame, motion-compensated to
+        # target_timestamp. We then apply T_vl to get vehicle frame.
+        # Previous in-house MC had a frame-convention bug (treated output as
+        # vehicle frame, missing T_vl step) → visibly misaligned projection.
         cam_ts = _camera_shutter_ts(frame_dir)
-        if cam_ts is not None and pt_ts is not None:
-            pts_veh = _ego_motion_apply(pts_lidar, pt_ts, frame_dir, T_vl, cam_ts)
+        lidar_files = sorted((frame_dir / "lidar_velodyne").glob("*.npy"))
+        if cam_ts is not None and pt_ts is not None and lidar_files:
+            from zod.utils.compensation import motion_compensate_pointwise
+            from zod.data_classes.sensor import LidarData
+            from zod.data_classes.calibration import LidarCalibration
+            from zod.data_classes.geometry import Pose
+            from zod.data_classes.ego_motion import EgoMotion
+            ld = LidarData.from_npy(str(lidar_files[len(lidar_files) // 2]))
+            cal = LidarCalibration(extrinsics=Pose(np.asarray(T_vl, dtype=np.float64)))
+            ego = EgoMotion.from_json_path(frame_dir / "ego_motion.json")
+            ld_mc = motion_compensate_pointwise(ld, ego, cal, target_timestamp=cam_ts)
+            pts_l_mc = ld_mc.points  # LIDAR frame, motion-compensated to cam_ts
+            homo = np.column_stack([pts_l_mc, np.ones(len(pts_l_mc), dtype=np.float32)])
+            pts_veh = (T_vl @ homo.T).T[:, :3].astype(np.float32)
         else:
-            # fallback: no MC
+            # fallback: no MC, scan-wise
             N = pts_lidar.shape[0]
             homo = np.column_stack([pts_lidar, np.ones(N, dtype=np.float32)])
             pts_veh = (T_vl @ homo.T).T[:, :3].astype(np.float32)
