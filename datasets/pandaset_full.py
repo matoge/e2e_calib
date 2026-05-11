@@ -124,6 +124,8 @@ class PandaSetCalibDatasetFull(Dataset):
                  max_crop_px: int = 512,
                  max_offset_m: float = 0.20,
                  max_rot_deg: float = 0.5,
+                 max_fx_pct: float = 0.0,
+                 max_fy_pct: float = 0.0,
                  min_pts: int = 8,
                  max_tries: int = 8,
                  oversample: int = 12,
@@ -144,6 +146,13 @@ class PandaSetCalibDatasetFull(Dataset):
         self.max_crop_px = int(max_crop_px)
         self.max_offset_m = float(max_offset_m)
         self.max_rot_deg  = float(max_rot_deg)
+        # Multiplicative fx/fy perturbation half-range (e.g. 0.02 = ±2%).
+        # When non-zero, sampled δ_fx, δ_fy ∈ [-pct, +pct] are folded into the
+        # projection K used for `dist_uvd` and appended to the per-sample pert
+        # vec as dims 6,7 (so the optional CLS frame-pose head with n_dof=8 can
+        # regress Δfx_pct, Δfy_pct alongside the 6-DoF SE3 perturbation).
+        self.max_fx_pct = float(max_fx_pct)
+        self.max_fy_pct = float(max_fy_pct)
         self.min_pts   = int(min_pts)
         self.max_tries = int(max_tries)
         self.oversample = int(oversample)
@@ -285,12 +294,23 @@ class PandaSetCalibDatasetFull(Dataset):
             ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
             R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
             cp_off = cp + t_delta
-            # 6-vec perturbation label for the optional CLS frame-pose head.
-            # Convention: YPR in DEGREES (matches dataset perturbation sampling +
-            # memory project_ypr_rotation.md), translation in meters.
-            # Layout: (t_delta_x_m, t_delta_y_m, t_delta_z_m, yaw_deg, pitch_deg, roll_deg)
-            pert_6vec = np.array([t_delta[0], t_delta[1], t_delta[2],
-                                   ypr[0], ypr[1], ypr[2]], dtype=np.float32)
+            # Intrinsic fx/fy multiplicative perturbation (independent — left/right
+            # PS cams show fx/fy don't drift together, so train them separately).
+            dfx_pct = float(np.random.uniform(-self.max_fx_pct, self.max_fx_pct)) \
+                       if self.max_fx_pct > 0 else 0.0
+            dfy_pct = float(np.random.uniform(-self.max_fy_pct, self.max_fy_pct)) \
+                       if self.max_fy_pct > 0 else 0.0
+            K_pert = K.copy()
+            if dfx_pct != 0.0: K_pert[0, 0] = K[0, 0] * (1.0 + dfx_pct)
+            if dfy_pct != 0.0: K_pert[1, 1] = K[1, 1] * (1.0 + dfy_pct)
+            # 8-vec perturbation label for the optional CLS frame-pose head (dims 6,7
+            # carry δ_fx_pct, δ_fy_pct). Earlier 6-vec callers see zeros in [6:].
+            # Convention: YPR in DEGREES (matches sampling + memory project_ypr_rotation.md),
+            # translation in meters, fx/fy as fractional percent.
+            # Layout: (tx_m, ty_m, tz_m, yaw_deg, pitch_deg, roll_deg, dfx_pct, dfy_pct)
+            pert_vec = np.array([t_delta[0], t_delta[1], t_delta[2],
+                                  ypr[0], ypr[1], ypr[2],
+                                  dfx_pct, dfy_pct], dtype=np.float32)
             R_inv = R_off.T.astype(np.float32)
             t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
             pts_cam_off = pts_c @ R_inv.T + t_inv       # (M, 3)
@@ -308,12 +328,12 @@ class PandaSetCalibDatasetFull(Dataset):
                 _td = _theta * (1.0 + _dist[0] * _t2 + _dist[1] * _t2 ** 2
                                     + _dist[2] * _t2 ** 3 + _dist[3] * _t2 ** 4)
                 _r_safe = np.where(_r > 1e-9, _r, 1.0)
-                _u = K[0, 0] * (_td * _x / _r_safe) + K[0, 2]
-                _v = K[1, 1] * (_td * _y / _r_safe) + K[1, 2]
+                _u = K_pert[0, 0] * (_td * _x / _r_safe) + K_pert[0, 2]
+                _v = K_pert[1, 1] * (_td * _y / _r_safe) + K_pert[1, 2]
                 uv_off_c = np.stack([_u, _v], axis=-1).astype(np.float32)
             else:
-                uv_off_c = (pts_cam_off[:, :2] * (np.array([K[0,0], K[1,1]], dtype=np.float32))) / \
-                           np.maximum(z_off[:, None], 1e-6) + np.array([K[0,2], K[1,2]], dtype=np.float32)
+                uv_off_c = (pts_cam_off[:, :2] * (np.array([K_pert[0,0], K_pert[1,1]], dtype=np.float32))) / \
+                           np.maximum(z_off[:, None], 1e-6) + np.array([K_pert[0,2], K_pert[1,2]], dtype=np.float32)
             # Tile mode: K_full is unchanged (parent coords) so the freshly-projected
             # uv_off_c lives in parent image coords. Subtract the tile origin so it
             # matches the already-tile-local uv_full / u0 / v0.
@@ -427,16 +447,16 @@ class PandaSetCalibDatasetFull(Dataset):
             return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
                     torch.tensor(vfp, dtype=torch.float32),
                     torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid),
-                    torch.from_numpy(pert_6vec))
+                    torch.from_numpy(pert_vec))
 
         return self[random.randint(0, len(self) - 1)]
 
 
 def collate_full(batch):
-    """Stack img/vfp + (G², K, 3) bucketed lidar grid + per-sample pert_6vec.
+    """Stack img/vfp + (G², K, 3) bucketed lidar grid + per-sample pert vec.
     Per-batch ragged padding only on the per-pivot true/dist tensors; the
-    lidar bucket is fixed-size. pert_6vec is per-sample (B, 6) — the SE3
-    perturbation label for the optional CLS frame-pose head."""
+    lidar bucket is fixed-size. pert_vec is per-sample (B, N_DOF) — 6-DoF SE3
+    perturbation + (when N_DOF=8) Δfx_pct, Δfy_pct for the CLS frame-pose head."""
     # Tolerate older 6-tuple samples (no pert) for backward compat — pad with zeros.
     imgs    = torch.stack([s[0] for s in batch])
     trues   = [s[1] for s in batch]
@@ -445,9 +465,16 @@ def collate_full(batch):
     b_uvds  = torch.stack([s[4] for s in batch])
     b_valids= torch.stack([s[5] for s in batch])
     if len(batch[0]) >= 7:
-        pert_6vec = torch.stack([s[6] for s in batch])         # (B, 6)
+        # Each sample's pert may be 6-vec (legacy) or 8-vec (with fx/fy). Pad to 8.
+        v0 = batch[0][6]
+        n_dof = v0.shape[-1] if hasattr(v0, 'shape') else len(v0)
+        if n_dof < 8:
+            pad = torch.zeros(8 - n_dof, dtype=torch.float32)
+            pert_6vec = torch.stack([torch.cat([s[6], pad]) for s in batch])
+        else:
+            pert_6vec = torch.stack([s[6] for s in batch])     # (B, 8)
     else:
-        pert_6vec = torch.zeros(len(batch), 6, dtype=torch.float32)
+        pert_6vec = torch.zeros(len(batch), 8, dtype=torch.float32)
     Nmax = max(t.shape[0] for t in trues)
     B = len(trues)
     Cdim = trues[0].shape[1]

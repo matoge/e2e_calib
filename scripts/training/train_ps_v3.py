@@ -91,7 +91,9 @@ def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
             # sampling + memory feedback_ypr_rotation: BA vars must be YPR, not δω).
             loss_fr = None
             if frame_mu is not None and pert_6vec is not None:
-                resid    = pert_6vec - frame_mu
+                # Slice pert to head's n_dof so 6-DoF heads ignore the trailing
+                # fx/fy dims that the dataset now always emits (8-DoF pert vec).
+                resid    = pert_6vec[..., :frame_mu.shape[-1]] - frame_mu
                 inv_var  = torch.exp(-2.0 * frame_logsig)
                 fr_nll   = 0.5 * (resid * resid * inv_var).sum(dim=-1) + frame_logsig.sum(dim=-1)
                 loss_fr  = fr_nll.mean()
@@ -203,6 +205,8 @@ def main(cfg=None):
         ds_kw = dict(img_size=c['img_size'],
                       max_offset_m=c.get('max_offset_m', 0.20),
                       max_rot_deg=c.get('max_rot_deg', 0.5),
+                      max_fx_pct=c.get('max_fx_pct', 0.0),
+                      max_fy_pct=c.get('max_fy_pct', 0.0),
                       min_crop_px=c.get('min_crop_px', 128),
                       max_crop_px=c.get('max_crop_px', 512),
                       frame_stride=c.get('frame_stride', 1),
@@ -210,6 +214,7 @@ def main(cfg=None):
                       oversample=c.get('oversample', 12),
                       zoom_aug=c.get('zoom_aug', False))
         log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
+            f"   fx/fy: ±{ds_kw['max_fx_pct']*100:.2f}% / ±{ds_kw['max_fy_pct']*100:.2f}%"
             f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
         tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
         log(f"train cache loaded: {len(tr_full)} instances")
@@ -661,6 +666,13 @@ if __name__ == "__main__":
                     help='enable CLS frame-pose head (patch-level 6-DoF + diagonal cov)')
     ap.add_argument('--frame-pose-weight', type=float, default=None,
                     help='loss weight for frame-pose NLL (default 0.5)')
+    ap.add_argument('--max-fx-pct', type=float, default=None,
+                    help='multiplicative fx perturbation half-range (e.g. 0.02 = ±2%). '
+                         'When nonzero, dataset perturbs K[0,0] per sample and the '
+                         'frame-pose head learns to regress Δfx as a separate dim.')
+    ap.add_argument('--max-fy-pct', type=float, default=None,
+                    help='multiplicative fy perturbation half-range (independent of fx). '
+                         'PS BA shows fx/fy drift independently per cam → train them separately.')
     ap.add_argument('--zoom-aug', action='store_true',
                     help='depth-dependent zoom-in aug: shrink cs by up to '
                          'scale_max(z) (1.0@z=20m → 2.0@z>=100m). Synthesizes '
@@ -709,6 +721,13 @@ if __name__ == "__main__":
     if args.query_drop:    cfg['query_drop']    = True
     if args.use_frame_pose: cfg['use_frame_pose'] = True
     if args.frame_pose_weight is not None: cfg['frame_pose_weight'] = args.frame_pose_weight
+    if args.max_fx_pct is not None: cfg['max_fx_pct'] = args.max_fx_pct
+    if args.max_fy_pct is not None: cfg['max_fy_pct'] = args.max_fy_pct
+    # When fx/fy perturbation is on, default the frame-pose head to 8-DoF
+    # (6-DoF SE3 + Δfx_pct + Δfy_pct). Caller can override with frame_pose_dof.
+    if (cfg.get('max_fx_pct', 0.0) > 0 or cfg.get('max_fy_pct', 0.0) > 0) \
+            and cfg.get('use_frame_pose', False) and 'frame_pose_dof' not in cfg:
+        cfg['frame_pose_dof'] = 8
     if args.zoom_aug: cfg['zoom_aug'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
