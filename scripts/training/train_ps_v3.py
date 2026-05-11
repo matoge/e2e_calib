@@ -172,6 +172,9 @@ def main(cfg=None):
             "Host-specific silent fallback was removed (2026-05-04): "
             "explicitly pass --cache /path/to/v3_cache."
         )
+    # For incidental single-cache uses (vis_pretrain subprocess, periodic vis),
+    # pick the first cache path. ConcatDataset / training uses all of them.
+    cache_first = cache[0] if isinstance(cache, (list, tuple)) else cache
     zod_src = c.get('zod_src', None)
     nw = c.get('num_workers', 16)
     pf = c.get('prefetch_factor', 4)
@@ -216,15 +219,25 @@ def main(cfg=None):
         log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
             f"   fx/fy: ±{ds_kw['max_fx_pct']*100:.2f}% / ±{ds_kw['max_fy_pct']*100:.2f}%"
             f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
-        tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
-        log(f"train cache loaded: {len(tr_full)} instances")
-        # val: oversample=1 always. Train's oversample (12) is a per-frame random
-        # crop multiplier that's pure data aug — applying it to val just inflates
-        # __len__ 12× and silently makes val passes 12× longer with no signal
-        # gain (same scenes, same files, just 12 random crops each). Bit me on
-        # NS where val len 124K → 1.49M → 22 min/ep. Force oversample=1 for val.
-        ds_kw_val = dict(ds_kw); ds_kw_val['oversample'] = 1
-        va_full = PandaSetCalibDatasetFull(cache, split='val', **ds_kw_val)
+        # Multi-cache support: --cache may be a list of paths. Joint training builds
+        # ConcatDataset across PS/WM/ZOD caches so the model learns a single calib
+        # ズレネット shared across sensor stacks (matches end-goal of zero-shot
+        # transfer to company data; memory project_zero_shot_success_bar.md).
+        cache_paths = cache if isinstance(cache, (list, tuple)) else [cache]
+        ds_kw_val = dict(ds_kw); ds_kw_val['oversample'] = 1  # val never oversamples
+        tr_per, va_per = [], []
+        for cp in cache_paths:
+            t = PandaSetCalibDatasetFull(cp, split='train', **ds_kw)
+            v = PandaSetCalibDatasetFull(cp, split='val',   **ds_kw_val)
+            tr_per.append(t); va_per.append(v)
+            log(f"  + cache {cp}: train={len(t)} val={len(v)}")
+        if len(tr_per) == 1:
+            tr_full, va_full = tr_per[0], va_per[0]
+        else:
+            from torch.utils.data import ConcatDataset
+            tr_full = ConcatDataset(tr_per)
+            va_full = ConcatDataset(va_per)
+        log(f"train cache(s) loaded: {len(tr_full)} instances")
     log(f"val cache loaded: {len(va_full)} instances (oversample=1)")
     # Sequence-level split: use the cache's pre-built train/val (scene-disjoint).
     # The previous code re-shuffled cache_train+cache_val with seed and cut at
@@ -305,7 +318,7 @@ def main(cfg=None):
         import subprocess as _sp, sys as _sys
         try:
             _sp.run([_sys.executable, 'scripts/visualization/vis_pretrain.py',
-                     '--cache', cache, '--out', str(exp_dir / 'vis_pretrain'),
+                     '--cache', cache_first, '--out', str(exp_dir / 'vis_pretrain'),
                      '--n', '10'], check=False, env={**os.environ,
                                                         'CLEARML_TASK_ID': ''})
             log(f"vis_pretrain → {exp_dir / 'vis_pretrain'}")
@@ -330,7 +343,7 @@ def main(cfg=None):
                                   oversample=1)
         else:
             from datasets.pandaset_full import PandaSetCalibDatasetFull
-            ds = PandaSetCalibDatasetFull(cache, split='val',
+            ds = PandaSetCalibDatasetFull(cache_first, split='val',
                                                   img_size=c['img_size'],
                                                   min_crop_px=c.get('min_crop_px', 128),
                                                   max_crop_px=c.get('max_crop_px', 384),
@@ -567,7 +580,7 @@ def main(cfg=None):
     n_vis = 48
     try:
         from scripts.visualization.vis_ps_v3 import main as vis_main
-        vis_main(c["name"], n_vis=n_vis, cache=cache)
+        vis_main(c["name"], n_vis=n_vis, cache=cache_first)
         log(f"Saved {n_vis} vis → {vis_dir}")
     except Exception as e:
         n_vis = 0
@@ -605,7 +618,9 @@ if __name__ == "__main__":
     import argparse, copy
     ap = argparse.ArgumentParser()
     ap.add_argument('--name')
-    ap.add_argument('--cache')
+    ap.add_argument('--cache', nargs='+',
+                    help='cache path(s). Multiple → ConcatDataset for joint '
+                         'multi-dataset training (e.g. PS+WM+ZOD).')
     ap.add_argument('--zod-src', default=None,
                     help='ZOD Frames root (e.g. /mnt/nvme6t/zod/frames). '
                          'When set, --cache is ignored and frames are read '
