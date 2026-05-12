@@ -1,0 +1,37 @@
+{
+  "name": "pandaset_3cam_corr",
+  "description": "BA correction for PandaSet left+right cams using front-only converged model. Output feeds build_pandaset_full_v3.py via --corr-json.",
+  "model": {
+    "ckpt": "experiments/ps_tile_seqsplit_100ep/best_model.pt",
+    "img_size": 128,
+    "in_channels": 3,
+    "n_layers": 4,
+    "use_convnext": true,
+    "use_frustum": true,
+    "deform_mode": "sl",
+    "use_frame_pose": false,
+    "frame_pose_dof": 6,
+    "pose_frame": "orig"
+  },
+  "data": {
+    "root": "/mnt/nvme6t/pandaset",
+    "scenes": ["001", "002", "003", "005", "011", "015", "017", "023", "027", "035"],
+    "frames": [30],
+    "cams": ["left_camera", "right_camera"]
+  },
+  "ba": {
+    "tile_size": 256,
+    "model_input_size": 128,
+    "tile_stride": 128,
+    "max_pts_per_tile": 256,
+    "min_pts_per_tile": 16,
+    "param": "3dof",
+    "damping": 1e-3
+  },
+  "output": {
+    "corrections_json": "configs/ba/pandaset_3cam_corrections.json",
+    "vis_dir": "experiments/_cache_check/ps_3cam_ba_check",
+    "vis_scenes": ["001", "017", "035"],
+    "vis_frames": [10, 30, 50]
+  }
+}

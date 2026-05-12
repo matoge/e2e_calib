@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "config_path": "configs/ba/pandaset_3cam_corr_smoke.json",
+    "config_sha256_prefix": "678226b7d450db81",
+    "git_sha": "7a4555e9c3",
+    "run_started": "2026-05-12T19:00:50",
+    "model_ckpt": "experiments/ps_tile_s15_100ep/best_model.pt",
+    "model_ckpt_mtime": "2026-05-05T00:14:25",
+    "elapsed_sec": 21.7
+  },
+  "ba_param": "3dof_omega_x_omega_y_delta_fx",
+  "corrections": {
+    "left_camera": {
+      "omega_x_deg": -0.5269137234757207,
+      "omega_y_deg": 0.1609223887580988,
+      "delta_fx_px": 5.888634469810136,
+      "fx_orig_ref": 930.451416015625,
+      "fx_corrected_ref": 936.3400504854351,
+      "fx_ratio": 1.0063287930658715,
+      "n_scenes": 10,
+      "n_frames": 10,
+      "n_pts": 191887
+    },
+    "right_camera": {
+      "omega_x_deg": 0.08788826781242594,
+      "omega_y_deg": -0.36048126388016966,
+      "delta_fx_px": 10.179763426389671,
+      "fx_orig_ref": 922.5465087890625,
+      "fx_corrected_ref": 932.7262722154521,
+      "fx_ratio": 1.0110344175924004,
+      "n_scenes": 10,
+      "n_frames": 10,
+      "n_pts": 184282
+    }
+  }
+}
