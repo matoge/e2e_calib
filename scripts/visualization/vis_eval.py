@@ -224,7 +224,8 @@ def render_pose_eval_samples(*, model, ds, out_dir, img_size: int,
                           bucket_valid=bucket_valid_v.unsqueeze(0).to(device))
             if not isinstance(_out, tuple) or len(_out) < 2:
                 log(f'  skip idx={idx}: model has no pose head output'); continue
-            per_pt, (mu_t_, ls_t_) = _out
+            per_pt, head_out = _out
+            mu_t_ = head_out[0]; ls_t_ = head_out[1]  # also have L at [2] post-Cholesky upgrade
             mu_p = mu_t_.float().cpu().numpy()[0]
             sig_p = ls_t_.exp().float().cpu().numpy()[0]
         gt_p = pert.numpy()

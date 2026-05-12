@@ -78,26 +78,33 @@ def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
         with torch.autocast(device_type="cuda", dtype=_AMP_DTYPE):
             params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
                             bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
-            # When use_frame_pose=True, model returns (per_pt_pred, (μ, log_σ)).
+            # When use_frame_pose=True, model returns (per_pt_pred, (μ, log_σ, L)).
+            frame_L = None
             if isinstance(params, tuple):
-                params, (frame_mu, frame_logsig) = params
+                params, head_out = params
+                if len(head_out) == 3:
+                    frame_mu, frame_logsig, frame_L = head_out
+                else:
+                    frame_mu, frame_logsig = head_out
             else:
                 frame_mu = frame_logsig = None
             valid  = ~pad_mask
             loss_pt = gaussian2d_nll(params[valid], gt[valid])
             loss = loss_pt
-            # Frame-pose NLL: diagonal Gaussian, 6-DoF target = (tx,ty,tz,yaw,pitch,roll)
-            # — translation in meters, rotation in DEGREES (matches dataset perturbation
-            # sampling + memory feedback_ypr_rotation: BA vars must be YPR, not δω).
+            # Frame-pose NLL: full multivariate Gaussian via Cholesky L (full Σ = L Lᵀ).
+            # Falls back to diag if frame_L missing (legacy). Translation in m, ypr in deg.
             loss_fr = None
             if frame_mu is not None and pert_6vec is not None:
-                # Slice pert to head's n_dof so 6-DoF heads ignore the trailing
-                # fx/fy dims that the dataset now always emits (8-DoF pert vec).
-                resid    = pert_6vec[..., :frame_mu.shape[-1]] - frame_mu
-                inv_var  = torch.exp(-2.0 * frame_logsig)
-                fr_nll   = 0.5 * (resid * resid * inv_var).sum(dim=-1) + frame_logsig.sum(dim=-1)
-                loss_fr  = fr_nll.mean()
-                loss     = loss + float(frame_pose_weight) * loss_fr
+                resid = pert_6vec[..., :frame_mu.shape[-1]] - frame_mu  # (B, n_dof)
+                if frame_L is not None:
+                    # NLL = 0.5 * x^T Σ^{-1} x + log|L| = 0.5 ||L^{-1} x||² + Σ log diag(L)
+                    z = torch.linalg.solve_triangular(frame_L, resid.unsqueeze(-1), upper=False).squeeze(-1)
+                    fr_nll = 0.5 * (z * z).sum(dim=-1) + frame_logsig.sum(dim=-1)
+                else:
+                    inv_var = torch.exp(-2.0 * frame_logsig)
+                    fr_nll  = 0.5 * (resid * resid * inv_var).sum(dim=-1) + frame_logsig.sum(dim=-1)
+                loss_fr = fr_nll.mean()
+                loss    = loss + float(frame_pose_weight) * loss_fr
         if train:
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
