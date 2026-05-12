@@ -21,7 +21,7 @@ Usage:
         --map-size-gb 60
 """
 import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-import argparse, pickle, struct, time
+import argparse, multiprocessing as mp, pickle, struct, time
 from pathlib import Path
 import numpy as np
 import lmdb
@@ -137,11 +137,37 @@ def _pack_inst(inst: dict) -> bytes:
     return bytes(out)
 
 
+def _worker_load_and_pack(args):
+    """Worker entry point: torch.load one inst.pt → packed (blob, cubs_blob).
+
+    Returns:
+        (fn, None, 0, b'', b'')           — file missing
+        (fn, scene, frame, blob, cubs)    — packed tile + per-frame cubs blob
+                                            (cubs may be redundant; master dedups)
+    """
+    inst_dir_str, fn = args
+    p = Path(inst_dir_str) / fn
+    try:
+        inst = torch.load(p, weights_only=False)
+    except FileNotFoundError:
+        return (fn, None, 0, b'', b'')
+    scene = str(inst.get('scene', ''))
+    frame = int(inst.get('frame', -1))
+    blob = _pack_inst(inst)
+    cubs_blob = _pack_cubs(inst.get('cuboids', []) or [])
+    return (fn, scene, frame, blob, cubs_blob)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--cache-dir', required=True)
     ap.add_argument('--map-size-gb', type=int, default=200)
     ap.add_argument('--commit-every', type=int, default=2000)
+    ap.add_argument('--workers', type=int, default=1,
+                    help='mp.Pool workers for parallel torch.load + pack. '
+                         '1 = serial (legacy). Recommended 6-8 alongside training.')
+    ap.add_argument('--chunksize', type=int, default=32,
+                    help='imap_unordered chunksize (samples per IPC).')
     ap.add_argument('--overwrite', action='store_true')
     args = ap.parse_args()
 
@@ -175,40 +201,67 @@ def main():
     nb = 0
     nb_cubs = 0
     missing = 0
-    seen_cubs_keys = set()      # (scene, frame) → already written
-    for i, fn in enumerate(fnames_all):
-        p = inst_dir / fn
-        try:
-            inst = torch.load(p, weights_only=False)
-        except FileNotFoundError:
-            missing += 1
-            if missing <= 5:
-                print(f'  WARN missing inst: {fn}', flush=True)
-            continue
-        # Cuboids dedup: first tile encountered for a (scene, frame) writes,
-        # the rest just reference the same key. Viz / fallback paths read by
-        # constructing the same key from the per-tile header.
-        scene = str(inst.get('scene', ''))
-        frame = int(inst.get('frame', -1))
+    seen_cubs_keys: set = set()   # (scene, frame) — only the FIRST sighting writes
+
+    def _write_one(fn, scene, frame, blob, cubs_blob):
+        nonlocal nb, nb_cubs
         ck = (scene, frame)
         if ck not in seen_cubs_keys:
-            cubs_key = f'{CUBS_KEY_PREFIX}{scene}/{frame}'.encode()
-            cubs_blob = _pack_cubs(inst.get('cuboids', []) or [])
-            txn.put(cubs_key, cubs_blob)
+            txn.put(f'{CUBS_KEY_PREFIX}{scene}/{frame}'.encode(), cubs_blob)
             nb_cubs += len(cubs_blob)
             seen_cubs_keys.add(ck)
-        blob = _pack_inst(inst)
         txn.put(fn.encode(), blob)
         nb += len(blob)
-        if (i + 1) % args.commit_every == 0:
-            txn.commit()
-            txn = env.begin(write=True)
-        if (i + 1) % 5000 == 0 or (i + 1) == N:
-            dt = time.time() - t0
-            sps = (i + 1) / max(dt, 1e-6)
-            print(f'  {i+1:>7}/{N}  tiles={nb/1e9:6.1f}GB  cubs={nb_cubs/1e6:6.1f}MB '
-                  f'({len(seen_cubs_keys)} frames)  sps={sps:6.0f}  elapsed={dt:6.0f}s',
-                  flush=True)
+
+    if args.workers > 1:
+        # Parallel: workers do torch.load + _pack_inst in their own processes;
+        # master serializes LMDB writes. imap_unordered keeps the pipeline full
+        # without preserving order — we key by fname so order doesn't matter.
+        ctx = mp.get_context('forkserver')   # fork-after-thread safe (e.g. ClearML)
+        with ctx.Pool(args.workers) as pool:
+            iterator = pool.imap_unordered(
+                _worker_load_and_pack,
+                [(str(inst_dir), fn) for fn in fnames_all],
+                chunksize=args.chunksize,
+            )
+            for i, result in enumerate(iterator):
+                fn, scene, frame, blob, cubs_blob = result
+                if scene is None:
+                    missing += 1
+                    if missing <= 5:
+                        print(f'  WARN missing inst: {fn}', flush=True)
+                else:
+                    _write_one(fn, scene, frame, blob, cubs_blob)
+                if (i + 1) % args.commit_every == 0:
+                    txn.commit(); txn = env.begin(write=True)
+                if (i + 1) % 5000 == 0 or (i + 1) == N:
+                    dt = time.time() - t0
+                    sps = (i + 1) / max(dt, 1e-6)
+                    print(f'  {i+1:>7}/{N}  tiles={nb/1e9:6.1f}GB  cubs={nb_cubs/1e6:6.1f}MB '
+                          f'({len(seen_cubs_keys)} frames)  sps={sps:6.0f}  elapsed={dt:6.0f}s',
+                          flush=True)
+    else:
+        for i, fn in enumerate(fnames_all):
+            p = inst_dir / fn
+            try:
+                inst = torch.load(p, weights_only=False)
+            except FileNotFoundError:
+                missing += 1
+                if missing <= 5:
+                    print(f'  WARN missing inst: {fn}', flush=True)
+                continue
+            scene = str(inst.get('scene', ''))
+            frame = int(inst.get('frame', -1))
+            _write_one(fn, scene, frame, _pack_inst(inst),
+                       _pack_cubs(inst.get('cuboids', []) or []))
+            if (i + 1) % args.commit_every == 0:
+                txn.commit(); txn = env.begin(write=True)
+            if (i + 1) % 5000 == 0 or (i + 1) == N:
+                dt = time.time() - t0
+                sps = (i + 1) / max(dt, 1e-6)
+                print(f'  {i+1:>7}/{N}  tiles={nb/1e9:6.1f}GB  cubs={nb_cubs/1e6:6.1f}MB '
+                      f'({len(seen_cubs_keys)} frames)  sps={sps:6.0f}  elapsed={dt:6.0f}s',
+                      flush=True)
     txn.commit()
     env.sync()
     env.close()
