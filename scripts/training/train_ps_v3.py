@@ -288,7 +288,8 @@ def main(cfg=None):
                           use_pose_emb=c.get("use_pose_emb", False),
                           deform_mode=c.get("deform_mode", "none"),
                           use_frame_pose=c.get("use_frame_pose", False),
-                          frame_pose_dof=c.get("frame_pose_dof", 6)).to(DEVICE)
+                          frame_pose_dof=c.get("frame_pose_dof", 6),
+                          frame_pose_full_cov=c.get("frame_pose_full_cov", False)).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     log(f"amp_dtype={_AMP_DTYPE} scaler_enabled={_NEED_SCALER} device={torch.cuda.get_device_name(0)} cc={torch.cuda.get_device_capability(0)}")
 
@@ -591,6 +592,10 @@ if __name__ == "__main__":
     ap.add_argument('--max-fy-pct', type=float, default=None,
                     help='multiplicative fy perturbation half-range (independent of fx). '
                          'PS BA shows fx/fy drift independently per cam → train them separately.')
+    ap.add_argument('--frame-pose-full-cov', action='store_true',
+                    help='CLS pose head outputs full n_dof×n_dof Cholesky cov '
+                         '(off-diagonal captures pose-dim correlations for BA). '
+                         'Default: diagonal Σ (compatible with legacy ckpts).')
     ap.add_argument('--pose-frame', choices=('orig','vcam'), default=None,
                     help='Frame in which the CLS pose-head target is expressed. '
                          "'orig' (default): orig camera frame — label depends on "
@@ -653,6 +658,7 @@ if __name__ == "__main__":
     if args.max_fx_pct is not None: cfg['max_fx_pct'] = args.max_fx_pct
     if args.max_fy_pct is not None: cfg['max_fy_pct'] = args.max_fy_pct
     if args.pose_frame is not None: cfg['pose_frame'] = args.pose_frame
+    if args.frame_pose_full_cov: cfg['frame_pose_full_cov'] = True
     # Default frame_pose_dof based on pose_frame and fx/fy aug:
     #   pose_frame='orig' + fx/fy aug:  8 (full 6-DoF SE3 + Δfx + Δfy)
     #   pose_frame='orig' no fx/fy:     6 (default of CLSFramePoseHead)

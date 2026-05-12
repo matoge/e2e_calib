@@ -405,27 +405,20 @@ class PoseEmb(nn.Module):
 
 class CLSFramePoseHead(nn.Module):
     """CLS-style aggregator: learnable token cross-attends to per-pt features
-    and outputs μ + lower-triangular Cholesky factor L so the full n_dof×n_dof
-    covariance Σ = L Lᵀ is regressed (not just diagonal).
+    and outputs (μ, log σ) for an n_dof SE3 perturbation. Defaults to diagonal
+    covariance for back-compat with old ckpts; pass full_cov=True to get the
+    full n_dof×n_dof Cholesky factor (off-diagonal entries capture pose-dim
+    correlations like yaw↔t_x ambiguity — crucial for multi-tile BA fusion).
 
-    Why full Σ matters for BA: pose dims are highly correlated (a small yaw
-    rotation and a small t_x translation produce nearly the same per-tile
-    pixel shift, so they're observationally indistinguishable from one tile
-    alone). Diagonal-only covariance double-counts that ambiguity when many
-    tiles are aggregated, biasing the BA solver. Full Σ encodes "we know
-    the SUM of yaw+t_x but not their split" → downstream information matrix
-    sum correctly fuses tiles.
-
-    Output sizes:
-      μ:        (B, n_dof)
-      L:        (B, n_dof, n_dof) lower-triangular, diag > 0 (softplus)
-      log_σ:    (B, n_dof) — for back-compat, returns diag(L); use cov() for full Σ.
-    Linear head dim: n_dof (μ) + n_dof*(n_dof+1)/2 (Cholesky entries).
+    Output (full_cov=False, default): linear head dim 2*n_dof, returns (μ, log_σ, None).
+    Output (full_cov=True):           linear head dim n_dof + n_dof*(n_dof+1)/2,
+                                       returns (μ, log_σ_diag, L) where Σ = L Lᵀ.
     """
-    def __init__(self, d: int, n_dof: int = 6, n_heads: int = 4):
+    def __init__(self, d: int, n_dof: int = 6, n_heads: int = 4, full_cov: bool = False):
         super().__init__()
         self.n_dof = n_dof
-        self.n_chol = n_dof * (n_dof + 1) // 2  # unique L entries
+        self.full_cov = bool(full_cov)
+        self.n_chol = n_dof * (n_dof + 1) // 2 if self.full_cov else 0
         self.cls = nn.Parameter(torch.randn(1, 1, d) * 0.02)
         self.norm_q = nn.LayerNorm(d)
         self.norm_kv = nn.LayerNorm(d)
@@ -436,16 +429,13 @@ class CLSFramePoseHead(nn.Module):
             nn.Linear(d, 4 * d), nn.GELU(),
             nn.Dropout(0.1), nn.Linear(4 * d, d),
         )
-        self.head = nn.Linear(d, n_dof + self.n_chol)
-        # Precompute tril indices for unflattening L
-        self.register_buffer('tril_idx', torch.tril_indices(n_dof, n_dof), persistent=False)
+        out_dim = (n_dof + self.n_chol) if self.full_cov else (2 * n_dof)
+        self.head = nn.Linear(d, out_dim)
+        if self.full_cov:
+            self.register_buffer('tril_idx', torch.tril_indices(n_dof, n_dof), persistent=False)
 
     def forward(self, q: torch.Tensor, key_padding_mask=None):
-        """q: (B, N, D) per-pt features. Returns:
-          μ:     (B, n_dof)
-          log_σ: (B, n_dof) — diag of L (for back-compat with diag-NLL loss)
-          L:     (B, n_dof, n_dof) lower-triangular Cholesky factor of Σ.
-        """
+        """Returns (μ, log_σ, L_or_None)."""
         B = q.size(0)
         cls = self.cls.expand(B, -1, -1)
         cls_attn, _ = self.cross(self.norm_q(cls),
@@ -453,12 +443,14 @@ class CLSFramePoseHead(nn.Module):
                                   key_padding_mask=key_padding_mask)
         cls = cls + self.drop(cls_attn)
         cls = cls + self.ffn(self.norm_ffn(cls))
-        out = self.head(cls.squeeze(1))                                # (B, n_dof + n_chol)
+        out = self.head(cls.squeeze(1))
         mu = out[:, :self.n_dof]
+        if not self.full_cov:
+            log_sigma = out[:, self.n_dof:]
+            return mu, log_sigma, None
         chol_flat = out[:, self.n_dof:]
         L = q.new_zeros(B, self.n_dof, self.n_dof)
         L[:, self.tril_idx[0], self.tril_idx[1]] = chol_flat
-        # Diagonal entries via softplus to ensure positivity
         diag = F.softplus(torch.diagonal(L, dim1=-2, dim2=-1)) + 1e-4
         L = L - torch.diag_embed(torch.diagonal(L, dim1=-2, dim2=-1)) + torch.diag_embed(diag)
         log_sigma = torch.log(diag)
@@ -478,7 +470,8 @@ class CalibNetDepth(nn.Module):
                  use_3d_local: bool = False,
                  local_3d_radii=(1.0, 4.0, 16.0),
                  local_3d_k=(8, 8, 8),
-                 use_frame_pose: bool = False, frame_pose_dof: int = 6):
+                 use_frame_pose: bool = False, frame_pose_dof: int = 6,
+                 frame_pose_full_cov: bool = False):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -551,7 +544,7 @@ class CalibNetDepth(nn.Module):
         # CLS frame-level pose head: outputs (μ, log σ) for an n_dof SE3 patch
         # perturbation. Generic body (cross-attn aggregator) + DoF-specific head.
         # Adding intrinsic params later = swap head + jacobian, body reusable.
-        self.frame_pose_head = (CLSFramePoseHead(d, n_dof=frame_pose_dof)
+        self.frame_pose_head = (CLSFramePoseHead(d, n_dof=frame_pose_dof, full_cov=frame_pose_full_cov)
                                  if use_frame_pose else None)
 
         # DDP support: freeze parameters whose forward path is never taken in
