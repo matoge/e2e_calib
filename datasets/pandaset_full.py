@@ -36,10 +36,76 @@ try:
 except Exception:
     pass
 
+import io
+import os
+import pickle
+import struct
+import warnings
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
+
+try:
+    import lmdb as _lmdb
+    _HAVE_LMDB = True
+except ImportError:
+    _lmdb = None
+    _HAVE_LMDB = False
+
+# LMDB packed-inst layout: 8-byte LE uint64 header_len, pickle header, raw body.
+# Header carries offsets+dtype+shape per array; body is jpg + arrays concatenated.
+_LMDB_HDR_LEN_FMT = '<Q'
+_LMDB_HDR_LEN_SIZE = struct.calcsize(_LMDB_HDR_LEN_FMT)
+
+
+def _unpack_lmdb_inst(blob: bytes, cubs_map: dict | None = None) -> dict:
+    """Decode one LMDB value → dict shaped like a torch-loaded inst.pt.
+
+    Zero pickle.loads of large tensors: arrays are np.frombuffer views over
+    `blob`, wrapped via torch.from_numpy (zero-copy, read-only).
+
+    Cuboids are NOT stored inline (v2 layout): they live under a separate
+    `__cubs__/<scene>/<frame>` key, shared across all tiles of the same
+    frame. `cubs_map` is a {(scene, frame): [cuboids list]} preloaded at
+    Dataset.__init__ time (~7 MB total for PS multicam_corr).
+    """
+    hdr_len = struct.unpack_from(_LMDB_HDR_LEN_FMT, blob, 0)[0]
+    header = pickle.loads(blob[_LMDB_HDR_LEN_SIZE:_LMDB_HDR_LEN_SIZE + hdr_len])
+    body_off = _LMDB_HDR_LEN_SIZE + hdr_len
+    offsets = header['offsets']
+
+    def _arr(name):
+        off, length, dtype_str, shape = offsets[name]
+        a = np.frombuffer(blob, dtype=np.dtype(dtype_str),
+                          count=length // np.dtype(dtype_str).itemsize,
+                          offset=body_off + off)
+        return a.reshape(shape)
+
+    def _bytes(name):
+        off, length, _dt, _sh = offsets[name]
+        return bytes(blob[body_off + off:body_off + off + length])
+
+    inst = {
+        'IH': header['IH'], 'IW': header['IW'],
+        'tile_u0': header['tile_u0'], 'tile_v0': header['tile_v0'],
+        'jpg_bytes': _bytes('jpg'),
+        'scene': header.get('scene', ''),
+        'frame': header.get('frame', -1),
+    }
+    with warnings.catch_warnings():
+        # torch.from_numpy on non-writable buffer-backed arrays warns; we
+        # only read these tensors, so the warning is noise.
+        warnings.simplefilter('ignore', UserWarning)
+        for k in ('K_full', 'cam_pos', 'R_gt', 'T_gt', 'distortion',
+                  'pts', 'uv_full', 'z_cam', 'is_obj', 'in_box'):
+            if k in offsets:
+                inst[k] = torch.from_numpy(_arr(k))
+    if header.get('is_fisheye', False):
+        inst['is_fisheye'] = True
+    if cubs_map is not None:
+        inst['cuboids'] = cubs_map.get((inst['scene'], inst['frame']), [])
+    return inst
 try:
     import turbojpeg as _tj
     # PyTurboJPEG class API. One instance per worker process (not thread-safe
@@ -138,6 +204,21 @@ class PandaSetCalibDatasetFull(Dataset):
                  preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
+        # LMDB packed path: if <cache_dir>/data.lmdb exists, use the packed
+        # converter output (raw bytes, zero torch.load per sample). The .pt
+        # path stays as a fallback.
+        self.lmdb_path = self.cache_dir / 'data.lmdb'
+        # E2E_NO_LMDB=1 forces the legacy inst/*.pt path even when LMDB exists
+        # (used by bench to A/B the two paths).
+        self._use_lmdb = bool(_HAVE_LMDB and self.lmdb_path.is_dir()
+                              and os.environ.get('E2E_NO_LMDB') != '1')
+        self._lmdb_env = None  # lazy-opened per worker after fork
+        # Cuboids (world-coord 3D boxes) are deduped to per-frame keys in the
+        # LMDB v2 layout. Preload the whole {(scene, frame): [cubs]} map at
+        # __init__ — total ~7 MB even on PS multicam_corr (843 frames × ~9KB).
+        # This is shared via fork copy-on-write across DataLoader workers so
+        # the hot-path `__getitem__` never queries the cuboid key.
+        self._cubs_map: dict | None = None
         meta = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
         assert split in ('train', 'val')
         self.fnames    = list(meta[split])
@@ -185,20 +266,71 @@ class PandaSetCalibDatasetFull(Dataset):
         # via copy-on-write / fork semantics and each worker hits RAM directly
         # instead of unpickling from disk every call.
         self._cache = None
-        if preload:
+        if preload and not self._use_lmdb:
+            # LMDB-backed caches are already an OS-mapped shared file; no point
+            # duplicating into Python objects per worker.
             self._cache = [
                 torch.load(self.inst_dir / fn, weights_only=False)
                 for fn in self.fnames
             ]
+        if self._use_lmdb:
+            # Preload deduped cuboid table once in the parent process. Forked
+            # workers inherit it via CoW.
+            self._cubs_map = self._preload_cubs_map()
 
     def __len__(self):
         return len(self.fnames) * self.oversample
+
+    def _open_lmdb(self):
+        # Per-worker open: each forked DataLoader worker opens its own env so
+        # internal lmdb-py state is process-local. readonly + lock=False is
+        # safe for a write-once-then-static DB and avoids the global writer
+        # mutex on every txn.
+        self._lmdb_env = _lmdb.open(
+            str(self.lmdb_path), readonly=True, lock=False,
+            readahead=False, meminit=False, max_readers=512, subdir=True,
+        )
+
+    def _preload_cubs_map(self) -> dict:
+        env = _lmdb.open(
+            str(self.lmdb_path), readonly=True, lock=False,
+            readahead=False, meminit=False, max_readers=512, subdir=True,
+        )
+        out: dict = {}
+        prefix = b'__cubs__/'
+        with env.begin(write=False) as txn:
+            cursor = txn.cursor()
+            cursor.set_range(prefix)
+            for key, val in cursor:
+                if not key.startswith(prefix):
+                    break
+                # key = b'__cubs__/<scene>/<frame>'
+                _, scene, frame_s = key.decode().split('/', 2)
+                frame = int(frame_s)
+                packed = pickle.loads(val)
+                M = packed['M']
+                if M == 0:
+                    out[(scene, frame)] = []
+                else:
+                    pos = packed['pos']; dims = packed['dims']; yaw = packed['yaw']
+                    out[(scene, frame)] = [
+                        {'pos': pos[j], 'dims': dims[j], 'yaw': float(yaw[j])}
+                        for j in range(M)
+                    ]
+        env.close()
+        return out
 
     def _load_inst(self, idx: int) -> dict:
         # idx is in [0, len_fnames * oversample); modulo to wrap to file index
         i = idx % len(self.fnames)
         if self._cache is not None:
             return self._cache[i]
+        if self._use_lmdb:
+            if self._lmdb_env is None:
+                self._open_lmdb()
+            with self._lmdb_env.begin(write=False) as txn:
+                blob = txn.get(self.fnames[i].encode())
+            return _unpack_lmdb_inst(blob, self._cubs_map)
         return torch.load(self.inst_dir / self.fnames[i], weights_only=False)
 
     def __getitem__(self, idx: int):
