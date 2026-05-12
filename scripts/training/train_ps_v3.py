@@ -646,11 +646,17 @@ if __name__ == "__main__":
     if args.max_fx_pct is not None: cfg['max_fx_pct'] = args.max_fx_pct
     if args.max_fy_pct is not None: cfg['max_fy_pct'] = args.max_fy_pct
     if args.pose_frame is not None: cfg['pose_frame'] = args.pose_frame
-    # When fx/fy perturbation is on, default the frame-pose head to 8-DoF
-    # (6-DoF SE3 + Δfx_pct + Δfy_pct). Caller can override with frame_pose_dof.
-    if (cfg.get('max_fx_pct', 0.0) > 0 or cfg.get('max_fy_pct', 0.0) > 0) \
-            and cfg.get('use_frame_pose', False) and 'frame_pose_dof' not in cfg:
-        cfg['frame_pose_dof'] = 8
+    # Default frame_pose_dof based on pose_frame and fx/fy aug:
+    #   pose_frame='orig' + fx/fy aug:  8 (full 6-DoF SE3 + Δfx + Δfy)
+    #   pose_frame='orig' no fx/fy:     6 (default of CLSFramePoseHead)
+    #   pose_frame='vcam' + fx/fy aug:  7 (5-DoF VCAM + Δfx + Δfy)
+    #   pose_frame='vcam' no fx/fy:     5 (5-DoF VCAM only)
+    if cfg.get('use_frame_pose', False) and 'frame_pose_dof' not in cfg:
+        has_fxfy = cfg.get('max_fx_pct', 0.0) > 0 or cfg.get('max_fy_pct', 0.0) > 0
+        if cfg.get('pose_frame', 'orig') == 'vcam':
+            cfg['frame_pose_dof'] = 7 if has_fxfy else 5
+        elif has_fxfy:
+            cfg['frame_pose_dof'] = 8
     if args.zoom_aug: cfg['zoom_aug'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size

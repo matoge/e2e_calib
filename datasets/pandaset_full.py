@@ -348,16 +348,20 @@ class PandaSetCalibDatasetFull(Dataset):
             if dfx_pct != 0.0: K_pert[0, 0] = K[0, 0] * (1.0 + dfx_pct)
             if dfy_pct != 0.0: K_pert[1, 1] = K[1, 1] * (1.0 + dfy_pct)
             # 8-vec perturbation label for the optional CLS frame-pose head.
-            # Layout: (tx, ty, tz, yaw_deg, pitch_deg, roll_deg, dfx_pct, dfy_pct)
-            # — translation in meters, ypr in DEGREES, fx/fy as fractional percent.
-            # pose_frame='vcam': pert_vec is in the tile's VCAM frame (sampled
-            # directly above), roll_vcam=0. The model learns one frame-agnostic
-            # mapping (input → VCAM 5-DoF); downstream BA aggregates per-tile
-            # (μ_vcam, Σ_vcam) via J_i = R_orig→vcam_i to recover orig δ.
+            # Layout depends on pose_frame:
+            #   'orig': (tx, ty, tz, yaw_deg, pitch_deg, roll_deg, dfx_pct, dfy_pct)
+            #           — model frame_pose_dof=8 takes full 6-DoF SE3 + fx/fy.
+            #   'vcam': (tx_v, ty_v, tz_v, yaw_v_deg, pitch_v_deg, dfx_pct, dfy_pct, 0)
+            #           — roll_v dropped (slot 7 unused), fx/fy moved to slots 5,6 so
+            #           model frame_pose_dof=5 cleanly targets 5-DoF pose, dof=7 picks
+            #           up fx/fy too. The CLS head learns one frame-agnostic mapping
+            #           (input → VCAM 5/7-DoF); downstream BA combines per-tile
+            #           (μ_v, Σ_v) via J_i = R_orig→vcam_i.
+            # Translation in meters, ypr in DEGREES, fx/fy as fractional percent.
             if self.pose_frame == 'vcam':
                 pert_vec = np.array([t_vcam[0], t_vcam[1], t_vcam[2],
-                                      ypr_vcam[0], ypr_vcam[1], 0.0,
-                                      dfx_pct, dfy_pct], dtype=np.float32)
+                                      ypr_vcam[0], ypr_vcam[1],
+                                      dfx_pct, dfy_pct, 0.0], dtype=np.float32)
             else:
                 pert_vec = np.array([t_delta[0], t_delta[1], t_delta[2],
                                       ypr[0], ypr[1], ypr[2],
