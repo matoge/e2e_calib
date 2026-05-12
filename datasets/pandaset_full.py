@@ -134,7 +134,8 @@ class PandaSetCalibDatasetFull(Dataset):
                  grid_n: int = 16,
                  n_full: int = 1024,
                  k_per_cell: int = 8,
-                 zoom_aug: bool = False):
+                 zoom_aug: bool = False,
+                 preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
         meta = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
@@ -177,13 +178,28 @@ class PandaSetCalibDatasetFull(Dataset):
         # wider source crops — fills the high-resolution far-object regime
         # that PS / Waymo data lacks at native lens.
         self.zoom_aug  = bool(zoom_aug)
+        # Preload every inst .pt into RAM. The full PS cache is ~1 GB, and
+        # torch.load per-sample shows up as ~3.8 ms in cProfile — roughly
+        # 40% of the remaining __getitem__ cost once TurboJPEG is in place.
+        # DataLoader workers spawn/fork after __init__, so the list is shared
+        # via copy-on-write / fork semantics and each worker hits RAM directly
+        # instead of unpickling from disk every call.
+        self._cache = None
+        if preload:
+            self._cache = [
+                torch.load(self.inst_dir / fn, weights_only=False)
+                for fn in self.fnames
+            ]
 
     def __len__(self):
         return len(self.fnames) * self.oversample
 
     def _load_inst(self, idx: int) -> dict:
         # idx is in [0, len_fnames * oversample); modulo to wrap to file index
-        return torch.load(self.inst_dir / self.fnames[idx % len(self.fnames)], weights_only=False)
+        i = idx % len(self.fnames)
+        if self._cache is not None:
+            return self._cache[i]
+        return torch.load(self.inst_dir / self.fnames[i], weights_only=False)
 
     def __getitem__(self, idx: int):
         inst = self._load_inst(idx)
