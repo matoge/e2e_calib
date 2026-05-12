@@ -344,6 +344,9 @@ def main():
     ap.add_argument('--n-layers', type=int, default=4)
     ap.add_argument('--use-frame-pose', action='store_true', default=True)
     ap.add_argument('--frame-pose-dof', type=int, default=8)
+    ap.add_argument('--frame-pose-full-cov', action='store_true',
+                    help='Construct pose head with full Cholesky cov (matches '
+                         'training ran with --frame-pose-full-cov).')
     ap.add_argument('--device', default='cuda')
     ap.add_argument('--mode', choices=('perpt','pose'), default='perpt',
                     help='perpt: training-style 2-panel (full + quiver). '
@@ -358,7 +361,8 @@ def main():
                           n_layers=args.n_layers, use_convnext=True,
                           use_frustum=True, deform_mode='sl',
                           use_frame_pose=args.use_frame_pose,
-                          frame_pose_dof=args.frame_pose_dof).to(args.device)
+                          frame_pose_dof=args.frame_pose_dof,
+                          frame_pose_full_cov=args.frame_pose_full_cov).to(args.device)
     state = torch.load(args.ckpt, map_location=args.device, weights_only=False)
     if isinstance(state, dict) and 'state_dict' in state: state = state['state_dict']
     miss, unexp = model.load_state_dict(state, strict=False)
