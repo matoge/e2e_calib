@@ -168,6 +168,158 @@ def render_eval_samples(*, model, ds, out_dir, img_size: int,
     return saved
 
 
+def render_pose_eval_samples(*, model, ds, out_dir, img_size: int,
+                              device, amp_dtype=torch.bfloat16,
+                              n: int = 6, ps_root='/mnt/nvme6t/pandaset',
+                              sample_idxs: list | None = None, log=print):
+    """Pose-head evaluation: apply predicted μ as extrinsic+intrinsic correction
+    and reproject ALL raw lidar (d=0 + d=1) so foreground cars get covered.
+
+    Renders 2-row layout per sample: top=BEFORE (perturbed projection,
+    red=lidar, lime=true target), bottom=AFTER (μ-recovered projection,
+    cyan=lidar, lime=true target). Title shows GT vs μ numeric comparison.
+    """
+    import pickle, gzip, io
+    from PIL import Image as _PIL
+    from scipy.spatial.transform import Rotation as _Rot
+    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob('*.png'): old.unlink()
+
+    if sample_idxs is None:
+        sibling = out.parent / 'vis_pretrain' / 'sample_idxs.json'
+        if sibling.exists():
+            idxs = json.loads(sibling.read_text())
+        else:
+            idxs = list(range(min(200, len(ds))))
+            _r.Random(0).shuffle(idxs)
+    else:
+        idxs = list(sample_idxs)
+
+    saved = 0
+    for idx in idxs[:max(200, n * 10)]:
+        if saved >= n: break
+        try:
+            np.random.seed(int(idx))
+            _sample = ds[idx]
+            img, true_uvd, dist_uvd, vfp, bucket_uvd_v, bucket_valid_v = _sample[:6]
+            pert = _sample[6] if len(_sample) >= 7 else None
+            crop = getattr(ds, '_last_crop', None)
+            inst = ds._load_inst(idx)
+        except Exception:
+            continue
+        if pert is None:
+            log(f'  skip idx={idx}: no pert vec'); continue
+        if crop is None:
+            log(f'  skip idx={idx}: no _last_crop'); continue
+
+        Nmax = true_uvd.shape[0]
+        pad = torch.zeros(1, Nmax, dtype=torch.bool, device=device)
+        with torch.autocast(device_type='cuda', dtype=amp_dtype), torch.no_grad():
+            img_gpu = img.unsqueeze(0).to(device).float().div_(255.0)
+            _out = model(img_gpu,
+                          dist_uvd.unsqueeze(0).to(device)[..., :3],
+                          key_padding_mask=pad,
+                          vfp=vfp.view(1).to(device),
+                          bucket_uvd=bucket_uvd_v.unsqueeze(0).to(device),
+                          bucket_valid=bucket_valid_v.unsqueeze(0).to(device))
+            if not isinstance(_out, tuple) or len(_out) < 2:
+                log(f'  skip idx={idx}: model has no pose head output'); continue
+            per_pt, (mu_t_, ls_t_) = _out
+            mu_p = mu_t_.float().cpu().numpy()[0]
+            sig_p = ls_t_.exp().float().cpu().numpy()[0]
+        gt_p = pert.numpy()
+        dof = mu_p.shape[0]
+        gt_pose = gt_p[:6]
+        mu_pose = mu_p[:6]
+        gt_fxfy = gt_p[6:8] if dof >= 8 and gt_p.shape[0] >= 8 else np.zeros(2)
+        mu_fxfy = mu_p[6:8] if dof >= 8 else np.zeros(2)
+
+        # Read raw lidar from disk (d=0 + d=1)
+        scene = inst['scene']; frame = int(inst['frame'])
+        ld = Path(ps_root) / scene / 'lidar' / f'{frame:02d}.pkl'
+        if not ld.exists(): ld = ld.with_suffix('.pkl.gz')
+        try:
+            df = pickle.load(open(ld,'rb')) if ld.suffix == '.pkl' else pickle.load(gzip.open(ld,'rb'))
+            pts_w_raw = df[['x','y','z']].values.astype(np.float32)
+        except Exception:
+            pts_w_raw = inst['pts'].numpy()
+
+        R_gt = inst['R_gt'].numpy(); cp = inst['cam_pos'].numpy(); K = inst['K_full'].numpy()
+        # Replay dataset's perturbation forward (GT)
+        R_off = R_gt @ _Rot.from_euler('zyx', gt_pose[3:6], degrees=True).as_matrix()
+        cp_off = cp + gt_pose[:3]
+        K_off = K.copy()
+        K_off[0,0] = K[0,0] * (1 + gt_fxfy[0]); K_off[1,1] = K[1,1] * (1 + gt_fxfy[1])
+        # μ-recovered (undo μ from off)
+        R_rec = R_off @ _Rot.from_euler('zyx', -mu_pose[3:6], degrees=True).as_matrix()
+        cp_rec = cp_off - mu_pose[:3]
+        K_rec = K_off.copy()
+        K_rec[0,0] = K_off[0,0] / (1 + mu_fxfy[0])
+        K_rec[1,1] = K_off[1,1] / (1 + mu_fxfy[1])
+
+        def proj(Rx, cpx, Kx):
+            pc = (Rx.T @ (pts_w_raw - cpx).T).T
+            z = pc[:,2]
+            uv = (pc[:,:2] * np.array([Kx[0,0], Kx[1,1]]) / np.maximum(z[:,None],1e-6)
+                  + np.array([Kx[0,2], Kx[1,2]]))
+            return uv, z
+        uv_true, z_true = proj(R_gt, cp, K)
+        uv_off, z_off = proj(R_off, cp_off, K_off)
+        uv_rec, z_rec = proj(R_rec, cp_rec, K_rec)
+
+        # Load full image (jpg_bytes in cache)
+        jpg = inst.get('jpg_bytes', None)
+        if jpg is not None:
+            full_img = np.asarray(_PIL.open(io.BytesIO(jpg)).convert('RGB'))
+        else:
+            full_img = np.zeros((int(inst['IH']), int(inst['IW']), 3), dtype=np.uint8)
+        IH, IW = full_img.shape[:2]
+        vis_t = (z_true>0.5)&(uv_true[:,0]>=0)&(uv_true[:,0]<IW)&(uv_true[:,1]>=0)&(uv_true[:,1]<IH)
+        vis_o = (z_off>0.5)&(uv_off[:,0]>=0)&(uv_off[:,0]<IW)&(uv_off[:,1]>=0)&(uv_off[:,1]<IH)
+        vis_r = (z_rec>0.5)&(uv_rec[:,0]>=0)&(uv_rec[:,0]<IW)&(uv_rec[:,1]>=0)&(uv_rec[:,1]<IH)
+        both = vis_t & vis_o & vis_r
+        if both.sum() < 10: continue
+        err_before = float(np.linalg.norm(uv_off[both]-uv_true[both], axis=1).mean())
+        err_after  = float(np.linalg.norm(uv_rec[both]-uv_true[both], axis=1).mean())
+
+        u0, v0, cs = crop['u0'], crop['v0'], crop['cs']
+        fig, axes = plt.subplots(2, 1, figsize=(IW/100, 2*IH/100 + 0.8), dpi=100)
+        # BEFORE
+        axes[0].imshow(full_img)
+        axes[0].scatter(uv_off[both,0], uv_off[both,1], s=2, c='red', alpha=0.6)
+        axes[0].scatter(uv_true[both,0], uv_true[both,1], s=2, c='lime', alpha=0.6)
+        axes[0].add_patch(plt.Rectangle((u0,v0), cs, cs, fill=False, ec='yellow', lw=2))
+        axes[0].set_xlim(0, IW); axes[0].set_ylim(IH, 0); axes[0].axis('off')
+        axes[0].set_title(
+            f'BEFORE  mean err={err_before:.2f} px   scene={scene} f{frame}   tile=({u0},{v0},{cs})\n'
+            f'GT pert:  t={gt_pose[:3].round(3)} m   ypr={gt_pose[3:6].round(3)}°   '
+            f'Δfx%={gt_fxfy[0]*100:+.2f}  Δfy%={gt_fxfy[1]*100:+.2f}',
+            fontsize=9)
+        # AFTER
+        axes[1].imshow(full_img)
+        axes[1].scatter(uv_rec[both,0], uv_rec[both,1], s=2, c='cyan', alpha=0.7)
+        axes[1].scatter(uv_true[both,0], uv_true[both,1], s=2, c='lime', alpha=0.6)
+        axes[1].add_patch(plt.Rectangle((u0,v0), cs, cs, fill=False, ec='yellow', lw=2))
+        axes[1].set_xlim(0, IW); axes[1].set_ylim(IH, 0); axes[1].axis('off')
+        red_pct = (err_before-err_after)/max(err_before,1e-9)*100
+        axes[1].set_title(
+            f'AFTER (pose-head μ)  mean err={err_after:.2f} px   ({red_pct:.0f}% reduction)\n'
+            f'μ:  t={mu_pose[:3].round(3)} m   ypr={mu_pose[3:6].round(3)}°   '
+            f'Δfx%={mu_fxfy[0]*100:+.2f}  Δfy%={mu_fxfy[1]*100:+.2f}\n'
+            f'residual:  t={(gt_pose[:3]-mu_pose[:3]).round(3)} m   '
+            f'ypr={(gt_pose[3:6]-mu_pose[3:6]).round(3)}°   '
+            f'Δfx%_err={(gt_fxfy[0]-mu_fxfy[0])*100:+.2f}  Δfy%_err={(gt_fxfy[1]-mu_fxfy[1])*100:+.2f}',
+            fontsize=9)
+        plt.tight_layout()
+        fp = out / f'pose_{saved:02d}_idx{idx:06d}.png'
+        plt.savefig(fp, dpi=100, bbox_inches='tight')
+        plt.close(fig)
+        log(f'  pose_{saved:02d} idx={idx} scene={scene} f{frame}  err {err_before:.1f}→{err_after:.1f}px  N={int(both.sum())}')
+        saved += 1
+    log(f'pose-eval: saved {saved} → {out}')
+    return saved
+
+
 def main():
     """CLI: render eval samples from a checkpoint against a cache.
     Example:
@@ -192,6 +344,10 @@ def main():
     ap.add_argument('--use-frame-pose', action='store_true', default=True)
     ap.add_argument('--frame-pose-dof', type=int, default=8)
     ap.add_argument('--device', default='cuda')
+    ap.add_argument('--mode', choices=('perpt','pose'), default='perpt',
+                    help='perpt: training-style 2-panel (full + quiver). '
+                         'pose: pose-head μ eval — full-frame BEFORE/AFTER with '
+                         'all raw lidar (d=0+d=1) reprojected.')
     args = ap.parse_args()
 
     from datasets.pandaset_full import PandaSetCalibDatasetFull
@@ -216,9 +372,14 @@ def main():
                                    max_fy_pct=args.max_fy_pct,
                                    min_crop_px=128, max_crop_px=384,
                                    grid_n=16, oversample=1)
-    n = render_eval_samples(model=model, ds=ds, out_dir=args.out,
-                             img_size=args.img_size, device=args.device,
-                             n=args.n, epoch=999)
+    if args.mode == 'pose':
+        n = render_pose_eval_samples(model=model, ds=ds, out_dir=args.out,
+                                      img_size=args.img_size, device=args.device,
+                                      n=args.n)
+    else:
+        n = render_eval_samples(model=model, ds=ds, out_dir=args.out,
+                                 img_size=args.img_size, device=args.device,
+                                 n=args.n, epoch=999)
     print(f'wrote {n} samples → {args.out}')
 
 
