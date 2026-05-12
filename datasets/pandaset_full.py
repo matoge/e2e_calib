@@ -126,6 +126,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  max_rot_deg: float = 0.5,
                  max_fx_pct: float = 0.0,
                  max_fy_pct: float = 0.0,
+                 pose_frame: str = 'orig',
                  min_pts: int = 8,
                  max_tries: int = 8,
                  oversample: int = 12,
@@ -153,6 +154,17 @@ class PandaSetCalibDatasetFull(Dataset):
         # regress Δfx_pct, Δfy_pct alongside the 6-DoF SE3 perturbation).
         self.max_fx_pct = float(max_fx_pct)
         self.max_fy_pct = float(max_fy_pct)
+        # pose_frame: 'orig' → pert_vec is in original camera frame (legacy).
+        # 'vcam' → pert is converted to the tile's virtual-camera frame whose
+        # optical axis is the ray through the tile center. This makes the
+        # 6-DoF label crop-position-AGNOSTIC: two tiles at left vs right edges
+        # with identical observations get identical labels. roll dim is left
+        # as 0 in vcam mode (rotation around VCAM optical axis is mostly
+        # confounded with t_x/t_y in tile-local space — explicit user advice).
+        # Downstream BA aggregates per-tile (μ_vcam, Σ_vcam) via Jacobian
+        # J_i = R_orig→vcam_i to recover orig-frame δ.
+        assert pose_frame in ('orig', 'vcam'), f'bad pose_frame={pose_frame}'
+        self.pose_frame = pose_frame
         self.min_pts   = int(min_pts)
         self.max_tries = int(max_tries)
         self.oversample = int(oversample)
@@ -289,9 +301,41 @@ class PandaSetCalibDatasetFull(Dataset):
             pts_c = pts[cand_idx]                       # (M<=2000, 3)
             uv_gt_c = uv_full[cand_idx]                 # (M, 2) full-image px
 
-            # Project candidates with perturbed pose
-            t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset_m
-            ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+            # Perturbation sampling:
+            #   pose_frame='orig': sample (t, ypr) uniform in orig camera axes (legacy)
+            #   pose_frame='vcam': sample uniform in tile's VCAM frame so labels are
+            #     crop-position-AGNOSTIC (identical observations → identical labels
+            #     regardless of tile location). Convert to orig for projection.
+            if self.pose_frame == 'vcam':
+                u_c = u0 + 0.5 * cs
+                v_c = v0 + 0.5 * cs
+                ray = np.array([(u_c - K[0,2]) / K[0,0],
+                                 (v_c - K[1,2]) / K[1,1],
+                                 1.0], dtype=np.float64)
+                r_i = ray / (np.linalg.norm(ray) + 1e-12)
+                z_ax = np.array([0., 0., 1.])
+                axis = np.cross(r_i, z_ax)
+                an = np.linalg.norm(axis)
+                if an < 1e-9:
+                    R_o_v = np.eye(3) if r_i[2] > 0 else -np.eye(3)
+                else:
+                    axis = axis / an
+                    angle = float(np.arccos(np.clip(r_i @ z_ax, -1.0, 1.0)))
+                    R_o_v = Rotation.from_rotvec(axis * angle).as_matrix()
+                # Sample in VCAM frame: t_v ∈ R³, (yaw_v, pitch_v) ∈ R² (roll_v=0)
+                t_vcam = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+                ypr_vcam = np.zeros(3, dtype=np.float64)
+                ypr_vcam[0] = (np.random.rand() * 2 - 1) * self.max_rot_deg  # yaw
+                ypr_vcam[1] = (np.random.rand() * 2 - 1) * self.max_rot_deg  # pitch
+                # roll_vcam left 0 (confounded with t_x/t_y per tile)
+                # Convert to orig for projection
+                R_pert_vcam = Rotation.from_euler('zyx', ypr_vcam, degrees=True).as_matrix()
+                R_pert_orig = R_o_v.T @ R_pert_vcam @ R_o_v
+                t_delta = R_o_v.T @ t_vcam
+                ypr = Rotation.from_matrix(R_pert_orig).as_euler('zyx', degrees=True)
+            else:
+                t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+                ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
             R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
             cp_off = cp + t_delta
             # Intrinsic fx/fy multiplicative perturbation (independent — left/right
@@ -303,14 +347,21 @@ class PandaSetCalibDatasetFull(Dataset):
             K_pert = K.copy()
             if dfx_pct != 0.0: K_pert[0, 0] = K[0, 0] * (1.0 + dfx_pct)
             if dfy_pct != 0.0: K_pert[1, 1] = K[1, 1] * (1.0 + dfy_pct)
-            # 8-vec perturbation label for the optional CLS frame-pose head (dims 6,7
-            # carry δ_fx_pct, δ_fy_pct). Earlier 6-vec callers see zeros in [6:].
-            # Convention: YPR in DEGREES (matches sampling + memory project_ypr_rotation.md),
-            # translation in meters, fx/fy as fractional percent.
-            # Layout: (tx_m, ty_m, tz_m, yaw_deg, pitch_deg, roll_deg, dfx_pct, dfy_pct)
-            pert_vec = np.array([t_delta[0], t_delta[1], t_delta[2],
-                                  ypr[0], ypr[1], ypr[2],
-                                  dfx_pct, dfy_pct], dtype=np.float32)
+            # 8-vec perturbation label for the optional CLS frame-pose head.
+            # Layout: (tx, ty, tz, yaw_deg, pitch_deg, roll_deg, dfx_pct, dfy_pct)
+            # — translation in meters, ypr in DEGREES, fx/fy as fractional percent.
+            # pose_frame='vcam': pert_vec is in the tile's VCAM frame (sampled
+            # directly above), roll_vcam=0. The model learns one frame-agnostic
+            # mapping (input → VCAM 5-DoF); downstream BA aggregates per-tile
+            # (μ_vcam, Σ_vcam) via J_i = R_orig→vcam_i to recover orig δ.
+            if self.pose_frame == 'vcam':
+                pert_vec = np.array([t_vcam[0], t_vcam[1], t_vcam[2],
+                                      ypr_vcam[0], ypr_vcam[1], 0.0,
+                                      dfx_pct, dfy_pct], dtype=np.float32)
+            else:
+                pert_vec = np.array([t_delta[0], t_delta[1], t_delta[2],
+                                      ypr[0], ypr[1], ypr[2],
+                                      dfx_pct, dfy_pct], dtype=np.float32)
             R_inv = R_off.T.astype(np.float32)
             t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
             pts_cam_off = pts_c @ R_inv.T + t_inv       # (M, 3)

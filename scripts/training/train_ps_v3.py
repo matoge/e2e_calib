@@ -210,6 +210,7 @@ def main(cfg=None):
                       max_rot_deg=c.get('max_rot_deg', 0.5),
                       max_fx_pct=c.get('max_fx_pct', 0.0),
                       max_fy_pct=c.get('max_fy_pct', 0.0),
+                      pose_frame=c.get('pose_frame', 'orig'),
                       min_crop_px=c.get('min_crop_px', 128),
                       max_crop_px=c.get('max_crop_px', 512),
                       frame_stride=c.get('frame_stride', 1),
@@ -583,6 +584,17 @@ if __name__ == "__main__":
     ap.add_argument('--max-fy-pct', type=float, default=None,
                     help='multiplicative fy perturbation half-range (independent of fx). '
                          'PS BA shows fx/fy drift independently per cam → train them separately.')
+    ap.add_argument('--pose-frame', choices=('orig','vcam'), default=None,
+                    help='Frame in which the CLS pose-head target is expressed. '
+                         "'orig' (default): orig camera frame — label depends on "
+                         'where in the image the tile was cropped (model needs '
+                         'visual context to disambiguate position relative to '
+                         'optical axis). '
+                         "'vcam': tile-local virtual-camera frame whose optical "
+                         'axis is the ray through the tile center → label is '
+                         'crop-position-agnostic. roll_vcam=0 (dropped). '
+                         'Downstream BA aggregates per-tile (μ_v, Σ_v) via '
+                         'J_i = R_orig→vcam_i.')
     ap.add_argument('--zoom-aug', action='store_true',
                     help='depth-dependent zoom-in aug: shrink cs by up to '
                          'scale_max(z) (1.0@z=20m → 2.0@z>=100m). Synthesizes '
@@ -633,6 +645,7 @@ if __name__ == "__main__":
     if args.frame_pose_weight is not None: cfg['frame_pose_weight'] = args.frame_pose_weight
     if args.max_fx_pct is not None: cfg['max_fx_pct'] = args.max_fx_pct
     if args.max_fy_pct is not None: cfg['max_fy_pct'] = args.max_fy_pct
+    if args.pose_frame is not None: cfg['pose_frame'] = args.pose_frame
     # When fx/fy perturbation is on, default the frame-pose head to 8-DoF
     # (6-DoF SE3 + Δfx_pct + Δfy_pct). Caller can override with frame_pose_dof.
     if (cfg.get('max_fx_pct', 0.0) > 0 or cfg.get('max_fy_pct', 0.0) > 0) \
