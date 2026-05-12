@@ -203,15 +203,17 @@ def _quat_to_yaw(qw, qx, qy, qz):
                             1.0 - 2.0 * (qy * qy + qz * qz)))
 
 
-def _load_cuboids_in_cam(frame_dir: Path, T_inv: np.ndarray):
-    """Read object_detection.json (ZOD format) and transform vehicle → cam.
+def _load_cuboids_in_cam(frame_dir: Path, T_inv: np.ndarray, T_vl: np.ndarray = None):
+    """Read object_detection.json (ZOD format) and return cuboids in VEHICLE frame.
 
-    ZOD format: list of objects with `properties.location_3d.coordinates`,
-    `size_3d_{length,width,height}`, `orientation_3d_q{w,x,y,z}`. Only items
-    with 3D bbox fields are kept (lane / 2D-only entries skipped).
+    BUG fix 2026-05-12: ZOD's 3D box `location_3d.coordinates` is in the LIDAR
+    (Velodyne) frame, NOT vehicle frame. The SDK's ObjectAnnotation.from_dict
+    uses `frame=Lidar.VELODYNE` explicitly. Previously we stored these as if
+    vehicle-frame → membership test against vehicle-frame pts always missed
+    objects (is_obj near zero across the cache).
 
-    Filter out tiny / zero-extent items (poles, bollards) where size_3d_length
-    < 0.3m — those have ill-defined yaw and confuse the AABB membership test.
+    Now: transform pos + orientation lidar → vehicle via T_vl, store in
+    vehicle frame so the existing AABB-around-Z membership test still works.
     """
     ann_path = frame_dir / "annotations" / "object_detection.json"
     if not ann_path.exists():
@@ -233,34 +235,40 @@ def _load_cuboids_in_cam(frame_dir: Path, T_inv: np.ndarray):
         size_h = props.get('size_3d_height')
         if size_l is None or size_w is None or size_h is None:
             continue
-        # skip poles/bollards/very-small items where dims < 0.3m
-        if min(size_l, size_w, size_h) < 0.3:
+        # NOTE: previously filtered min(dims) < 0.3m to drop poles/bollards.
+        # User asked to keep ALL boxes (signs/poles are great calib anchors).
+        # Just guard against zero-dim entries.
+        if min(size_l, size_w, size_h) <= 1e-3:
             continue
         qw = props.get('orientation_3d_qw', 1.0)
         qx = props.get('orientation_3d_qx', 0.0)
         qy = props.get('orientation_3d_qy', 0.0)
         qz = props.get('orientation_3d_qz', 0.0)
-        pos_v = np.asarray(loc['coordinates'], dtype=np.float32)
-        if pos_v.size != 3:
+        pos_lidar = np.asarray(loc['coordinates'], dtype=np.float32)
+        if pos_lidar.size != 3:
             continue
-        # Vehicle-frame: x=fwd, y=left, z=up; ZOD size_3d_length is along x (fwd),
-        # size_3d_width along y (left), size_3d_height along z (up).
-        # In CAM frame (cv2: x=right, y=down, z=fwd): the AABB rotated about Z
-        # in `_is_obj_per_point` is WRONG (yaw is about vehicle-Z=up, which maps
-        # to cam ≈ -Y, not Z). Workaround: store cuboid in vehicle frame and
-        # the membership test runs in vehicle frame too. We add a flag so
-        # downstream knows.
-        # Map dims: vehicle (l, w, h) along (x_fwd, y_left, z_up). With yaw
-        # rotation about Z, AABB extents are (l/2, w/2, h/2). Correct as-is.
         dims = np.asarray([size_l, size_w, size_h], dtype=np.float32)
-        yaw = _quat_to_yaw(qw, qx, qy, qz)
-        # Keep cuboid in VEHICLE frame so yaw axis (=Z up) matches the AABB
-        # rotation in `_is_obj_per_point`. The membership test must therefore
-        # be done in vehicle frame as well — see `process_frame` which converts
-        # pts_vis (cam frame) → pts_veh via T_vc before calling.
-        pos_cam = pos_v.astype(np.float32)  # actually vehicle frame; name kept for compat
+        # Lidar→vehicle: pos transforms by T_vl (full 4x4), yaw transforms via
+        # the rotation block of T_vl. If T_vl is missing (legacy callers), fall
+        # back to treating coords as vehicle-frame — but that's the bug we just
+        # fixed and downstream membership will silently zero out.
+        if T_vl is not None:
+            R_vl = T_vl[:3, :3].astype(np.float64)
+            t_vl = T_vl[:3, 3].astype(np.float64)
+            pos_veh = (R_vl @ pos_lidar.astype(np.float64)) + t_vl
+            # Compose orientation: full rotation = R_vl @ Rz(yaw_lidar). We need
+            # yaw_veh = z-component of the resulting rotation (assuming T_vl
+            # has near-identity rotation up to small mount tilt — true for ZOD).
+            from scipy.spatial.transform import Rotation as _R
+            R_obj_lidar = _R.from_quat([qx, qy, qz, qw]).as_matrix()
+            R_obj_veh = R_vl @ R_obj_lidar
+            yaw = float(np.arctan2(R_obj_veh[1, 0], R_obj_veh[0, 0]))
+            pos_out = pos_veh.astype(np.float32)
+        else:
+            pos_out = pos_lidar.astype(np.float32)
+            yaw = _quat_to_yaw(qw, qx, qy, qz)
         cubs.append({
-            'pos':  pos_cam.astype(np.float32),
+            'pos':  pos_out,
             'dims': dims,
             'yaw':  float(yaw),
         })
@@ -331,7 +339,7 @@ def process_frame(args_tuple):
         # cuboids stored in VEHICLE frame (yaw axis = vehicle Z = up).
         # AABB membership test must run in vehicle frame too — convert visible
         # pts_cam → pts_veh via T_vc and use those for is_obj.
-        cubs = _load_cuboids_in_cam(frame_dir, T_cv)  # actually vehicle frame
+        cubs = _load_cuboids_in_cam(frame_dir, T_cv, T_vl=T_vl)  # cuboids now in vehicle frame
         pts_vis_h = np.column_stack([pts_vis, np.ones(len(pts_vis), dtype=np.float32)])
         pts_vis_veh = (T_vc @ pts_vis_h.T).T[:, :3].astype(np.float32)
         is_obj_vis = _is_obj_per_point(pts_vis_veh, cubs)
