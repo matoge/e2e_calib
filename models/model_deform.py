@@ -141,10 +141,18 @@ class MSDeformAttn(nn.Module):
             # dtype + be contiguous. reference_points arrives in fp32 from outside
             # autocast scope, so align to value's dtype.
             dt = value.dtype
+            # Kernel asserts B % step == 0. Default step is 64 (clean for the
+            # 128/64-multiple batches), but the LAST batch of an epoch is
+            # `len(ds) % batch_size` samples — e.g. 128250 % 128 = 250 → batch
+            # 1001 of 128 + batch 1002 of 122, and 122 % 64 = 58 → assert fail
+            # mid-training. Fall back to step=B for that partial batch so the
+            # kernel does one chunk instead of erroring. Perf impact is zero on
+            # divisible batches (the >99% case).
+            step = self.im2col_step if B % self.im2col_step == 0 else B
             out = _MSDAFunctionCUDA.apply(
                 value.contiguous(), input_spatial_shapes, input_level_start_index,
                 sampling_locations.to(dt).contiguous(), aw.to(dt).contiguous(),
-                self.im2col_step)
+                step)
         else:
             # pure pytorch (works on CPU + CUDA; differentiable)
             shapes_list = [(int(h), int(w)) for h, w in input_spatial_shapes.tolist()]
