@@ -16,22 +16,31 @@ from datasets.pandaset_full import PandaSetCalibDatasetFull, _is_obj_per_point, 
 def _full_proj(inst):
     img = decode_inst_img(inst).permute(1, 2, 0).numpy()
     IH, IW = img.shape[:2]
-    K = inst['K_full'].numpy()
-    T_gt = inst['T_gt'].numpy()
     pts = inst['pts'].numpy()
     cubs = inst.get('cuboids', [])
-    homo = np.column_stack([pts, np.ones(len(pts))])
-    pcam = (T_gt @ homo.T)[:3].T
-    z = pcam[:, 2]
-    uv = ((K @ pcam.T)[:2] / np.maximum(pcam[:, 2:].T, 1e-6)).T
-    # Tile inst: K_full stays in PARENT coords (distortion-safe), so projection
-    # lands at parent-image uv. Subtract (tile_u0, tile_v0) to bring into the
-    # tile-local canvas the renderer is showing.
-    tile_u0 = int(inst.get('tile_u0', 0)); tile_v0 = int(inst.get('tile_v0', 0))
-    if tile_u0 or tile_v0:
-        uv = uv - np.array([tile_u0, tile_v0], dtype=uv.dtype)
+    # Prefer cached uv_full + z_cam (was computed at build time with the right
+    # lens model — KB fisheye for ZOD, pinhole for PS/Waymo). Re-projecting
+    # via plain K @ pts here would silently miss edge pts on fisheye caches.
+    if 'uv_full' in inst and 'z_cam' in inst:
+        uv = inst['uv_full'].numpy().astype(np.float32, copy=False)
+        z  = inst['z_cam'].numpy().astype(np.float32, copy=False)
+    else:
+        K = inst['K_full'].numpy()
+        T_gt = inst['T_gt'].numpy()
+        homo = np.column_stack([pts, np.ones(len(pts))])
+        pcam = (T_gt @ homo.T)[:3].T
+        z = pcam[:, 2]
+        uv = ((K @ pcam.T)[:2] / np.maximum(pcam[:, 2:].T, 1e-6)).T
+        tile_u0 = int(inst.get('tile_u0', 0)); tile_v0 = int(inst.get('tile_v0', 0))
+        if tile_u0 or tile_v0:
+            uv = uv - np.array([tile_u0, tile_v0], dtype=uv.dtype)
     vis = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW) & (uv[:, 1] >= 0) & (uv[:, 1] < IH)
-    is_obj = _is_obj_per_point(pts, cubs).astype(bool)
+    # is_obj: prefer cache value if present (already computed in build, in
+    # cuboid frame). Fallback recompute (legacy caches).
+    if 'is_obj' in inst:
+        is_obj = (inst['is_obj'].numpy() > 0).astype(bool)
+    else:
+        is_obj = _is_obj_per_point(pts, cubs).astype(bool)
     return img, uv, vis, is_obj, IH, IW
 
 
