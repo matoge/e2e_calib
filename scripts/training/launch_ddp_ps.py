@@ -13,7 +13,8 @@ Expected usage (from submit_clearml_task.sh):
 
 Env overrides:
   LDP_NUM_GPUS            (default from --num-gpus; final fallback=4)
-  LDP_MIXED_PRECISION     (default bf16; A100 ok, V100 should set fp16)
+  LDP_MIXED_PRECISION     (default auto: sm_80+ → bf16, sm_70 → fp16, else no.
+                           Pass 'auto' explicitly, or set to fp16/bf16/no to pin.)
   LDP_TARGET_SCRIPT       (default scripts/training/train_ps_v3_ddp.py)
 
 Design notes:
@@ -32,10 +33,33 @@ import subprocess
 from pathlib import Path
 
 
+def _auto_mixed_precision():
+    """Pick fp16/bf16/no by querying the visible GPU's compute capability.
+
+    Why: V100 (sm_70) has no bf16 tensor cores → bf16 falls back to a slow
+    software path (measured ~6× slower than fp16). Ampere+ (sm_80+) has
+    native bf16, which has a wider exponent range than fp16 and is
+    preferred for training stability. CPU-only / no CUDA → 'no'.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return "no"
+        major, _ = torch.cuda.get_device_capability(0)
+    except Exception:
+        return "bf16"  # conservative default for modern clusters
+    if major >= 8:
+        return "bf16"   # Ampere, Ada, Hopper, Blackwell
+    if major == 7:
+        return "fp16"   # Volta / Turing — bf16 tensor cores absent
+    return "no"         # Pascal and older: no AMP tensor cores
+
+
 def _parse_known(argv):
     """Split off our launcher-specific flags; pass everything else through."""
     num_gpus = None
-    mp = os.environ.get("LDP_MIXED_PRECISION", "bf16")
+    env_mp = os.environ.get("LDP_MIXED_PRECISION")
+    mp = env_mp  # None means "not user-specified yet" → will auto-pick below
     target = os.environ.get(
         "LDP_TARGET_SCRIPT", "scripts/training/train_ps_v3_ddp.py"
     )
@@ -59,6 +83,8 @@ def _parse_known(argv):
             passthrough.append(a); i += 1
     if num_gpus is None:
         num_gpus = int(os.environ.get("LDP_NUM_GPUS", "4"))
+    if mp is None or mp == "auto":
+        mp = _auto_mixed_precision()
     return num_gpus, mp, target, passthrough
 
 
