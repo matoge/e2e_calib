@@ -1,0 +1,34 @@
+{
+  "provenance": {
+    "config_path": "configs/ba/pandaset_3cam_corr_multicam.json",
+    "config_sha256_prefix": "ed0d9ff0580a706a",
+    "git_sha": "71bd663f89",
+    "run_started": "2026-05-13T06:51:05",
+    "model_ckpt": "experiments/ps_multicam_corr_vcam_clspose_fxfy_100ep/best_model.pt",
+    "model_ckpt_mtime": "2026-05-13T06:45:05",
+    "elapsed_sec": 26.6
+  },
+  "ba_param": "2dof_omega_x_omega_y_fx_fy_fixed",
+  "corrections": {
+    "left_camera": {
+      "omega_x_deg": -0.11238058803970188,
+      "omega_y_deg": 0.2781770162269794,
+      "delta_fx_px": 5.622163719202554,
+      "fx_ref": 930.451416015625,
+      "delta_fx_pct": 0.6042404388267535,
+      "n_scenes": 10,
+      "n_frames": 10,
+      "n_pts": 191887
+    },
+    "right_camera": {
+      "omega_x_deg": -0.19801002208289872,
+      "omega_y_deg": -0.42826225372794735,
+      "delta_fx_px": 5.145094906039243,
+      "fx_ref": 922.5465087890625,
+      "delta_fx_pct": 0.5577057478427522,
+      "n_scenes": 10,
+      "n_frames": 10,
+      "n_pts": 184282
+    }
+  }
+}

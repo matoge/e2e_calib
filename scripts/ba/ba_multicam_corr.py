@@ -361,16 +361,19 @@ def main():
         UV = np.concatenate(pooled_uv)
         PAR = np.concatenate(pooled_par)
         Z = np.concatenate(pooled_z)
-        delta = solve_2dof(UV, PAR, Z, K_ref, damping=ba_cfg["damping"])
+        delta = solve_3dof(UV, PAR, Z, K_ref, damping=ba_cfg["damping"])
         corrections[cam] = {
             "omega_x_deg": float(delta[0]),
             "omega_y_deg": float(delta[1]),
+            "delta_fx_px": float(delta[2]),
             "fx_ref": float(K_ref[0, 0]),
+            "delta_fx_pct": float(delta[2]) / float(K_ref[0, 0]) * 100.0,
             "n_scenes": int(per_scene),
             "n_frames": int(per_frame),
             "n_pts": int(len(UV)),
         }
-        print(f"  → ωx={delta[0]:+.4f}°  ωy={delta[1]:+.4f}°  "
+        print(f"  → ωx={delta[0]:+.4f}°  ωy={delta[1]:+.4f}°  Δfx={delta[2]:+.2f}px "
+              f"({delta[2]/K_ref[0,0]*100:+.3f}%)  "
               f"scenes={per_scene} frames={per_frame} pts={len(UV)}")
 
     # BEFORE/AFTER vis
@@ -399,7 +402,7 @@ def main():
             "model_ckpt_mtime": datetime.fromtimestamp(ckpt_p.stat().st_mtime).isoformat(timespec="seconds"),
             "elapsed_sec": round(time.time() - t0, 1),
         },
-        "ba_param": "2dof_omega_x_omega_y_fx_fy_fixed",
+        "ba_param": "3dof_omega_x_omega_y_dfx",
         "corrections": corrections,
     }
     out_p = Path(cfg["output"]["corrections_json"])
