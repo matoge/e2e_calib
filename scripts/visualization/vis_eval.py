@@ -64,8 +64,32 @@ def render_eval_samples(*, model, ds, out_dir, img_size: int,
         idxs = list(sample_idxs); obj_filter = False
 
     S = int(img_size)
+    # Two-pass selection: first try obj_filter on; if we can't fill `n` samples
+    # (e.g. TSS4 + datasets without is_obj plumbed), retry without the filter
+    # so a small N of useful vis always renders for any cache.
+    pool = idxs[:max(200, n * 10)]
+    if obj_filter:
+        prefilter = []
+        for idx in pool:
+            try: _smp = ds[int(idx)]
+            except Exception: continue
+            iobj = _smp[2][:, 3].numpy() > 0.5  # dist_uvd[:, 3] == is_obj flag
+            if iobj.any():
+                d_obj = _smp[2][iobj, :2].numpy()
+                if max(float(d_obj[:,0].max() - d_obj[:,0].min()),
+                       float(d_obj[:,1].max() - d_obj[:,1].min())) >= 16:
+                    prefilter.append(int(idx))
+            if len(prefilter) >= n: break
+        if len(prefilter) >= n // 2:    # enough obj-rich samples found
+            pool = prefilter
+            obj_filter = False           # already filtered, skip per-sample check
+            log(f'vis_ep{epoch:03d}: obj_filter found {len(pool)} samples')
+        else:
+            obj_filter = False
+            log(f'vis_ep{epoch:03d}: obj-poor cache → using random samples (obj_filter disabled)')
+
     saved = 0
-    for idx in idxs[:max(200, n * 10)]:
+    for idx in pool:
         if saved >= n: break
         try:
             np.random.seed(int(idx))   # deterministic crop + perturbation across epochs
@@ -84,8 +108,16 @@ def render_eval_samples(*, model, ds, out_dir, img_size: int,
         pad = torch.zeros(1, Nmax, dtype=torch.bool, device=device)
         with torch.autocast(device_type='cuda', dtype=amp_dtype), torch.no_grad():
             img_gpu = img.unsqueeze(0).to(device).float().div_(255.0)
-            _out = model(img_gpu,
-                          dist_uvd.unsqueeze(0).to(device)[..., :3],
+            # Match train-side intensity handling. V3-i dist_uvd is (N, 5) =
+            # [u, v, d, is_obj, intensity]; legacy is (N, 3). When
+            # model.use_intensity, feed [u, v, d, intensity] (skip is_obj at 3).
+            _dist = dist_uvd.unsqueeze(0).to(device)
+            if getattr(model, 'use_intensity', False):
+                _dist_in = torch.stack([_dist[..., 0], _dist[..., 1],
+                                         _dist[..., 2], _dist[..., 4]], dim=-1)
+            else:
+                _dist_in = _dist[..., :3]
+            _out = model(img_gpu, _dist_in,
                           key_padding_mask=pad,
                           vfp=vfp.view(1).to(device),
                           bucket_uvd=bucket_uvd_v.unsqueeze(0).to(device),
@@ -216,8 +248,13 @@ def render_pose_eval_samples(*, model, ds, out_dir, img_size: int,
         pad = torch.zeros(1, Nmax, dtype=torch.bool, device=device)
         with torch.autocast(device_type='cuda', dtype=amp_dtype), torch.no_grad():
             img_gpu = img.unsqueeze(0).to(device).float().div_(255.0)
-            _out = model(img_gpu,
-                          dist_uvd.unsqueeze(0).to(device)[..., :3],
+            _dist = dist_uvd.unsqueeze(0).to(device)
+            if getattr(model, 'use_intensity', False):
+                _dist_in = torch.stack([_dist[..., 0], _dist[..., 1],
+                                         _dist[..., 2], _dist[..., 4]], dim=-1)
+            else:
+                _dist_in = _dist[..., :3]
+            _out = model(img_gpu, _dist_in,
                           key_padding_mask=pad,
                           vfp=vfp.view(1).to(device),
                           bucket_uvd=bucket_uvd_v.unsqueeze(0).to(device),
