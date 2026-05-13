@@ -40,7 +40,7 @@ CFG = dict(
     use_convnext  = True,
     use_frustum   = True,
     epochs        = 100,
-    batch_size    = 128,
+    batch_size    = 256,
     lr            = 3e-4,
     lr_min        = 1e-7,
     val_fraction  = 0.1,
@@ -48,8 +48,8 @@ CFG = dict(
     min_crop_px   = 128,
     max_crop_px   = 384,
     deform_mode   = "sl",
-    oversample    = 1,
-    num_workers   = 12,
+    oversample    = 4,
+    num_workers   = 16,
     max_rot_deg   = 1.5,
     max_offset_m  = 0.6,
     val_size      = 8000,
@@ -405,6 +405,12 @@ def main(cfg=None):
     # can't even start). Skipping until vis_ep000 is moved to subprocess.
 
     cur_sigma = None
+    # Validation cadence: validate every `val_every` epochs (default 1 = every
+    # epoch). Validation pass takes ~20-30s on this rig; for long runs that
+    # plateau slowly, sub-sampling val saves >25% wall time without losing
+    # the best-ckpt signal (still validated on the final epoch + ep 1).
+    val_every = int(c.get('val_every', 1))
+    last_va = None
     for epoch in range(1, epochs+1):
         _ep_start = time.time()
         # Stage 2 query drop schedule: linear 0.2 → 0.8 over training.
@@ -433,11 +439,23 @@ def main(cfg=None):
          tr_obj_med, tr_obj_p95, tr_bg_med, tr_bg_p95,
          tr_pt_nll, tr_fr_nll) = epoch_loop(
             model, train_loader, optimizer, scaler, True, frame_pose_weight=fp_w)
-        with torch.no_grad():
+        do_val = (epoch == 1) or (epoch == epochs) or (epoch % val_every == 0)
+        if do_val:
+            with torch.no_grad():
+                (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
+                 va_obj_med, va_obj_p95, va_bg_med, va_bg_p95,
+                 va_pt_nll, va_fr_nll) = epoch_loop(
+                    model, val_loader, optimizer, scaler, False, frame_pose_weight=fp_w)
+            last_va = (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
+                       va_obj_med, va_obj_p95, va_bg_med, va_bg_p95,
+                       va_pt_nll, va_fr_nll)
+        else:
+            # Validation skipped this epoch (val_every > 1). Reuse prior values
+            # for logging; best-ckpt save below is gated on do_val so we never
+            # promote a stale value.
             (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
              va_obj_med, va_obj_p95, va_bg_med, va_bg_p95,
-             va_pt_nll, va_fr_nll) = epoch_loop(
-                model, val_loader, optimizer, scaler, False, frame_pose_weight=fp_w)
+             va_pt_nll, va_fr_nll) = last_va
         scheduler.step()
         history['ep'].append(epoch)
         history['tr_nll'].append(tr_nll); history['va_nll'].append(va_nll)
@@ -452,7 +470,7 @@ def main(cfg=None):
             f"mse={va_mse:.2f}(obj={va_obj_mse:.2f}/m{va_obj_med:.2f}/95p{va_obj_p95:.1f} "
             f"bg={va_bg_mse:.2f}/m{va_bg_med:.2f}/95p{va_bg_p95:.1f})  "
             f"lr={scheduler.get_last_lr()[0]:.2e}  tot={(time.time()-t0)/60:.1f}min")
-        if va_nll < best_val:
+        if do_val and va_nll < best_val:
             best_val = va_nll
             torch.save(model.state_dict(), ckpt)
             log(f"  ↳ saved (val_nll={best_val:.4f})")
@@ -636,6 +654,10 @@ if __name__ == "__main__":
                          'e.g. 20000 → 78 batches @ bs=256 → ~14s/ep')
     ap.add_argument('--val-size', type=int, default=None,
                     help='deterministic first-N val subsample for fast eval')
+    ap.add_argument('--val-every', type=int, default=None,
+                    help='run validation every N epochs (default 1). Best-ckpt '
+                         'is only updated on a validated epoch; ep 1 and the '
+                         'final epoch always run val regardless.')
     ap.add_argument('--curriculum', default=None,
                     help='sigma curriculum spec, semicolon-separated stages '
                          'e.g. "1-25:0.5,0.05;26-60:1.0,0.10;61-100:2.0,0.20"')
@@ -692,6 +714,7 @@ if __name__ == "__main__":
     if args.zoom_aug: cfg['zoom_aug'] = True
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
+    if args.val_every  is not None: cfg['val_every']  = args.val_every
     if args.curriculum:
         # parse "1-25:0.5,0.05;26-60:1.0,0.10;..."
         stages = []
