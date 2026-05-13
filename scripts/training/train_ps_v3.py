@@ -411,9 +411,19 @@ def main(cfg=None):
             log(f"vis_pretrain skipped: {e}")
 
     def _midtrain_vis(epoch: int, n: int = 30):
-        """Render N obj-centered val tiles with current model output. Thin
-        wrapper around scripts.visualization.vis_eval.render_eval_samples so
-        post-training demos go through the SAME pipeline (no private vis)."""
+        """Render N val tiles with the current model. Same images every epoch.
+
+        vis_pretrain ran with ds.fnames = train+val combined (scene-stratified
+        pick) and persisted `sample_idxs.json` under those *combined* indices.
+        For vis_eval to render the SAME tiles every epoch the dataset it
+        indexes into must be the same combined view — not a Subset (Subset
+        re-indexes) and not a sequence-level split (different fnames list).
+
+        We expose a small combined-fnames dataset here and let render_eval
+        pull sample_idxs.json straight through. When --frame-split is on the
+        combined view also matches what tr_full was mutated to (so val
+        frames inside it ARE held out from training).
+        """
         if zod_src:
             from datasets.zod_full import ZODCalibDataset
             ds = ZODCalibDataset(zod_src, split='val',
@@ -423,7 +433,7 @@ def main(cfg=None):
                                   oversample=1)
         else:
             from datasets.pandaset_full import PandaSetCalibDatasetFull
-            ds = PandaSetCalibDatasetFull(cache_first, split='val',
+            ds = PandaSetCalibDatasetFull(cache_first, split='train',
                                                   img_size=c['img_size'],
                                                   min_crop_px=c.get('min_crop_px', 128),
                                                   max_crop_px=c.get('max_crop_px', 384),
@@ -432,6 +442,12 @@ def main(cfg=None):
                                                   max_offset_m=c.get('max_offset_m', 0.20),
                                                   max_rot_deg=c.get('max_rot_deg', 0.5),
                                                   oversample=1)
+            # Match vis_pretrain's combined-fnames view so sample_idxs.json
+            # (saved by the vis_pretrain subprocess at ep 0) resolves to the
+            # same tiles every epoch.
+            import torch as _torch
+            _meta = _torch.load(Path(cache_first) / 'meta.pt', weights_only=False)
+            ds.fnames = list(_meta['train']) + list(_meta['val'])
         from scripts.visualization.vis_eval import render_eval_samples
         return render_eval_samples(
             model=model, ds=ds, out_dir=exp_dir / f'vis_ep{epoch:03d}',
