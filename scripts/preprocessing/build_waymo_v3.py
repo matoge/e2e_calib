@@ -183,6 +183,7 @@ def process_seg(args_tuple):
         for cam_id, proj in per_cam.items():
             uv = proj['uv'].astype(np.float32)
             depth = proj['depth'].astype(np.float32)
+            intensity = proj.get('intensity', np.zeros_like(depth)).astype(np.float32)
             laser = proj['laser'].astype(np.int8)
             if cam_id not in cam_by_ts.get(ts, {}) or len(uv) < 16:
                 continue
@@ -226,6 +227,7 @@ def process_seg(args_tuple):
                     z_cam    = torch.from_numpy(zc),
                     is_obj   = torch.from_numpy(is_obj_vis),
                     laser    = torch.from_numpy(laser),
+                    intensity = torch.from_numpy(intensity),
                 ))
                 torch.save(inst, inst_dir / f'{gid:08d}.pt')
                 gid += 1
@@ -239,6 +241,7 @@ def process_seg(args_tuple):
                     is_obj_vis=is_obj_vis, common_inst=common_inst,
                     tile_w=tw, tile_h=th, stride=st, pad_px=pad,
                     y_start=y0, jpg_quality=q,
+                    intensity_vis=intensity,
                     out_dir=inst_dir, gid_base=gid)
                 gid += 1
                 written += len(tile_files)

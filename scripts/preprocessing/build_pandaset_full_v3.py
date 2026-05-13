@@ -99,11 +99,18 @@ def _process_scene(args_tuple):
         if 'd' in df.columns:
             df = df[df['d'] == 0]
         pts_world = df[['x','y','z']].values.astype(np.float32)
+        # PandaSet lidar pkl includes an `i` (intensity) column per-point in
+        # [0, 255] float. Save it alongside pts so the V3-i dataset path can
+        # feed a 4-ch PointMLP (memory: project_lidar_intensity_pending).
+        intensity_all = (df['i'].values.astype(np.float32)
+                         if 'i' in df.columns
+                         else np.zeros(len(df), dtype=np.float32))
         uv, z = _project(pts_world, pose_mat, K)
         vis = (z > 0.5) & (uv[:,0] >= 0) & (uv[:,0] < IW) & (uv[:,1] >= 0) & (uv[:,1] < IH)
         if vis.sum() < min_pts:
             continue
         pts_vis = pts_world[vis]
+        intensity_vis = intensity_all[vis]
 
         img_path = cam_dir / f'{fi:02d}.jpg'
         if not img_path.exists():
@@ -163,6 +170,7 @@ def _process_scene(args_tuple):
                 uv_full  = torch.from_numpy(uv_vis),
                 z_cam    = torch.from_numpy(z_vis),
                 is_obj   = torch.from_numpy(is_obj_vis),
+                intensity = torch.from_numpy(intensity_vis),
             ))
             fname = f'{gid:08d}.pt'
             torch.save(inst, Path(out_dir) / fname)
@@ -203,6 +211,7 @@ def _process_scene(args_tuple):
                     uv_t     = uv_vis[in_pad]                         # parent-image coords
                     z_t      = z_vis[in_pad]
                     is_obj_t = is_obj_vis[in_pad]
+                    intensity_t = intensity_vis[in_pad]
                     in_box_t = ((uv_t[:, 0] >= tx) & (uv_t[:, 0] < tx + tw) &
                                 (uv_t[:, 1] >= ty) & (uv_t[:, 1] < ty + th)).astype(np.float32)
 
@@ -222,6 +231,7 @@ def _process_scene(args_tuple):
                         z_cam     = torch.from_numpy(z_t),
                         is_obj    = torch.from_numpy(is_obj_t),
                         in_box    = torch.from_numpy(in_box_t),       # 1.0 = strict tile
+                        intensity = torch.from_numpy(intensity_t),
                     ))
                     fname = f'{gid:08d}_t{tile_id}.pt'
                     torch.save(inst, Path(out_dir) / fname)

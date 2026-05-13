@@ -151,7 +151,10 @@ def read_range_all(lidar_parquet_path: Path | str,
             if vals is None or len(vals) == 0:
                 continue
             arr = np.asarray(vals, dtype=np.float32).reshape(shape)
-            out[ts][lid][ret] = arr[:, :, 0]
+            # Keep full (H, W, C) so callers can grab intensity from channel 1
+            # in addition to range at channel 0 (Waymo v2 lidar parquet
+            # encoding). per_cam_projections handles both slices internally.
+            out[ts][lid][ret] = arr
     return out
 
 
@@ -171,13 +174,18 @@ def per_cam_projections(lcp_arrs: dict, range_arrs: dict,
             ret:   (N,)   uint8    (1 = return1, 2 = return2)
     """
     cams = list(cams)
-    buckets = {c: dict(uv=[], depth=[], laser=[], ret=[]) for c in cams}
+    buckets = {c: dict(uv=[], depth=[], intensity=[], laser=[], ret=[]) for c in cams}
     for lid, by_ret in lcp_arrs.items():
         rng_by_ret = range_arrs.get(lid, {})
         for ret_name, proj in by_ret.items():
-            depth = rng_by_ret.get(ret_name)
-            if depth is None:
+            range_img = rng_by_ret.get(ret_name)
+            if range_img is None:
                 continue
+            # read_range_all now returns the full (H, W, C) range image;
+            # channel 0 = range (m), channel 1 = intensity.
+            depth     = range_img[..., 0]
+            intensity = (range_img[..., 1] if range_img.shape[-1] > 1
+                         else np.zeros_like(depth))
             d_valid = depth > 0
             ret_idx = 1 if ret_name == 'return1' else 2
             # 2 projection slots per pixel
@@ -191,6 +199,7 @@ def per_cam_projections(lcp_arrs: dict, range_arrs: dict,
                         continue
                     buckets[c]['uv'   ].append(np.stack([u[m], v[m]], axis=1).astype(np.float32))
                     buckets[c]['depth'].append(depth[m])
+                    buckets[c]['intensity'].append(intensity[m])
                     n = int(m.sum())
                     buckets[c]['laser'].append(np.full(n, lid, dtype=np.uint8))
                     buckets[c]['ret'  ].append(np.full(n, ret_idx, dtype=np.uint8))
@@ -199,14 +208,16 @@ def per_cam_projections(lcp_arrs: dict, range_arrs: dict,
         if not b['uv']:
             out[c] = dict(uv=np.zeros((0, 2), np.float32),
                           depth=np.zeros(0, np.float32),
+                          intensity=np.zeros(0, np.float32),
                           laser=np.zeros(0, np.uint8),
                           ret=np.zeros(0, np.uint8))
         else:
             out[c] = dict(
-                uv   =np.concatenate(b['uv'   ], axis=0),
-                depth=np.concatenate(b['depth']),
-                laser=np.concatenate(b['laser']),
-                ret  =np.concatenate(b['ret']),
+                uv       =np.concatenate(b['uv'   ], axis=0),
+                depth    =np.concatenate(b['depth']),
+                intensity=np.concatenate(b['intensity']),
+                laser    =np.concatenate(b['laser']),
+                ret      =np.concatenate(b['ret']),
             )
     return out
 
