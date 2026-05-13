@@ -24,21 +24,40 @@ else:
     _AMP_DTYPE = torch.bfloat16
 _NEED_SCALER = (_AMP_DTYPE == torch.float16)
 
+# Default = "pixel-only" CalibNet (per-pt Δuv + Σ head only).
+# Rationale (2026-05-13): the clspose / fxfy heads added in f3d043b and later
+# experiments (vcam pose head, Δfx aug, full-cov CLS) were silently inherited
+# by subsequent runs even when not needed; the σ head correlates with depth
+# not texture, so BA driven by clspose ended up dominated by near-range road
+# pts and skewing calibration estimates. Strip back to 4-layer ConvNeXt +
+# deform_sl + frustum, no CLS head, no intrinsic aug. Opt in to clspose / fxfy
+# only when explicitly studying frame-pose regression.
 CFG = dict(
     name          = "ps_v3_full",
-    n_layers      = 2,
-    img_size      = 64,
+    n_layers      = 4,
+    img_size      = 128,
     in_channels   = 3,
-    use_convnext  = False,
+    use_convnext  = True,
     use_frustum   = True,
     epochs        = 100,
-    batch_size    = 64,
-    lr            = 1e-3,
-    lr_min        = 1e-6,
+    batch_size    = 128,
+    lr            = 3e-4,
+    lr_min        = 1e-7,
     val_fraction  = 0.1,
     split_seed    = 42,
     min_crop_px   = 128,
-    max_crop_px   = 512,
+    max_crop_px   = 384,
+    deform_mode   = "sl",
+    oversample    = 1,
+    num_workers   = 12,
+    max_rot_deg   = 1.5,
+    max_offset_m  = 0.6,
+    val_size      = 8000,
+    # Intentionally OFF:
+    #   use_frame_pose = False  → no CLS frame-pose head
+    #   max_fx_pct     = 0.0    → no intrinsic perturbation augmentation
+    #   max_fy_pct     = 0.0
+    #   pose_frame     = 'orig' → no virtual-camera label conversion
     # --cache は必須。 host ごとに path が違うので default は設けない
     # (旧: /mnt/nvme6t/... は dgx1/2 で存在せず、別 dataset に silent
     #  fall-through する事故を起こしていた。 2026-05-04 撤去)。
