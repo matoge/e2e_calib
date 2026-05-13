@@ -50,6 +50,7 @@ CFG = dict(
     deform_mode   = "sl",
     oversample    = 4,
     num_workers   = 16,
+    use_intensity = True,    # V3-i caches: per-pt intensity → 4-ch PointMLP embed
     max_rot_deg   = 1.5,
     max_offset_m  = 0.6,
     val_size      = 8000,
@@ -94,8 +95,15 @@ def epoch_loop(model, loader, optimizer, scaler, train, frame_pose_weight=0.5):
         if pert_6vec is not None:
             pert_6vec = pert_6vec.to(DEVICE, non_blocking=True)
         gt           = true_uvd[..., :2] - dist_uvd[..., :2]
+        # When use_intensity, pass [u, v, d, intensity] (skip is_obj at idx 3).
+        # dist_uvd is (B, N, 5) = [u, v, d, is_obj, intensity] from V3-i caches.
+        if getattr(model, 'use_intensity', False):
+            pts_in = torch.stack([dist_uvd[..., 0], dist_uvd[..., 1],
+                                   dist_uvd[..., 2], dist_uvd[..., 4]], dim=-1)
+        else:
+            pts_in = dist_uvd[..., :3]
         with torch.autocast(device_type="cuda", dtype=_AMP_DTYPE):
-            params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
+            params = model(imgs, pts_in, key_padding_mask=pad_mask, vfp=vfp,
                             bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
             # When use_frame_pose=True, model returns (per_pt_pred, (μ, log_σ, L)).
             frame_L = None
@@ -273,9 +281,53 @@ def main(cfg=None):
     # val_nll because model effectively memorized scene-level features.
     # The cache split (PandaSetCalibDatasetFull(... split='train' / 'val')) is
     # already scene-disjoint per the build pipeline.
-    train_ds = tr_full
-    val_ds   = va_full
-    log(f"sequence-level split (cache pre-built): train={len(train_ds)} val={len(val_ds)}")
+    if c.get('frame_split', False):
+        # Frame-level split (override sequence-level cache split).
+        # Use when the cache has too few sequences for a meaningful scene-
+        # disjoint val (e.g. TSS4: 1 long sequence). Groups ALL tile fnames by
+        # their frame prefix ('00012345_tN.pt' → frame '00012345'), random-splits
+        # frame IDs by seed, then keeps every tile (and every oversample copy)
+        # of each frame in its assigned split — so no frame leaks between sides.
+        # IMPORTANT: build ONE dataset and override its fnames (LMDB can't be
+        # opened twice in the same worker). Train and val share the underlying
+        # ds (which holds the LMDB env); Subset wraps it for split indices.
+        # Subset is imported at module scope (line 11); a local-scope re-import
+        # here turns it into a function-local variable Python-globally, causing
+        # UnboundLocalError on the non-frame_split path below.
+        import torch as _t
+        # Combine fnames from tr_full + va_full; oversample expansion happens
+        # internally via idx % len(fnames).
+        combined_fnames = list(tr_full.fnames) + list(va_full.fnames)
+        def _frame_of(fname: str) -> str:
+            stem = fname.split('.')[0]
+            return stem.split('_t')[0] if '_t' in stem else stem
+        frame_list = sorted({_frame_of(f) for f in combined_fnames})
+        gen = _t.Generator().manual_seed(int(c.get('split_seed', 42)))
+        perm = _t.randperm(len(frame_list), generator=gen).tolist()
+        n_val_frames = max(1, int(len(frame_list) * float(c.get('val_fraction', 0.1))))
+        val_frames   = set(frame_list[i] for i in perm[:n_val_frames])
+        # Mutate tr_full so its fnames are the union; this is the single dataset
+        # both train_ds and val_ds will wrap via Subset. va_full is discarded
+        # to avoid its LMDB-env conflicting with tr_full's at worker fork time.
+        tr_full.fnames = combined_fnames
+        N_files = len(combined_fnames)
+        oversample = int(c.get('oversample', 1))
+        total = N_files * oversample
+        train_idx, val_idx = [], []
+        for k in range(total):
+            fn = combined_fnames[k % N_files]
+            (val_idx if _frame_of(fn) in val_frames else train_idx).append(k)
+        train_ds = Subset(tr_full, train_idx)
+        val_ds   = Subset(tr_full, val_idx)   # shares the SAME ds (one LMDB env)
+        # del va_full  # not strictly needed; just don't iterate it
+        log(f"frame-level split (override): {len(frame_list)} frames "
+            f"→ val_frames={n_val_frames} ({c.get('val_fraction', 0.1):.0%}), "
+            f"seed={c.get('split_seed', 42)}; "
+            f"instances: train={len(train_ds)} val={len(val_ds)}")
+    else:
+        train_ds = tr_full
+        val_ds   = va_full
+        log(f"sequence-level split (cache pre-built): train={len(train_ds)} val={len(val_ds)}")
 
     # Optional per-epoch random subsample (RandomSampler with num_samples).
     # Each epoch draws this many random indices (without replacement when
@@ -308,7 +360,8 @@ def main(cfg=None):
                           deform_mode=c.get("deform_mode", "none"),
                           use_frame_pose=c.get("use_frame_pose", False),
                           frame_pose_dof=c.get("frame_pose_dof", 6),
-                          frame_pose_full_cov=c.get("frame_pose_full_cov", False)).to(DEVICE)
+                          frame_pose_full_cov=c.get("frame_pose_full_cov", False),
+                          use_intensity=c.get("use_intensity", True)).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     log(f"amp_dtype={_AMP_DTYPE} scaler_enabled={_NEED_SCALER} device={torch.cuda.get_device_name(0)} cc={torch.cuda.get_device_capability(0)}")
 
@@ -347,7 +400,7 @@ def main(cfg=None):
         try:
             _sp.run([_sys.executable, 'scripts/visualization/vis_pretrain.py',
                      '--cache', cache_first, '--out', str(exp_dir / 'vis_pretrain'),
-                     '--n', '10'], check=False, env={**os.environ,
+                     '--n', '30'], check=False, env={**os.environ,
                                                         'CLEARML_TASK_ID': ''})
             log(f"vis_pretrain → {exp_dir / 'vis_pretrain'}")
             if cml_logger is not None:
@@ -357,7 +410,7 @@ def main(cfg=None):
         except (Exception, SystemExit) as e:
             log(f"vis_pretrain skipped: {e}")
 
-    def _midtrain_vis(epoch: int, n: int = 10):
+    def _midtrain_vis(epoch: int, n: int = 30):
         """Render N obj-centered val tiles with current model output. Thin
         wrapper around scripts.visualization.vis_eval.render_eval_samples so
         post-training demos go through the SAME pipeline (no private vis)."""
@@ -503,7 +556,7 @@ def main(cfg=None):
                 pass
 
         if epoch % 10 == 0 or epoch == epochs:
-            try: _midtrain_vis(epoch, n=10)
+            try: _midtrain_vis(epoch, n=30)
             except Exception as _e: log(f"vis_ep{epoch:03d} skipped: {_e}")
 
     log(f"Best val NLL: {best_val:.4f}  |  time: {(time.time()-t0)/60:.1f}min")
@@ -658,6 +711,11 @@ if __name__ == "__main__":
                     help='run validation every N epochs (default 1). Best-ckpt '
                          'is only updated on a validated epoch; ep 1 and the '
                          'final epoch always run val regardless.')
+    ap.add_argument('--frame-split', action='store_true',
+                    help='Override the cache pre-built sequence-level split with '
+                         'a per-frame random split (val_fraction × seed). Use when '
+                         'the cache has too few sequences for scene-disjoint val '
+                         '(e.g. TSS4 = 1 sequence).')
     ap.add_argument('--curriculum', default=None,
                     help='sigma curriculum spec, semicolon-separated stages '
                          'e.g. "1-25:0.5,0.05;26-60:1.0,0.10;61-100:2.0,0.20"')
@@ -715,6 +773,7 @@ if __name__ == "__main__":
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
     if args.val_every  is not None: cfg['val_every']  = args.val_every
+    if args.frame_split:                cfg['frame_split']  = True
     if args.curriculum:
         # parse "1-25:0.5,0.05;26-60:1.0,0.10;..."
         stages = []
