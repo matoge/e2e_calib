@@ -25,7 +25,10 @@ from scripts.ba.ba_multicam_corr import (
 )
 
 from .model_loader import LoadedModel
-from .schemas import CalibRequest, CalibResponse, Correction
+from .schemas import (
+    CalibRequest, CalibResponse, CalibSequenceRequest, CalibSequenceResponse,
+    Correction,
+)
 
 
 DEFAULT_BA = dict(
@@ -136,6 +139,76 @@ class CalibInferencePipeline:
         return ((W - T) // S + 1) * ((H - T) // S + 1)
 
 
+    # -------------------------------------------------------- sequence mode
+    def infer_sequence(self, req: CalibSequenceRequest) -> "SequenceResult":
+        """Pool multiple frames' per-pt residuals into ONE BA solve.
+
+        Same math as scripts/ba/ba_multicam_corr.py's multi-scene loop:
+        each frame's `infer_tiles` returns (uv, par, z); we concatenate
+        across frames and solve once. Per-frame timings are summed, not
+        averaged, so the reported elapsed_ms is the wall the server spent.
+        """
+        t0 = time.time()
+        ba_cfg = dict(self.ba)
+        if req.dof:
+            ba_cfg['dof'] = list(req.dof)
+
+        pooled_uv: list[np.ndarray] = []
+        pooled_par: list[np.ndarray] = []
+        pooled_z:  list[np.ndarray] = []
+        n_tiles_total = 0
+        K_ref: np.ndarray | None = None
+
+        for fr in req.frames:
+            img = self._decode_image(fr)
+            pts_w = np.asarray(fr.pts_world, dtype=np.float64).reshape(-1, 3)
+            K     = np.asarray(fr.K,         dtype=np.float64).reshape(3, 3)
+            T_cw  = np.asarray(fr.T_cw,      dtype=np.float64).reshape(4, 4)
+            if K_ref is None:
+                K_ref = K
+            homo = np.column_stack([pts_w, np.ones(len(pts_w))])
+            pts_c = (T_cw @ homo.T).T[:, :3]
+            z = pts_c[:, 2].astype(np.float32)
+            uv = (K @ pts_c.T).T[:, :2] / np.maximum(z[:, None], 1e-6)
+            uv = uv.astype(np.float32)
+            K_f32 = K.astype(np.float32)
+            res = infer_tiles(self.model, img, uv, z, K_f32, ba_cfg, self.device)
+            if res is None:
+                continue
+            UV, PAR, Z = res
+            pooled_uv.append(UV); pooled_par.append(PAR); pooled_z.append(Z)
+            n_tiles_total += self._estimate_n_tiles(img, ba_cfg)
+
+        if not pooled_uv:
+            return SequenceResult(correction={}, n_frames=len(req.frames),
+                                   n_pts=0, n_tiles_total=n_tiles_total,
+                                   elapsed_ms=(time.time() - t0) * 1e3)
+
+        UV_all  = np.concatenate(pooled_uv,  axis=0)
+        PAR_all = np.concatenate(pooled_par, axis=0)
+        Z_all   = np.concatenate(pooled_z,   axis=0)
+        K_f32   = K_ref.astype(np.float32)
+
+        dof_names = resolve_dof_list(ba_cfg)
+        delta = solve_dofs(UV_all, PAR_all, Z_all, K_f32, dof_names,
+                            damping=ba_cfg['damping'])
+        dof_vals = delta_to_dict(delta, dof_names)
+        return SequenceResult(
+            correction=dof_vals, n_frames=len(req.frames),
+            n_pts=int(len(UV_all)), n_tiles_total=n_tiles_total,
+            elapsed_ms=(time.time() - t0) * 1e3,
+        )
+
+
+@dataclass
+class SequenceResult:
+    correction: dict
+    n_frames: int
+    n_pts: int
+    n_tiles_total: int
+    elapsed_ms: float
+
+
 def correction_response(result: PipelineResult,
                          model_version: str) -> CalibResponse:
     """Format the pipeline output for the public API. Unit/key mapping
@@ -154,6 +227,27 @@ def correction_response(result: PipelineResult,
     )
     return CalibResponse(
         correction=c, n_pts_pooled=result.n_pts, n_tiles=result.n_tiles,
+        elapsed_ms=round(result.elapsed_ms, 2),
+        model_version=model_version,
+    )
+
+
+def sequence_response(result: SequenceResult,
+                       model_version: str) -> CalibSequenceResponse:
+    c = Correction(
+        omega_x_deg = result.correction.get('omega_x'),
+        omega_y_deg = result.correction.get('omega_y'),
+        omega_z_deg = result.correction.get('omega_z'),
+        tx_m        = result.correction.get('tx'),
+        ty_m        = result.correction.get('ty'),
+        tz_m        = result.correction.get('tz'),
+        dfx_px      = result.correction.get('dfx'),
+        dfy_px      = result.correction.get('dfy'),
+        df_common_px= result.correction.get('df_common'),
+    )
+    return CalibSequenceResponse(
+        correction=c, n_frames=result.n_frames,
+        n_pts_pooled=result.n_pts, n_tiles_total=result.n_tiles_total,
         elapsed_ms=round(result.elapsed_ms, 2),
         model_version=model_version,
     )

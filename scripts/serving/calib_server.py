@@ -34,8 +34,13 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 
 from .model_loader import LoadedModel, load_ckpt
-from .pipeline import CalibInferencePipeline, correction_response
-from .schemas import CalibRequest, CalibResponse, HealthResponse
+from .pipeline import (
+    CalibInferencePipeline, correction_response, sequence_response,
+)
+from .schemas import (
+    CalibRequest, CalibResponse, CalibSequenceRequest,
+    CalibSequenceResponse, HealthResponse,
+)
 
 
 log = logging.getLogger('calib_server')
@@ -125,6 +130,22 @@ def infer(req: CalibRequest):
         log.exception('infer failed')
         raise HTTPException(status_code=400, detail=f'inference error: {e}')
     return correction_response(result, model_version=pipe.version)
+
+
+@app.post('/infer_sequence', response_model=CalibSequenceResponse)
+def infer_sequence(req: CalibSequenceRequest):
+    """Pool many frames into ONE global BA solve. Same math as
+    scripts/ba/ba_multicam_corr.py's multi-scene loop."""
+    pipe = HOLDER.current
+    if pipe is None:
+        raise HTTPException(status_code=503, detail='model not loaded')
+    try:
+        with torch.no_grad():
+            result = pipe.infer_sequence(req)
+    except Exception as e:
+        log.exception('infer_sequence failed')
+        raise HTTPException(status_code=400, detail=f'inference error: {e}')
+    return sequence_response(result, model_version=pipe.version)
 
 
 def main():

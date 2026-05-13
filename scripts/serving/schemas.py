@@ -91,3 +91,30 @@ class HealthResponse(BaseModel):
     status: str
     model_version: str
     cuda_available: bool
+
+
+class CalibSequenceRequest(BaseModel):
+    """A list of frames from the SAME camera (single cam id, identical K).
+    The server runs per-frame inference and pools every pivot into ONE
+    global BA solve — the same multi-frame averaging used in
+    scripts/ba/ba_multicam_corr.py with N scenes × N frames. K and dof
+    are taken from the first frame; per-frame T_cw / image / lidar pts
+    can differ.
+    """
+    frames: List[CalibRequest] = Field(
+        ..., min_length=1,
+        description="Frames pooled into one BA. Order doesn't affect the result.",
+    )
+    dof: Optional[List[str]] = Field(
+        None,
+        description="Override DoF for the global solve (per-frame `dof` ignored).",
+    )
+
+
+class CalibSequenceResponse(BaseModel):
+    correction: Correction
+    n_frames: int
+    n_pts_pooled: int
+    n_tiles_total: int
+    elapsed_ms: float
+    model_version: str
