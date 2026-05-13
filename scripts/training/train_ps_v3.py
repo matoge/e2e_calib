@@ -711,6 +711,11 @@ if __name__ == "__main__":
                     help='run validation every N epochs (default 1). Best-ckpt '
                          'is only updated on a validated epoch; ep 1 and the '
                          'final epoch always run val regardless.')
+    ap.add_argument('--use-intensity', action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help='--use-intensity / --no-use-intensity. Default keeps '
+                         'CFG value (True). Pass --no-use-intensity on caches '
+                         'without `intensity` field (legacy V3 / non-V3i).')
     ap.add_argument('--frame-split', action='store_true',
                     help='Override the cache pre-built sequence-level split with '
                          'a per-frame random split (val_fraction × seed). Use when '
@@ -773,6 +778,7 @@ if __name__ == "__main__":
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
     if args.val_every  is not None: cfg['val_every']  = args.val_every
+    if args.use_intensity is not None: cfg['use_intensity'] = args.use_intensity
     if args.frame_split:                cfg['frame_split']  = True
     if args.curriculum:
         # parse "1-25:0.5,0.05;26-60:1.0,0.10;..."
