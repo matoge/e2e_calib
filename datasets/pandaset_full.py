@@ -201,6 +201,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  n_full: int = 1024,
                  k_per_cell: int = 8,
                  zoom_aug: bool = False,
+                 rep_strategy: str = 'cell_center',
                  preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
@@ -259,6 +260,21 @@ class PandaSetCalibDatasetFull(Dataset):
         # wider source crops — fills the high-resolution far-object regime
         # that PS / Waymo data lacks at native lens.
         self.zoom_aug  = bool(zoom_aug)
+        # rep_strategy: which point per occupied cell becomes the model query.
+        #   'cell_center' — point closest to the cell's geometric center in uv
+        #                    (legacy default; existing models trained on this).
+        #                    Stable in uniform point clouds but the rep can flip
+        #                    foreground↔background under small motion since the
+        #                    "closest to center" choice doesn't honor depth.
+        #   'nearest_cam' — point with the smallest depth (closest to the ego
+        #                    camera) in each cell. Foreground points are
+        #                    occlusion-stable (a road point can't suddenly
+        #                    "win" the cell when a pole edge moves a few px).
+        #                    Requires retraining; old cell_center checkpoints
+        #                    will see slightly out-of-distribution inputs.
+        assert rep_strategy in ('cell_center', 'nearest_cam'), \
+            f'bad rep_strategy={rep_strategy}'
+        self.rep_strategy = rep_strategy
         # Preload every inst .pt into RAM. The full PS cache is ~1 GB, and
         # torch.load per-sample shows up as ~3.8 ms in cProfile — roughly
         # 40% of the remaining __getitem__ cost once TurboJPEG is in place.
@@ -590,10 +606,17 @@ class PandaSetCalibDatasetFull(Dataset):
         ci_u = np.clip((uv_local[:, 0] / cell_S).astype(int), 0, grid_n - 1)
         ci_v = np.clip((uv_local[:, 1] / cell_S).astype(int), 0, grid_n - 1)
         cell_id = ci_v * grid_n + ci_u
-        cu_c = (ci_u + 0.5) * cell_S
-        cv_c = (ci_v + 0.5) * cell_S
-        d2 = (uv_local[:, 0] - cu_c) ** 2 + (uv_local[:, 1] - cv_c) ** 2
-        order = np.lexsort((d2, cell_id))           # primary cell_id, secondary d2
+        if self.rep_strategy == 'nearest_cam':
+            # Tiebreak by depth: smallest-z (closest to camera) wins per cell.
+            # Stable against fg/bg flips when a cell straddles an object edge.
+            z_in_crop = z_off[in_crop_off].astype(np.float32)
+            score = z_in_crop                                     # min-first
+        else:
+            # Legacy: distance to cell center in uv plane.
+            cu_c = (ci_u + 0.5) * cell_S
+            cv_c = (ci_v + 0.5) * cell_S
+            score = (uv_local[:, 0] - cu_c) ** 2 + (uv_local[:, 1] - cv_c) ** 2
+        order = np.lexsort((score, cell_id))           # primary cell_id, secondary score
         _, first_pos = np.unique(cell_id[order], return_index=True)
         sel = order[first_pos]                        # one rep per occupied cell
         sub_idx = np.where(in_crop_off)[0][sel]      # idx into cand_idx

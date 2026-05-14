@@ -250,10 +250,12 @@ def main(cfg=None):
                       frame_stride=c.get('frame_stride', 1),
                       grid_n=c.get('grid_n', 16),
                       oversample=c.get('oversample', 12),
-                      zoom_aug=c.get('zoom_aug', False))
+                      zoom_aug=c.get('zoom_aug', False),
+                      rep_strategy=c.get('rep_strategy', 'cell_center'))
         log(f"  perturbation: ±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m"
             f"   fx/fy: ±{ds_kw['max_fx_pct']*100:.2f}% / ±{ds_kw['max_fy_pct']*100:.2f}%"
             f"   crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full-image px → {c['img_size']})")
+        log(f"  rep_strategy={ds_kw['rep_strategy']}")
         # Multi-cache support: --cache may be a list of paths. Joint training builds
         # ConcatDataset across PS/WM/ZOD caches so the model learns a single calib
         # ズレネット shared across sensor stacks (matches end-goal of zero-shot
@@ -655,6 +657,12 @@ if __name__ == "__main__":
                     help='max random crop side in full-image px (default 512)')
     ap.add_argument('--oversample', type=int, default=None,
                     help='per-epoch oversample factor (each frame yields N random crops; default 12 → ~90K/ep matches v9_lazy)')
+    ap.add_argument('--rep-strategy', choices=('cell_center', 'nearest_cam'),
+                    default=None,
+                    help='per-cell representative selection. cell_center '
+                         '(legacy default): point closest to cell center in '
+                         'uv. nearest_cam: point with smallest z (closest to '
+                         'camera) — occlusion-stable, requires retraining.')
     ap.add_argument('--batch-size', type=int, default=None,
                     help='train/val batch size (default 64; bump to 256 for v2 cache to feed GPU)')
     ap.add_argument('--prefetch-factor', type=int, default=None,
@@ -759,6 +767,7 @@ if __name__ == "__main__":
     if args.lr_min  is not None: cfg['lr_min'] = args.lr_min
     if args.frame_stride and args.frame_stride > 1: cfg['frame_stride'] = args.frame_stride
     if args.oversample is not None: cfg['oversample'] = args.oversample
+    if args.rep_strategy is not None: cfg['rep_strategy'] = args.rep_strategy
     if args.grid_n is not None: cfg['grid_n'] = args.grid_n
     if args.workers is not None: cfg['num_workers'] = args.workers
     if args.min_crop_px is not None: cfg['min_crop_px'] = args.min_crop_px
