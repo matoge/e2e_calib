@@ -98,7 +98,7 @@ def _unpack_lmdb_inst(blob: bytes, cubs_map: dict | None = None) -> dict:
         # only read these tensors, so the warning is noise.
         warnings.simplefilter('ignore', UserWarning)
         for k in ('K_full', 'cam_pos', 'R_gt', 'T_gt', 'distortion',
-                  'pts', 'uv_full', 'z_cam', 'is_obj', 'in_box'):
+                  'pts', 'uv_full', 'z_cam', 'is_obj', 'in_box', 'intensity'):
             if k in offsets:
                 inst[k] = torch.from_numpy(_arr(k))
     if header.get('is_fisheye', False):
@@ -345,6 +345,14 @@ class PandaSetCalibDatasetFull(Dataset):
         cp  = inst['cam_pos'].numpy()
         R_gt = inst['R_gt'].numpy()
         cubs = inst.get('cuboids', [])
+        # Intensity is REQUIRED in V3-i caches. Caches built before 2026-05-13
+        # do not have this key; rebuild via scripts/preprocessing/build_*_v3.py.
+        if 'intensity' not in inst:
+            raise KeyError(
+                f"inst['intensity'] missing in cache {self.cache_dir.name}. "
+                "Rebuild cache with intensity-aware build_*_v3.py."
+            )
+        intensity = inst['intensity'].numpy() if hasattr(inst['intensity'], 'numpy') else np.asarray(inst['intensity'])
 
         # Cached: uv_full (N,2), z_cam (N,), is_obj (N,) — computed once at build / inject time
         if 'uv_full' in inst and 'z_cam' in inst:
@@ -447,6 +455,7 @@ class PandaSetCalibDatasetFull(Dataset):
             if len(cand_idx) > self.n_full:
                 cand_idx = np.random.choice(cand_idx, size=self.n_full, replace=False)
             pts_c = pts[cand_idx]                       # (M<=2000, 3)
+            intens_c = intensity[cand_idx]              # (M,) per-pt lidar intensity
             uv_gt_c = uv_full[cand_idx]                 # (M, 2) full-image px
 
             # Perturbation sampling:
@@ -514,145 +523,171 @@ class PandaSetCalibDatasetFull(Dataset):
                 pert_vec = np.array([t_delta[0], t_delta[1], t_delta[2],
                                       ypr[0], ypr[1], ypr[2],
                                       dfx_pct, dfy_pct], dtype=np.float32)
-            R_inv = R_off.T.astype(np.float32)
-            t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
-            pts_cam_off = pts_c @ R_inv.T + t_inv       # (M, 3)
-            z_off = pts_cam_off[:, 2]
-            if inst.get('is_fisheye', False) and 'distortion' in inst:
-                # Kannala-Brandt fisheye (e.g. ZOD). Pinhole projection would
-                # diverge at the edges where theta > arctan(image_diagonal/2 fx).
-                # Re-project via the same lens model the cache used at build time.
-                _dist = inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy') \
-                        else np.asarray(inst['distortion'], dtype=np.float32)
-                _x, _y, _z = pts_cam_off[:, 0], pts_cam_off[:, 1], pts_cam_off[:, 2]
-                _r = np.sqrt(_x * _x + _y * _y)
-                _theta = np.arctan2(_r, np.maximum(_z, 1e-6))
-                _t2 = _theta * _theta
-                _td = _theta * (1.0 + _dist[0] * _t2 + _dist[1] * _t2 ** 2
-                                    + _dist[2] * _t2 ** 3 + _dist[3] * _t2 ** 4)
-                _r_safe = np.where(_r > 1e-9, _r, 1.0)
-                _u = K_pert[0, 0] * (_td * _x / _r_safe) + K_pert[0, 2]
-                _v = K_pert[1, 1] * (_td * _y / _r_safe) + K_pert[1, 2]
-                uv_off_c = np.stack([_u, _v], axis=-1).astype(np.float32)
-            else:
-                uv_off_c = (pts_cam_off[:, :2] * (np.array([K_pert[0,0], K_pert[1,1]], dtype=np.float32))) / \
-                           np.maximum(z_off[:, None], 1e-6) + np.array([K_pert[0,2], K_pert[1,2]], dtype=np.float32)
-            # Tile mode: K_full is unchanged (parent coords) so the freshly-projected
-            # uv_off_c lives in parent image coords. Subtract the tile origin so it
-            # matches the already-tile-local uv_full / u0 / v0.
-            if tile_u0 or tile_v0:
-                uv_off_c = uv_off_c - np.array([tile_u0, tile_v0], dtype=np.float32)
-
-            in_crop_off = ((uv_off_c[:, 0] >= u0) & (uv_off_c[:, 0] < u0 + cs) &
-                           (uv_off_c[:, 1] >= v0) & (uv_off_c[:, 1] < v0 + cs) &
-                           (z_off > 0.5))
-            if in_crop_off.sum() < self.min_pts:
+            built = self.build_window(
+                inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
+                u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
+                tile_u0, tile_v0, img_full, IW, IH,
+            )
+            if built is None:
                 continue
-
-            # 16x16 sub-grid representative selection — fully vectorized
-            scale = S / cs
-            uv_local = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
-                                 (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1)
-            grid_n = self.grid_n
-            cell_S = float(S) / grid_n
-            ci_u = np.clip((uv_local[:, 0] / cell_S).astype(int), 0, grid_n - 1)
-            ci_v = np.clip((uv_local[:, 1] / cell_S).astype(int), 0, grid_n - 1)
-            cell_id = ci_v * grid_n + ci_u
-            cu_c = (ci_u + 0.5) * cell_S
-            cv_c = (ci_v + 0.5) * cell_S
-            d2 = (uv_local[:, 0] - cu_c) ** 2 + (uv_local[:, 1] - cv_c) ** 2
-            order = np.lexsort((d2, cell_id))           # primary cell_id, secondary d2
-            _, first_pos = np.unique(cell_id[order], return_index=True)
-            sel = order[first_pos]                        # one rep per occupied cell
-            sub_idx = np.where(in_crop_off)[0][sel]      # idx into cand_idx
-            pts_sel = pts_c[sub_idx]                     # (Nrep, 3)
-            uv_gt_sel  = uv_gt_c[sub_idx]
-            uv_off_sel = uv_off_c[sub_idx]
-
-            uv_gt_loc  = ((uv_gt_sel  - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
-            uv_off_loc = ((uv_off_sel - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
-            dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
-            is_obj = is_obj_full[cand_idx[sub_idx]].astype(np.float32)
-
-            true_uvd = np.concatenate([uv_gt_loc,  dist_m[:, None], is_obj[:, None]], axis=1)
-            dist_uvd = np.concatenate([uv_off_loc, dist_m[:, None], is_obj[:, None]], axis=1)
-
-            if img_full is None:
-                # TurboJPEG partial decode of just the crop region (~4.5ms for 384px MCU-aligned).
-                # DDAD stores PNG bytes in 'jpg_bytes' — TJ chokes on those, fall back to PIL.
-                blob = inst['jpg_bytes']
-                is_jpeg = (len(blob) > 2 and blob[0] == 0xff and blob[1] == 0xd8)
-                ju0 = (u0 // _MCU) * _MCU
-                jv0 = (v0 // _MCU) * _MCU
-                ju1 = min(IW, ((u0 + cs + _MCU - 1) // _MCU) * _MCU)
-                jv1 = min(IH, ((v0 + cs + _MCU - 1) // _MCU) * _MCU)
-                jw, jh = ju1 - ju0, jv1 - jv0
-                if _HAVE_TJ and is_jpeg:
-                    cropped = _TJ_INST.crop(blob, ju0, jv0, jw, jh, preserve=False)
-                    arr = np.asarray(_TJ_INST.decode(cropped, pixel_format=_TJ_PF_RGB))[:jh, :jw]
-                else:
-                    import io
-                    from PIL import Image as _PILImage
-                    full = np.asarray(_PILImage.open(io.BytesIO(blob)).convert('RGB'),
-                                      dtype=np.uint8)
-                    arr = full[jv0:jv1, ju0:ju1]
-                # Slice to exact (cs, cs) inside the MCU-padded region
-                arr = arr[v0 - jv0:v0 - jv0 + cs, u0 - ju0:u0 - ju0 + cs]
-                img_crop = torch.from_numpy(arr.copy()).permute(2, 0, 1).contiguous().float().unsqueeze(0)
-            else:
-                img_crop = img_full[:, v0:v0+cs, u0:u0+cs].float().unsqueeze(0)
-            img_crop = F.interpolate(img_crop, size=(S, S), mode='bilinear',
-                                      align_corners=False).squeeze(0)
-            # uint8 で渡す → IPC 4x 軽量化、GPU 側で .float()/255.0 する
-            img_crop = img_crop.clamp_(0, 255).to(torch.uint8)
-
-            vfp = float(K[0, 0]) * S / cs
-
-            # Dense raw point cloud for frustum encoder per-cell context
-            # (uv_off in local crop px, depth normalized /100 to match dist_uvd convention).
-            uv_full_loc = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
-                                     (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1).astype(np.float32)
-            d_full = (z_off[in_crop_off] / 100.0).astype(np.float32)
-            uvd_full_raw = np.concatenate([uv_full_loc, d_full[:, None]], axis=1)
-
-            # ── Bucketed cell layout: pre-bin pts into a fixed (G², K) grid so
-            # the model can read 3×3 neighbor cells per query in O(K)·O(9) work
-            # instead of brute-force O(Nkv) per query. K is fixed per cell so
-            # collate is a vanilla stack — no per-batch ragged padding.
-            G = int(self.grid_n)
-            K_per_cell = int(getattr(self, 'k_per_cell', 8))
-            cell_S = float(S) / G
-            cu = np.clip((uv_full_loc[:, 0] / cell_S).astype(np.int32), 0, G - 1)
-            cv = np.clip((uv_full_loc[:, 1] / cell_S).astype(np.int32), 0, G - 1)
-            cell_id = cv * G + cu                                    # (n_raw,)
-            n_raw = uvd_full_raw.shape[0]
-            # Random shuffle so that "first K per cell" picks K random pts when
-            # the cell is over-full. Cheap O(n_raw) permutation.
-            shuf = np.random.permutation(n_raw)
-            sorted_idx = shuf[np.argsort(cell_id[shuf], kind='stable')]
-            sorted_uvd = uvd_full_raw[sorted_idx]                    # (n_raw, 3)
-            sorted_cid = cell_id[sorted_idx]                         # (n_raw,)
-            # within-cell rank: 0,1,2,... per cell. Take only those <K.
-            counts = np.bincount(sorted_cid, minlength=G * G)
-            cell_starts = np.zeros(G * G + 1, dtype=np.int64)
-            cell_starts[1:] = counts.cumsum()
-            intra = np.arange(n_raw, dtype=np.int64) - cell_starts[sorted_cid]
-            keep_mask = intra < K_per_cell
-            slots = intra[keep_mask]
-            cells = sorted_cid[keep_mask]
-            bucket_uvd  = np.zeros((G * G, K_per_cell, 3), dtype=np.float32)
-            bucket_valid = np.zeros((G * G, K_per_cell), dtype=bool)
-            bucket_uvd[cells, slots]  = sorted_uvd[keep_mask]
-            bucket_valid[cells, slots] = True
-
-            self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
-                                    scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
-            return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
-                    torch.tensor(vfp, dtype=torch.float32),
-                    torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid),
-                    torch.from_numpy(pert_vec))
+            return built
 
         return self[random.randint(0, len(self) - 1)]
+
+    # ─── Shared helper used by both training (__getitem__) and inference demos.
+    # ─── Takes pre-sampled pts / perturbation / crop, returns the same tuple
+    # ─── __getitem__ used to inline-build. Keeping this on the class so the
+    # ─── browser demo can call it directly without duplicating projection /
+    # ─── bucket-bin / rep-selection logic.
+    def build_window(self, inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
+                       u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
+                       tile_u0, tile_v0, img_full, IW, IH):
+        """Apply a given perturbation+crop to an inst → DataLoader sample tuple.
+        Returns None when the crop ends up with < self.min_pts in-view points;
+        caller decides whether to retry (training) or report failure (demo)."""
+        S = self.img_size
+        R_inv = R_off.T.astype(np.float32)
+        t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
+        pts_cam_off = pts_c @ R_inv.T + t_inv       # (M, 3)
+        z_off = pts_cam_off[:, 2]
+        if inst.get('is_fisheye', False) and 'distortion' in inst:
+            # Kannala-Brandt fisheye (e.g. ZOD). Pinhole projection would
+            # diverge at the edges where theta > arctan(image_diagonal/2 fx).
+            # Re-project via the same lens model the cache used at build time.
+            _dist = inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy') \
+                    else np.asarray(inst['distortion'], dtype=np.float32)
+            _x, _y, _z = pts_cam_off[:, 0], pts_cam_off[:, 1], pts_cam_off[:, 2]
+            _r = np.sqrt(_x * _x + _y * _y)
+            _theta = np.arctan2(_r, np.maximum(_z, 1e-6))
+            _t2 = _theta * _theta
+            _td = _theta * (1.0 + _dist[0] * _t2 + _dist[1] * _t2 ** 2
+                                + _dist[2] * _t2 ** 3 + _dist[3] * _t2 ** 4)
+            _r_safe = np.where(_r > 1e-9, _r, 1.0)
+            _u = K_pert[0, 0] * (_td * _x / _r_safe) + K_pert[0, 2]
+            _v = K_pert[1, 1] * (_td * _y / _r_safe) + K_pert[1, 2]
+            uv_off_c = np.stack([_u, _v], axis=-1).astype(np.float32)
+        else:
+            uv_off_c = (pts_cam_off[:, :2] * (np.array([K_pert[0,0], K_pert[1,1]], dtype=np.float32))) / \
+                       np.maximum(z_off[:, None], 1e-6) + np.array([K_pert[0,2], K_pert[1,2]], dtype=np.float32)
+        # Tile mode: K_full is unchanged (parent coords) so the freshly-projected
+        # uv_off_c lives in parent image coords. Subtract the tile origin so it
+        # matches the already-tile-local uv_full / u0 / v0.
+        if tile_u0 or tile_v0:
+            uv_off_c = uv_off_c - np.array([tile_u0, tile_v0], dtype=np.float32)
+
+        in_crop_off = ((uv_off_c[:, 0] >= u0) & (uv_off_c[:, 0] < u0 + cs) &
+                       (uv_off_c[:, 1] >= v0) & (uv_off_c[:, 1] < v0 + cs) &
+                       (z_off > 0.5))
+        if in_crop_off.sum() < self.min_pts:
+            return None
+
+        # 16x16 sub-grid representative selection — fully vectorized
+        scale = S / cs
+        uv_local = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
+                             (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1)
+        grid_n = self.grid_n
+        cell_S = float(S) / grid_n
+        ci_u = np.clip((uv_local[:, 0] / cell_S).astype(int), 0, grid_n - 1)
+        ci_v = np.clip((uv_local[:, 1] / cell_S).astype(int), 0, grid_n - 1)
+        cell_id = ci_v * grid_n + ci_u
+        cu_c = (ci_u + 0.5) * cell_S
+        cv_c = (ci_v + 0.5) * cell_S
+        d2 = (uv_local[:, 0] - cu_c) ** 2 + (uv_local[:, 1] - cv_c) ** 2
+        order = np.lexsort((d2, cell_id))           # primary cell_id, secondary d2
+        _, first_pos = np.unique(cell_id[order], return_index=True)
+        sel = order[first_pos]                        # one rep per occupied cell
+        sub_idx = np.where(in_crop_off)[0][sel]      # idx into cand_idx
+        pts_sel = pts_c[sub_idx]                     # (Nrep, 3)
+        intens_sel = intens_c[sub_idx].astype(np.float32)  # (Nrep,)
+        uv_gt_sel  = uv_gt_c[sub_idx]
+        uv_off_sel = uv_off_c[sub_idx]
+
+        uv_gt_loc  = ((uv_gt_sel  - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
+        uv_off_loc = ((uv_off_sel - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
+        dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
+        is_obj = is_obj_full[cand_idx[sub_idx]].astype(np.float32)
+
+        # (N, 5): [u, v, d, is_obj, intensity]
+        # idx 0-3 stay for backward compat; intensity is the new 5th channel.
+        true_uvd = np.concatenate([uv_gt_loc,  dist_m[:, None], is_obj[:, None], intens_sel[:, None]], axis=1)
+        dist_uvd = np.concatenate([uv_off_loc, dist_m[:, None], is_obj[:, None], intens_sel[:, None]], axis=1)
+
+        if img_full is None:
+            # TurboJPEG partial decode of just the crop region (~4.5ms for 384px MCU-aligned).
+            # DDAD stores PNG bytes in 'jpg_bytes' — TJ chokes on those, fall back to PIL.
+            blob = inst['jpg_bytes']
+            is_jpeg = (len(blob) > 2 and blob[0] == 0xff and blob[1] == 0xd8)
+            ju0 = (u0 // _MCU) * _MCU
+            jv0 = (v0 // _MCU) * _MCU
+            ju1 = min(IW, ((u0 + cs + _MCU - 1) // _MCU) * _MCU)
+            jv1 = min(IH, ((v0 + cs + _MCU - 1) // _MCU) * _MCU)
+            jw, jh = ju1 - ju0, jv1 - jv0
+            if _HAVE_TJ and is_jpeg:
+                cropped = _TJ_INST.crop(blob, ju0, jv0, jw, jh, preserve=False)
+                arr = np.asarray(_TJ_INST.decode(cropped, pixel_format=_TJ_PF_RGB))[:jh, :jw]
+            else:
+                import io
+                from PIL import Image as _PILImage
+                full = np.asarray(_PILImage.open(io.BytesIO(blob)).convert('RGB'),
+                                  dtype=np.uint8)
+                arr = full[jv0:jv1, ju0:ju1]
+            # Slice to exact (cs, cs) inside the MCU-padded region
+            arr = arr[v0 - jv0:v0 - jv0 + cs, u0 - ju0:u0 - ju0 + cs]
+            img_crop = torch.from_numpy(arr.copy()).permute(2, 0, 1).contiguous().float().unsqueeze(0)
+        else:
+            img_crop = img_full[:, v0:v0+cs, u0:u0+cs].float().unsqueeze(0)
+        img_crop = F.interpolate(img_crop, size=(S, S), mode='bilinear',
+                                  align_corners=False).squeeze(0)
+        # uint8 で渡す → IPC 4x 軽量化、GPU 側で .float()/255.0 する
+        img_crop = img_crop.clamp_(0, 255).to(torch.uint8)
+
+        vfp = float(K[0, 0]) * S / cs
+
+        # Dense raw point cloud for frustum encoder per-cell context
+        # (uv_off in local crop px, depth normalized /100 to match dist_uvd convention).
+        uv_full_loc = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
+                                 (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1).astype(np.float32)
+        d_full = (z_off[in_crop_off] / 100.0).astype(np.float32)
+        # bucket_uvd stays 3D [u, v, d] — frustum cross-attn is purely geometric;
+        # intensity is fed to the model only through dist_uvd[..., 4] → point MLP embed.
+        uvd_full_raw = np.concatenate([uv_full_loc, d_full[:, None]], axis=1)
+
+        # ── Bucketed cell layout: pre-bin pts into a fixed (G², K) grid so
+        # the model can read 3×3 neighbor cells per query in O(K)·O(9) work
+        # instead of brute-force O(Nkv) per query. K is fixed per cell so
+        # collate is a vanilla stack — no per-batch ragged padding.
+        G = int(self.grid_n)
+        K_per_cell = int(getattr(self, 'k_per_cell', 8))
+        cell_S = float(S) / G
+        cu = np.clip((uv_full_loc[:, 0] / cell_S).astype(np.int32), 0, G - 1)
+        cv = np.clip((uv_full_loc[:, 1] / cell_S).astype(np.int32), 0, G - 1)
+        cell_id = cv * G + cu                                    # (n_raw,)
+        n_raw = uvd_full_raw.shape[0]
+        # Random shuffle so that "first K per cell" picks K random pts when
+        # the cell is over-full. Cheap O(n_raw) permutation.
+        shuf = np.random.permutation(n_raw)
+        sorted_idx = shuf[np.argsort(cell_id[shuf], kind='stable')]
+        sorted_uvd = uvd_full_raw[sorted_idx]                    # (n_raw, 3)
+        sorted_cid = cell_id[sorted_idx]                         # (n_raw,)
+        # within-cell rank: 0,1,2,... per cell. Take only those <K.
+        counts = np.bincount(sorted_cid, minlength=G * G)
+        cell_starts = np.zeros(G * G + 1, dtype=np.int64)
+        cell_starts[1:] = counts.cumsum()
+        intra = np.arange(n_raw, dtype=np.int64) - cell_starts[sorted_cid]
+        keep_mask = intra < K_per_cell
+        slots = intra[keep_mask]
+        cells = sorted_cid[keep_mask]
+        bucket_uvd  = np.zeros((G * G, K_per_cell, 3), dtype=np.float32)
+        bucket_valid = np.zeros((G * G, K_per_cell), dtype=bool)
+        bucket_uvd[cells, slots]  = sorted_uvd[keep_mask]
+        bucket_valid[cells, slots] = True
+
+        self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
+                                scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
+        return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
+                torch.tensor(vfp, dtype=torch.float32),
+                torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid),
+                torch.from_numpy(pert_vec))
 
 
 def collate_full(batch):
