@@ -45,6 +45,7 @@ def cut_inst_to_tiles(*, jpg_bytes: bytes, IW: int, IH: int,
                        pts_vis: np.ndarray, uv_vis: np.ndarray,
                        z_vis: np.ndarray, is_obj_vis: np.ndarray,
                        is_radar_vis: np.ndarray | None = None,
+                       extra_per_point: dict[str, np.ndarray] | None = None,
                        common_inst: dict, tile_w: int = DEFAULT_TILE,
                        tile_h: int = DEFAULT_TILE,
                        stride: int = DEFAULT_STRIDE,
@@ -110,6 +111,9 @@ def cut_inst_to_tiles(*, jpg_bytes: bytes, IW: int, IH: int,
             ))
             if is_radar_vis is not None:
                 inst['is_radar'] = torch.from_numpy(is_radar_vis[in_pad].astype(np.float32))
+            if extra_per_point:
+                for k, arr in extra_per_point.items():
+                    inst[k] = torch.from_numpy(np.ascontiguousarray(arr[in_pad]))
             fname = f'{gid:08d}_t{tile_id}.pt'
             torch.save(inst, out_dir / fname)
             out_files.append(fname)
