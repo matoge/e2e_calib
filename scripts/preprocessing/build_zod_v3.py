@@ -122,19 +122,26 @@ def _load_calib(frame_dir: Path):
 
 def _load_lidar(frame_dir: Path):
     """Single core sweep → (pts (N,3) xyz lidar local, ts (N,) per-point us int).
-    Returns (None, None) on missing data."""
+    Returns (None, None, None) on missing data.
+    Returns (pts (N,3), intensity (N,), ts (N,)) on success."""
     lidars = sorted((frame_dir / "lidar_velodyne").glob("*.npy"))
     if not lidars:
-        return None, None
+        return None, None, None
     sweep = np.load(lidars[len(lidars) // 2], allow_pickle=False)
     if sweep.dtype.names and 'x' in sweep.dtype.names:
         pts = np.stack([sweep['x'], sweep['y'], sweep['z']], axis=1).astype(np.float32)
+        # per-point intensity: VLS-128 sweep stores 'intensity' (0–255 uint8 or float)
+        if 'intensity' in sweep.dtype.names:
+            intensity = sweep['intensity'].astype(np.float32)
+        else:
+            intensity = np.zeros(len(pts), dtype=np.float32)
         # per-point timestamp: integer microseconds, RELATIVE to camera shutter time
         ts = sweep['timestamp'].astype(np.int64) if 'timestamp' in sweep.dtype.names else None
     else:
         pts = sweep[:, :3].astype(np.float32)
+        intensity = sweep[:, 3].astype(np.float32) if sweep.shape[1] >= 4 else np.zeros(len(pts), dtype=np.float32)
         ts = None
-    return pts, ts
+    return pts, intensity, ts
 
 
 def _ego_motion_apply(pts_lidar, pt_ts_us, frame_dir, T_vl, cam_ts_unix):
@@ -334,7 +341,7 @@ def process_frame(args_tuple):
         if not frame_dir.exists():
             return fid, 0
         K, dist, T_vc, T_vl, IW, IH = _load_calib(frame_dir)
-        pts_lidar, pt_ts = _load_lidar(frame_dir)
+        pts_lidar, intensity, pt_ts = _load_lidar(frame_dir)
         if pts_lidar is None or len(pts_lidar) == 0:
             return fid, 0
 
@@ -354,8 +361,10 @@ def process_frame(args_tuple):
                 np.asarray(ego.timestamps, dtype=np.float64),
                 np.asarray(ego.poses, dtype=np.float64),
                 T_vl.astype(np.float64), float(cam_ts))
+            # LidarData filters invalid points → intensity from ld matches pts_veh.
+            intensity = ld.intensity.astype(np.float32)
         else:
-            # fallback: no MC, scan-wise
+            # fallback: no MC, scan-wise — intensity from raw sweep aligns with pts.
             N = pts_lidar.shape[0]
             homo = np.column_stack([pts_lidar, np.ones(N, dtype=np.float32)])
             pts_veh = (T_vl @ homo.T).T[:, :3].astype(np.float32)
@@ -376,6 +385,8 @@ def process_frame(args_tuple):
         pts_vis = pts_cam[valid]
         uv_vis  = uv[valid]
         z_vis   = z[valid]
+        # Intensity follows the original sweep order so the valid mask applies as-is.
+        intensity_vis = intensity[valid].astype(np.float32)
 
         # cuboids stored in VEHICLE frame (yaw axis = vehicle Z = up).
         # AABB membership test must run in vehicle frame too — convert visible
@@ -407,10 +418,11 @@ def process_frame(args_tuple):
             inst.update(dict(
                 jpg_bytes = jpg_bytes,
                 IH=int(IH), IW=int(IW),
-                pts     = torch.from_numpy(pts_vis),
-                uv_full = torch.from_numpy(uv_vis),
-                z_cam   = torch.from_numpy(z_vis),
-                is_obj  = torch.from_numpy(is_obj_vis),
+                pts       = torch.from_numpy(pts_vis),
+                uv_full   = torch.from_numpy(uv_vis),
+                z_cam     = torch.from_numpy(z_vis),
+                is_obj    = torch.from_numpy(is_obj_vis),
+                intensity = torch.from_numpy(intensity_vis),
             ))
             torch.save(inst, inst_dir / f'{gid_start:08d}.pt')
             return fid, 1
@@ -423,9 +435,13 @@ def process_frame(args_tuple):
                 is_obj_vis=is_obj_vis, common_inst=common_inst,
                 tile_w=tw, tile_h=th, stride=st, pad_px=pad,
                 y_start=y0, jpg_quality=q,
-                out_dir=inst_dir, gid_base=gid_start)
+                out_dir=inst_dir, gid_base=gid_start,
+                intensity_vis=intensity_vis)
             return fid, len(tile_files)
     except Exception as e:
+        import traceback as _tb
+        print(f'[ERR {fid}] {type(e).__name__}: {e}', flush=True)
+        _tb.print_exc()
         return fid, 0
 
 
@@ -435,6 +451,9 @@ def main():
     ap.add_argument('--out',         default=str(CACHE_OUT))
     ap.add_argument('--workers',     type=int, default=8)
     ap.add_argument('--max-frames',  type=int, default=None)
+    ap.add_argument('--frame-list', default=None,
+                    help='path to .txt with one frame_id per line (first whitespace-token); '
+                         'restricts the build to those IDs (e.g. curated_clean_drive.txt)')
     ap.add_argument('--val-frac',    type=float, default=0.15)
     ap.add_argument('--max-yaw-rate', type=float, default=None,
                     help='exclude frames with yaw rate (deg/s, abs) above this')
@@ -499,6 +518,13 @@ def main():
               f'({len(kept)/len(all_ids)*100:.1f}%)', flush=True)
         all_ids = kept
 
+    if args.frame_list:
+        with open(args.frame_list) as f:
+            keep = set(line.split()[0] for line in f if line.strip())
+        before = len(all_ids)
+        all_ids = [fid for fid in all_ids if fid in keep]
+        print(f'  frame-list filter: {len(all_ids)}/{before} kept '
+              f'(list: {args.frame_list}, {len(keep)} ids)', flush=True)
     if args.max_frames:
         all_ids = all_ids[:args.max_frames]
     print(f'frames to process: {len(all_ids)} | out: {out} | workers: {args.workers}', flush=True)

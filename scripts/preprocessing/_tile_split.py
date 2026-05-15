@@ -44,6 +44,7 @@ def make_tile_starts(span: int, tile: int, stride: int, axis_start: int = 0) -> 
 def cut_inst_to_tiles(*, jpg_bytes: bytes, IW: int, IH: int,
                        pts_vis: np.ndarray, uv_vis: np.ndarray,
                        z_vis: np.ndarray, is_obj_vis: np.ndarray,
+                       intensity_vis: np.ndarray | None = None,
                        is_radar_vis: np.ndarray | None = None,
                        extra_per_point: dict[str, np.ndarray] | None = None,
                        common_inst: dict, tile_w: int = DEFAULT_TILE,
@@ -109,6 +110,8 @@ def cut_inst_to_tiles(*, jpg_bytes: bytes, IW: int, IH: int,
                 is_obj    = torch.from_numpy(is_obj_t),
                 in_box    = torch.from_numpy(in_box_t),
             ))
+            if intensity_vis is not None:
+                inst['intensity'] = torch.from_numpy(intensity_vis[in_pad].astype(np.float32))
             if is_radar_vis is not None:
                 inst['is_radar'] = torch.from_numpy(is_radar_vis[in_pad].astype(np.float32))
             if extra_per_point:

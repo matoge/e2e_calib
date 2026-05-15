@@ -88,6 +88,8 @@ def _pack_inst(inst: dict) -> bytes:
               if 'is_obj' in inst else None)
     in_box = (_as_np(inst['in_box']).astype(np.uint8, copy=False)
               if 'in_box' in inst else None)
+    intensity = (_as_np(inst['intensity']).astype(np.float32, copy=False)
+                 if 'intensity' in inst else None)
     distortion = (_as_np(inst['distortion']).astype(np.float32, copy=False)
                   if 'distortion' in inst else None)
     is_fisheye = bool(inst.get('is_fisheye', False))
@@ -116,6 +118,7 @@ def _pack_inst(inst: dict) -> bytes:
     if z_cam   is not None: _append('z_cam',   z_cam,   'f4', (N,))
     if is_obj  is not None: _append('is_obj',  is_obj,  'u1', (N,))
     if in_box  is not None: _append('in_box',  in_box,  'u1', (N,))
+    if intensity is not None: _append('intensity', intensity, 'f4', (N,))
 
     header = {
         'v': 2,                       # bumped: cuboids hoisted out
