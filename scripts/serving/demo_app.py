@@ -20,10 +20,11 @@ from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 import numpy as np
 import torch
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, Response
+from fastapi import APIRouter, FastAPI, Query
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from PIL import Image
 from scipy.spatial.transform import Rotation
 
@@ -218,6 +219,28 @@ def _render(seed: int, ox: float, oy: float, tx: float, ty: float):
 
         err_pre  = np.linalg.norm(dist_uv_tile - true_uv_tile, axis=1)
         err_post = np.linalg.norm(pred_uv_tile - true_uv_tile, axis=1)
+        # Same error in MODEL-input (128 px) coords — directly comparable to
+        # val_mse printed in train.log (which is in 128-frame).
+        err_pre_local  = err_pre  * scale
+        err_post_local = err_post * scale
+
+        # Per-pt sigma (model output channels 2,3 are log_sigma_uv; ch 4 is raw
+        # rho through tanh*0.99). In MODEL-input pixels — multiply by 1/scale
+        # to get tile-pixel sigmas for display + Mahalanobis error.
+        sigma_u_local = np.exp(params[:, 2])
+        sigma_v_local = np.exp(params[:, 3])
+        rho           = np.tanh(params[:, 4]) * 0.99
+        sigma_u_tile = sigma_u_local / scale
+        sigma_v_tile = sigma_v_local / scale
+        # Mahalanobis residual (pred - GT)^T Σ^-1 (pred - GT). In a perfectly
+        # calibrated model with proper σ, the mean Mahalanobis² should be ≈ 2.0
+        # (Chi² 2-DoF mean). Higher → overconfident; lower → underconfident.
+        du = pred_uv_local[:, 0] - true_uv_local[:, 0]
+        dv = pred_uv_local[:, 1] - true_uv_local[:, 1]
+        det_sigma = sigma_u_local ** 2 * sigma_v_local ** 2 * (1 - rho ** 2)
+        det_sigma = np.maximum(det_sigma, 1e-12)
+        m2 = ((du / sigma_u_local) ** 2 + (dv / sigma_v_local) ** 2
+              - 2 * rho * du * dv / (sigma_u_local * sigma_v_local)) / np.maximum(1 - rho ** 2, 1e-6)
 
         # BA solve on per-pt predictions in MODEL-input frame.
         K = pkt['K'].astype(np.float32)
@@ -262,6 +285,24 @@ def _render(seed: int, ox: float, oy: float, tx: float, ty: float):
             err_post_px=dict(mean=float(err_post.mean()),
                               median=float(np.median(err_post)),
                               p95=float(np.percentile(err_post, 95))),
+            err_pre_local_px=dict(mean=float(err_pre_local.mean()),
+                                   median=float(np.median(err_pre_local)),
+                                   p95=float(np.percentile(err_pre_local, 95))),
+            err_post_local_px=dict(mean=float(err_post_local.mean()),
+                                    median=float(np.median(err_post_local)),
+                                    p95=float(np.percentile(err_post_local, 95))),
+            sigma_px=dict(
+                u_mean=float(sigma_u_tile.mean()),
+                u_median=float(np.median(sigma_u_tile)),
+                v_mean=float(sigma_v_tile.mean()),
+                v_median=float(np.median(sigma_v_tile)),
+                rho_mean=float(rho.mean()),
+            ),
+            mahalanobis2=dict(
+                mean=float(m2.mean()),
+                median=float(np.median(m2)),
+                p95=float(np.percentile(m2, 95)),
+            ),
             ba_correction=ba_corr,
             elapsed_ms=round(float(elapsed_ms), 1),
             crop=dict(u0=int(u0), v0=int(v0), cs=int(pkt['cs'])),
@@ -286,10 +327,32 @@ def _render(seed: int, ox: float, oy: float, tx: float, ty: float):
                    angles='xy', scale_units='xy', scale=1,
                    color='deepskyblue', width=0.003, headwidth=3.5,
                    headlength=4, alpha=0.8, zorder=4)
+        # 1-σ covariance ellipses around each predicted point (per-pt model
+        # confidence) — eigen-decomp of [[σu², ρσuσv], [ρσuσv, σv²]].
+        a = sigma_u_tile ** 2
+        c = sigma_v_tile ** 2
+        b = rho * sigma_u_tile * sigma_v_tile
+        tr = a + c
+        disc = np.maximum((tr / 2) ** 2 - (a * c - b * b), 0.0)
+        s = np.sqrt(disc)
+        lam1 = tr / 2 + s
+        lam2 = np.maximum(tr / 2 - s, 0.0)
+        # eigenvector angle of λ1; arctan2(λ1 - a, b) is stable when b ≠ 0
+        ang = np.where(np.abs(b) > 1e-9,
+                        np.degrees(np.arctan2(lam1 - a, b)),
+                        np.where(a >= c, 0.0, 90.0))
+        for i in range(len(pred_uv_tile)):
+            ell = Ellipse(xy=(pred_uv_tile[i, 0], pred_uv_tile[i, 1]),
+                          width=2.0 * np.sqrt(lam1[i]),
+                          height=2.0 * np.sqrt(lam2[i]),
+                          angle=ang[i], fill=False,
+                          edgecolor='deepskyblue', linewidth=0.7,
+                          alpha=0.55, zorder=4.5)
+            ax.add_patch(ell)
         ax.scatter(pred_uv_tile[:, 0], pred_uv_tile[:, 1],
                    c='deepskyblue', s=22, marker='o',
                    edgecolors='white', linewidths=0.4,
-                   label='model pred', zorder=5)
+                   label='model pred (±1σ)', zorder=5)
         ax.set_xlim(0, IW); ax.set_ylim(IH, 0); ax.axis('off')
         ax.set_title(f'{inst.get("scene")}  f={inst.get("frame", -1)}  '
                      f'crop={pkt["cs"]}px  model={elapsed_ms:.0f} ms',
@@ -304,7 +367,12 @@ def _render(seed: int, ox: float, oy: float, tx: float, ty: float):
 
 
 # ─── FastAPI ────────────────────────────────────────────────────────────────
+# Routes register on a router so the app can be served at either root '/' or
+# behind a path prefix (e.g. `clearml.budda.site/demo` via Cloudflare tunnel
+# without path-strip). Mount under both so direct LAN access at root still
+# works and the public CF route at /demo* lands on the same handlers.
 app = FastAPI(title='e2e_calib slider demo')
+router = APIRouter()
 
 
 @app.on_event('startup')
@@ -312,14 +380,14 @@ def _startup():
     _ensure_loaded()
 
 
-@app.get('/sample.png')
+@router.get('/sample.png')
 def sample_png(seed: int = Query(0), ox: float = Query(0.0), oy: float = Query(0.0),
                tx: float = Query(0.0), ty: float = Query(0.0)):
     png, _ = _render(seed, ox, oy, tx, ty)
     return Response(content=png, media_type='image/png')
 
 
-@app.get('/sample')
+@router.get('/sample')
 def sample(seed: int = Query(0), ox: float = Query(0.0), oy: float = Query(0.0),
             tx: float = Query(0.0), ty: float = Query(0.0)):
     png, metrics = _render(seed, ox, oy, tx, ty)
@@ -367,9 +435,9 @@ DEMO_HTML = """<!doctype html>
       <span style="background:#f44"></span>perturbed&nbsp;
       <span style="background:#0bf"></span>model pred
     </div>
-    <label>ωx (roll about cam X): <span class="val" id="oxv">0.00</span> deg</label>
+    <label>ωx — pitch (rotation about cam X axis, image up/down): <span class="val" id="oxv">0.00</span> deg</label>
     <input type="range" id="ox" min="-2" max="2" step="0.05" value="0">
-    <label>ωy (pitch about cam Y): <span class="val" id="oyv">0.00</span> deg</label>
+    <label>ωy — yaw (rotation about cam Y axis, image left/right): <span class="val" id="oyv">0.00</span> deg</label>
     <input type="range" id="oy" min="-2" max="2" step="0.05" value="0">
     <label>tx: <span class="val" id="txv">0.00</span> m</label>
     <input type="range" id="tx" min="-1" max="1" step="0.01" value="0">
@@ -385,16 +453,49 @@ DEMO_HTML = """<!doctype html>
       <h3>Per-point projection error vs GT</h3>
       <div class="metric-row head"><div></div><div>mean</div><div>median</div><div>p95</div></div>
       <div class="metric-row">
-        <div>before fix</div>
+        <div>tile-px before</div>
         <div class="num-pre"  id="pre_mean">–</div>
         <div class="num-pre"  id="pre_med">–</div>
         <div class="num-pre"  id="pre_p95">–</div>
       </div>
       <div class="metric-row">
-        <div>after model</div>
+        <div>tile-px after</div>
         <div class="num-post" id="post_mean">–</div>
         <div class="num-post" id="post_med">–</div>
         <div class="num-post" id="post_p95">–</div>
+      </div>
+      <div class="metric-row">
+        <div>128-px before</div>
+        <div class="num-pre"  id="pre_l_mean">–</div>
+        <div class="num-pre"  id="pre_l_med">–</div>
+        <div class="num-pre"  id="pre_l_p95">–</div>
+      </div>
+      <div class="metric-row">
+        <div>128-px after (= val_mse)</div>
+        <div class="num-post" id="post_l_mean">–</div>
+        <div class="num-post" id="post_l_med">–</div>
+        <div class="num-post" id="post_l_p95">–</div>
+      </div>
+
+      <h3>Per-point σ (model confidence)</h3>
+      <div class="metric-row head"><div></div><div>mean</div><div>median</div><div>ρ̄</div></div>
+      <div class="metric-row">
+        <div>σ_u (px)</div>
+        <div class="num-post" id="su_mean">–</div>
+        <div class="num-post" id="su_med">–</div>
+        <div class="num-post" id="rho_mean">–</div>
+      </div>
+      <div class="metric-row">
+        <div>σ_v (px)</div>
+        <div class="num-post" id="sv_mean">–</div>
+        <div class="num-post" id="sv_med">–</div>
+        <div></div>
+      </div>
+      <div class="metric-row">
+        <div>Mahalanobis²</div>
+        <div class="num-post" id="m2_mean">–</div>
+        <div class="num-post" id="m2_med">–</div>
+        <div class="num-post" id="m2_p95">–</div>
       </div>
 
       <h3>BA 4-DoF correction (predicted vs your input)</h3>
@@ -446,6 +547,22 @@ function setMetrics(m) {
   $('post_mean').textContent = fmtNum(post.mean, 2) + ' px';
   $('post_med').textContent  = fmtNum(post.median, 2) + ' px';
   $('post_p95').textContent  = fmtNum(post.p95, 2) + ' px';
+  const preL = m.err_pre_local_px || {}, postL = m.err_post_local_px || {};
+  $('pre_l_mean').textContent  = fmtNum(preL.mean, 2) + ' px';
+  $('pre_l_med').textContent   = fmtNum(preL.median, 2) + ' px';
+  $('pre_l_p95').textContent   = fmtNum(preL.p95, 2) + ' px';
+  $('post_l_mean').textContent = fmtNum(postL.mean, 2) + ' px';
+  $('post_l_med').textContent  = fmtNum(postL.median, 2) + ' px';
+  $('post_l_p95').textContent  = fmtNum(postL.p95, 2) + ' px';
+  const sig = m.sigma_px || {}, m2 = m.mahalanobis2 || {};
+  $('su_mean').textContent  = fmtNum(sig.u_mean, 2) + ' px';
+  $('su_med').textContent   = fmtNum(sig.u_median, 2) + ' px';
+  $('sv_mean').textContent  = fmtNum(sig.v_mean, 2) + ' px';
+  $('sv_med').textContent   = fmtNum(sig.v_median, 2) + ' px';
+  $('rho_mean').textContent = fmtNum(sig.rho_mean, 3);
+  $('m2_mean').textContent  = fmtNum(m2.mean, 2);
+  $('m2_med').textContent   = fmtNum(m2.median, 2);
+  $('m2_p95').textContent   = fmtNum(m2.p95, 2);
   const ba = m.ba_correction || {}, gt = m.user_perturbation || {};
   function row(k, suffix, unit, decimals) {
     const p = ba[k], g = gt[k];
@@ -472,7 +589,7 @@ async function render() {
   const v = vals();
   const qs = `seed=${SEED}&ox=${v.ox}&oy=${v.oy}&tx=${v.tx}&ty=${v.ty}`;
   try {
-    const r = await fetch('/sample?' + qs);
+    const r = await fetch('sample?' + qs);
     if (!r.ok) { busy = false; if (pending) render(); return; }
     const o = await r.json();
     imgEl.src = 'data:image/png;base64,' + o.png_b64;
@@ -499,9 +616,24 @@ render();
 """
 
 
-@app.get('/', response_class=HTMLResponse)
+@router.get('/', response_class=HTMLResponse)
 def index():
     return DEMO_HTML
+
+
+# Mount the same router at both root and /demo so direct LAN access
+# (http://yokohama1:8765/) and the Cloudflare-tunneled path-based route
+# (https://clearml.budda.site/demo) both resolve. CF tunnel doesn't strip
+# path prefixes, so the prefix has to be a real, registered mount.
+app.include_router(router)
+app.include_router(router, prefix='/demo')
+
+
+# Convenience: /demo without trailing slash → /demo/ so relative `sample` URLs
+# in the served HTML resolve under the demo prefix.
+@app.get('/demo', include_in_schema=False)
+def _demo_redirect():
+    return RedirectResponse(url='/demo/', status_code=307)
 
 
 def main():
