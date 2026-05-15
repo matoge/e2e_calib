@@ -153,7 +153,7 @@ class FrustumLocalEncoder(nn.Module):
             nn.ModuleDict(dict(
                 ln_q  = nn.LayerNorm(d_local),
                 q_proj = nn.Linear(d_local, d_local),
-                kv_proj = nn.Linear(3, 2 * d_local),
+                kv_proj = nn.Linear(4, 2 * d_local),  # uvd + intensity
                 out_proj = nn.Linear(d_local, d_local),
             )) for _ in range(n_layers)
         ])
@@ -192,6 +192,7 @@ class FrustumLocalEncoder(nn.Module):
         cell_px = float(img_size) / float(self.grid_n)
         G = self.grid_n
         K_pc = bucket_uvd.shape[2]
+        C    = bucket_uvd.shape[-1]   # 3 (uvd) or 4 (uvd + intensity)
         B, N_q, _ = query_uvd.shape
 
         # ── Gather 3×3 neighbor cells per query ──
@@ -206,19 +207,19 @@ class FrustumLocalEncoder(nn.Module):
         nb_cv = (q_cv.unsqueeze(-1) + dv9).clamp(0, G - 1)
         nb_cid = nb_cv * G + nb_cu                                     # (B, Nq, 9)
 
-        # gather (B, Nq, 9, K, 3) and (B, Nq, 9, K)
-        nb_idx_exp = nb_cid.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, K_pc, 3)
+        # gather (B, Nq, 9, K, C) and (B, Nq, 9, K)
+        nb_idx_exp = nb_cid.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, K_pc, C)
         bucket_uvd_exp = bucket_uvd.unsqueeze(1).expand(-1, N_q, -1, -1, -1)
-        cands = bucket_uvd_exp.gather(2, nb_idx_exp)                   # (B, Nq, 9, K, 3)
+        cands = bucket_uvd_exp.gather(2, nb_idx_exp)                   # (B, Nq, 9, K, C)
         nb_v_exp = nb_cid.unsqueeze(-1).expand(-1, -1, -1, K_pc)
         bucket_v_exp = bucket_valid.unsqueeze(1).expand(-1, N_q, -1, -1)
         cand_valid = bucket_v_exp.gather(2, nb_v_exp)                  # (B, Nq, 9, K)
         # flatten neighbor + slot dims
-        cands = cands.reshape(B, N_q, 9 * K_pc, 3)                     # (B, Nq, 72, 3)
+        cands = cands.reshape(B, N_q, 9 * K_pc, C)                     # (B, Nq, 72, C)
         cand_valid = cand_valid.reshape(B, N_q, 9 * K_pc)              # (B, Nq, 72)
 
         # rel relative to query
-        rel_all = cands - query_uvd.unsqueeze(2)                       # (B, Nq, 72, 3)
+        rel_all = cands - query_uvd.unsqueeze(2)                       # (B, Nq, 72, C)
 
         # Density-invariant: k random points from the valid set.
         rand_score = torch.rand(B, N_q, 9 * K_pc, device=query_uvd.device, dtype=query_uvd.dtype)
@@ -226,8 +227,8 @@ class FrustumLocalEncoder(nn.Module):
         kk = min(self.k, 9 * K_pc)
         _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)        # (B, N_q, k)
         valid = rand_score.gather(2, topk_idx) >= 0
-        idx_exp = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3)
-        topk_rel = rel_all.gather(2, idx_exp)                          # (B, N_q, k, 3)
+        idx_exp = topk_idx.unsqueeze(-1).expand(-1, -1, -1, C)
+        topk_rel = rel_all.gather(2, idx_exp)                          # (B, N_q, k, C)
 
         # Debug instrumentation
         self._last_topk_idx = topk_idx.detach()
@@ -292,7 +293,12 @@ class FrustumLocalEncoder(nn.Module):
         u = (cx + 0.5) * cell_px
         v = (cy + 0.5) * cell_px
         d = torch.zeros_like(u)
-        cell_uvd = torch.stack([u, v, d], dim=-1).reshape(1, -1, 3).expand(B, -1, -1)
+        C = bucket_uvd.shape[-1]
+        if C == 4:
+            i = torch.zeros_like(u)  # zero intensity for empty cells
+            cell_uvd = torch.stack([u, v, d, i], dim=-1).reshape(1, -1, C).expand(B, -1, -1)
+        else:
+            cell_uvd = torch.stack([u, v, d], dim=-1).reshape(1, -1, C).expand(B, -1, -1)
         D = self.in_proj.in_features
         zero_q_token = torch.zeros(B, cell_uvd.shape[1], D,
                                     device=device, dtype=bucket_uvd.dtype)
@@ -630,10 +636,14 @@ class CalibNetDepth(nn.Module):
             uvd_norm = torch.cat([uv_01, d3, distorted_uvd[..., 3:4]], dim=-1)
         else:
             uvd_norm = torch.cat([uv_01, d3], dim=-1)
-        # Spatial-only view of the query (drop intensity), used everywhere
-        # downstream where geometric relations / 3D backprojection / deformable
-        # sampling are applied.
-        distorted_uvd_geom = distorted_uvd[..., :3]
+        # Spatial+intensity view of the query, fed to frustum encoder so the
+        # KV (uvd+intensity) and Q (uvd+intensity) match in channel count and
+        # rel = cands - query stays well-defined.
+        if self.use_intensity:
+            distorted_uvd_geom = torch.cat([distorted_uvd[..., :3],
+                                            distorted_uvd[..., 3:4]], dim=-1)
+        else:
+            distorted_uvd_geom = distorted_uvd[..., :3]
 
         # Stage 2 (mixed Q): randomly zero out depth for some queries so the
         # model learns to handle UV-only Q. query_drop_prob is set externally
@@ -658,9 +668,9 @@ class CalibNetDepth(nn.Module):
                     "post-2026-05-04). Old (full_uvd, pad_full) flat layout removed."
                 )
             if getattr(self, '_is_3d_local', False):
-                # 3D-local path still uses the flat layout — flatten bucket to (B, G²·K, 3).
-                B_, G2, Kpc, _ = bucket_uvd.shape
-                flat_uvd = bucket_uvd.reshape(B_, G2 * Kpc, 3)
+                # 3D-local path still uses the flat layout — flatten bucket to (B, G²·K, C).
+                B_, G2, Kpc, C_ = bucket_uvd.shape
+                flat_uvd = bucket_uvd.reshape(B_, G2 * Kpc, C_)
                 flat_pad = ~bucket_valid.reshape(B_, G2 * Kpc)
                 q = q + self.frustum_enc(distorted_uvd_geom,
                                           full_uvd=flat_uvd,

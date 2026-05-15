@@ -219,4 +219,11 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
             saved += 1
     finally:
         model.train(was_training)
+        # Release lmdb env in this (parent) process so DataLoader workers
+        # forked AFTER this call can open it without hitting lmdb's
+        # 'already open in this process' guard.
+        try:
+            ds.close_lmdb()
+        except Exception:
+            pass
     log(f"vis_ep{epoch:03d}: saved {saved} → {out}")

@@ -289,23 +289,64 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.load(self.inst_dir / fn, weights_only=False)
                 for fn in self.fnames
             ]
-        if self._use_lmdb:
+        if self._use_lmdb and os.environ.get('E2E_PRELOAD_CUBS') == '1':
             # Preload deduped cuboid table once in the parent process. Forked
             # workers inherit it via CoW.
+            # OFF by default: any lmdb.open in __init__ leaves an entry in
+            # lmdb-py's per-process registry that survives env.close() on at
+            # least some library versions, which then conflicts with the
+            # workers' open() of the same path. Set E2E_PRELOAD_CUBS=1 only
+            # when you trust your lmdb-py version + path doesn't get reopened.
             self._cubs_map = self._preload_cubs_map()
 
     def __len__(self):
         return len(self.fnames) * self.oversample
 
+    # Process-wide LMDB env cache keyed by (pid, path). lmdb-py rejects a
+    # second open() of the same path within one process, so multiple Dataset
+    # instances pointing at the same cache (typical: train+val splits, or
+    # accel.gather peeking) must SHARE one Environment.
+    _LMDB_ENV_CACHE: dict = {}
+
     def _open_lmdb(self):
-        # Per-worker open: each forked DataLoader worker opens its own env so
-        # internal lmdb-py state is process-local. readonly + lock=False is
-        # safe for a write-once-then-static DB and avoids the global writer
-        # mutex on every txn.
-        self._lmdb_env = _lmdb.open(
-            str(self.lmdb_path), readonly=True, lock=False,
-            readahead=False, meminit=False, max_readers=512, subdir=True,
-        )
+        import os as _os
+        cur = _os.getpid()
+        key = (cur, str(self.lmdb_path))
+        env = PandaSetCalibDatasetFull._LMDB_ENV_CACHE.get(key)
+        if env is None:
+            env = _lmdb.open(
+                str(self.lmdb_path), readonly=True, lock=False,
+                readahead=False, meminit=False, max_readers=512, subdir=True,
+            )
+            PandaSetCalibDatasetFull._LMDB_ENV_CACHE[key] = env
+        self._lmdb_env = env
+        self._lmdb_env_pid = cur
+
+    def __getstate__(self):
+        # When DataLoader spawn workers pickle this dataset, drop the lmdb env
+        # so the child re-opens its own. Otherwise lmdb's per-process registry
+        # in the child rejects open() on the inherited path with
+        # 'already open in this process' (since the unpickled handle keeps
+        # the path registered).
+        st = self.__dict__.copy()
+        st['_lmdb_env'] = None
+        st['_lmdb_env_pid'] = None
+        return st
+
+    def close_lmdb(self):
+        """Close the lmdb env. Required after parent-process __getitem__ calls
+        (e.g. vis_pretrain, midtrain_vis) — lmdb tracks open paths in a
+        process-wide registry, so a subsequent open() of the same path from
+        any DataLoader worker forked off this parent will raise
+        'already open in this process'.
+        """
+        if self._lmdb_env is not None:
+            try:
+                self._lmdb_env.close()
+            except Exception:
+                pass
+            self._lmdb_env = None
+            self._lmdb_env_pid = None
 
     def _preload_cubs_map(self) -> dict:
         env = _lmdb.open(
@@ -671,9 +712,11 @@ class PandaSetCalibDatasetFull(Dataset):
         uv_full_loc = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
                                  (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1).astype(np.float32)
         d_full = (z_off[in_crop_off] / 100.0).astype(np.float32)
-        # bucket_uvd stays 3D [u, v, d] — frustum cross-attn is purely geometric;
-        # intensity is fed to the model only through dist_uvd[..., 4] → point MLP embed.
-        uvd_full_raw = np.concatenate([uv_full_loc, d_full[:, None]], axis=1)
+        intens_full = intens_c[in_crop_off].astype(np.float32)
+        # bucket_uvd is 4D [u, v, d, intensity] — both point query and frustum
+        # KV consume the same 4-ch view so intensity participates in cross-attn.
+        uvd_full_raw = np.concatenate([uv_full_loc, d_full[:, None],
+                                       intens_full[:, None]], axis=1)
 
         # ── Bucketed cell layout: pre-bin pts into a fixed (G², K) grid so
         # the model can read 3×3 neighbor cells per query in O(K)·O(9) work
@@ -700,7 +743,7 @@ class PandaSetCalibDatasetFull(Dataset):
         keep_mask = intra < K_per_cell
         slots = intra[keep_mask]
         cells = sorted_cid[keep_mask]
-        bucket_uvd  = np.zeros((G * G, K_per_cell, 3), dtype=np.float32)
+        bucket_uvd  = np.zeros((G * G, K_per_cell, 4), dtype=np.float32)
         bucket_valid = np.zeros((G * G, K_per_cell), dtype=bool)
         bucket_uvd[cells, slots]  = sorted_uvd[keep_mask]
         bucket_valid[cells, slots] = True

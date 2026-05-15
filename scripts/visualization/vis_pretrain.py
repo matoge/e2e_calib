@@ -272,6 +272,14 @@ def main():
     import json
     (out / 'sample_idxs.json').write_text(json.dumps(chosen))
 
+    # Release lmdb env so DataLoader workers forked AFTER this call (i.e.
+    # the actual training loop) can open it without lmdb's
+    # 'already open in this process' guard tripping.
+    try:
+        ds.close_lmdb()
+    except Exception:
+        pass
+
 
 if __name__ == '__main__':
     main()

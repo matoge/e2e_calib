@@ -88,7 +88,14 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
         # enabled (model raises otherwise). Harmless extra kwargs when off.
         # API renamed 2026-05-04 (commit 01abd02) — flat distorted_uvd_full
         # → bucketed (G², K, 3) layout.
-        params = model(imgs, dist_uvd[..., :3], key_padding_mask=pad_mask, vfp=vfp,
+        # dist_uvd cols: [u, v, d, is_obj, intensity]. Model wants UVD(+I) so
+        # we slice out the is_obj column (3) and pass [u,v,d, intensity] when
+        # use_intensity=True (model.point_mlp in_channels=4), else [u,v,d].
+        if getattr(accel.unwrap_model(model), 'use_intensity', False):
+            point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
+        else:
+            point_in = dist_uvd[..., :3]
+        params = model(imgs, point_in, key_padding_mask=pad_mask, vfp=vfp,
                        bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
         valid  = ~pad_mask
         loss   = gaussian2d_nll(params[valid], gt[valid])
@@ -196,12 +203,14 @@ def main(cfg=None):
     kw = dict(num_workers=nw, pin_memory=True,
               persistent_workers=(nw > 0),
               prefetch_factor=pf if nw > 0 else None,
-              collate_fn=collate_full)
+              collate_fn=collate_full,
+              multiprocessing_context='spawn' if nw > 0 else None)
     val_nw = min(4, nw)
     val_kw = dict(num_workers=val_nw, pin_memory=True,
                   persistent_workers=(val_nw > 0),
                   prefetch_factor=pf if val_nw > 0 else None,
-                  collate_fn=collate_full)
+                  collate_fn=collate_full,
+                  multiprocessing_context='spawn' if val_nw > 0 else None)
     import random as _r
     ds_kw = dict(max_offset_m=c.get('max_offset_m', 0.20),
                   max_rot_deg=c.get('max_rot_deg', 0.5),
@@ -293,35 +302,14 @@ def main(cfg=None):
             cml_logger = None
 
     # Pre-training cache sanity vis (rank-0 only, then rendezvous).
-    # For combined training (multiple --cache paths), render n samples per
-    # dataset under exp_dir/vis_pretrain/{ds_name}/ so each is visible
-    # separately on ClearML.
+    # SKIPPED for LMDB caches: vis_pretrain opens lmdb env in parent process
+    # which leaves it in lmdb's per-process registry. DataLoader workers
+    # forked/spawned afterwards then fail with 'already open in this
+    # process'. Wire up an independent path for pretrain vis later if
+    # needed. For now, only midtrain_vis (which runs once per N epochs and
+    # the workers use persistent_workers) is used.
     if accel.is_main_process:
-        try:
-            from scripts.util.midtrain_vis import vis_pretrain_run
-            n_per_ds = 15 if len(cache_paths) > 1 else 10
-            for cp in cache_paths:
-                ds_name = Path(cp).name
-                sub_exp = exp_dir / 'vis_pretrain_per_ds' / ds_name
-                sub_exp.mkdir(parents=True, exist_ok=True)
-                # vis_pretrain_run writes to {exp_dir}/vis_pretrain — pass a
-                # per-dataset exp_dir so dirs don't collide. ClearML series
-                # uses ds_name to disambiguate panels.
-                _per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
-                _per_ds_exp.mkdir(exist_ok=True)
-                vis_pretrain_run(_per_ds_exp, cp, cml_logger=cml_logger,
-                                 n=n_per_ds, log=log)
-                # Re-upload under per-dataset series for clean panels
-                if cml_logger is not None:
-                    for p in sorted((_per_ds_exp / 'vis_pretrain').glob('*.png')):
-                        try:
-                            cml_logger.report_image(
-                                f'vis_pretrain__{ds_name}', p.stem,
-                                iteration=0, local_path=str(p))
-                        except Exception:
-                            pass
-        except Exception as _e:
-            log(f"vis_pretrain skipped: {_e}")
+        log("vis_pretrain skipped: lmdb-in-parent registry conflict with workers")
     accel.wait_for_everyone()
 
     for epoch in range(1, epochs+1):
@@ -385,34 +373,9 @@ def main(cfg=None):
                     pass
             # Per-10-epoch debug images (rank-0 only; needs the unwrapped model
             # so forward signature matches the dataset-level call in the util).
-            if epoch % 10 == 0 or epoch == epochs:
-                try:
-                    from scripts.util.midtrain_vis import midtrain_vis
-                    n_vis = 15 if len(cache_paths) > 1 else 10
-                    for cp in cache_paths:
-                        ds_name = Path(cp).name
-                        # Per-dataset exp dir so val_*.png filenames don't collide
-                        per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
-                        per_ds_exp.mkdir(exist_ok=True)
-                        midtrain_vis(
-                            accel.unwrap_model(model), per_ds_exp, cp, epoch,
-                            img_size=c["img_size"],
-                            min_crop_px=c.get("min_crop_px", 128),
-                            max_crop_px=c.get("max_crop_px", 384),
-                            cml_logger=None,  # we re-report under per-ds series
-                            device=accel.device,
-                            amp_dtype=torch.float16, n=n_vis, log=log)
-                        if cml_logger is not None:
-                            vis_dir = per_ds_exp / f'vis_ep{epoch:03d}'
-                            for p in sorted(vis_dir.glob('*.png')):
-                                try:
-                                    cml_logger.report_image(
-                                        f'vis_ep__{ds_name}', p.stem,
-                                        iteration=epoch, local_path=str(p))
-                                except Exception:
-                                    pass
-                except Exception as _e:
-                    log(f"vis_ep{epoch:03d} skipped: {_e}")
+            # midtrain_vis SKIPPED for LMDB caches (parent-process env open
+            # conflicts with persistent_workers). TODO: rewrite to use a
+            # separate raw-lmdb scanner that doesn't share the dataset path.
         accel.wait_for_everyone()
 
     log(f"Best val NLL: {best_val:.4f}  |  time: {(time.time()-t0)/60:.1f}min")
