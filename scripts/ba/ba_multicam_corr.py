@@ -57,6 +57,31 @@ def build_model(model_cfg: dict, device: torch.device) -> CalibNetDepth:
     return m
 
 
+def ego_speed_at(root: Path, scene: str, cam: str, frame: int,
+                  dt: float = 0.1) -> float:
+    """Approx ego speed in m/s via central diff on the cam-in-world position
+    (PS is ~10 Hz → dt=0.1). At sequence boundaries falls back to one-sided
+    diff. Returns 0.0 if poses unavailable."""
+    poses_p = root / scene / "camera" / cam / "poses.json"
+    if not poses_p.exists():
+        return 0.0
+    poses = json.loads(poses_p.read_text())
+    n = len(poses)
+    if n < 2:
+        return 0.0
+    f_lo = max(0, frame - 1)
+    f_hi = min(n - 1, frame + 1)
+    if f_hi == f_lo:
+        return 0.0
+    p_lo = np.array([poses[f_lo]["position"]["x"],
+                      poses[f_lo]["position"]["y"],
+                      poses[f_lo]["position"]["z"]])
+    p_hi = np.array([poses[f_hi]["position"]["x"],
+                      poses[f_hi]["position"]["y"],
+                      poses[f_hi]["position"]["z"]])
+    return float(np.linalg.norm(p_hi - p_lo) / ((f_hi - f_lo) * dt))
+
+
 def load_frame(root: Path, scene: str, cam: str, frame: int):
     sc = root / scene
     cd = sc / "camera" / cam
@@ -127,9 +152,19 @@ def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int):
 
 @torch.no_grad()
 def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.ndarray,
-                 ba_cfg: dict, device: torch.device):
-    """Sliding tile grid over image → per-tile model forward → per-pt (Δu,Δv,σ_u,σ_v,ρ).
-    Returns (uv_full[N,2], par[N,5], z_cam[N]). All in FULL-image px units."""
+                 ba_cfg: dict, device: torch.device, y_cam: np.ndarray | None = None):
+    """Batched sliding-tile inference: one forward call per frame (B = n_tiles)
+    instead of one per tile. Returns (uv_full[N,2], par[N,5], z_cam[N]) in
+    FULL-image px units, identical contract to the per-tile version.
+
+    ba_cfg knobs:
+      - exclude_ground_y_cam : float | None
+          When set, drop pts with cam-Y >= this value (in meters). PS cams sit
+          ~1.5m above road → pts with y_cam ≳ +1.0 are road/ground, which the
+          σ-head reports as low-σ (close + tight by pixel) and thus dominates
+          BA weights despite carrying NO useful calibration signal. Excluding
+          ground is required for BA to lock onto edges of buildings / vehicles
+          / signs."""
     H, W = img.shape[:2]
     TILE = ba_cfg["tile_size"]
     S = ba_cfg["model_input_size"]
@@ -137,15 +172,21 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
     min_pts = ba_cfg["min_pts_per_tile"]
     stride = ba_cfg.get("tile_stride", 128)
     scale = TILE / S
-    # Sliding window with stride (matches /tmp/redo_flow_left.py and canonical
-    # proj_3dof_*.png coverage style). Includes a final tile flush to right/bottom.
+    y_thresh = ba_cfg.get("exclude_ground_y_cam", None)
     us = list(range(0, max(W - TILE, 0) + 1, stride))
     vs = list(range(0, max(H - TILE, 0) + 1, stride))
     if us and us[-1] != W - TILE:
         us.append(W - TILE)
     if vs and vs[-1] != H - TILE:
         vs.append(H - TILE)
-    out_uv, out_par, out_z = [], [], []
+
+    # Pass 1: collect per-tile crop/uvd/idx (CPU). Skip tiles with < min_pts.
+    crops_np: list = []
+    uvd_np: list = []
+    pad_mask_np: list = []
+    buc_np: list = []
+    buc_v_np: list = []
+    idx_per_tile: list = []
     for v0 in vs:
         for u0 in us:
             crop = img[v0:v0 + TILE, u0:u0 + TILE]
@@ -158,78 +199,193 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
                 crop = pad
             in_tile = ((uv[:, 0] >= u0) & (uv[:, 0] < u0 + TILE) &
                        (uv[:, 1] >= v0) & (uv[:, 1] < v0 + TILE) & (z > 0.5))
+            if y_thresh is not None and y_cam is not None:
+                in_tile &= (y_cam < y_thresh)
             if int(in_tile.sum()) < min_pts:
                 continue
             idx = np.where(in_tile)[0]
             if len(idx) > max_pts:
-                idx = np.random.choice(idx, max_pts, replace=False)
-            # Local UVD: model expects uv in [0, S) and d normalized to /100.
-            # Depth d = Euclidean distance ‖p_cam‖ (matches canonical pipeline
-            # in /tmp/ba_mc_corr_s001f30.py and /tmp/redo_flow_left.py).
+                # Deterministic top-K by closest depth (most reliable per-pt).
+                # Was np.random.choice — pool was noisy across reruns.
+                idx = idx[np.argsort(z[idx])[:max_pts]]
             u_local = (uv[idx, 0] - u0) * (S / TILE)
             v_local = (uv[idx, 1] - v0) * (S / TILE)
             z_local = z[idx]
-            # Reconstruct cam-frame 3D pts → Euclidean norm
             X = (uv[idx, 0] - K[0, 2]) * z_local / K[0, 0]
             Y = (uv[idx, 1] - K[1, 2]) * z_local / K[1, 1]
             d_eucl = np.sqrt(X * X + Y * Y + z_local * z_local)
-            uvd = np.stack([u_local, v_local, (d_eucl / 100.0).astype(np.float32)], axis=1).astype(np.float32)
-            # vfp = fx * S / cs (matches dataset)
-            vfp = float(K[0, 0]) * S / TILE
-            # Bucket from same uvd
-            buc, buc_v = build_bucket(uvd, S, grid_n=16, K_per_cell=8)
-            # GPU tensors
+            uvd_t = np.stack([u_local, v_local,
+                               (d_eucl / 100.0).astype(np.float32)], axis=1
+                              ).astype(np.float32)
+            # Pad to max_pts, build mask (True = pad / ignore).
+            n = len(idx)
+            uvd_pad = np.zeros((max_pts, 3), dtype=np.float32)
+            uvd_pad[:n] = uvd_t
+            mask = np.ones(max_pts, dtype=bool)
+            mask[:n] = False
+            buc, buc_v = build_bucket(uvd_t, S, grid_n=16, K_per_cell=8)
             crop_r = np.asarray(Image.fromarray(crop).resize((S, S)))
-            img_t = torch.from_numpy(crop_r).permute(2, 0, 1).unsqueeze(0).float().div(255.0).to(device)
-            dist_uvd = torch.from_numpy(uvd).unsqueeze(0).to(device)
-            pad_mask = torch.zeros(1, len(idx), dtype=torch.bool, device=device)
-            vfp_t = torch.tensor([vfp], dtype=torch.float32, device=device)
-            buc_t = torch.from_numpy(buc).unsqueeze(0).to(device)
-            buc_v_t = torch.from_numpy(buc_v).unsqueeze(0).to(device)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                out = model(img_t, dist_uvd, key_padding_mask=pad_mask,
-                            vfp=vfp_t, bucket_uvd=buc_t, bucket_valid=buc_v_t)
-            params = out[0] if isinstance(out, tuple) else out
-            params = params.float().cpu().numpy()[0]  # (M, 5)
-            out_uv.append(uv[idx])
-            out_par.append(np.column_stack([
-                params[:, 0] * scale,             # Δu in full-image px
-                params[:, 1] * scale,
-                np.exp(params[:, 2]) * scale,     # σ_u
-                np.exp(params[:, 3]) * scale,
-                np.tanh(params[:, 4]) * 0.99,     # ρ
-            ]))
-            out_z.append(z_local)
+            crops_np.append(crop_r)
+            uvd_np.append(uvd_pad)
+            pad_mask_np.append(mask)
+            buc_np.append(buc)
+            buc_v_np.append(buc_v)
+            idx_per_tile.append((u0, v0, idx))
+
+    if not crops_np:
+        return None
+
+    # Pass 2: one batched forward (B = n_tiles). vfp is per-tile but TILE is
+    # constant across this frame so vfp is identical for every tile.
+    B = len(crops_np)
+    vfp = float(K[0, 0]) * S / TILE
+    img_t = torch.from_numpy(np.stack(crops_np, axis=0)).permute(0, 3, 1, 2).float().div(255.0).to(device)
+    dist_uvd = torch.from_numpy(np.stack(uvd_np, axis=0)).to(device)
+    pad_mask = torch.from_numpy(np.stack(pad_mask_np, axis=0)).to(device)
+    vfp_t = torch.full((B,), vfp, dtype=torch.float32, device=device)
+    buc_t = torch.from_numpy(np.stack(buc_np, axis=0)).to(device)
+    buc_v_t = torch.from_numpy(np.stack(buc_v_np, axis=0)).to(device)
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        out = model(img_t, dist_uvd, key_padding_mask=pad_mask,
+                    vfp=vfp_t, bucket_uvd=buc_t, bucket_valid=buc_v_t)
+    params = out[0] if isinstance(out, tuple) else out
+    params_np = params.float().cpu().numpy()  # (B, max_pts, 5)
+
+    # Pass 3: per-tile slicing (real-only) → full-image px.
+    out_uv, out_par, out_z = [], [], []
+    for ti, (u0, v0, idx) in enumerate(idx_per_tile):
+        n = len(idx)
+        p = params_np[ti, :n]
+        z_local = z[idx]
+        out_uv.append(uv[idx])
+        out_par.append(np.column_stack([
+            p[:, 0] * scale,
+            p[:, 1] * scale,
+            np.exp(p[:, 2]) * scale,
+            np.exp(p[:, 3]) * scale,
+            np.tanh(p[:, 4]) * 0.99,
+        ]))
+        out_z.append(z_local)
     if not out_uv:
         return None
     return np.concatenate(out_uv), np.concatenate(out_par), np.concatenate(out_z)
 
 
-def solve_3dof(uv: np.ndarray, par: np.ndarray, z: np.ndarray, K: np.ndarray,
-                damping: float = 1e-3):
-    """1-step linearized GN for [ωx_deg, ωy_deg, Δfx_px]. Matches canonical."""
+# ── BA DoF library: name → (du(X,Y,Z,uv,K), dv(X,Y,Z,uv,K)) ───────────────
+# All angles in DEGREES (d2r applied in solver), translations in METERS, fx
+# in PIXELS. Sign convention: positive delta = correction to APPLY on top of
+# the declared world→cam SE(3) / intrinsics so the projection lines up.
+# Keep the legacy 3-DoF aliases ('df_common' under both 'dfx' and 'df_common'
+# names) for back-compat with existing configs.
+_D2R = np.pi / 180.0
+
+
+def _jac_omega_x(X, Y, Z, uv, K):
+    fx, fy = K[0, 0], K[1, 1]
+    return -(fx * X * Y) / (Z * Z) * _D2R, (-fy - (fy * Y * Y) / (Z * Z)) * _D2R
+
+
+def _jac_omega_y(X, Y, Z, uv, K):
+    fx, fy = K[0, 0], K[1, 1]
+    return (fx + (fx * X * X) / (Z * Z)) * _D2R, (fy * X * Y) / (Z * Z) * _D2R
+
+
+def _jac_omega_z(X, Y, Z, uv, K):
+    # Rotation about cam optical axis. Cross-couples with center offset but
+    # PandaSet/Waymo lens roll is usually <0.01°.
+    fx, fy = K[0, 0], K[1, 1]
+    return -fx * Y / Z * _D2R, fy * X / Z * _D2R
+
+
+def _jac_tx(X, Y, Z, uv, K):
+    return K[0, 0] / Z, np.zeros_like(Z)
+
+
+def _jac_ty(X, Y, Z, uv, K):
+    return np.zeros_like(Z), K[1, 1] / Z
+
+
+def _jac_tz(X, Y, Z, uv, K):
+    # Mostly coupled with depth scale and dfx; include only when you really
+    # mean a longitudinal mount-position bias (rare on automotive rigs).
+    return -K[0, 0] * X / (Z * Z), -K[1, 1] * Y / (Z * Z)
+
+
+def _jac_dfx(X, Y, Z, uv, K):
+    fx, cx = K[0, 0], K[0, 2]
+    return (uv[:, 0] - cx) / fx, np.zeros_like(Z)
+
+
+def _jac_dfy(X, Y, Z, uv, K):
+    fy, cy = K[1, 1], K[1, 2]
+    return np.zeros_like(Z), (uv[:, 1] - cy) / fy
+
+
+def _jac_df_common(X, Y, Z, uv, K):
+    # Legacy 3-DoF "Δfx" — actually a common Δf in px applied symmetrically
+    # to fx and fy (cameras with fixed aspect). Kept for back-compat with
+    # the 3-DoF result tables in memory project_ps_calib_full_picture.
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    return (uv[:, 0] - cx) / fx, (uv[:, 1] - cy) / fy
+
+
+DOF_JAC = {
+    "omega_x":   _jac_omega_x,
+    "omega_y":   _jac_omega_y,
+    "omega_z":   _jac_omega_z,
+    "tx":        _jac_tx,
+    "ty":        _jac_ty,
+    "tz":        _jac_tz,
+    "dfx":       _jac_dfx,
+    "dfy":       _jac_dfy,
+    "df_common": _jac_df_common,
+}
+
+# Default DoF lists for the legacy `param` string aliases.
+_DOF_PRESETS = {
+    "3dof": ["omega_x", "omega_y", "df_common"],
+    "5dof": ["omega_x", "omega_y", "tx", "ty", "df_common"],
+    "6dof": ["omega_x", "omega_y", "omega_z", "tx", "ty", "df_common"],
+    "7dof": ["omega_x", "omega_y", "omega_z", "tx", "ty", "tz", "df_common"],
+}
+
+
+def resolve_dof_list(ba_cfg: dict) -> list:
+    """ba.dof (explicit list) wins; else ba.param string preset; else 3dof."""
+    if isinstance(ba_cfg.get("dof"), list) and ba_cfg["dof"]:
+        return list(ba_cfg["dof"])
+    return list(_DOF_PRESETS.get(ba_cfg.get("param", "3dof"),
+                                  _DOF_PRESETS["3dof"]))
+
+
+def solve_dofs(uv: np.ndarray, par: np.ndarray, z: np.ndarray, K: np.ndarray,
+                dof_names: list, damping: float = 1e-3):
+    """1-step linearized GN over a config-supplied list of DoFs. Returns
+    delta of len(dof_names) in declaration order."""
+    for name in dof_names:
+        if name not in DOF_JAC:
+            raise KeyError(f"unknown DoF '{name}' — valid: {sorted(DOF_JAC)}")
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     X = (uv[:, 0] - cx) * z / fx
     Y = (uv[:, 1] - cy) * z / fy
     Z = z
-    du_ox = -(fx * X * Y) / (Z * Z)
-    dv_ox = -fy - (fy * Y * Y) / (Z * Z)
-    du_oy =  fx + (fx * X * X) / (Z * Z)
-    dv_oy =  (fy * X * Y) / (Z * Z)
-    du_dfx = (uv[:, 0] - cx) / fx
-    dv_dfx = (uv[:, 1] - cy) / fy
-    d2r = np.pi / 180
-    J_u = np.column_stack([du_ox * d2r, du_oy * d2r, du_dfx])
-    J_v = np.column_stack([dv_ox * d2r, dv_oy * d2r, dv_dfx])
+    Jus, Jvs = [], []
+    for name in dof_names:
+        ju, jv = DOF_JAC[name](X, Y, Z, uv, K)
+        Jus.append(np.broadcast_to(ju, Z.shape))
+        Jvs.append(np.broadcast_to(jv, Z.shape))
+    J_u = np.column_stack(Jus)
+    J_v = np.column_stack(Jvs)
     r_u, r_v = par[:, 0], par[:, 1]
     su, sv, rho = par[:, 2], par[:, 3], par[:, 4]
     det = su * su * sv * sv * (1 - rho * rho)
     Wuu = (sv * sv) / det
     Wvv = (su * su) / det
     Wuv = -(rho * su * sv) / det
-    H = np.zeros((3, 3)); b = np.zeros(3)
-    for i in range(3):
-        for j in range(3):
+    n = len(dof_names)
+    H = np.zeros((n, n)); b = np.zeros(n)
+    for i in range(n):
+        for j in range(n):
             H[i, j] = ((J_u[:, i] * Wuu * J_u[:, j]).sum()
                        + (J_v[:, i] * Wvv * J_v[:, j]).sum()
                        + (J_u[:, i] * Wuv * J_v[:, j]).sum()
@@ -238,21 +394,73 @@ def solve_3dof(uv: np.ndarray, par: np.ndarray, z: np.ndarray, K: np.ndarray,
                 + (J_v[:, i] * Wvv * r_v).sum()
                 + (J_u[:, i] * Wuv * r_v).sum()
                 + (J_v[:, i] * Wuv * r_u).sum())
-    H += damping * np.eye(3)
+    H += damping * np.eye(n)
     return np.linalg.solve(H, b)
 
 
-def make_T_corr(ox_deg: float, oy_deg: float) -> np.ndarray:
-    R = Rotation.from_euler("xy", [ox_deg, oy_deg], degrees=True).as_matrix()
+# Back-compat thin wrappers — keep old call sites working.
+def solve_3dof(uv, par, z, K, damping=1e-3):
+    return solve_dofs(uv, par, z, K, _DOF_PRESETS["3dof"], damping)
+
+
+def solve_5dof(uv, par, z, K, damping=1e-3):
+    return solve_dofs(uv, par, z, K, _DOF_PRESETS["5dof"], damping)
+
+
+def delta_to_dict(delta: np.ndarray, dof_names: list) -> dict:
+    """Map solver output → human-readable dict keyed by DoF name with
+    unit-aware values. Angles → degrees, translations → meters, fx → px."""
+    out = {}
+    for i, name in enumerate(dof_names):
+        out[name] = float(delta[i])
+    return out
+
+
+def make_T_corr_from_dofs(dof_vals: dict) -> np.ndarray:
+    """Build SE(3) T_corr from the DoF-value dict. Rotation = ZYX Euler in
+    degrees (omega_z, omega_y, omega_x); translation in meters."""
+    ox = dof_vals.get("omega_x", 0.0)
+    oy = dof_vals.get("omega_y", 0.0)
+    oz = dof_vals.get("omega_z", 0.0)
+    # Compose in same order make_T_corr did for back-compat: xy Euler when
+    # no z. With z present, use ZYX standard right-handed.
+    if abs(oz) < 1e-12:
+        R = Rotation.from_euler("xy", [ox, oy], degrees=True).as_matrix()
+    else:
+        R = Rotation.from_euler("zyx", [oz, oy, ox], degrees=True).as_matrix()
     T = np.eye(4); T[:3, :3] = R
+    T[0, 3] = dof_vals.get("tx", 0.0)
+    T[1, 3] = dof_vals.get("ty", 0.0)
+    T[2, 3] = dof_vals.get("tz", 0.0)
     return T
 
 
+def make_T_corr(ox_deg: float, oy_deg: float,
+                tx_m: float = 0.0, ty_m: float = 0.0) -> np.ndarray:
+    """Legacy positional API kept for callers outside this module."""
+    return make_T_corr_from_dofs({
+        "omega_x": ox_deg, "omega_y": oy_deg,
+        "tx": tx_m, "ty": ty_m,
+    })
+
+
 def render_before_after(out_dir: Path, scene: str, frame: int, cam: str,
-                         frame_data, delta: np.ndarray):
+                         frame_data, dof_vals: dict):
     img, K, T_cw, pts_w, _, uv, z = frame_data
-    K_new = K.copy()  # fx/fy fixed — 2-DoF BA only solves ωx, ωy
-    T_corr = make_T_corr(delta[0], delta[1])
+    # Apply BA corrections to BOTH the extrinsic (rotation + translation) and
+    # the intrinsic (Δfx / Δfy / common Δf) so AFTER reflects everything we
+    # solved for, not just rotation.
+    K_new = K.copy()
+    df_px = dof_vals.get("dfx", dof_vals.get("df_common", 0.0))
+    if df_px:
+        K_new[0, 0] = K[0, 0] + df_px
+    df_common = dof_vals.get("df_common", 0.0)
+    if df_common:
+        K_new[1, 1] = K[1, 1] + df_common
+    dfy_px = dof_vals.get("dfy", 0.0)
+    if dfy_px:
+        K_new[1, 1] = K[1, 1] + dfy_px
+    T_corr = make_T_corr_from_dofs(dof_vals)
     T_cw_new = (T_corr @ T_cw).astype(np.float32)
     homo = np.column_stack([pts_w, np.ones(len(pts_w), dtype=np.float32)])
     pts_c2 = (T_cw_new @ homo.T).T[:, :3]
@@ -272,7 +480,16 @@ def render_before_after(out_dir: Path, scene: str, frame: int, cam: str,
     axes[1].imshow(img)
     axes[1].scatter(uv2[v2, 0], uv2[v2, 1], s=0.3, c=z2[v2],
                      cmap="turbo_r", alpha=0.7, vmin=1, vmax=80, marker=".")
-    axes[1].set_title(f"{cam} — AFTER  ωx={delta[0]:+.3f}° ωy={delta[1]:+.3f}°")
+    title_bits = []
+    if "omega_x" in dof_vals: title_bits.append(f"ωx={dof_vals['omega_x']:+.3f}°")
+    if "omega_y" in dof_vals: title_bits.append(f"ωy={dof_vals['omega_y']:+.3f}°")
+    if "omega_z" in dof_vals: title_bits.append(f"ωz={dof_vals['omega_z']:+.3f}°")
+    if "tx"      in dof_vals: title_bits.append(f"tx={dof_vals['tx']*100:+.1f}cm")
+    if "ty"      in dof_vals: title_bits.append(f"ty={dof_vals['ty']*100:+.1f}cm")
+    if "tz"      in dof_vals: title_bits.append(f"tz={dof_vals['tz']*100:+.1f}cm")
+    if df_px:    title_bits.append(f"Δfx={df_px:+.1f}px")
+    if dfy_px:   title_bits.append(f"Δfy={dfy_px:+.1f}px")
+    axes[1].set_title(f"{cam} — AFTER  " + " ".join(title_bits))
     axes[1].set_xticks([]); axes[1].set_yticks([])
     plt.tight_layout()
     fp = out_dir / f"{scene}_f{frame:02d}_{cam}.png"
@@ -288,7 +505,8 @@ def main():
 
     cfg = load_config(args.config)
     print(f"Config: {args.config} (sha256={cfg['_sha256']})")
-    print(f"  description: {cfg['description']}")
+    if 'description' in cfg:
+        print(f"  description: {cfg['description']}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(cfg["model"], device)
@@ -342,7 +560,8 @@ def main():
                 if scene in vis_scenes and frame in vis_frames:
                     vis_cache[(scene, frame, cam)] = fd
                 img, K, T_cw, pts_w, pts_c, uv, z = fd
-                res = infer_tiles(model, img, uv, z, K, ba_cfg, device)
+                y_cam = pts_c[:, 1]  # cam-Y axis = downward; ground ≳ +1m
+                res = infer_tiles(model, img, uv, z, K, ba_cfg, device, y_cam=y_cam)
                 if res is None:
                     continue
                 u, p, zc = res
@@ -361,29 +580,48 @@ def main():
         UV = np.concatenate(pooled_uv)
         PAR = np.concatenate(pooled_par)
         Z = np.concatenate(pooled_z)
-        delta = solve_3dof(UV, PAR, Z, K_ref, damping=ba_cfg["damping"])
-        corrections[cam] = {
-            "omega_x_deg": float(delta[0]),
-            "omega_y_deg": float(delta[1]),
-            "delta_fx_px": float(delta[2]),
-            "fx_ref": float(K_ref[0, 0]),
-            "delta_fx_pct": float(delta[2]) / float(K_ref[0, 0]) * 100.0,
-            "n_scenes": int(per_scene),
-            "n_frames": int(per_frame),
-            "n_pts": int(len(UV)),
-        }
-        print(f"  → ωx={delta[0]:+.4f}°  ωy={delta[1]:+.4f}°  Δfx={delta[2]:+.2f}px "
-              f"({delta[2]/K_ref[0,0]*100:+.3f}%)  "
-              f"scenes={per_scene} frames={per_frame} pts={len(UV)}")
+        dof_names = resolve_dof_list(ba_cfg)
+        delta = solve_dofs(UV, PAR, Z, K_ref, dof_names, damping=ba_cfg["damping"])
+        dof_vals = delta_to_dict(delta, dof_names)
+        fx_ref = float(K_ref[0, 0])
+        rec = dict(dof_vals)
+        rec["fx_ref"] = fx_ref
+        # Δfx-style DoFs are reported as % of fx for quick reading.
+        for k in ("dfx", "df_common"):
+            if k in dof_vals:
+                rec[f"{k}_pct"] = dof_vals[k] / fx_ref * 100.0
+        if "dfy" in dof_vals:
+            rec["dfy_pct"] = dof_vals["dfy"] / float(K_ref[1, 1]) * 100.0
+        rec.update(n_scenes=int(per_scene), n_frames=int(per_frame),
+                   n_pts=int(len(UV)))
+        corrections[cam] = rec
+        # Human-readable one-liner: only print the DoFs actually solved.
+        bits = []
+        if "omega_x"   in dof_vals: bits.append(f"ωx={dof_vals['omega_x']:+.4f}°")
+        if "omega_y"   in dof_vals: bits.append(f"ωy={dof_vals['omega_y']:+.4f}°")
+        if "omega_z"   in dof_vals: bits.append(f"ωz={dof_vals['omega_z']:+.4f}°")
+        if "tx"        in dof_vals: bits.append(f"tx={dof_vals['tx']*100:+.1f}cm")
+        if "ty"        in dof_vals: bits.append(f"ty={dof_vals['ty']*100:+.1f}cm")
+        if "tz"        in dof_vals: bits.append(f"tz={dof_vals['tz']*100:+.1f}cm")
+        for k in ("dfx", "df_common"):
+            if k in dof_vals:
+                bits.append(f"Δfx={dof_vals[k]:+.2f}px ({dof_vals[k]/fx_ref*100:+.3f}%)")
+        if "dfy" in dof_vals:
+            bits.append(f"Δfy={dof_vals['dfy']:+.2f}px "
+                        f"({dof_vals['dfy']/float(K_ref[1,1])*100:+.3f}%)")
+        print(f"  → " + "  ".join(bits) +
+              f"  scenes={per_scene} frames={per_frame} pts={len(UV)}")
 
     # BEFORE/AFTER vis
     print("\n[VIS] rendering BEFORE/AFTER")
     for (scene, frame, cam), fd in sorted(vis_cache.items()):
         if cam not in corrections:
             continue
-        delta = np.array([corrections[cam]["omega_x_deg"],
-                          corrections[cam]["omega_y_deg"]])
-        fp = render_before_after(vis_dir, scene, frame, cam, fd, delta)
+        # Extract the DoF-named keys (e.g. omega_x, tx, dfx) — skip
+        # bookkeeping fields like n_pts / fx_ref / *_pct.
+        rec = corrections[cam]
+        dof_vals = {k: v for k, v in rec.items() if k in DOF_JAC}
+        fp = render_before_after(vis_dir, scene, frame, cam, fd, dof_vals)
         print(f"  {fp}")
 
     # Provenance
@@ -402,7 +640,7 @@ def main():
             "model_ckpt_mtime": datetime.fromtimestamp(ckpt_p.stat().st_mtime).isoformat(timespec="seconds"),
             "elapsed_sec": round(time.time() - t0, 1),
         },
-        "ba_param": "3dof_omega_x_omega_y_dfx",
+        "ba_param": "+".join(resolve_dof_list(ba_cfg)),
         "corrections": corrections,
     }
     out_p = Path(cfg["output"]["corrections_json"])

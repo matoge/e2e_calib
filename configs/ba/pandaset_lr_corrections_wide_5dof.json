@@ -1,0 +1,38 @@
+{
+  "provenance": {
+    "config_path": "/tmp/ba_lr_wide.json",
+    "config_sha256_prefix": "e5d8f4c30971a619",
+    "git_sha": "c91be39371",
+    "run_started": "2026-05-13T10:25:42",
+    "model_ckpt": "experiments/ps_multicam_corr_vcam_clspose_fxfy_100ep/best_model.pt",
+    "model_ckpt_mtime": "2026-05-13T06:45:05",
+    "elapsed_sec": 307.8
+  },
+  "ba_param": "omega_x+omega_y+tx+ty+df_common",
+  "corrections": {
+    "left_camera": {
+      "omega_x": 0.12046111644970701,
+      "omega_y": 0.3162409198313097,
+      "tx": -0.009771482490813364,
+      "ty": 0.06814075145033324,
+      "df_common": 5.627065330154803,
+      "fx_ref": 930.451416015625,
+      "df_common_pct": 0.6047672380628961,
+      "n_scenes": 100,
+      "n_frames": 800,
+      "n_pts": 15465269
+    },
+    "right_camera": {
+      "omega_x": 0.12416644707911206,
+      "omega_y": -0.4042550321100408,
+      "tx": 0.021464932246076648,
+      "ty": 0.05382913755588967,
+      "df_common": 2.829470346449085,
+      "fx_ref": 922.5465087890625,
+      "df_common_pct": 0.3067021900243335,
+      "n_scenes": 100,
+      "n_frames": 800,
+      "n_pts": 15585620
+    }
+  }
+}

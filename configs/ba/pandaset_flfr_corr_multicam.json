@@ -1,0 +1,37 @@
+{
+  "name": "pandaset_flfr_corr_multicam",
+  "description": "FL/FR BA correction using multicam_corr_vcam_clspose_fxfy_100ep model. Memory project_ps_calib_full_picture flagged FL/FR as front-only OOD with undershoot (FL ωx -0.29° BA vs -0.55° true via sweep); multicam should hit closer to truth.",
+  "model": {
+    "ckpt": "experiments/ps_multicam_corr_vcam_clspose_fxfy_100ep/best_model.pt",
+    "img_size": 128,
+    "in_channels": 3,
+    "n_layers": 4,
+    "use_convnext": true,
+    "use_frustum": true,
+    "deform_mode": "sl",
+    "use_frame_pose": true,
+    "frame_pose_dof": 7,
+    "pose_frame": "vcam"
+  },
+  "data": {
+    "root": "/mnt/nvme6t/pandaset",
+    "scenes": ["001", "002", "003", "005", "011", "015", "017", "023", "027", "035"],
+    "frames": [30],
+    "cams": ["front_left_camera", "front_right_camera"]
+  },
+  "ba": {
+    "tile_size": 256,
+    "model_input_size": 128,
+    "tile_stride": 128,
+    "max_pts_per_tile": 256,
+    "min_pts_per_tile": 16,
+    "param": "3dof",
+    "damping": 1e-3
+  },
+  "output": {
+    "corrections_json": "configs/ba/pandaset_flfr_corrections_multicam.json",
+    "vis_dir": "experiments/_cache_check/ps_flfr_ba_check_multicam",
+    "vis_scenes": ["001", "017", "035"],
+    "vis_frames": [10, 30, 50]
+  }
+}
