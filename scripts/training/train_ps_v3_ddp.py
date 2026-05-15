@@ -225,9 +225,15 @@ def main(cfg=None):
     from torch.utils.data import ConcatDataset
     tr_parts, va_parts = [], []
     for cp in cache_paths:
-        tr_p = PandaSetCalibDatasetFull(cp, split='train', **ds_kw)
-        va_p = PandaSetCalibDatasetFull(cp, split='val',   **ds_kw)
-        log(f"  [{cp}] train={len(tr_p)} val={len(va_p)}")
+        # Waymo cache is already huge (5M tiles); oversample=1 keeps it
+        # in the same epoch budget as the smaller (kami/woven) caches at
+        # the user-supplied oversample. Override per-cache.
+        cp_kw = dict(ds_kw)
+        if 'waymo' in cp.lower():
+            cp_kw['oversample'] = 1
+        tr_p = PandaSetCalibDatasetFull(cp, split='train', **cp_kw)
+        va_p = PandaSetCalibDatasetFull(cp, split='val',   **cp_kw)
+        log(f"  [{cp}] train={len(tr_p)} val={len(va_p)} (os={cp_kw['oversample']})")
         tr_parts.append(tr_p); va_parts.append(va_p)
     tr_full = ConcatDataset(tr_parts) if len(tr_parts) > 1 else tr_parts[0]
     va_full = ConcatDataset(va_parts) if len(va_parts) > 1 else va_parts[0]
