@@ -95,49 +95,65 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                                        max_offset_m=max_offset_m,
                                        oversample=1)
 
-    sample_idx_fp = exp_dir / 'vis_pretrain' / 'sample_idxs.json'
-    if sample_idx_fp.exists():
-        idxs = _json.loads(sample_idx_fp.read_text())
-        obj_filter = False  # curated already
-    else:
-        idxs = list(range(len(ds)))
-        _r.Random(0).shuffle(idxs)
-        obj_filter = True
+    # Render two pools: n samples passing obj_filter, and n samples without
+    # filter (random scenes). 2*n images are saved per epoch per dataset.
+    idxs = list(range(len(ds)))
+    _r.Random(0).shuffle(idxs)
 
     S = int(img_size)
-    saved = 0
+    saved_obj = 0
+    saved_any = 0
+    n_obj_target = n
+    n_any_target = n
     was_training = model.training
     model.eval()
+    _first_error_logged = False
     try:
-        for idx in idxs[:200]:
-            if saved >= n:
+        for idx in idxs[:600]:
+            if saved_obj >= n_obj_target and saved_any >= n_any_target:
                 break
+            # Let real exceptions bubble — only catch the rare "no points
+            # in crop / dataset retry" so the first stacktrace surfaces in
+            # the log instead of being silently eaten.
+            _np.random.seed(int(idx))
             try:
-                # Pin np.random per idx so the crop box (u0, v0, cs) and the
-                # extrinsic perturbation are identical across epochs/eval runs —
-                # vis stays comparable. train_ps_v3._midtrain_vis does the same.
-                _np.random.seed(int(idx))
-                img, true_uvd, dist_uvd, vfp, uvd_full_v, pad_full_v = ds[idx]
-            except Exception:
+                out = ds[idx]
+            except (RuntimeError, ValueError) as _e:
+                if not _first_error_logged:
+                    log(f"vis_ep{epoch:03d}: ds[{idx}] retryable: {_e}")
+                    _first_error_logged = True
                 continue
+            img, true_uvd, dist_uvd, vfp = out[0], out[1], out[2], out[3]
+            bucket_uvd_v   = out[4]
+            bucket_valid_v = out[5]
             is_obj = dist_uvd[:, 3].numpy() > 0.5
-            if obj_filter:
-                if not is_obj.any():
-                    continue
-                d_obj = dist_uvd[is_obj, :2].numpy()
-                if max(float(d_obj[:, 0].max() - d_obj[:, 0].min()),
-                       float(d_obj[:, 1].max() - d_obj[:, 1].min())) < 16:
-                    continue
+            d_obj = dist_uvd[is_obj, :2].numpy() if is_obj.any() else None
+            obj_qualifies = (
+                d_obj is not None and d_obj.shape[0] > 0 and
+                max(float(d_obj[:, 0].max() - d_obj[:, 0].min()),
+                    float(d_obj[:, 1].max() - d_obj[:, 1].min())) >= 16
+            )
+            if obj_qualifies and saved_obj < n_obj_target:
+                pool = 'obj'
+            elif saved_any < n_any_target:
+                pool = 'any'
+            else:
+                continue
             Nmax = true_uvd.shape[0]
             pad = torch.zeros(1, Nmax, dtype=torch.bool, device=device)
+            use_intensity = bool(getattr(model, 'use_intensity', False))
+            if use_intensity and dist_uvd.shape[-1] >= 5:
+                point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
+            else:
+                point_in = dist_uvd[..., :3]
             with torch.autocast(device_type='cuda', dtype=amp_dtype), torch.no_grad():
                 img_gpu = img.unsqueeze(0).to(device).float().div_(255.0)
                 p = model(img_gpu,
-                          dist_uvd.unsqueeze(0).to(device)[..., :3],
+                          point_in.unsqueeze(0).to(device),
                           key_padding_mask=pad,
                           vfp=vfp.view(1).to(device),
-                          distorted_uvd_full=uvd_full_v.unsqueeze(0).to(device),
-                          pad_full=pad_full_v.unsqueeze(0).to(device))[0].float().cpu().numpy()
+                          bucket_uvd=bucket_uvd_v.unsqueeze(0).to(device),
+                          bucket_valid=bucket_valid_v.unsqueeze(0).to(device))[0].float().cpu().numpy()
             true_uv = true_uvd[:, :2].numpy()
             dist_uv = dist_uvd[:, :2].numpy()
             pred_uv = dist_uv + p[:, :2]
@@ -207,16 +223,21 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                           f'H={H_bits:.2f}b  lapV={lap_var:.0f}',
                           fontsize=8)
             plt.tight_layout(pad=0.2)
-            fp = out / f'val_{saved:02d}_idx{idx:06d}.png'
+            sub_idx = saved_obj if pool == 'obj' else saved_any
+            fp = out / f'val_{pool}_{sub_idx:02d}_idx{idx:06d}.png'
             plt.savefig(fp, dpi=96, bbox_inches='tight')
             plt.close(fig)
             if cml_logger is not None:
                 try:
-                    cml_logger.report_image('vis_ep', f'sample_{saved:02d}',
+                    cml_logger.report_image(f'vis_ep_{pool}',
+                                             f'sample_{sub_idx:02d}',
                                              iteration=epoch, local_path=str(fp))
                 except Exception:
                     pass
-            saved += 1
+            if pool == 'obj':
+                saved_obj += 1
+            else:
+                saved_any += 1
     finally:
         model.train(was_training)
         # Release lmdb env in this (parent) process so DataLoader workers
@@ -226,4 +247,4 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
             ds.close_lmdb()
         except Exception:
             pass
-    log(f"vis_ep{epoch:03d}: saved {saved} → {out}")
+    log(f"vis_ep{epoch:03d}: saved obj={saved_obj} any={saved_any} → {out}")

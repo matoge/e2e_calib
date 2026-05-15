@@ -302,14 +302,29 @@ def main(cfg=None):
             cml_logger = None
 
     # Pre-training cache sanity vis (rank-0 only, then rendezvous).
-    # SKIPPED for LMDB caches: vis_pretrain opens lmdb env in parent process
-    # which leaves it in lmdb's per-process registry. DataLoader workers
-    # forked/spawned afterwards then fail with 'already open in this
-    # process'. Wire up an independent path for pretrain vis later if
-    # needed. For now, only midtrain_vis (which runs once per N epochs and
-    # the workers use persistent_workers) is used.
+    # The class-level _LMDB_ENV_CACHE in PandaSetCalibDatasetFull keyed by
+    # (pid, path) means workers share one env per path with the parent —
+    # so opening the env from vis_pretrain is now safe.
     if accel.is_main_process:
-        log("vis_pretrain skipped: lmdb-in-parent registry conflict with workers")
+        try:
+            from scripts.util.midtrain_vis import vis_pretrain_run
+            n_per_ds = 15 if len(cache_paths) > 1 else 10
+            for cp in cache_paths:
+                ds_name = Path(cp).name
+                _per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
+                _per_ds_exp.mkdir(exist_ok=True)
+                vis_pretrain_run(_per_ds_exp, cp, cml_logger=cml_logger,
+                                 n=n_per_ds, log=log)
+                if cml_logger is not None:
+                    for p in sorted((_per_ds_exp / 'vis_pretrain').glob('*.png')):
+                        try:
+                            cml_logger.report_image(
+                                f'vis_pretrain__{ds_name}', p.stem,
+                                iteration=0, local_path=str(p))
+                        except Exception:
+                            pass
+        except Exception as _e:
+            log(f"vis_pretrain skipped: {_e}")
     accel.wait_for_everyone()
 
     for epoch in range(1, epochs+1):
@@ -373,9 +388,35 @@ def main(cfg=None):
                     pass
             # Per-10-epoch debug images (rank-0 only; needs the unwrapped model
             # so forward signature matches the dataset-level call in the util).
-            # midtrain_vis SKIPPED for LMDB caches (parent-process env open
-            # conflicts with persistent_workers). TODO: rewrite to use a
-            # separate raw-lmdb scanner that doesn't share the dataset path.
+            # Per-N-epoch debug images, dataset-split. Class-level lmdb env
+            # cache means parent + workers share one env per path → safe.
+            if epoch % 10 == 0 or epoch == epochs:
+                try:
+                    from scripts.util.midtrain_vis import midtrain_vis
+                    n_vis = 15 if len(cache_paths) > 1 else 10
+                    for cp in cache_paths:
+                        ds_name = Path(cp).name
+                        per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
+                        per_ds_exp.mkdir(exist_ok=True)
+                        midtrain_vis(
+                            accel.unwrap_model(model), per_ds_exp, cp, epoch,
+                            img_size=c["img_size"],
+                            min_crop_px=c.get("min_crop_px", 128),
+                            max_crop_px=c.get("max_crop_px", 384),
+                            cml_logger=None,
+                            device=accel.device,
+                            amp_dtype=torch.float16, n=n_vis, log=log)
+                        if cml_logger is not None:
+                            vis_dir = per_ds_exp / f'vis_ep{epoch:03d}'
+                            for p in sorted(vis_dir.glob('*.png')):
+                                try:
+                                    cml_logger.report_image(
+                                        f'vis_ep__{ds_name}', p.stem,
+                                        iteration=epoch, local_path=str(p))
+                                except Exception:
+                                    pass
+                except Exception as _e:
+                    log(f"vis_ep{epoch:03d} skipped: {_e}")
         accel.wait_for_everyone()
 
     log(f"Best val NLL: {best_val:.4f}  |  time: {(time.time()-t0)/60:.1f}min")
