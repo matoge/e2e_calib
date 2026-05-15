@@ -87,13 +87,11 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                              oversample=1)
     else:
         # Force the legacy .pt path for vis: opening lmdb here in the parent
-        # process collides with the train_loader's persistent_workers (which
-        # cached the same Environment under a different pid). The vis dataset
-        # only reads ~15-30 samples per call and is rate-limited to every 10
-        # epochs, so the slower disk path is invisible to training throughput.
-        import os as _os
-        _prev_no_lmdb = _os.environ.get('E2E_NO_LMDB')
-        _os.environ['E2E_NO_LMDB'] = '1'
+        # process collides with the train_loader's persistent_workers. We
+        # disable lmdb on the *instance only* (not via env var) so the
+        # train_loader workers, which fork from the parent, don't inherit
+        # an E2E_NO_LMDB=1 and trash their own lmdb path. This vis ds is
+        # read ~30 times per call, every 10 epochs, so slower .pt is fine.
         from datasets.pandaset_full import PandaSetCalibDatasetFull
         ds = PandaSetCalibDatasetFull(cache, split='val',
                                        img_size=img_size,
@@ -101,11 +99,11 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                                        max_crop_px=max_crop_px,
                                        max_rot_deg=max_rot_deg,
                                        max_offset_m=max_offset_m,
-                                       oversample=1)
-        if _prev_no_lmdb is None:
-            _os.environ.pop('E2E_NO_LMDB', None)
-        else:
-            _os.environ['E2E_NO_LMDB'] = _prev_no_lmdb
+                                       oversample=1,
+                                       preload=False)
+        ds._use_lmdb = False
+        ds._lmdb_env = None
+        ds._cubs_map = None
 
     # Render two pools: n samples passing obj_filter, and n samples without
     # filter (random scenes). 2*n images are saved per epoch per dataset.
@@ -129,15 +127,15 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
             # the log instead of being silently eaten.
             _np.random.seed(int(idx))
             try:
-                out = ds[idx]
+                ds_out = ds[idx]
             except (RuntimeError, ValueError) as _e:
                 if not _first_error_logged:
                     log(f"vis_ep{epoch:03d}: ds[{idx}] retryable: {_e}")
                     _first_error_logged = True
                 continue
-            img, true_uvd, dist_uvd, vfp = out[0], out[1], out[2], out[3]
-            bucket_uvd_v   = out[4]
-            bucket_valid_v = out[5]
+            img, true_uvd, dist_uvd, vfp = ds_out[0], ds_out[1], ds_out[2], ds_out[3]
+            bucket_uvd_v   = ds_out[4]
+            bucket_valid_v = ds_out[5]
             is_obj = dist_uvd[:, 3].numpy() > 0.5
             d_obj = dist_uvd[is_obj, :2].numpy() if is_obj.any() else None
             obj_qualifies = (
