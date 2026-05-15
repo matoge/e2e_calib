@@ -240,11 +240,11 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                 saved_any += 1
     finally:
         model.train(was_training)
-        # Release lmdb env in this (parent) process so DataLoader workers
-        # forked AFTER this call can open it without hitting lmdb's
-        # 'already open in this process' guard.
-        try:
-            ds.close_lmdb()
-        except Exception:
-            pass
+        # NOTE: do NOT call ds.close_lmdb() here. With persistent_workers=True
+        # the DataLoader workers share a class-level (pid, path) env. Closing
+        # the parent's handle invalidates outstanding txns observed by the
+        # workers' mmap → "Attempt to operate on closed/deleted/dropped object"
+        # on the next training step. The class cache + __getstate__ already
+        # ensures workers re-open in their own pid, so leak is bounded to the
+        # parent's single env.
     log(f"vis_ep{epoch:03d}: saved obj={saved_obj} any={saved_any} → {out}")
