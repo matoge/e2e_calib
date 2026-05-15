@@ -86,6 +86,14 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                              max_offset_m=max_offset_m,
                              oversample=1)
     else:
+        # Force the legacy .pt path for vis: opening lmdb here in the parent
+        # process collides with the train_loader's persistent_workers (which
+        # cached the same Environment under a different pid). The vis dataset
+        # only reads ~15-30 samples per call and is rate-limited to every 10
+        # epochs, so the slower disk path is invisible to training throughput.
+        import os as _os
+        _prev_no_lmdb = _os.environ.get('E2E_NO_LMDB')
+        _os.environ['E2E_NO_LMDB'] = '1'
         from datasets.pandaset_full import PandaSetCalibDatasetFull
         ds = PandaSetCalibDatasetFull(cache, split='val',
                                        img_size=img_size,
@@ -94,6 +102,10 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                                        max_rot_deg=max_rot_deg,
                                        max_offset_m=max_offset_m,
                                        oversample=1)
+        if _prev_no_lmdb is None:
+            _os.environ.pop('E2E_NO_LMDB', None)
+        else:
+            _os.environ['E2E_NO_LMDB'] = _prev_no_lmdb
 
     # Render two pools: n samples passing obj_filter, and n samples without
     # filter (random scenes). 2*n images are saved per epoch per dataset.
