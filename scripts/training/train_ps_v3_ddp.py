@@ -39,7 +39,7 @@ torch.set_float32_matmul_precision("high")
 CFG = dict(
     name          = "ps_v3_ddp",
     n_layers      = 2,
-    img_size      = 64,
+    img_size      = 128,
     in_channels   = 3,
     use_convnext  = False,
     use_frustum   = True,
@@ -50,7 +50,7 @@ CFG = dict(
     val_fraction  = 0.1,
     split_seed    = 42,
     min_crop_px   = 128,
-    max_crop_px   = 512,
+    max_crop_px   = 384,
     # --cache は必須。 host ごとに path が違うので default は設けない
     # (旧: /mnt/nvme6t/... は dgx1/2 で存在せず、別 dataset に silent
     #  fall-through する事故を起こしていた。 2026-05-04 撤去)。
