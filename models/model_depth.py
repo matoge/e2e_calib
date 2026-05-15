@@ -14,11 +14,17 @@ from models.model_cov import CrossAttentionBlockCov, TransformerDecoderBlock, cl
 
 
 class PointMLP3(nn.Module):
-    """Point MLP for 3-channel input (U, V, D_norm)."""
-    def __init__(self, d: int = D_DIM):
+    """Point MLP for (U, V, D_norm, [intensity]) input.
+
+    in_channels is 3 for legacy caches (no intensity) or 4 for V3-i caches
+    (with per-point intensity). The downstream code is unchanged — only the
+    first linear layer's input dim shifts.
+    """
+    def __init__(self, d: int = D_DIM, in_channels: int = 3):
         super().__init__()
+        self.in_channels = int(in_channels)
         self.net = nn.Sequential(
-            nn.Linear(3, 64),  nn.GELU(),
+            nn.Linear(self.in_channels, 64), nn.GELU(),
             nn.Linear(64, d),  nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(d, d),
@@ -471,7 +477,8 @@ class CalibNetDepth(nn.Module):
                  local_3d_radii=(1.0, 4.0, 16.0),
                  local_3d_k=(8, 8, 8),
                  use_frame_pose: bool = False, frame_pose_dof: int = 6,
-                 frame_pose_full_cov: bool = False):
+                 frame_pose_full_cov: bool = False,
+                 use_intensity: bool = True):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -482,7 +489,9 @@ class CalibNetDepth(nn.Module):
         self.n_layers    = n_layers
         self.cnn         = (ConvNeXtBackbone(d, in_channels=in_channels)
                             if use_convnext else CNNBackbone(d, in_channels=in_channels))
-        self.point_mlp   = PointMLP3(d)
+        # Point input dim: 3 (u, v, d) for legacy caches; 4 (+ intensity) for V3-i.
+        self.use_intensity = bool(use_intensity)
+        self.point_mlp   = PointMLP3(d, in_channels=4 if self.use_intensity else 3)
         if use_3d_local:
             # Replaces FrustumLocalEncoder's UV-pixel-box with 3D ball-query
             # MSG (PointNet++ style). Multi-scale via radii in metres.
@@ -594,9 +603,9 @@ class CalibNetDepth(nn.Module):
                 bucket_valid: torch.Tensor = None):
         """
         image           : (B, C, H, W)
-        distorted_uvd   : (B, N, 3)  [U, V, D_norm]
+        distorted_uvd   : (B, N, 3 or 4)  [U, V, D_norm, (intensity if use_intensity)]
         key_padding_mask: (B, N) bool  True = padding position
-        bucket_uvd      : (B, G², K_per_cell, 3)  pre-binned lidar grid
+        bucket_uvd      : (B, G², K_per_cell, 3)  pre-binned lidar grid (geometric only)
         bucket_valid    : (B, G², K_per_cell)     bool valid mask
         Returns params  : (B, N, 5)  [tx, ty, log_sx, log_sy, rho]
         """
@@ -614,8 +623,17 @@ class CalibNetDepth(nn.Module):
             fine_feat   = ft_map
 
         uv_01    = distorted_uvd[..., :2] / self.img_size
-        uvd_norm = torch.cat([uv_01, distorted_uvd[..., 2:3]], dim=-1)
         d3       = distorted_uvd[..., 2:3]
+        if self.use_intensity:
+            # distorted_uvd has (u, v, d, intensity). uvd_norm becomes 4-D so the
+            # point MLP (in_channels=4) embeds intensity alongside geometry.
+            uvd_norm = torch.cat([uv_01, d3, distorted_uvd[..., 3:4]], dim=-1)
+        else:
+            uvd_norm = torch.cat([uv_01, d3], dim=-1)
+        # Spatial-only view of the query (drop intensity), used everywhere
+        # downstream where geometric relations / 3D backprojection / deformable
+        # sampling are applied.
+        distorted_uvd_geom = distorted_uvd[..., :3]
 
         # Stage 2 (mixed Q): randomly zero out depth for some queries so the
         # model learns to handle UV-only Q. query_drop_prob is set externally
@@ -625,7 +643,10 @@ class CalibNetDepth(nn.Module):
         if self.training and qdp > 0.0:
             # Bernoulli per (B, N) — independent per query position
             mask = torch.bernoulli(torch.full_like(d3, 1.0 - qdp)).to(d3.dtype)
-            uvd_norm = torch.cat([uv_01, d3 * mask], dim=-1)
+            if self.use_intensity:
+                uvd_norm = torch.cat([uv_01, d3 * mask, distorted_uvd[..., 3:4]], dim=-1)
+            else:
+                uvd_norm = torch.cat([uv_01, d3 * mask], dim=-1)
 
         q = self.point_mlp(uvd_norm)
         if self.frustum_enc is not None:
@@ -641,7 +662,7 @@ class CalibNetDepth(nn.Module):
                 B_, G2, Kpc, _ = bucket_uvd.shape
                 flat_uvd = bucket_uvd.reshape(B_, G2 * Kpc, 3)
                 flat_pad = ~bucket_valid.reshape(B_, G2 * Kpc)
-                q = q + self.frustum_enc(distorted_uvd,
+                q = q + self.frustum_enc(distorted_uvd_geom,
                                           full_uvd=flat_uvd,
                                           full_pad_mask=flat_pad,
                                           vfp=vfp, img_size=self.img_size,
@@ -651,7 +672,7 @@ class CalibNetDepth(nn.Module):
                     bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
                     img_size=self.img_size)
             else:
-                q = q + self.frustum_enc(distorted_uvd,
+                q = q + self.frustum_enc(distorted_uvd_geom,
                                           bucket_uvd=bucket_uvd,
                                           bucket_valid=bucket_valid,
                                           query_token=q,
@@ -741,7 +762,11 @@ class CalibNetDepth(nn.Module):
         # refinement layers
         for i in range(1, min(self.n_layers, len(blocks))):
             uv_i = (uv_01 + raw_cum[..., :2]).clamp(0, 1)
-            q    = self.point_mlp(torch.cat([uv_i, d3], dim=-1)) + q
+            if self.use_intensity:
+                refine_uvd = torch.cat([uv_i, d3, distorted_uvd[..., 3:4]], dim=-1)
+            else:
+                refine_uvd = torch.cat([uv_i, d3], dim=-1)
+            q    = self.point_mlp(refine_uvd) + q
             q, raw_i = self._block(blocks[i], q, feats_by_layer[i], uv_i, key_padding_mask,
                                     extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
             raw_cum = raw_cum + raw_i

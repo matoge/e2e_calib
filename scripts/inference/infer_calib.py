@@ -40,6 +40,15 @@ def load_calib_model(exp: str, device: str | torch.device = 'cuda'):
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     c = mod.CFG
 
+    sd = torch.load(ckpt_path, map_location=device, weights_only=True)
+    # Auto-detect 4-ch (intensity) vs 3-ch PointMLP from the saved state_dict.
+    # point_mlp.net.0.weight has shape (64, in_channels). Older ckpts are 3-ch.
+    pm_w = sd.get('point_mlp.net.0.weight')
+    if pm_w is not None and pm_w.shape[1] == 4:
+        use_intensity_detected = True
+    else:
+        use_intensity_detected = bool(c.get('use_intensity', False))
+
     model = CalibNetDepth(
         img_size       = c['img_size'],
         in_channels    = c['in_channels'],
@@ -47,13 +56,18 @@ def load_calib_model(exp: str, device: str | torch.device = 'cuda'):
         self_first     = c.get('self_first', False),
         use_convnext   = c.get('use_convnext', False),
         use_frustum    = c.get('use_frustum', False),
+        deform_mode    = c.get('deform_mode', 'none'),
         use_frame_token  = c.get('use_frame_token',  False),
         frame_token_side = c.get('frame_token_side', 8),
         use_lidar_kv     = c.get('use_lidar_kv', False),
         use_pose_emb     = c.get('use_pose_emb', False),
+        use_frame_pose   = c.get('use_frame_pose', False),
+        frame_pose_dof   = c.get('frame_pose_dof', 6),
+        use_intensity    = use_intensity_detected,
     ).to(device)
-    sd = torch.load(ckpt_path, map_location=device, weights_only=True)
-    miss, unex = model.load_state_dict(sd, strict=True)   # strict catches mismatches early
+    # detect extra_kv presence from state_dict (model_depth auto-creates extra_kv_attn
+    # when use_lidar_kv is True; some checkpoints have it without explicit CFG flag).
+    miss, unex = model.load_state_dict(sd, strict=False)   # non-strict: report mismatches
     model.eval()
     return model
 

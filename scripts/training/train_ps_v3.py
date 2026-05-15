@@ -261,13 +261,28 @@ def main(cfg=None):
         # ズレネット shared across sensor stacks (matches end-goal of zero-shot
         # transfer to company data; memory project_zero_shot_success_bar.md).
         cache_paths = cache if isinstance(cache, (list, tuple)) else [cache]
+        # Per-cache oversample: `oversample` in cfg may be a single int (legacy:
+        # same os for every cache) OR a list matching cache_paths order. Joint
+        # ZOD+TSS4 wants 1 for ZOD (292K tiles already plenty) and 12 for TSS4
+        # (27K tiles, needs heavier crop augmentation) — uniform os=8 wastes
+        # half the epoch on redundant ZOD crops.
+        os_cfg = c.get('oversample', 12)
+        if isinstance(os_cfg, (list, tuple)):
+            if len(os_cfg) != len(cache_paths):
+                raise ValueError(
+                    f"--oversample list len {len(os_cfg)} != --cache list len "
+                    f"{len(cache_paths)}; pass one os per cache or a single int.")
+            os_per_cache = list(os_cfg)
+        else:
+            os_per_cache = [int(os_cfg)] * len(cache_paths)
         ds_kw_val = dict(ds_kw); ds_kw_val['oversample'] = 1  # val never oversamples
         tr_per, va_per = [], []
-        for cp in cache_paths:
-            t = PandaSetCalibDatasetFull(cp, split='train', **ds_kw)
+        for cp, os_i in zip(cache_paths, os_per_cache):
+            ds_kw_i = dict(ds_kw); ds_kw_i['oversample'] = int(os_i)
+            t = PandaSetCalibDatasetFull(cp, split='train', **ds_kw_i)
             v = PandaSetCalibDatasetFull(cp, split='val',   **ds_kw_val)
             tr_per.append(t); va_per.append(v)
-            log(f"  + cache {cp}: train={len(t)} val={len(v)}")
+            log(f"  + cache {cp}: train={len(t)} val={len(v)} (os={os_i})")
         if len(tr_per) == 1:
             tr_full, va_full = tr_per[0], va_per[0]
         else:
@@ -655,8 +670,11 @@ if __name__ == "__main__":
                     help='min random crop side in full-image px (default 128)')
     ap.add_argument('--max-crop-px', type=int, default=None,
                     help='max random crop side in full-image px (default 512)')
-    ap.add_argument('--oversample', type=int, default=None,
-                    help='per-epoch oversample factor (each frame yields N random crops; default 12 → ~90K/ep matches v9_lazy)')
+    ap.add_argument('--oversample', type=str, default=None,
+                    help='per-epoch oversample factor (each frame yields N '
+                         'random crops; default 12). Single int OR comma-list '
+                         'matching --cache order, e.g. "1,12" = ZOD os=1, '
+                         'TSS4 os=12 — useful when caches differ in size.')
     ap.add_argument('--rep-strategy', choices=('cell_center', 'nearest_cam'),
                     default=None,
                     help='per-cell representative selection. cell_center '
@@ -766,7 +784,11 @@ if __name__ == "__main__":
     if args.lr      is not None: cfg['lr']     = args.lr
     if args.lr_min  is not None: cfg['lr_min'] = args.lr_min
     if args.frame_stride and args.frame_stride > 1: cfg['frame_stride'] = args.frame_stride
-    if args.oversample is not None: cfg['oversample'] = args.oversample
+    if args.oversample is not None:
+        # Parse "1,12" → [1, 12] for per-cache; "12" → 12 for uniform.
+        s = args.oversample.strip()
+        cfg['oversample'] = ([int(x) for x in s.split(',')]
+                              if ',' in s else int(s))
     if args.rep_strategy is not None: cfg['rep_strategy'] = args.rep_strategy
     if args.grid_n is not None: cfg['grid_n'] = args.grid_n
     if args.workers is not None: cfg['num_workers'] = args.workers

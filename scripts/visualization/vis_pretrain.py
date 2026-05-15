@@ -222,11 +222,40 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob('*.png'): old.unlink()
 
-    ds = PandaSetCalibDatasetFull(cache, split='val', img_size=args.img_size,
+    # ONE dataset, with fnames combined across train + val. Avoids the double-
+    # LMDB-open error from instantiating two datasets pointing at the same file.
+    # Scene-stratified sampling below ensures vis spans all sequences (TSS4
+    # naively used split='val' → 1 scene → boring vis).
+    ds = PandaSetCalibDatasetFull(cache, split='train', img_size=args.img_size,
                                    min_crop_px=args.min_crop_px,
                                    max_crop_px=args.max_crop_px, oversample=1)
-    idxs = list(range(len(ds))); _r.Random(args.seed).shuffle(idxs)
-    print(f'cache: {cache}  insts: {len(ds)}  rendering {args.n} → {out}')
+    import torch as _torch
+    _meta = _torch.load(Path(cache) / 'meta.pt', weights_only=False)
+    ds.fnames = list(_meta['train']) + list(_meta['val'])
+    # Scene-stratified sampling so a small N spreads across all sequences
+    # (TSS4 has 5 scenes; naive shuffle landed all 30 in one scene → useless).
+    # Per scene: shuffle its tile idxs, pick round-robin until n is filled.
+    rng = _r.Random(args.seed)
+    scene_to_idxs = {}
+    for i in range(len(ds)):
+        try:
+            inst = ds._load_inst(i)
+            s = inst.get('scene', '_unknown')
+        except Exception:
+            s = '_err'
+        scene_to_idxs.setdefault(s, []).append(i)
+    for v in scene_to_idxs.values():
+        rng.shuffle(v)
+    scene_order = sorted(scene_to_idxs.keys())
+    rng.shuffle(scene_order)
+    # Round-robin across scenes
+    idxs = []
+    while sum(len(v) for v in scene_to_idxs.values()) > 0 and len(idxs) < args.n * 10:
+        for s in scene_order:
+            if scene_to_idxs[s]:
+                idxs.append(scene_to_idxs[s].pop())
+                if len(idxs) >= args.n * 10: break
+    print(f'cache: {cache}  insts: {len(ds)}  scenes: {len(scene_order)}  rendering {args.n} → {out}')
     chosen = []
     saved = 0
     for idx in idxs:
