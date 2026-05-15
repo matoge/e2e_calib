@@ -1,0 +1,49 @@
+ClearML Task: created new task id=f635c17c1a8e42f1a97e27a397cc65c6
+ClearML results page: https://clearml.budda.site/projects/08d9e4b8a1334ad7ba45150d8a16b97e/experiments/f635c17c1a8e42f1a97e27a397cc65c6/output/log
+10:18:04  loading cache ['/mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i', '/mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled', '/mnt/nvme6t/e2e_calib_cache/pandaset_v3_tiled_i'] (V3 full-image)
+10:18:04    perturbation: ±1.5 deg / ±0.6 m   fx/fy: ±0.00% / ±0.00%   crop_px=[128, 512] (full-image px → 128)
+10:18:04    rep_strategy=nearest_cam
+<unknown>:83: SyntaxWarning: invalid escape sequence '\s'
+2026-05-15 10:18:09,881 - clearml.model - WARNING - Connecting multiple input models with the same name: `meta`. This might result in the wrong model being used when executing remotely
+10:18:10    + cache /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i: train=292440 val=37560 (os=1)
+10:18:10    + cache /mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled: train=27880 val=3920 (os=1)
+10:18:18    + cache /mnt/nvme6t/e2e_calib_cache/pandaset_v3_tiled_i: train=70400 val=12000 (os=1)
+10:18:18  train cache(s) loaded: 390720 instances
+10:18:18  val cache loaded: 53480 instances (oversample=1)
+10:18:18  sequence-level split (cache pre-built): train=390720 val=53480
+10:18:18    val subsample: 8000/53480 (deterministic first-N)
+10:18:19  params: 1.81M
+10:18:19  amp_dtype=torch.bfloat16 scaler_enabled=False device=NVIDIA GeForce RTX 5080 cc=(12, 0)
+ClearML Monitor: Could not detect iteration reporting, falling back to iterations as seconds-from-start
+cache: /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i  insts: 330000  scenes: 8250  rendering 30 → experiments/zod_tss4_ps_20260515_joint_repnear_os1_50ep/vis_pretrain
+  pre_00: idx=257541  scene=074287 frame=74287  N=247 obj=25
+  pre_01: idx=61475  scene=018088 frame=18088  N=55 obj=0
+  pre_02: idx=153203  scene=039368 frame=39368  N=226 obj=18
+  pre_03: idx=294902  scene=000504 frame=504  N=101 obj=76
+  pre_04: idx=274598  scene=085239 frame=85239  N=28 obj=0
+  pre_05: idx=275191  scene=085578 frame=85578  N=109 obj=0
+  pre_06: idx=179709  scene=045133 frame=45133  N=15 obj=0
+  pre_07: idx=190970  scene=047829 frame=47829  N=209 obj=4
+  pre_08: idx=74931  scene=020500 frame=20500  N=231 obj=1
+  pre_09: idx=248945  scene=069415 frame=69415  N=73 obj=0
+  pre_10: idx=171699  scene=043467 frame=43467  N=98 obj=0
+  pre_11: idx=192867  scene=048226 frame=48226  N=14 obj=0
+  pre_12: idx=117347  scene=031553 frame=31553  N=18 obj=0
+  pre_13: idx=280103  scene=089855 frame=89855  N=34 obj=7
+  pre_14: idx=254894  scene=072511 frame=72511  N=151 obj=0
+  pre_15: idx=184033  scene=046233 frame=46233  N=89 obj=0
+  pre_16: idx=304916  scene=002426 frame=2426  N=145 obj=7
+  pre_17: idx=129664  scene=034293 frame=34293  N=75 obj=0
+  pre_18: idx=259806  scene=075874 frame=75874  N=235 obj=76
+  pre_19: idx=127055  scene=033748 frame=33748  N=133 obj=3
+  pre_20: idx=285686  scene=094548 frame=94548  N=166 obj=78
+  pre_21: idx=49088  scene=016101 frame=16101  N=229 obj=12
+  pre_22: idx=308677  scene=003025 frame=3025  N=172 obj=0
+  pre_23: idx=148097  scene=038161 frame=38161  N=139 obj=0
+  pre_24: idx=118533  scene=031853 frame=31853  N=132 obj=88
+  pre_25: idx=254342  scene=072252 frame=72252  N=143 obj=7
+  pre_26: idx=109722  scene=026769 frame=26769  N=18 obj=0
+  pre_27: idx=234337  scene=062519 frame=62519  N=182 obj=20
+  pre_28: idx=131805  scene=034804 frame=34804  N=228 obj=51
+  pre_29: idx=18255  scene=011305 frame=11305  N=158 obj=84
+10:21:34  vis_pretrain → experiments/zod_tss4_ps_20260515_joint_repnear_os1_50ep/vis_pretrain

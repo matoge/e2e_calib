@@ -1,0 +1,2 @@
+/home/hiro/git/e2e_calib/scripts/ba/ba_multicam_corr.py:177: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+  img_t = torch.from_numpy(crop_r).permute(2, 0, 1).unsqueeze(0).float().div(255.0).to(device)

@@ -1,0 +1,241 @@
+ClearML Task: created new task id=52ac8ff6c47e40f2bc0b0dc0fa117d55
+ClearML results page: https://clearml.budda.site/projects/08d9e4b8a1334ad7ba45150d8a16b97e/experiments/52ac8ff6c47e40f2bc0b0dc0fa117d55/output/log
+23:53:21  loading cache ['/mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i', '/mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled'] (V3 full-image)
+23:53:21    perturbation: ±1.5 deg / ±0.6 m   fx/fy: ±0.00% / ±0.00%   crop_px=[128, 512] (full-image px → 128)
+23:53:21    rep_strategy=nearest_cam
+<unknown>:83: SyntaxWarning: invalid escape sequence '\s'
+2026-05-14 23:53:24,169 - clearml.model - WARNING - Connecting multiple input models with the same name: `meta`. This might result in the wrong model being used when executing remotely
+23:53:24    + cache /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i: train=1169760 val=37560 (os=4)
+23:53:24    + cache /mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled: train=334560 val=3920 (os=12)
+23:53:24  train cache(s) loaded: 1504320 instances
+23:53:24  val cache loaded: 41480 instances (oversample=1)
+23:53:24  sequence-level split (cache pre-built): train=1504320 val=41480
+23:53:24    val subsample: 8000/41480 (deterministic first-N)
+23:53:24  params: 1.81M
+23:53:24  amp_dtype=torch.bfloat16 scaler_enabled=False device=NVIDIA GeForce RTX 5080 cc=(12, 0)
+cache: /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i  insts: 330000  scenes: 8250  rendering 30 → experiments/zod_tss4_20260514_joint_repnear_zod4_tss12_30ep/vis_pretrain
+  pre_00: idx=257541  scene=074287 frame=74287  N=247 obj=25
+  pre_01: idx=61475  scene=018088 frame=18088  N=55 obj=0
+  pre_02: idx=153203  scene=039368 frame=39368  N=226 obj=18
+  pre_03: idx=294902  scene=000504 frame=504  N=101 obj=76
+  pre_04: idx=274598  scene=085239 frame=85239  N=28 obj=0
+  pre_05: idx=275191  scene=085578 frame=85578  N=109 obj=0
+  pre_06: idx=179709  scene=045133 frame=45133  N=15 obj=0
+  pre_07: idx=190970  scene=047829 frame=47829  N=209 obj=4
+  pre_08: idx=74931  scene=020500 frame=20500  N=231 obj=1
+  pre_09: idx=248945  scene=069415 frame=69415  N=73 obj=0
+  pre_10: idx=171699  scene=043467 frame=43467  N=98 obj=0
+  pre_11: idx=192867  scene=048226 frame=48226  N=14 obj=0
+  pre_12: idx=117347  scene=031553 frame=31553  N=18 obj=0
+  pre_13: idx=280103  scene=089855 frame=89855  N=34 obj=7
+  pre_14: idx=254894  scene=072511 frame=72511  N=151 obj=0
+  pre_15: idx=184033  scene=046233 frame=46233  N=89 obj=0
+  pre_16: idx=304916  scene=002426 frame=2426  N=145 obj=7
+  pre_17: idx=129664  scene=034293 frame=34293  N=75 obj=0
+  pre_18: idx=259806  scene=075874 frame=75874  N=235 obj=76
+  pre_19: idx=127055  scene=033748 frame=33748  N=133 obj=3
+  pre_20: idx=285686  scene=094548 frame=94548  N=166 obj=78
+  pre_21: idx=49088  scene=016101 frame=16101  N=229 obj=12
+  pre_22: idx=308677  scene=003025 frame=3025  N=172 obj=0
+  pre_23: idx=148097  scene=038161 frame=38161  N=139 obj=0
+  pre_24: idx=118533  scene=031853 frame=31853  N=132 obj=88
+  pre_25: idx=254342  scene=072252 frame=72252  N=143 obj=7
+  pre_26: idx=109722  scene=026769 frame=26769  N=18 obj=0
+  pre_27: idx=234337  scene=062519 frame=62519  N=182 obj=20
+  pre_28: idx=131805  scene=034804 frame=34804  N=228 obj=51
+  pre_29: idx=18255  scene=011305 frame=11305  N=158 obj=84
+23:54:53  vis_pretrain → experiments/zod_tss4_20260514_joint_repnear_zod4_tss12_30ep/vis_pretrain
+  step 100  loss=+6.743  sps=300
+ClearML Monitor: Could not detect iteration reporting, falling back to iterations as seconds-from-start
+  step 200  loss=+6.325  sps=514
+  step 300  loss=+6.186  sps=676
+  step 400  loss=+6.120  sps=803
+  step 500  loss=+5.901  sps=903
+  step 600  loss=+5.864  sps=987
+  step 700  loss=+5.850  sps=1062
+  step 800  loss=+5.821  sps=1123
+  step 900  loss=+5.914  sps=1176
+  step 1000  loss=+5.720  sps=1221
+  step 1100  loss=+5.625  sps=1261
+  step 1200  loss=+5.723  sps=1298
+  step 1300  loss=+5.592  sps=1330
+  step 1400  loss=+5.673  sps=1361
+  step 1500  loss=+5.598  sps=1386
+  step 1600  loss=+5.496  sps=1407
+  step 1700  loss=+5.556  sps=1429
+  step 1800  loss=+5.471  sps=1447
+  step 1900  loss=+5.518  sps=1465
+  step 2000  loss=+5.527  sps=1482
+  step 2100  loss=+5.443  sps=1495
+  step 2200  loss=+5.546  sps=1512
+  step 2300  loss=+5.479  sps=1527
+  step 2400  loss=+5.419  sps=1538
+  step 2500  loss=+5.407  sps=1547
+  step 2600  loss=+5.307  sps=1553
+  step 2700  loss=+5.329  sps=1563
+  step 2800  loss=+5.347  sps=1575
+  step 2900  loss=+5.460  sps=1582
+  step 3000  loss=+5.445  sps=1589
+  step 3100  loss=+5.405  sps=1598
+  step 3200  loss=+5.472  sps=1605
+  step 3300  loss=+5.363  sps=1612
+  step 3400  loss=+5.450  sps=1614
+  step 3500  loss=+5.435  sps=1619
+  step 3600  loss=+5.339  sps=1625
+  step 3700  loss=+5.198  sps=1632
+  step 3800  loss=+5.233  sps=1637
+  step 3900  loss=+5.185  sps=1640
+  step 4000  loss=+5.324  sps=1644
+  step 4100  loss=+5.274  sps=1646
+  step 4200  loss=+5.162  sps=1650
+  step 4300  loss=+5.166  sps=1653
+  step 4400  loss=+5.187  sps=1656
+  step 4500  loss=+5.010  sps=1657
+  step 4600  loss=+5.254  sps=1660
+  step 4700  loss=+5.246  sps=1662
+  step 4800  loss=+5.193  sps=1665
+  step 4900  loss=+5.179  sps=1669
+  step 5000  loss=+5.229  sps=1673
+  step 5100  loss=+5.133  sps=1676
+  step 5200  loss=+5.243  sps=1681
+  step 5300  loss=+5.249  sps=1684
+  step 5400  loss=+5.229  sps=1687
+  step 5500  loss=+5.283  sps=1689
+  step 5600  loss=+5.224  sps=1693
+  step 5700  loss=+5.246  sps=1695
+  step 5800  loss=+5.089  sps=1697
+00:10:04  [  1/30]  train nll=+5.481(pt=+5.481 fr=+nan obj=+5.930 bg=+5.438) mse=12.64(obj=15.46/m12.26/95p39.5 bg=12.35/m10.44/95p28.7)  val nll=+5.057(pt=+5.057 fr=+nan obj=+5.407 bg=+4.998) mse=10.55(obj=12.47/m10.08/95p30.9 bg=10.21/m8.81/95p22.9)  lr=1.20e-04  tot=16.7min
+00:10:05    ↳ saved (val_nll=5.0574)
+                                            0% | 0.00/6.96 MB [00:00<?, ?MB/s]: █████████████████████████████████ 100% | 6.96/6.96 MB [00:00<00:00, 95.61MB/s]: 
+  step 100  loss=+5.143  sps=1561
+  step 200  loss=+5.415  sps=1686
+  step 300  loss=+5.213  sps=1711
+  step 400  loss=+5.196  sps=1741
+  step 500  loss=+5.201  sps=1760
+  step 600  loss=+5.064  sps=1760
+  step 700  loss=+5.221  sps=1762
+  step 800  loss=+4.912  sps=1770
+  step 900  loss=+5.151  sps=1784
+  step 1000  loss=+5.200  sps=1796
+  step 1100  loss=+5.065  sps=1802
+  step 1200  loss=+5.061  sps=1806
+  step 1300  loss=+5.058  sps=1811
+  step 1400  loss=+4.962  sps=1820
+  step 1500  loss=+5.052  sps=1824
+  step 1600  loss=+5.111  sps=1825
+  step 1700  loss=+4.932  sps=1820
+  step 1800  loss=+5.159  sps=1823
+  step 1900  loss=+5.036  sps=1824
+  step 2000  loss=+5.133  sps=1824
+  step 2100  loss=+4.948  sps=1821
+  step 2200  loss=+4.976  sps=1821
+  step 2300  loss=+5.090  sps=1822
+  step 2400  loss=+4.856  sps=1823
+  step 2500  loss=+5.052  sps=1823
+  step 2600  loss=+5.047  sps=1824
+  step 2700  loss=+4.940  sps=1825
+  step 2800  loss=+5.019  sps=1827
+  step 2900  loss=+4.918  sps=1825
+  step 3000  loss=+4.941  sps=1824
+  step 3100  loss=+4.922  sps=1826
+  step 3200  loss=+5.148  sps=1827
+  step 3300  loss=+5.023  sps=1830
+  step 3400  loss=+4.886  sps=1831
+  step 3500  loss=+4.991  sps=1832
+  step 3600  loss=+4.919  sps=1833
+  step 3700  loss=+4.840  sps=1836
+  step 3800  loss=+5.016  sps=1837
+  step 3900  loss=+5.042  sps=1836
+  step 4000  loss=+4.900  sps=1832
+  step 4100  loss=+4.992  sps=1832
+  step 4200  loss=+4.805  sps=1834
+  step 4300  loss=+5.026  sps=1836
+  step 4400  loss=+4.891  sps=1837
+  step 4500  loss=+4.978  sps=1838
+  step 4600  loss=+4.931  sps=1840
+  step 4700  loss=+4.822  sps=1841
+  step 4800  loss=+4.793  sps=1843
+  step 4900  loss=+5.023  sps=1843
+  step 5000  loss=+4.902  sps=1843
+  step 5100  loss=+4.901  sps=1844
+  step 5200  loss=+4.796  sps=1845
+  step 5300  loss=+4.793  sps=1845
+  step 5400  loss=+4.789  sps=1846
+  step 5500  loss=+4.781  sps=1847
+  step 5600  loss=+4.957  sps=1848
+  step 5700  loss=+5.051  sps=1847
+  step 5800  loss=+4.938  sps=1847
+00:23:40  [  2/30]  train nll=+5.008(pt=+5.008 fr=+nan obj=+5.328 bg=+4.977) mse=10.29(obj=12.21/m9.76/95p30.8 bg=10.10/m8.61/95p22.8)  val nll=+5.057(pt=+5.057 fr=+nan obj=+5.407 bg=+4.998) mse=10.55(obj=12.47/m10.08/95p30.9 bg=10.21/m8.81/95p22.9)  lr=1.80e-04  tot=30.2min
+  step 100  loss=+5.126  sps=1602
+  step 200  loss=+4.837  sps=1705
+  step 300  loss=+4.889  sps=1735
+  step 400  loss=+5.029  sps=1748
+  step 500  loss=+4.930  sps=1758
+  step 600  loss=+4.920  sps=1788
+  step 700  loss=+4.983  sps=1797
+  step 800  loss=+4.973  sps=1801
+  step 900  loss=+4.956  sps=1807
+  step 1000  loss=+4.869  sps=1811
+  step 1100  loss=+4.902  sps=1810
+  step 1200  loss=+4.663  sps=1807
+  step 1300  loss=+4.780  sps=1815
+  step 1400  loss=+4.823  sps=1822
+  step 1500  loss=+4.878  sps=1828
+  step 1600  loss=+4.702  sps=1830
+  step 1700  loss=+4.912  sps=1834
+  step 1800  loss=+4.845  sps=1838
+  step 1900  loss=+4.818  sps=1843
+  step 2000  loss=+5.492  sps=1846
+  step 2100  loss=+4.747  sps=1844
+  step 2200  loss=+4.946  sps=1846
+  step 2300  loss=+4.952  sps=1848
+  step 2400  loss=+4.970  sps=1852
+  step 2500  loss=+4.811  sps=1853
+  step 2600  loss=+4.871  sps=1849
+  step 2700  loss=+4.702  sps=1851
+  step 2800  loss=+4.752  sps=1852
+  step 2900  loss=+4.752  sps=1856
+  step 3000  loss=+4.797  sps=1858
+  step 3100  loss=+4.978  sps=1860
+  step 3200  loss=+4.852  sps=1860
+  step 3300  loss=+4.748  sps=1860
+  step 3400  loss=+4.772  sps=1860
+  step 3500  loss=+4.658  sps=1859
+  step 3600  loss=+4.652  sps=1859
+  step 3700  loss=+4.785  sps=1860
+  step 3800  loss=+4.708  sps=1860
+  step 3900  loss=+4.682  sps=1862
+  step 4000  loss=+4.612  sps=1862
+  step 4100  loss=+4.819  sps=1861
+  step 4200  loss=+4.784  sps=1860
+  step 4300  loss=+4.899  sps=1859
+  step 4400  loss=+4.747  sps=1860
+  step 4500  loss=+4.704  sps=1857
+  step 4600  loss=+4.763  sps=1852
+  step 4700  loss=+4.596  sps=1665
+  step 4800  loss=+4.698  sps=1668
+  step 4900  loss=+4.656  sps=1669
+  step 5000  loss=+4.761  sps=1615
+  step 5100  loss=+4.848  sps=1598
+  step 5200  loss=+4.751  sps=1601
+  step 5300  loss=+4.546  sps=1604
+  step 5400  loss=+4.666  sps=1608
+  step 5500  loss=+4.570  sps=1613
+  step 5600  loss=+4.736  sps=1618
+  step 5700  loss=+4.715  sps=1623
+  step 5800  loss=+4.841  sps=1627
+00:39:03  [  3/30]  train nll=+4.795(pt=+4.795 fr=+nan obj=+5.073 bg=+4.768) mse=9.39(obj=10.95/m8.61/95p28.1 bg=9.23/m7.76/95p21.2)  val nll=+5.057(pt=+5.057 fr=+nan obj=+5.407 bg=+4.998) mse=10.55(obj=12.47/m10.08/95p30.9 bg=10.21/m8.81/95p22.9)  lr=2.40e-04  tot=45.6min
+  step 100  loss=+4.646  sps=1712
+  step 200  loss=+4.618  sps=1648
+  step 300  loss=+4.775  sps=1743
+  step 400  loss=+4.725  sps=1805
+  step 500  loss=+4.662  sps=1838
+  step 600  loss=+4.784  sps=1867
+  step 700  loss=+4.581  sps=1878
+  step 800  loss=+4.508  sps=1900
+  step 900  loss=+4.847  sps=1912
+  step 1000  loss=+4.523  sps=1924
+  step 1100  loss=+4.557  sps=1923
+  step 1200  loss=+4.557  sps=1924
+/home/hiro/miniconda3/lib/python3.13/multiprocessing/resource_tracker.py:301: UserWarning: resource_tracker: There appear to be 159 leaked semaphore objects to clean up at shutdown: {'/mp-cz6aagf0', '/mp-6uunl77p', '/mp-kx95s7pe', '/mp-j96xjmby', '/mp-e0b56jz3', '/mp-m5y_lpv2', '/mp-tfq8r_4i', '/mp-k1zqlgj9', '/mp-mh0n90yl', '/mp-90l5mhrl', '/mp-x0ni2cuf', '/mp-060mkd52', '/mp-5o3w1vp_', '/mp-2ca6cmg4', '/mp-mxct526r', '/mp-xr_f28za', '/mp-z25llmne', '/mp-x7qgk8bq', '/mp-0njwfg_x', '/mp-l8qdjae2', '/mp-u27vftgh', '/mp-g7l3kbn9', '/mp-md_jk_qq', '/mp-fby_hawz', '/mp-z3zplwg2', '/mp-7wd5rfim', '/mp-tltpy8fg', '/mp-t8ctd93b', '/mp-uwcsf96h', '/mp-gsq4asz4', '/mp-48lo8v4k', '/mp-ilvza44d', '/mp-oog2o9wq', '/mp-fwjyhk4b', '/mp-79wlaux8', '/mp-7rn2wq_9', '/mp-8qvvf3tl', '/mp-qctx9_qk', '/mp-ayqn6274', '/mp-xs4ttx8u', '/mp-7m_9zyiu', '/mp-1ijqkc36', '/mp-jamdd3w1', '/mp-inur8px2', '/mp-38doh5cz', '/mp-ny1jaz13', '/mp-ickw1hxh', '/mp-w6d763n0', '/mp-n726b7sf', '/mp-5b80ipxl', '/mp-tjp6ejou', '/mp-slq7hkpq', '/mp-ltzs7v_2', '/mp-3_sbdkt0', '/mp-itqdm5_9', '/mp-6p7076di', '/mp-88k8rud9', '/mp-6e_83bnj', '/mp-k2g224ri', '/mp-sgtcpgw8', '/mp-cnuvge54', '/mp-ob4qqip_', '/mp-jvip5zps', '/mp-1u4t317w', '/mp-ia3ypljm', '/mp-po9zvy38', '/mp-g9rlu6ih', '/mp-5pt9e666', '/mp-95btaggz', '/mp-evgp0pey', '/mp-lppsp9hv', '/mp-etx6b69g', '/mp-bu1hpy9g', '/mp-_qaq4qs0', '/mp-1hki3pob', '/mp-_4evvg5v', '/mp-n55_76li', '/mp-a2dclpgn', '/mp-jygwn3mn', '/mp-f2dn2522', '/mp-0f87iedn', '/mp-ohm0qo8y', '/mp-cuzo3kg8', '/mp-b7l9s_br', '/mp-68ydklh7', '/mp-nrc7vt1s', '/mp-tyhs08aq', '/mp-eir6rfb2', '/mp-e3vfqjfk', '/mp-aeo1zd39', '/mp-g_clzc12', '/mp-zzhdu6_d', '/mp-q5wlhmvt', '/mp-h34q2qiq', '/mp-olatsmxc', '/mp-a0nkwne3', '/mp-8z8rwwzq', '/mp-9anyu_n9', '/mp-39uni1nw', '/mp-sa9qhaq9', '/mp-l651vf63', '/mp-sy28is8b', '/mp-48jtvdvs', '/mp-ofg3cl5p', '/mp-8xdik3a3', '/mp-b4_j4ejh', '/mp-inscekbm', '/mp-omav2pw1', '/mp-r4j1h8bp', '/mp-rkhuiwy7', '/mp-8z24jwno', '/mp-3tt8rm71', '/mp-k6r58m5e', '/mp-qr07w6cg', '/mp-1fbrpi7h', '/mp-vfkupt5p', '/mp-hx56ns7f', '/mp-0tegijg7', '/mp-u9asx5wz', '/mp-shobdijv', '/mp-guz4b0c7', '/mp-89a0g3ll', '/mp-0j8h6ado', '/mp-k1h62rgn', '/mp-9ddyybl4', '/mp-4nbgrled', '/mp-7be11exz', '/mp-rolf0ay2', '/mp-2povwsgo', '/mp-a4at1xhv', '/mp-2j7nuy78', '/mp-yyx2u_a2', '/mp-kyjpu5mz', '/mp-t5r6kjkk', '/mp-ur7czojb', '/mp-jio3ruao', '/mp-j2m6nmar', '/mp-d0c3jh2m', '/mp-wo7cb3nq', '/mp-6ukk4kth', '/mp-ak9fwmhw', '/mp-cytdigw7', '/mp-gqn76oq7', '/mp-p5oaavma', '/mp-iiz65z9i', '/mp-foobe7jd', '/mp-tcz29qgn', '/mp-evvax5co', '/mp-vg4nvkbd', '/mp-me8j6_av', '/mp-e3juuhzs', '/mp-x3574tuo', '/mp-e4fufbog', '/mp-45140vls', '/mp-w1bmi6ig', '/mp-8o68wwil', '/mp-fq0933yy', '/mp-g7cdr201', '/mp-lvh8gevi'}
+  warnings.warn(
