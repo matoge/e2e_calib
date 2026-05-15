@@ -19,6 +19,9 @@ Notes:
 """
 import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import math, time, torch, torch.nn as nn
+import torch.multiprocessing as _tmp
+try: _tmp.set_sharing_strategy('file_system')
+except Exception: pass
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -209,11 +212,18 @@ def main(cfg=None):
                   oversample=c.get('oversample', 12))
     log(f"cache={cache}  perturbation=±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m  "
         f"crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full → {c['img_size']})")
-    tr_full = PandaSetCalibDatasetFull(cache, split='train', **ds_kw)
-    va_full = PandaSetCalibDatasetFull(cache, split='val',   **ds_kw)
+    cache_paths = [p.strip() for p in str(cache).split(',') if p.strip()]
+    from torch.utils.data import ConcatDataset
+    tr_parts, va_parts = [], []
+    for cp in cache_paths:
+        tr_p = PandaSetCalibDatasetFull(cp, split='train', **ds_kw)
+        va_p = PandaSetCalibDatasetFull(cp, split='val',   **ds_kw)
+        log(f"  [{cp}] train={len(tr_p)} val={len(va_p)}")
+        tr_parts.append(tr_p); va_parts.append(va_p)
+    tr_full = ConcatDataset(tr_parts) if len(tr_parts) > 1 else tr_parts[0]
+    va_full = ConcatDataset(va_parts) if len(va_parts) > 1 else va_parts[0]
     log(f"train cache: {len(tr_full)} inst   val cache: {len(va_full)} inst")
 
-    from torch.utils.data import ConcatDataset
     full_ds = ConcatDataset([tr_full, va_full])
     idxs = list(range(len(full_ds)))
     _r.Random(c["split_seed"]).shuffle(idxs)
@@ -283,10 +293,33 @@ def main(cfg=None):
             cml_logger = None
 
     # Pre-training cache sanity vis (rank-0 only, then rendezvous).
+    # For combined training (multiple --cache paths), render n samples per
+    # dataset under exp_dir/vis_pretrain/{ds_name}/ so each is visible
+    # separately on ClearML.
     if accel.is_main_process:
         try:
             from scripts.util.midtrain_vis import vis_pretrain_run
-            vis_pretrain_run(exp_dir, cache, cml_logger=cml_logger, n=10, log=log)
+            n_per_ds = 15 if len(cache_paths) > 1 else 10
+            for cp in cache_paths:
+                ds_name = Path(cp).name
+                sub_exp = exp_dir / 'vis_pretrain_per_ds' / ds_name
+                sub_exp.mkdir(parents=True, exist_ok=True)
+                # vis_pretrain_run writes to {exp_dir}/vis_pretrain — pass a
+                # per-dataset exp_dir so dirs don't collide. ClearML series
+                # uses ds_name to disambiguate panels.
+                _per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
+                _per_ds_exp.mkdir(exist_ok=True)
+                vis_pretrain_run(_per_ds_exp, cp, cml_logger=cml_logger,
+                                 n=n_per_ds, log=log)
+                # Re-upload under per-dataset series for clean panels
+                if cml_logger is not None:
+                    for p in sorted((_per_ds_exp / 'vis_pretrain').glob('*.png')):
+                        try:
+                            cml_logger.report_image(
+                                f'vis_pretrain__{ds_name}', p.stem,
+                                iteration=0, local_path=str(p))
+                        except Exception:
+                            pass
         except Exception as _e:
             log(f"vis_pretrain skipped: {_e}")
     accel.wait_for_everyone()
@@ -355,13 +388,29 @@ def main(cfg=None):
             if epoch % 10 == 0 or epoch == epochs:
                 try:
                     from scripts.util.midtrain_vis import midtrain_vis
-                    midtrain_vis(
-                        accel.unwrap_model(model), exp_dir, cache, epoch,
-                        img_size=c["img_size"],
-                        min_crop_px=c.get("min_crop_px", 128),
-                        max_crop_px=c.get("max_crop_px", 384),
-                        cml_logger=cml_logger, device=accel.device,
-                        amp_dtype=torch.float16, n=10, log=log)
+                    n_vis = 15 if len(cache_paths) > 1 else 10
+                    for cp in cache_paths:
+                        ds_name = Path(cp).name
+                        # Per-dataset exp dir so val_*.png filenames don't collide
+                        per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
+                        per_ds_exp.mkdir(exist_ok=True)
+                        midtrain_vis(
+                            accel.unwrap_model(model), per_ds_exp, cp, epoch,
+                            img_size=c["img_size"],
+                            min_crop_px=c.get("min_crop_px", 128),
+                            max_crop_px=c.get("max_crop_px", 384),
+                            cml_logger=None,  # we re-report under per-ds series
+                            device=accel.device,
+                            amp_dtype=torch.float16, n=n_vis, log=log)
+                        if cml_logger is not None:
+                            vis_dir = per_ds_exp / f'vis_ep{epoch:03d}'
+                            for p in sorted(vis_dir.glob('*.png')):
+                                try:
+                                    cml_logger.report_image(
+                                        f'vis_ep__{ds_name}', p.stem,
+                                        iteration=epoch, local_path=str(p))
+                                except Exception:
+                                    pass
                 except Exception as _e:
                     log(f"vis_ep{epoch:03d} skipped: {_e}")
         accel.wait_for_everyone()

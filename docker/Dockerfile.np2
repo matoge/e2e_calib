@@ -1,0 +1,35 @@
+# Python 3.13 + torch 2.5.1+cu121 (sm_70 公式wheel入り)
+# NGC派生は捨てる、cleanな python:3.13-slim ベース
+FROM python:3.13-slim
+
+ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git tini libgl1 libglib2.0-0 libturbojpeg0-dev curl ca-certificates \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# torch 2.5.1+cu121 — sm_70 (V100) 含む公式wheel
+RUN pip install --upgrade pip && pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
+        'torch==2.5.1' 'torchvision==0.20.1'
+
+RUN pip install \
+        'numpy>=2.0,<3' \
+        'pandas>=2.2' \
+        'pyarrow>=15' \
+        'scipy>=1.13' \
+        'matplotlib>=3.8' \
+        'pillow>=10' \
+        'tqdm' \
+        'opencv-python-headless' \
+        'PyTurboJPEG' \
+        'lmdb' \
+        'accelerate>=1.0' \
+        'clearml>=1.16' \
+        'zod' \
+    && python -c "import torch,numpy,pandas,pyarrow,scipy,lmdb,accelerate,clearml,zod; print('torch=',torch.__version__,'cuda=',torch.version.cuda,'numpy=',numpy.__version__,'pandas=',pandas.__version__); x=torch.tensor([1.,2.]); print('numpy<->torch:',x.numpy())"
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["bash"]

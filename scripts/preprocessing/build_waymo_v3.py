@@ -297,7 +297,11 @@ def main():
             written_total += n
             print(f"  {seg}: +{n}  total={written_total} ({time.time()-t0:.0f}s)", flush=True)
     else:
-        with ProcessPoolExecutor(max_workers=args.workers, max_tasks_per_child=1) as ex:
+        import sys as _sys
+        _ppe_kw = dict(max_workers=args.workers)
+        if _sys.version_info >= (3, 11):
+            _ppe_kw['max_tasks_per_child'] = 1
+        with ProcessPoolExecutor(**_ppe_kw) as ex:
             futs = {ex.submit(process_seg, a): a[0] for a in argv}
             done = 0
             for fut in as_completed(futs):
