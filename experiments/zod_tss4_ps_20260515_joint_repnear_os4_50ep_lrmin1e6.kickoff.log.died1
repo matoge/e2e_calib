@@ -1,0 +1,424 @@
+ClearML Task: created new task id=d0273d4a2d6241c99feedd3006c8b3ec
+ClearML results page: https://clearml.budda.site/projects/08d9e4b8a1334ad7ba45150d8a16b97e/experiments/d0273d4a2d6241c99feedd3006c8b3ec/output/log
+14:51:36  loading cache ['/mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i', '/mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled', '/mnt/nvme6t/e2e_calib_cache/pandaset_v3_tiled_i'] (V3 full-image)
+14:51:36    perturbation: ±1.5 deg / ±0.6 m   fx/fy: ±0.00% / ±0.00%   crop_px=[128, 512] (full-image px → 128)
+14:51:36    rep_strategy=nearest_cam
+<unknown>:83: SyntaxWarning: invalid escape sequence '\s'
+2026-05-15 14:51:39,845 - clearml.model - WARNING - Connecting multiple input models with the same name: `meta`. This might result in the wrong model being used when executing remotely
+14:51:40    + cache /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i: train=1169760 val=37560 (os=4)
+14:51:40    + cache /mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled: train=111520 val=3920 (os=4)
+14:51:45    + cache /mnt/nvme6t/e2e_calib_cache/pandaset_v3_tiled_i: train=281600 val=12000 (os=4)
+14:51:45  train cache(s) loaded: 1562880 instances
+14:51:45  val cache loaded: 53480 instances (oversample=1)
+14:51:45  sequence-level split (cache pre-built): train=1562880 val=53480
+14:51:45    val subsample: 8000/53480 (deterministic first-N)
+14:51:45  params: 1.81M
+14:51:45  amp_dtype=torch.bfloat16 scaler_enabled=False device=NVIDIA GeForce RTX 5080 cc=(12, 0)
+cache: /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i  insts: 330000  scenes: 8250  rendering 30 → experiments/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6/vis_pretrain
+  pre_00: idx=257541  scene=074287 frame=74287  N=247 obj=25
+  pre_01: idx=61475  scene=018088 frame=18088  N=55 obj=0
+  pre_02: idx=153203  scene=039368 frame=39368  N=226 obj=18
+  pre_03: idx=294902  scene=000504 frame=504  N=101 obj=76
+  pre_04: idx=274598  scene=085239 frame=85239  N=28 obj=0
+  pre_05: idx=275191  scene=085578 frame=85578  N=109 obj=0
+  pre_06: idx=179709  scene=045133 frame=45133  N=15 obj=0
+  pre_07: idx=190970  scene=047829 frame=47829  N=209 obj=4
+  pre_08: idx=74931  scene=020500 frame=20500  N=231 obj=1
+  pre_09: idx=248945  scene=069415 frame=69415  N=73 obj=0
+  pre_10: idx=171699  scene=043467 frame=43467  N=98 obj=0
+  pre_11: idx=192867  scene=048226 frame=48226  N=14 obj=0
+  pre_12: idx=117347  scene=031553 frame=31553  N=18 obj=0
+  pre_13: idx=280103  scene=089855 frame=89855  N=34 obj=7
+  pre_14: idx=254894  scene=072511 frame=72511  N=151 obj=0
+  pre_15: idx=184033  scene=046233 frame=46233  N=89 obj=0
+  pre_16: idx=304916  scene=002426 frame=2426  N=145 obj=7
+  pre_17: idx=129664  scene=034293 frame=34293  N=75 obj=0
+  pre_18: idx=259806  scene=075874 frame=75874  N=235 obj=76
+  pre_19: idx=127055  scene=033748 frame=33748  N=133 obj=3
+  pre_20: idx=285686  scene=094548 frame=94548  N=166 obj=78
+  pre_21: idx=49088  scene=016101 frame=16101  N=229 obj=12
+  pre_22: idx=308677  scene=003025 frame=3025  N=172 obj=0
+  pre_23: idx=148097  scene=038161 frame=38161  N=139 obj=0
+  pre_24: idx=118533  scene=031853 frame=31853  N=132 obj=88
+  pre_25: idx=254342  scene=072252 frame=72252  N=143 obj=7
+  pre_26: idx=109722  scene=026769 frame=26769  N=18 obj=0
+  pre_27: idx=234337  scene=062519 frame=62519  N=182 obj=20
+  pre_28: idx=131805  scene=034804 frame=34804  N=228 obj=51
+  pre_29: idx=18255  scene=011305 frame=11305  N=158 obj=84
+14:53:32  vis_pretrain → experiments/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6/vis_pretrain
+2026-05-15 14:53:37,675 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_04_idx274598/vis_pretrain_pre_04_idx274598_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,677 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_04_idx274598/vis_pretrain_pre_04_idx274598_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,686 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_06_idx179709/vis_pretrain_pre_06_idx179709_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,687 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_06_idx179709/vis_pretrain_pre_06_idx179709_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,721 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_02_idx153203/vis_pretrain_pre_02_idx153203_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,721 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_00_idx257541/vis_pretrain_pre_00_idx257541_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,723 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_02_idx153203/vis_pretrain_pre_02_idx153203_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,724 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_00_idx257541/vis_pretrain_pre_00_idx257541_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,781 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_05_idx275191/vis_pretrain_pre_05_idx275191_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,781 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_05_idx275191/vis_pretrain_pre_05_idx275191_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,834 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_03_idx294902/vis_pretrain_pre_03_idx294902_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,835 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_03_idx294902/vis_pretrain_pre_03_idx294902_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,839 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_07_idx190970/vis_pretrain_pre_07_idx190970_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,840 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_07_idx190970/vis_pretrain_pre_07_idx190970_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,887 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_01_idx061475/vis_pretrain_pre_01_idx061475_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,888 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_01_idx061475/vis_pretrain_pre_01_idx061475_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,908 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_08_idx074931/vis_pretrain_pre_08_idx074931_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,909 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_08_idx074931/vis_pretrain_pre_08_idx074931_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,941 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_12_idx117347/vis_pretrain_pre_12_idx117347_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:37,942 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_12_idx117347/vis_pretrain_pre_12_idx117347_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:37,998 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_10_idx171699/vis_pretrain_pre_10_idx171699_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,000 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_09_idx248945/vis_pretrain_pre_09_idx248945_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,000 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_10_idx171699/vis_pretrain_pre_10_idx171699_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,001 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_09_idx248945/vis_pretrain_pre_09_idx248945_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,044 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_14_idx254894/vis_pretrain_pre_14_idx254894_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,045 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_14_idx254894/vis_pretrain_pre_14_idx254894_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,061 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_13_idx280103/vis_pretrain_pre_13_idx280103_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,062 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_13_idx280103/vis_pretrain_pre_13_idx280103_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,087 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_11_idx192867/vis_pretrain_pre_11_idx192867_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,088 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_11_idx192867/vis_pretrain_pre_11_idx192867_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,121 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_16_idx304916/vis_pretrain_pre_16_idx304916_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,122 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_16_idx304916/vis_pretrain_pre_16_idx304916_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,143 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_15_idx184033/vis_pretrain_pre_15_idx184033_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,144 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_15_idx184033/vis_pretrain_pre_15_idx184033_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,189 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_20_idx285686/vis_pretrain_pre_20_idx285686_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,191 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_20_idx285686/vis_pretrain_pre_20_idx285686_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,215 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_17_idx129664/vis_pretrain_pre_17_idx129664_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,217 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_17_idx129664/vis_pretrain_pre_17_idx129664_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,217 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_18_idx259806/vis_pretrain_pre_18_idx259806_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,219 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_18_idx259806/vis_pretrain_pre_18_idx259806_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,244 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_22_idx308677/vis_pretrain_pre_22_idx308677_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,245 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_22_idx308677/vis_pretrain_pre_22_idx308677_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,306 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_21_idx049088/vis_pretrain_pre_21_idx049088_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,308 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_21_idx049088/vis_pretrain_pre_21_idx049088_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,324 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_24_idx118533/vis_pretrain_pre_24_idx118533_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,339 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_24_idx118533/vis_pretrain_pre_24_idx118533_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,406 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_23_idx148097/vis_pretrain_pre_23_idx148097_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,408 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_23_idx148097/vis_pretrain_pre_23_idx148097_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,409 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_19_idx127055/vis_pretrain_pre_19_idx127055_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,411 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_19_idx127055/vis_pretrain_pre_19_idx127055_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,463 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_26_idx109722/vis_pretrain_pre_26_idx109722_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,464 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_26_idx109722/vis_pretrain_pre_26_idx109722_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,517 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_25_idx254342/vis_pretrain_pre_25_idx254342_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,518 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_25_idx254342/vis_pretrain_pre_25_idx254342_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,550 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_28_idx131805/vis_pretrain_pre_28_idx131805_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,553 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_28_idx131805/vis_pretrain_pre_28_idx131805_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,592 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_27_idx234337/vis_pretrain_pre_27_idx234337_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,593 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_27_idx234337/vis_pretrain_pre_27_idx234337_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,665 - clearml.storage - ERROR - Exception encountered while uploading Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_29_idx018255/vis_pretrain_pre_29_idx018255_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+
+2026-05-15 14:53:38,667 - clearml.metrics - WARNING - Failed uploading to https://clearml.budda.site/files (Failed uploading object /e2e_calib/calib/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6.d0273d4a2d6241c99feedd3006c8b3ec/metrics/vis_pretrain/pre_29_idx018255/vis_pretrain_pre_29_idx018255_00000000.png to https://clearml.budda.site/files (405): <!doctype html>
+<html lang=en>
+<title>405 Method Not Allowed</title>
+<h1>Method Not Allowed</h1>
+<p>The method is not allowed for the requested URL.</p>
+)
+2026-05-15 14:53:38,668 - clearml.metrics - ERROR - Not uploading 30/30 events because the data upload failed
+ClearML Monitor: Could not detect iteration reporting, falling back to iterations as seconds-from-start
+  step 100  loss=+6.767  sps=100
+  step 200  loss=+6.219  sps=186
+  step 300  loss=+6.156  sps=262
+  step 400  loss=+6.062  sps=326
+  step 500  loss=+5.924  sps=384
+  step 600  loss=+5.895  sps=442
+  step 700  loss=+6.044  sps=479
+  step 800  loss=+5.708  sps=521
+  step 900  loss=+5.673  sps=562
+  step 1000  loss=+5.726  sps=597
+  step 1100  loss=+5.791  sps=633
+  step 1200  loss=+5.671  sps=667
+  step 1300  loss=+5.649  sps=627
+  step 1400  loss=+5.749  sps=654

@@ -1,0 +1,456 @@
+ClearML Task: created new task id=26f37bd65be04da38754491f34e9adee
+ClearML results page: https://clearml.budda.site/projects/08d9e4b8a1334ad7ba45150d8a16b97e/experiments/26f37bd65be04da38754491f34e9adee/output/log
+15:08:15  loading cache ['/mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i', '/mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled', '/mnt/nvme6t/e2e_calib_cache/pandaset_v3_tiled_i'] (V3 full-image)
+15:08:15    perturbation: ±1.5 deg / ±0.6 m   fx/fy: ±0.00% / ±0.00%   crop_px=[128, 512] (full-image px → 128)
+15:08:15    rep_strategy=nearest_cam
+<unknown>:83: SyntaxWarning: invalid escape sequence '\s'
+2026-05-15 15:08:18,382 - clearml.model - WARNING - Connecting multiple input models with the same name: `meta`. This might result in the wrong model being used when executing remotely
+15:08:18    + cache /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i: train=1169760 val=37560 (os=4)
+15:08:18    + cache /mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled: train=111520 val=3920 (os=4)
+15:08:23    + cache /mnt/nvme6t/e2e_calib_cache/pandaset_v3_tiled_i: train=281600 val=12000 (os=4)
+15:08:23  train cache(s) loaded: 1562880 instances
+15:08:23  val cache loaded: 53480 instances (oversample=1)
+15:08:23  sequence-level split (cache pre-built): train=1562880 val=53480
+15:08:23    val subsample: 8000/53480 (deterministic first-N)
+15:08:23  params: 1.81M
+15:08:23  amp_dtype=torch.bfloat16 scaler_enabled=False device=NVIDIA GeForce RTX 5080 cc=(12, 0)
+cache: /mnt/nvme6t/e2e_calib_cache/zod_v3_tiled_clean_i  insts: 330000  scenes: 8250  rendering 30 → experiments/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6/vis_pretrain
+  pre_00: idx=257541  scene=074287 frame=74287  N=247 obj=25
+  pre_01: idx=61475  scene=018088 frame=18088  N=55 obj=0
+  pre_02: idx=153203  scene=039368 frame=39368  N=226 obj=18
+  pre_03: idx=294902  scene=000504 frame=504  N=101 obj=76
+  pre_04: idx=274598  scene=085239 frame=85239  N=28 obj=0
+  pre_05: idx=275191  scene=085578 frame=85578  N=109 obj=0
+  pre_06: idx=179709  scene=045133 frame=45133  N=15 obj=0
+  pre_07: idx=190970  scene=047829 frame=47829  N=209 obj=4
+  pre_08: idx=74931  scene=020500 frame=20500  N=231 obj=1
+  pre_09: idx=248945  scene=069415 frame=69415  N=73 obj=0
+  pre_10: idx=171699  scene=043467 frame=43467  N=98 obj=0
+  pre_11: idx=192867  scene=048226 frame=48226  N=14 obj=0
+  pre_12: idx=117347  scene=031553 frame=31553  N=18 obj=0
+  pre_13: idx=280103  scene=089855 frame=89855  N=34 obj=7
+  pre_14: idx=254894  scene=072511 frame=72511  N=151 obj=0
+  pre_15: idx=184033  scene=046233 frame=46233  N=89 obj=0
+  pre_16: idx=304916  scene=002426 frame=2426  N=145 obj=7
+  pre_17: idx=129664  scene=034293 frame=34293  N=75 obj=0
+  pre_18: idx=259806  scene=075874 frame=75874  N=235 obj=76
+  pre_19: idx=127055  scene=033748 frame=33748  N=133 obj=3
+  pre_20: idx=285686  scene=094548 frame=94548  N=166 obj=78
+  pre_21: idx=49088  scene=016101 frame=16101  N=229 obj=12
+  pre_22: idx=308677  scene=003025 frame=3025  N=172 obj=0
+  pre_23: idx=148097  scene=038161 frame=38161  N=139 obj=0
+  pre_24: idx=118533  scene=031853 frame=31853  N=132 obj=88
+  pre_25: idx=254342  scene=072252 frame=72252  N=143 obj=7
+  pre_26: idx=109722  scene=026769 frame=26769  N=18 obj=0
+  pre_27: idx=234337  scene=062519 frame=62519  N=182 obj=20
+  pre_28: idx=131805  scene=034804 frame=34804  N=228 obj=51
+  pre_29: idx=18255  scene=011305 frame=11305  N=158 obj=84
+15:10:00  vis_pretrain → experiments/zod_tss4_ps_20260515_joint_repnear_os4_50ep_lrmin1e6/vis_pretrain
+ClearML Monitor: Could not detect iteration reporting, falling back to iterations as seconds-from-start
+  step 100  loss=+6.767  sps=101
+  step 200  loss=+6.199  sps=191
+  step 300  loss=+6.151  sps=269
+  step 400  loss=+6.054  sps=341
+  step 500  loss=+5.935  sps=405
+  step 600  loss=+5.906  sps=464
+  step 700  loss=+6.002  sps=514
+  step 800  loss=+5.718  sps=563
+  step 900  loss=+5.671  sps=586
+  step 1000  loss=+5.721  sps=624
+  step 1100  loss=+5.799  sps=654
+  step 1200  loss=+5.681  sps=679
+  step 1300  loss=+5.651  sps=711
+  step 1400  loss=+5.751  sps=742
+  step 1500  loss=+5.561  sps=769
+  step 1600  loss=+5.511  sps=791
+  step 1700  loss=+5.661  sps=818
+  step 1800  loss=+5.506  sps=837
+  step 1900  loss=+5.479  sps=857
+  step 2000  loss=+5.661  sps=876
+  step 2100  loss=+5.517  sps=898
+  step 2200  loss=+5.461  sps=918
+  step 2300  loss=+5.367  sps=938
+  step 2400  loss=+5.366  sps=956
+  step 2500  loss=+5.361  sps=953
+  step 2600  loss=+5.407  sps=966
+  step 2700  loss=+5.360  sps=979
+  step 2800  loss=+5.512  sps=941
+  step 2900  loss=+5.353  sps=943
+  step 3000  loss=+5.392  sps=956
+  step 3100  loss=+5.442  sps=968
+  step 3200  loss=+5.269  sps=973
+  step 3300  loss=+5.327  sps=980
+  step 3400  loss=+5.272  sps=984
+  step 3500  loss=+5.447  sps=988
+  step 3600  loss=+5.293  sps=997
+  step 3700  loss=+5.626  sps=1009
+  step 3800  loss=+5.235  sps=1017
+  step 3900  loss=+5.263  sps=1020
+  step 4000  loss=+5.253  sps=1026
+  step 4100  loss=+5.187  sps=1033
+  step 4200  loss=+5.350  sps=1043
+  step 4300  loss=+5.377  sps=1054
+  step 4400  loss=+5.268  sps=1064
+  step 4500  loss=+5.105  sps=1075
+  step 4600  loss=+5.287  sps=1076
+  step 4700  loss=+5.193  sps=1077
+  step 4800  loss=+5.250  sps=1082
+  step 4900  loss=+5.210  sps=1087
+  step 5000  loss=+5.052  sps=1093
+  step 5100  loss=+5.157  sps=1099
+  step 5200  loss=+5.205  sps=1108
+  step 5300  loss=+5.146  sps=1114
+  step 5400  loss=+5.067  sps=1120
+  step 5500  loss=+5.157  sps=1129
+  step 5600  loss=+5.001  sps=1135
+  step 5700  loss=+5.185  sps=1091
+  step 5800  loss=+5.122  sps=1082
+  step 5900  loss=+5.129  sps=1087
+  step 6000  loss=+5.046  sps=1093
+  step 6100  loss=+4.985  sps=1096
+15:35:52  [  1/50]  train nll=+5.462(pt=+5.462 fr=+nan obj=+5.721 bg=+5.423) mse=12.52(obj=14.11/m11.49/95p34.6 bg=12.27/m10.45/95p28.1)  val nll=+5.079(pt=+5.079 fr=+nan obj=+5.357 bg=+5.032) mse=10.50(obj=12.23/m9.91/95p30.5 bg=10.20/m8.78/95p23.0)  lr=1.20e-04  tot=27.5min
+15:35:53    ↳ saved (val_nll=5.0795)
+                                            0% | 0.00/6.96 MB [00:00<?, ?MB/s]: █████████████████████████████████ 100% | 6.96/6.96 MB [00:00<00:00, 35.47MB/s]: 
+  step 100  loss=+5.099  sps=1463
+  step 200  loss=+5.158  sps=1311
+  step 300  loss=+5.184  sps=1385
+  step 400  loss=+5.246  sps=1421
+  step 500  loss=+5.051  sps=1460
+  step 600  loss=+5.195  sps=1512
+  step 700  loss=+5.150  sps=1536
+  step 800  loss=+5.169  sps=1555
+  step 900  loss=+5.076  sps=1486
+  step 1000  loss=+5.022  sps=1440
+  step 1100  loss=+5.013  sps=1426
+  step 1200  loss=+5.043  sps=1414
+  step 1300  loss=+5.112  sps=1423
+  step 1400  loss=+5.170  sps=1429
+  step 1500  loss=+5.115  sps=1365
+  step 1600  loss=+5.181  sps=1353
+  step 1700  loss=+5.194  sps=1342
+  step 1800  loss=+5.010  sps=1361
+  step 1900  loss=+5.128  sps=1362
+  step 2000  loss=+4.839  sps=1355
+  step 2100  loss=+5.028  sps=1353
+  step 2200  loss=+4.964  sps=1361
+  step 2300  loss=+5.066  sps=1367
+  step 2400  loss=+5.067  sps=1370
+  step 2500  loss=+5.000  sps=1382
+  step 2600  loss=+5.167  sps=1392
+  step 2700  loss=+4.956  sps=1406
+  step 2800  loss=+4.942  sps=1419
+  step 2900  loss=+4.927  sps=1421
+  step 3000  loss=+4.944  sps=1403
+  step 3100  loss=+5.101  sps=1397
+  step 3200  loss=+4.965  sps=1404
+  step 3300  loss=+4.930  sps=1411
+  step 3400  loss=+5.103  sps=1413
+  step 3500  loss=+5.061  sps=1414
+  step 3600  loss=+4.934  sps=1412
+  step 3700  loss=+5.032  sps=1420
+  step 3800  loss=+5.026  sps=1427
+  step 3900  loss=+4.944  sps=1432
+  step 4000  loss=+5.006  sps=1440
+  step 4100  loss=+5.090  sps=1447
+  step 4200  loss=+4.861  sps=1448
+  step 4300  loss=+4.888  sps=1436
+  step 4400  loss=+4.804  sps=1430
+  step 4500  loss=+4.918  sps=1432
+  step 4600  loss=+5.032  sps=1438
+  step 4700  loss=+4.947  sps=1443
+  step 4800  loss=+4.837  sps=1436
+  step 4900  loss=+4.864  sps=1434
+  step 5000  loss=+4.784  sps=1437
+  step 5100  loss=+4.813  sps=1441
+  step 5200  loss=+4.856  sps=1445
+  step 5300  loss=+4.891  sps=1450
+  step 5400  loss=+4.972  sps=1455
+  step 5500  loss=+4.880  sps=1461
+  step 5600  loss=+4.959  sps=1467
+  step 5700  loss=+5.023  sps=1469
+  step 5800  loss=+4.817  sps=1465
+  step 5900  loss=+4.750  sps=1441
+  step 6000  loss=+4.862  sps=1440
+  step 6100  loss=+4.857  sps=1438
+15:54:02  [  2/50]  train nll=+5.000(pt=+5.000 fr=+nan obj=+5.157 bg=+4.977) mse=10.24(obj=11.23/m9.16/95p27.4 bg=10.09/m8.65/95p22.7)  val nll=+5.079(pt=+5.079 fr=+nan obj=+5.357 bg=+5.032) mse=10.50(obj=12.23/m9.91/95p30.5 bg=10.20/m8.78/95p23.0)  lr=1.80e-04  tot=45.6min
+  step 100  loss=+4.906  sps=1408
+  step 200  loss=+5.129  sps=1391
+  step 300  loss=+4.857  sps=1393
+  step 400  loss=+4.884  sps=1383
+  step 500  loss=+4.867  sps=1285
+  step 600  loss=+4.927  sps=1305
+  step 700  loss=+4.913  sps=1338
+  step 800  loss=+4.896  sps=1379
+  step 900  loss=+4.874  sps=1416
+  step 1000  loss=+4.798  sps=1427
+  step 1100  loss=+4.931  sps=1440
+  step 1200  loss=+4.998  sps=1464
+  step 1300  loss=+4.817  sps=1474
+  step 1400  loss=+4.894  sps=1451
+  step 1500  loss=+5.157  sps=1441
+  step 1600  loss=+5.052  sps=1418
+  step 1700  loss=+4.844  sps=1421
+  step 1800  loss=+4.838  sps=1436
+  step 1900  loss=+4.955  sps=1444
+  step 2000  loss=+4.785  sps=1455
+  step 2100  loss=+4.743  sps=1466
+  step 2200  loss=+4.817  sps=1480
+  step 2300  loss=+4.739  sps=1493
+  step 2400  loss=+4.692  sps=1501
+  step 2500  loss=+4.821  sps=1468
+  step 2600  loss=+4.734  sps=1462
+  step 2700  loss=+4.817  sps=1460
+  step 2800  loss=+4.880  sps=1447
+  step 2900  loss=+4.690  sps=1455
+  step 3000  loss=+4.715  sps=1464
+  step 3100  loss=+4.802  sps=1471
+  step 3200  loss=+4.709  sps=1478
+  step 3300  loss=+4.846  sps=1485
+  step 3400  loss=+4.598  sps=1492
+  step 3500  loss=+4.791  sps=1499
+  step 3600  loss=+4.816  sps=1483
+  step 3700  loss=+4.568  sps=1476
+  step 3800  loss=+4.639  sps=1474
+  step 3900  loss=+4.662  sps=1470
+  step 4000  loss=+4.762  sps=1469
+  step 4100  loss=+4.629  sps=1473
+  step 4200  loss=+5.003  sps=1479
+  step 4300  loss=+4.655  sps=1484
+  step 4400  loss=+4.748  sps=1490
+  step 4500  loss=+4.677  sps=1496
+  step 4600  loss=+4.624  sps=1503
+  step 4700  loss=+5.014  sps=1509
+  step 4800  loss=+4.622  sps=1503
+  step 4900  loss=+4.515  sps=1487
+  step 5000  loss=+4.567  sps=1489
+  step 5100  loss=+4.625  sps=1482
+  step 5200  loss=+4.491  sps=1481
+  step 5300  loss=+4.737  sps=1485
+  step 5400  loss=+4.576  sps=1490
+  step 5500  loss=+4.437  sps=1493
+  step 5600  loss=+4.463  sps=1497
+  step 5700  loss=+4.730  sps=1501
+  step 5800  loss=+4.598  sps=1501
+  step 5900  loss=+4.612  sps=1494
+  step 6000  loss=+4.613  sps=1488
+  step 6100  loss=+4.519  sps=1492
+16:11:32  [  3/50]  train nll=+4.748(pt=+4.748 fr=+nan obj=+4.825 bg=+4.737) mse=9.18(obj=9.72/m7.69/95p24.4 bg=9.10/m7.65/95p20.9)  val nll=+5.079(pt=+5.079 fr=+nan obj=+5.357 bg=+5.032) mse=10.50(obj=12.23/m9.91/95p30.5 bg=10.20/m8.78/95p23.0)  lr=2.40e-04  tot=63.1min
+  step 100  loss=+4.595  sps=1519
+  step 200  loss=+4.795  sps=1519
+  step 300  loss=+4.741  sps=1506
+  step 400  loss=+4.601  sps=1519
+  step 500  loss=+4.543  sps=1558
+  step 600  loss=+4.690  sps=1586
+  step 700  loss=+4.570  sps=1607
+  step 800  loss=+4.676  sps=1629
+  step 900  loss=+4.475  sps=1648
+  step 1000  loss=+4.575  sps=1584
+  step 1100  loss=+4.795  sps=1523
+  step 1200  loss=+4.560  sps=1536
+  step 1300  loss=+4.448  sps=1537
+  step 1400  loss=+4.765  sps=1541
+  step 1500  loss=+4.646  sps=1511
+  step 1600  loss=+4.482  sps=1515
+  step 1700  loss=+4.472  sps=1523
+  step 1800  loss=+4.434  sps=1531
+  step 1900  loss=+4.700  sps=1535
+  step 2000  loss=+4.511  sps=1549
+  step 2100  loss=+4.628  sps=1563
+  step 2200  loss=+4.625  sps=1538
+  step 2300  loss=+4.489  sps=1515
+  step 2400  loss=+4.472  sps=1521
+  step 2500  loss=+4.624  sps=1518
+  step 2600  loss=+4.398  sps=1518
+  step 2700  loss=+4.443  sps=1526
+  step 2800  loss=+4.475  sps=1517
+  step 2900  loss=+4.493  sps=1521
+  step 3000  loss=+4.567  sps=1526
+  step 3100  loss=+4.586  sps=1530
+  step 3200  loss=+4.647  sps=1537
+  step 3300  loss=+4.329  sps=1544
+  step 3400  loss=+4.173  sps=1550
+  step 3500  loss=+4.464  sps=1557
+  step 3600  loss=+4.431  sps=1563
+  step 3700  loss=+4.741  sps=1562
+  step 3800  loss=+4.352  sps=1543
+  step 3900  loss=+4.419  sps=1539
+  step 4000  loss=+4.333  sps=1542
+  step 4100  loss=+4.557  sps=1546
+  step 4200  loss=+4.461  sps=1544
+  step 4300  loss=+4.610  sps=1544
+  step 4400  loss=+4.450  sps=1546
+  step 4500  loss=+4.437  sps=1550
+  step 4600  loss=+4.450  sps=1557
+  step 4700  loss=+4.382  sps=1563
+  step 4800  loss=+4.484  sps=1569
+  step 4900  loss=+4.368  sps=1571
+  step 5000  loss=+4.272  sps=1557
+  step 5100  loss=+4.449  sps=1552
+  step 5200  loss=+4.449  sps=1557
+  step 5300  loss=+4.378  sps=1557
+  step 5400  loss=+4.353  sps=1548
+  step 5500  loss=+4.237  sps=1546
+  step 5600  loss=+4.467  sps=1550
+  step 5700  loss=+4.318  sps=1553
+  step 5800  loss=+4.439  sps=1556
+  step 5900  loss=+4.322  sps=1560
+  step 6000  loss=+4.163  sps=1559
+  step 6100  loss=+4.411  sps=1557
+16:28:18  [  4/50]  train nll=+4.487(pt=+4.487 fr=+nan obj=+4.435 bg=+4.496) mse=8.20(obj=8.24/m6.09/95p22.1 bg=8.19/m6.64/95p19.6)  val nll=+5.079(pt=+5.079 fr=+nan obj=+5.357 bg=+5.032) mse=10.50(obj=12.23/m9.91/95p30.5 bg=10.20/m8.78/95p23.0)  lr=3.00e-04  tot=79.9min
+  step 100  loss=+4.381  sps=1601
+  step 200  loss=+4.497  sps=1702
+  step 300  loss=+4.500  sps=1730
+  step 400  loss=+4.265  sps=1579
+  step 500  loss=+4.371  sps=1476
+  step 600  loss=+4.313  sps=1494
+  step 700  loss=+4.343  sps=1507
+  step 800  loss=+4.295  sps=1489
+  step 900  loss=+4.411  sps=1492
+  step 1000  loss=+4.482  sps=1510
+  step 1100  loss=+4.344  sps=1524
+  step 1200  loss=+4.325  sps=1537
+  step 1300  loss=+4.304  sps=1500
+  step 1400  loss=+4.289  sps=1510
+  step 1500  loss=+4.405  sps=1527
+  step 1600  loss=+4.344  sps=1536
+  step 1700  loss=+4.230  sps=1547
+  step 1800  loss=+4.595  sps=1533
+  step 1900  loss=+4.270  sps=1502
+  step 2000  loss=+4.419  sps=1507
+  step 2100  loss=+4.282  sps=1512
+  step 2200  loss=+4.456  sps=1496
+  step 2300  loss=+4.201  sps=1456
+  step 2400  loss=+4.292  sps=1408
+  step 2500  loss=+4.414  sps=1382
+  step 2600  loss=+4.332  sps=1356
+  step 2700  loss=+4.333  sps=1330
+  step 2800  loss=+4.352  sps=1326
+  step 2900  loss=+4.218  sps=1326
+  step 3000  loss=+4.220  sps=1314
+  step 3100  loss=+4.472  sps=1314
+  step 3200  loss=+4.155  sps=1318
+  step 3300  loss=+4.228  sps=1321
+  step 3400  loss=+4.301  sps=1323
+  step 3500  loss=+4.232  sps=1326
+  step 3600  loss=+4.333  sps=1330
+  step 3700  loss=+4.272  sps=1333
+  step 3800  loss=+4.271  sps=1335
+  step 3900  loss=+4.324  sps=1324
+  step 4000  loss=+4.143  sps=1322
+  step 4100  loss=+4.332  sps=1324
+  step 4200  loss=+4.101  sps=1318
+  step 4300  loss=+4.175  sps=1312
+  step 4400  loss=+4.270  sps=1311
+  step 4500  loss=+4.198  sps=1313
+  step 4600  loss=+4.005  sps=1315
+  step 4700  loss=+4.114  sps=1319
+  step 4800  loss=+4.123  sps=1324
+  step 4900  loss=+4.204  sps=1327
+  step 5000  loss=+4.416  sps=1331
+  step 5100  loss=+4.106  sps=1334
+  step 5200  loss=+4.224  sps=1323
+  step 5300  loss=+4.168  sps=1318
+  step 5400  loss=+4.264  sps=1320
+  step 5500  loss=+4.014  sps=1321
+  step 5600  loss=+4.100  sps=1316
+  step 5700  loss=+4.384  sps=1301
+  step 5800  loss=+4.130  sps=1297
+  step 5900  loss=+4.262  sps=1296
+  step 6000  loss=+3.921  sps=1294
+  step 6100  loss=+4.059  sps=1296
+16:48:52  [  5/50]  train nll=+4.287(pt=+4.287 fr=+nan obj=+4.171 bg=+4.305) mse=7.52(obj=7.36/m5.23/95p20.5 bg=7.54/m5.94/95p18.6)  val nll=+4.344(pt=+4.344 fr=+nan obj=+4.220 bg=+4.360) mse=7.58(obj=7.53/m5.13/95p22.2 bg=7.61/m5.72/95p19.9)  lr=3.00e-04  tot=100.5min
+16:49:01    ↳ saved (val_nll=4.3436)
+                                            0% | 0.00/6.96 MB [00:00<?, ?MB/s]: █████████████████████████████████ 100% | 6.96/6.96 MB [00:00<00:00, 21.14MB/s]: 
+  step 100  loss=+4.134  sps=1194
+  step 200  loss=+4.269  sps=1039
+  step 300  loss=+4.125  sps=1097
+  step 400  loss=+4.028  sps=1142
+  step 500  loss=+4.073  sps=1195
+  step 600  loss=+4.002  sps=1221
+  step 700  loss=+3.953  sps=1242
+  step 800  loss=+4.125  sps=1270
+  step 900  loss=+4.332  sps=1288
+  step 1000  loss=+4.093  sps=1311
+  step 1100  loss=+4.070  sps=1313
+  step 1200  loss=+4.142  sps=1324
+  step 1300  loss=+3.976  sps=1335
+  step 1400  loss=+4.163  sps=1343
+  step 1500  loss=+4.255  sps=1339
+  step 1600  loss=+4.126  sps=1334
+  step 1700  loss=+4.024  sps=1309
+  step 1800  loss=+4.235  sps=1308
+  step 1900  loss=+4.159  sps=1312
+  step 2000  loss=+4.031  sps=1315
+  step 2100  loss=+4.115  sps=1325
+  step 2200  loss=+4.009  sps=1331
+  step 2300  loss=+4.060  sps=1339
+  step 2400  loss=+4.290  sps=1345
+  step 2500  loss=+4.064  sps=1347
+  step 2600  loss=+3.910  sps=1355
+  step 2700  loss=+3.999  sps=1367
+  step 2800  loss=+4.096  sps=1369
+  step 2900  loss=+4.122  sps=1369
+  step 3000  loss=+4.239  sps=1367
+  step 3100  loss=+4.088  sps=1372
+  step 3200  loss=+3.939  sps=1369
+  step 3300  loss=+4.246  sps=1374
+  step 3400  loss=+4.147  sps=1370
+  step 3500  loss=+4.081  sps=1370
+  step 3600  loss=+4.101  sps=1373
+  step 3700  loss=+4.062  sps=1373
+  step 3800  loss=+4.050  sps=1376
+  step 3900  loss=+4.134  sps=1380
+  step 4000  loss=+3.872  sps=1385
+  step 4100  loss=+4.114  sps=1392
+  step 4200  loss=+4.154  sps=1398
+  step 4300  loss=+4.081  sps=1390
+  step 4400  loss=+4.033  sps=1392
+  step 4500  loss=+4.002  sps=1396
+  step 4600  loss=+4.083  sps=1392
+  step 4700  loss=+4.013  sps=1385
+  step 4800  loss=+3.968  sps=1382
+  step 4900  loss=+3.962  sps=1384
+  step 5000  loss=+3.902  sps=1386
+  step 5100  loss=+3.940  sps=1384
+  step 5200  loss=+3.835  sps=1382
+  step 5300  loss=+3.945  sps=1381
+  step 5400  loss=+3.988  sps=1384
+  step 5500  loss=+4.162  sps=1381
+  step 5600  loss=+3.932  sps=1383
+  step 5700  loss=+4.167  sps=1381
+  step 5800  loss=+4.047  sps=1381
+  step 5900  loss=+4.038  sps=1343
+  step 6000  loss=+3.997  sps=1322
+  step 6100  loss=+4.175  sps=1327
+17:08:44  [  6/50]  train nll=+4.087(pt=+4.087 fr=+nan obj=+3.923 bg=+4.112) mse=6.90(obj=6.61/m4.58/95p18.9 bg=6.95/m5.34/95p17.6)  val nll=+4.344(pt=+4.344 fr=+nan obj=+4.220 bg=+4.360) mse=7.58(obj=7.53/m5.13/95p22.2 bg=7.61/m5.72/95p19.9)  lr=3.00e-04  tot=120.3min
+  step 100  loss=+3.964  sps=1425
+  step 200  loss=+4.068  sps=1520
+  step 300  loss=+3.721  sps=1510
+  step 400  loss=+4.065  sps=1513
+  step 500  loss=+4.073  sps=1529
+  step 600  loss=+4.105  sps=1507
+  step 700  loss=+4.011  sps=1391
+  step 800  loss=+4.065  sps=1374
+  step 900  loss=+3.907  sps=1397
+  step 1000  loss=+4.033  sps=1416
+  step 1100  loss=+3.932  sps=1415
+  step 1200  loss=+3.988  sps=1411
+  step 1300  loss=+3.916  sps=1415
+  step 1400  loss=+3.821  sps=1425
+  step 1500  loss=+3.934  sps=1436
+  step 1600  loss=+4.000  sps=1437
+  step 1700  loss=+3.973  sps=1444
+  step 1800  loss=+3.975  sps=1441
+  step 1900  loss=+3.921  sps=1437
+  step 2000  loss=+3.884  sps=1406
+  step 2100  loss=+3.906  sps=1406
+  step 2200  loss=+3.797  sps=1412
+  step 2300  loss=+4.042  sps=1402
+  step 2400  loss=+3.856  sps=1408
+  step 2500  loss=+3.968  sps=1413
+  step 2600  loss=+3.915  sps=1416
+  step 2700  loss=+3.843  sps=1425
+  step 2800  loss=+3.853  sps=1421
+  step 2900  loss=+3.774  sps=1418
+  step 3000  loss=+3.869  sps=1420
+  step 3100  loss=+3.788  sps=1423
