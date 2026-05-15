@@ -30,10 +30,10 @@ TMPOC drive of equivalent frame budget the gap should close.
 Sample viz (left = tile location on full frame, red box = crop; right = tile
 crop with LiDAR projection):
 
-![val 00](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_00_idx023682.png)
-![val 01](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_01_idx019684.png)
-![val 02](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_02_idx001577.png)
-![val 03](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_03_idx031377.png)
+![val 00](../assets/weekly_2026-05-15/val_00_idx023682.png)
+![val 01](../assets/weekly_2026-05-15/val_01_idx019684.png)
+![val 02](../assets/weekly_2026-05-15/val_02_idx001577.png)
+![val 03](../assets/weekly_2026-05-15/val_03_idx031377.png)
 
 (σ-ellipse overlay needs a separate viz pass on `best_model.pt` — the
 training-time viz preset only shows tile + point projection.)

@@ -42,10 +42,10 @@ obj annotation が無いため (bg-only NLL = pt NLL = 2.135)。
 右 = 同 tile crop に LiDAR 点を投影。σ 楕円は今の vis preset では出ない
 ので別途 best_model.pt から viz 走らせる必要あり。
 
-![val 00](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_00_idx023682.png)
-![val 01](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_01_idx019684.png)
-![val 02](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_02_idx001577.png)
-![val 03](../../experiments/tss4_20260514_intensity_4ch_100ep_framesplit/vis_ep100/val_03_idx031377.png)
+![val 00](../assets/weekly_2026-05-15/val_00_idx023682.png)
+![val 01](../assets/weekly_2026-05-15/val_01_idx019684.png)
+![val 02](../assets/weekly_2026-05-15/val_02_idx001577.png)
+![val 03](../assets/weekly_2026-05-15/val_03_idx031377.png)
 
 → TSS4 cache だけでも 5cm 級の点単位ずれ予測ができる、社内データ単体での
 σ-net 適用に道が開けた。
