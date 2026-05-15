@@ -171,6 +171,9 @@ def process_seg(args_tuple):
     if max_frames:
         ts_list = ts_list[:max_frames]
 
+    done_flag = inst_dir / f'_done_{seg_name}.flag'
+    if done_flag.exists():
+        return seg_name, 0
     written = 0
     gid = gid_start
     for ts in ts_list:
@@ -245,6 +248,7 @@ def process_seg(args_tuple):
                     out_dir=inst_dir, gid_base=gid)
                 gid += 1
                 written += len(tile_files)
+    done_flag.touch()
     return seg_name, written
 
 
@@ -293,7 +297,7 @@ def main():
             written_total += n
             print(f"  {seg}: +{n}  total={written_total} ({time.time()-t0:.0f}s)", flush=True)
     else:
-        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        with ProcessPoolExecutor(max_workers=args.workers, max_tasks_per_child=1) as ex:
             futs = {ex.submit(process_seg, a): a[0] for a in argv}
             done = 0
             for fut in as_completed(futs):
