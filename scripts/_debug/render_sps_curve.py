@@ -22,7 +22,7 @@ def parse(p: Path):
 
 runs = [
     ('os=1, bs=384', 'experiments/km_wv_8gpu_50ep_os1_bs384_v8/train.log'),
-    ('os=4, bs=384', 'experiments/km_wv_8gpu_50ep_os4/train.log'),
+    ('os=4, bs=384 (200ep)', 'experiments/km_wv_8gpu_200ep_os4/train.log'),
 ]
 
 fig, (ax_sps, ax_nll) = plt.subplots(1, 2, figsize=(11, 4))

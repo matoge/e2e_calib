@@ -1,5 +1,13 @@
 # DGX2の8GPUを埋める — DataLoader↔GPUの帯域パイプを設計する
 
+## TL;DR
+
+- **LMDBに集約** すると `inst/*.pt` の open(2) 大量発行から解放され、`np.frombuffer` zero-copy で worker サンプル生成が **1サンプル ~8 ms** に。
+- **DGX2のメモリ帯域はすごい**：DDR4 ×6ch ×2sock = ~256 GB/s、page cacheに **1.3 TiB の LMDB全載せ** で disk read = 0、すべてRAMから供給。CPU 49 core が常時アクティブ、bond NIC 200 Gbps、まだ余裕。
+- **GPU も割とまだまだ使える**：V100 32GB のうち bs=384/rank で 6-9 GB しか食ってない (27%)。bs=768 で sps 1.3-1.5x まだ伸びる。**8 GPU で 5500-5800 sps** に到達、目標3000の **約1.9倍**。CPU 1サンプル 8ms × 64worker / 1000ms = 理論上限8000のうち 70% 引き出し。
+
+![SPS / val_nll](../assets/dgx2_sps/sps_curve.png)
+
 ## 主役は dataloader と GPU の "帯域パイプ"
 
 CalibrationNet は1.09M paramsしか無い。**モデル自体は軽い**。  
@@ -43,10 +51,12 @@ CalibrationNet は1.09M paramsしか無い。**モデル自体は軽い**。
 
 | 設定 | sps(global) |
 |---|---:|
-| ep1 (warmup含む) | 1697 |
-| ep5 安定 | 3779 |
-| ep11 | 3933 |
+| ep1 (warmup含む, os=1) | 1697 |
+| ep5 安定 (os=1) | 3779 |
+| ep11 (os=1) | 3933 |
 | ep1 (oversample=4) | 3666 |
+| ep5 (oversample=4) | 5517 |
+| **ep7 (oversample=4)** | **5750** |
 
 `oversample=1 → 4` でsps落ちないのは**dataloaderがGPU側に追いつき続けている**証拠。  
 1サンプル CPU 8ms × 64 worker / 1000ms = **理論上限 8000 sps**。実測 3900 は半分弱で、残りはGPU側律速＋NCCL barrier。
