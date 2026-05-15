@@ -2,9 +2,18 @@
 
 ## TL;DR
 
-- **Switch to LMDB.** Replacing 1.5M `inst/*.pt` files with one LMDB drops worker sample-gen to **~8 ms / sample** via `np.frombuffer` zero-copy reads.
-- **DGX2 memory bandwidth is huge.** DDR4 ×6 channel × 2 socket ≈ 256 GB/s. Page cache holds **1.3 TiB of LMDB** so disk reads are zero — every sample is served from RAM. 49 of 96 cores stay active, 200 Gbps bond NIC, plenty of headroom left.
-- **GPUs still have room.** V100 32 GB only takes 6–9 GB at bs=384/rank (27%). bs=768 leaves another 1.3–1.5× sps on the table. We hit **5500–5800 sps on 8 GPUs**, ~1.9× the 3000 target. CPU theoretical ceiling 8000 sps (8 ms × 64 workers); we're already at 70% of that.
+- **Switch to [LMDB][lmdb]**[^lmdb]. Replacing 1.5M `inst/*.pt` files with one LMDB drops worker sample-gen to **~8 ms / sample** via [`np.frombuffer`][np-frombuffer] zero-copy reads.
+- **DGX2 memory bandwidth is huge.** [DDR4][ddr4] ×6 channel × 2 socket ≈ 256 GB/s. Linux [page cache][page-cache] holds **1.3 TiB of LMDB** so disk reads are zero — every sample is served from RAM. 49 of 96 cores stay active, 200 Gbps [bond NIC][nic-bond], plenty of headroom left.
+- **GPUs still have room.** V100 32 GB ([HBM2][hbm2]) only takes 6–9 GB at bs=384/rank (27%). bs=768 leaves another 1.3–1.5× sps on the table. We hit **5500–5800 sps on 8 GPUs**, ~1.9× the 3000 target. CPU theoretical ceiling 8000 sps (8 ms × 64 workers); we're already at 70% of that.
+
+[lmdb]: https://www.symas.com/lmdb "Symas Lightning Memory-Mapped Database — what LMDB is and why it's fast"
+[np-frombuffer]: https://numpy.org/doc/stable/reference/generated/numpy.frombuffer.html "np.frombuffer — zero-copy view over raw bytes"
+[ddr4]: https://en.wikipedia.org/wiki/DDR4_SDRAM "DDR4 SDRAM (Wikipedia)"
+[page-cache]: https://www.kernel.org/doc/html/latest/admin-guide/mm/concepts.html#page-cache "Linux page cache (kernel.org admin guide)"
+[nic-bond]: https://docs.kernel.org/networking/bonding.html "Linux bonding driver (kernel.org)"
+[hbm2]: https://en.wikipedia.org/wiki/High_Bandwidth_Memory "High Bandwidth Memory (HBM/HBM2)"
+
+[^lmdb]: LMDB = Lightning Memory-Mapped Database. A single-file embedded key-value store that mmap's the whole DB into address space. Reads cost zero syscalls after the first page-fault, and parallel readers don't lock — perfect for many-worker DataLoaders.
 
 ![SPS / val_nll](../assets/dgx2_sps/sps_curve.png)
 
@@ -15,7 +24,10 @@ What's heavy is **data generation**:
 
 1. **Per-LiDAR-point random sampling and 3D back-projection every iteration.** `dist_uvd` (256 pts, 5 ch) and `bucket_uvd` (G²×K = 256×8 = 2048 pts, 4 ch) get re-projected against the image crop. Random crop / extrinsic perturbation / oversample re-walks the same frame many times. **~7-8 ms CPU per sample.**
 2. **Transformer learns LiDAR↔image patterns over the entire image, not just objects.** Supervision is a two-tier NLL over `obj` cuboids and `bg` everywhere. **Convergence is extremely slow** — 50 epochs only gets val_nll from 4.07 → 3.45. We need to crank a lot of epochs.
-3. **Frustum encoder's 3×3 cell-neighbor gather runs every iter.** `(B, Nq, 9, K, 4)` gather + topk + mini cross-attn per query. With BS=384/rank and Nq=256 that's **Q=98,304 points** vs. 8,847,360 KV candidates. Backward stays heavy even at fp16.
+3. **Frustum encoder's 3×3 cell-neighbor gather runs every iter.** `(B, Nq, 9, K, 4)` [gather][torch-gather] + topk + mini [cross-attention][xattn] per query. With BS=384/rank and Nq=256 that's **Q=98,304 points** vs. 8,847,360 KV candidates. Backward stays heavy even at fp16.
+
+[torch-gather]: https://pytorch.org/docs/stable/generated/torch.gather.html "torch.gather — index-based scatter/gather over a tensor dim"
+[xattn]: https://arxiv.org/abs/1706.03762 "Attention Is All You Need (the canonical reference for cross-attention)"
 
 → **CPU sample-gen and GPU compute are in roughly the same time budget.** Filling 8 GPUs becomes "**how fast can the dataloader keep feeding them**" — the entire bandwidth pipe matters.
 
@@ -39,6 +51,12 @@ What's heavy is **data generation**:
        ▼
 [ NCCL allreduce 8 GPU ]               ← bottleneck-3 (creates idle time)
 ```
+
+> Background reading: [PyTorch DataLoader docs][dl-docs] (workers/persistent_workers/pin_memory), [DDP & DataLoader gotchas][ddp-gotcha], and [NCCL collectives][nccl] (what AllReduce actually does).
+
+[dl-docs]: https://pytorch.org/docs/stable/data.html "torch.utils.data — DataLoader options"
+[ddp-gotcha]: https://pytorch.org/docs/stable/notes/ddp.html "DistributedDataParallel — design notes"
+[nccl]: https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html "NCCL collectives (NVIDIA docs)"
 
 Each layer is a section of pipe with its own width. **Choke any one of them and the 8 GPUs stop being saturated.**
 
@@ -76,7 +94,9 @@ Each layer is a section of pipe with its own width. **Choke any one of them and 
 
 ### 1. **LMDB tile cache + class-level env cache**
 
-Don't lay out 1.5M `inst/*.pt` files; the metadata-walk cost alone kills you. Pack them into one LMDB and read with `np.frombuffer` for **zero-copy** access. Plus:
+Don't lay out 1.5M `inst/*.pt` files; the [metadata-walk cost][filesystem-readdir] alone kills you. Pack them into one [LMDB][lmdb] and read with [`np.frombuffer`][np-frombuffer] for **zero-copy** access. Plus:
+
+[filesystem-readdir]: https://www.usenix.org/system/files/conference/atc18/atc18-zhao.pdf "On Fast Large-Scale Program Analysis in Datalog (motivates why million-file FS walks are slow)"
 
 ```python
 class PandaSetCalibDatasetFull(Dataset):
@@ -94,7 +114,10 @@ This way **train + val splits can open the same path inside the same worker with
 
 ### 2. **Use `spawn`, not `forkserver`**, with `persistent_workers=True`
 
-`forkserver` snapshots the parent and inherits its open LMDB env, which then collides with the child's open() inside lmdb-py's per-process registry. Use `spawn`:
+[`forkserver`][mp-context] snapshots the parent and inherits its open LMDB env, which then collides with the child's `open()` inside [lmdb-py's per-process registry][lmdb-py]. Use [`spawn`][mp-context]:
+
+[mp-context]: https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods "Python multiprocessing — start methods (spawn / fork / forkserver)"
+[lmdb-py]: https://lmdb.readthedocs.io/en/release/ "lmdb-py docs — Environment lifecycle, fork rules"
 
 ```python
 DataLoader(..., num_workers=8, persistent_workers=True,
@@ -103,9 +126,14 @@ DataLoader(..., num_workers=8, persistent_workers=True,
 
 `persistent_workers=True` skips the **per-epoch worker spawn cost** — that's the main idle window between epochs.
 
-### 3. JPEG → 64×64 via `TurboJPEG.crop_decode` aligned to MCU boundaries
+### 3. JPEG → 64×64 via [`TurboJPEG.crop_decode`][turbojpeg-crop] aligned to [MCU][jpeg-mcu] boundaries
 
-`PIL.Image.open` lazy decode is 16 ms / sample. TurboJPEG's crop+decode lands at **4.5 ms** (3.5×). Dockerfile must include `libturbojpeg0-dev` + `PyTurboJPEG`.
+`PIL.Image.open` lazy decode is 16 ms / sample. [TurboJPEG][libjpeg-turbo]'s crop+decode lands at **4.5 ms** (3.5×). Dockerfile must include `libturbojpeg0-dev` + [`PyTurboJPEG`][pyturbojpeg].
+
+[libjpeg-turbo]: https://libjpeg-turbo.org/ "libjpeg-turbo — SIMD-accelerated JPEG codec"
+[turbojpeg-crop]: https://rawpedia.rawtherapee.com/Demosaicing#libjpeg-turbo "TurboJPEG crop_decode — partial decode aligned to MCU"
+[jpeg-mcu]: https://en.wikipedia.org/wiki/JPEG#Encoding "JPEG encoding — MCU (Minimum Coded Unit) blocks"
+[pyturbojpeg]: https://pypi.org/project/PyTurboJPEG/ "PyTurboJPEG — Python bindings for libjpeg-turbo"
 
 ### 4. **`num_workers=8/rank × 8rank = 64`** is the sweet spot
 
@@ -114,20 +142,31 @@ On the 96-core DGX2:
 - **64 workers active = 0.75 core/worker** (IO-wait included).
 - Bumping to 20 actually drops sps (worker startup overhead + shared-mem fd starvation).
 
-### 5. **Page cache is the first leg of the bandwidth pipe**
+### 5. **[Page cache][page-cache] is the first leg of the bandwidth pipe**
 
-1.3 TiB of DGX2 RAM lives as LMDB mmap page cache. Disk read happens **only on the first epoch**; from there it's a **pure memory-bandwidth game**: RAM → numpy → torch.
+1.3 TiB of DGX2 RAM lives as LMDB [mmap][mmap2] page cache. Disk read happens **only on the first epoch**; from there it's a **pure memory-bandwidth game**: RAM → numpy → torch.
 
-→ Keys to using that bandwidth: **put the LMDB on /home (md1) or /dev/shm**, never on **/mnt/fsx (Lustre)**, which is bad at small random reads and won't survive in page cache.
+→ Keys to using that bandwidth: **put the LMDB on /home ([md1][mdraid]) or [/dev/shm][tmpfs]**, never on **[/mnt/fsx (Lustre)][lustre]**, which is bad at small random reads and won't survive in page cache.
 
-### 6. fp16 + intensity 4 ch — halves PCIe → HBM
+[mmap2]: https://man7.org/linux/man-pages/man2/mmap.2.html "mmap(2) — map files into memory"
+[mdraid]: https://wiki.archlinux.org/title/RAID "Linux mdadm software RAID"
+[tmpfs]: https://www.kernel.org/doc/Documentation/filesystems/tmpfs.txt "tmpfs / /dev/shm — RAM-backed filesystem"
+[lustre]: https://www.lustre.org/ "Lustre parallel filesystem"
 
-H2D is `dist_uvd` + `bucket_uvd` ≈ tens of KB per sample, DMA'd via `pin_memory=True`.  
-On top of that, **fp16 mixed precision** halves model params and intermediate activations. At bs=384 we only use 9 / 32 GB HBM → there's **room to push bs=768** to widen the GPU side of the pipe.
+### 6. [fp16 mixed precision][amp] + intensity 4 ch — halves PCIe → HBM
 
-### 7. Minimize NCCL barriers
+H2D is `dist_uvd` + `bucket_uvd` ≈ tens of KB per sample, [DMA][dma]'d via [`pin_memory=True`][pinmem].  
+On top of that, **[fp16 mixed precision][amp]** halves model params and intermediate activations. At bs=384 we only use 9 / 32 GB HBM → there's **room to push bs=768** to widen the GPU side of the pipe.
 
-`accel.gather` for stats / `accel.wait_for_everyone` post-vis / val-phase barriers eat an invisible 10-20% of sps.
+[amp]: https://pytorch.org/docs/stable/amp.html "PyTorch automatic mixed precision (AMP)"
+[dma]: https://en.wikipedia.org/wiki/Direct_memory_access "Direct Memory Access (Wikipedia)"
+[pinmem]: https://pytorch.org/docs/stable/data.html#memory-pinning "torch DataLoader pin_memory — overlap H2D copy with compute"
+
+### 7. Minimize [NCCL][nccl] barriers
+
+[`accel.gather`][accel-gather] for stats / `accel.wait_for_everyone` post-vis / val-phase barriers eat an invisible 10-20% of sps.
+
+[accel-gather]: https://huggingface.co/docs/accelerate/usage_guides/distributed_inference "HuggingFace Accelerate — distributed gather/wait_for_everyone"
 - Run val every 5 epochs instead of every epoch (`--val-every 5`).
 - Run vis_pretrain / midtrain_vis on rank-0 only, no all-rank wait.
 - `find_unused_parameters=False` (default) — `True` causes a 22× AllReduce slowdown.
