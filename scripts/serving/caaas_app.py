@@ -147,9 +147,9 @@ def calibrate():
     # caller's job; cache build does it offline. Default /128 is a safe
     # mid-band for kamikado/woven; waymo would want /1.0.)
     intens_norm = np.clip(intensity / 128.0, 0.0, 1.0).astype(np.float32)
-    ba_cfg = dict(tile_size=512, model_input_size=128,
+    ba_cfg = dict(tile_size=384, model_input_size=128,
                   max_pts_per_tile=256, min_pts_per_tile=8,
-                  tile_stride=384)
+                  tile_stride=320)
     res = infer_tiles(model, img, uv_full, z_cam, K, ba_cfg,
                        torch.device(_DEVICE), intensity=intens_norm)
     if res is None:
@@ -312,9 +312,9 @@ def calibrate_demo():
     uv_gt = uv.copy()
     z_gt_keep = z.copy()
 
-    ba_cfg = dict(tile_size=512, model_input_size=c['img_size'],
+    ba_cfg = dict(tile_size=384, model_input_size=c['img_size'],
                   max_pts_per_tile=256, min_pts_per_tile=8,
-                  tile_stride=384)
+                  tile_stride=320)
     res = infer_tiles(model, img, uv, z, K, ba_cfg, torch.device(_DEVICE),
                       intensity=intensity)
     if res is None:

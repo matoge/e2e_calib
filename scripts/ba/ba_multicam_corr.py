@@ -250,7 +250,14 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
             mask[:n] = False
             buc, buc_v = build_bucket(uvd_t, S, grid_n=16, K_per_cell=8,
                                        rng=bucket_rng)
-            crop_r = np.asarray(Image.fromarray(crop).resize((S, S)))
+            # Match training resize EXACTLY: bilinear, align_corners=False, via
+            # F.interpolate. PIL.resize defaults to BICUBIC (≥9.1) or NEAREST
+            # (≤9.0) which both diverge from training and skew per-pt outputs.
+            _crop_t = torch.from_numpy(crop).permute(2, 0, 1).unsqueeze(0).float()
+            _crop_t = torch.nn.functional.interpolate(_crop_t, size=(S, S),
+                                                       mode='bilinear',
+                                                       align_corners=False)
+            crop_r = _crop_t.squeeze(0).permute(1, 2, 0).clamp(0, 255).byte().numpy()
             crops_np.append(crop_r)
             uvd_np.append(uvd_pad)
             pad_mask_np.append(mask)

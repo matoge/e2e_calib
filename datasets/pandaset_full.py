@@ -410,31 +410,11 @@ class PandaSetCalibDatasetFull(Dataset):
                 "Rebuild cache with intensity-aware build_*_v3.py."
             )
         intensity = inst['intensity'].numpy() if hasattr(inst['intensity'], 'numpy') else np.asarray(inst['intensity'])
-        # Normalize per-dataset intensity to a comparable ~[0,1] band before
-        # feeding it into the point MLP / frustum KV. Observed raw ranges:
-        #   waymo    : 0..16   (Waymo OSI returns spec-based [0,1] mostly,
-        #                       but some pts have rare 16+ spikes that
-        #                       overflowed fp16 in kv_proj → loss=NaN)
-        #   kamikado : 0..96   (same ip664 sensor as woven; uint8/128 quant)
-        #   woven    : 0..63   (same family)
-        #   pandaset : 0..255
-        # Use cache_dir.name to pick a per-dataset divisor that matches the
-        # underlying sensor quantization. Waymo gets a robust hard clip to
-        # avoid the fp16 overflow.
+        # Cache contract: intensity is already normalised to [0,1] by
+        # scripts/data/migrate_intensity_norm.py. Reader is dataset-agnostic.
         intensity = np.asarray(intensity, dtype=np.float32)
         if intensity.size:
-            _name = self.cache_dir.name.lower()
-            if 'waymo' in _name:
-                # raw spec is [0,1] for clean returns + occasional spikes;
-                # clip to 1.0 keeps the bulk distribution intact.
-                intensity = np.clip(intensity, 0.0, 1.0)
-            elif 'kamikado' in _name or 'woven' in _name:
-                # ip664 sensor, /128 quantum.
-                intensity = np.clip(intensity / 128.0, 0.0, 1.0)
-            else:
-                # pandaset / nuscenes / etc. — uint8 → [0,1].
-                intensity = np.clip(intensity / 255.0, 0.0, 1.0)
-            intensity = intensity.astype(np.float32, copy=False)
+            intensity = np.clip(intensity, 0.0, 1.0).astype(np.float32, copy=False)
 
         # Cached: uv_full (N,2), z_cam (N,), is_obj (N,) — computed once at build / inject time
         if 'uv_full' in inst and 'z_cam' in inst:

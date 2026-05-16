@@ -18,8 +18,6 @@ the per-sensor normalisation that previously lived in
 datasets/pandaset_full.py. The new pipeline performs this normalisation
 once at adapter time and stores the [0,1] value in the cache.
 """
-
-_INTENSITY_DIVISOR = 128.0
 from __future__ import annotations
 
 import io
@@ -28,6 +26,8 @@ import re
 from pathlib import Path
 
 import numpy as np
+
+_INTENSITY_DIVISOR = 128.0
 from PIL import Image
 
 from scripts.data.calib_frame import CalibFrame
