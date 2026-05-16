@@ -307,31 +307,45 @@ def main(cfg=None):
         except Exception:
             cml_logger = None
 
-    # Pre-training cache sanity vis (rank-0 only, then rendezvous).
-    # The class-level _LMDB_ENV_CACHE in PandaSetCalibDatasetFull keyed by
-    # (pid, path) means workers share one env per path with the parent —
-    # so opening the env from vis_pretrain is now safe.
+    # vis_pretrain is removed; the preflight midtrain_vis below renders the
+    # same per-dataset samples but on the actual model (untrained at ep=0)
+    # so we get the GT correspondence + Σ ellipse overlays for free.
+
+    # ── PRE-FLIGHT (ep=0): full val pass + per-dataset midtrain_vis on the
+    # untrained model. Fails fast (within minutes, before training spends an
+    # hour) if loader/model/vis pipeline is broken.
+    log("preflight: val + midtrain_vis(ep=0) on untrained model")
+    with torch.no_grad():
+        epoch_loop(model, val_loader, optimizer, accel, False)
     if accel.is_main_process:
         try:
-            from scripts.util.midtrain_vis import vis_pretrain_run
-            n_per_ds = 15 if len(cache_paths) > 1 else 10
+            from scripts.util.midtrain_vis import midtrain_vis
+            n_vis = 15 if len(cache_paths) > 1 else 10
             for cp in cache_paths:
                 ds_name = Path(cp).name
-                _per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
-                _per_ds_exp.mkdir(exist_ok=True)
-                vis_pretrain_run(_per_ds_exp, cp, cml_logger=cml_logger,
-                                 n=n_per_ds, log=log)
+                per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
+                per_ds_exp.mkdir(exist_ok=True)
+                midtrain_vis(
+                    accel.unwrap_model(model), per_ds_exp, cp, 0,
+                    img_size=c["img_size"],
+                    min_crop_px=c.get("min_crop_px", 128),
+                    max_crop_px=c.get("max_crop_px", 384),
+                    cml_logger=None, device=accel.device,
+                    amp_dtype=torch.float16, n=n_vis, log=log)
                 if cml_logger is not None:
-                    for p in sorted((_per_ds_exp / 'vis_pretrain').glob('*.png')):
+                    vis_dir = per_ds_exp / f'vis_ep000'
+                    for p in sorted(vis_dir.glob('*.png')):
                         try:
                             cml_logger.report_image(
-                                f'vis_pretrain__{ds_name}', p.stem,
+                                f'vis_ep__{ds_name}', p.stem,
                                 iteration=0, local_path=str(p))
                         except Exception:
                             pass
         except Exception as _e:
-            log(f"vis_pretrain skipped: {_e}")
+            log(f"preflight midtrain_vis FAILED: {_e}")
+            raise
     accel.wait_for_everyone()
+    log("preflight OK — entering train loop")
 
     for epoch in range(1, epochs+1):
         # DistributedSampler needs set_epoch for proper shuffling across epochs;

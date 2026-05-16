@@ -209,6 +209,13 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                           f'cubs={len(inst.get("cuboids", []))}', fontsize=8)
 
             axR.imshow(crop_np)
+            # Pred Σ ellipses (1.5σ) overlaid at predicted UV. p has shape
+            # (N, 5) = [δu, δv, log_sx, log_sy, rho]; sx,sy are per-pixel.
+            import math as _m
+            from matplotlib.patches import Ellipse as _Ellipse
+            log_sx = p[:, 2]; log_sy = p[:, 3]; rho = _np.tanh(p[:, 4])
+            sx = _np.exp(log_sx); sy = _np.exp(log_sy)
+            # dist→pred prediction quiver
             uc = pred_uv[:, 0] - dist_uv[:, 0]
             vc = pred_uv[:, 1] - dist_uv[:, 1]
             if (~is_obj).any():
@@ -219,6 +226,31 @@ def midtrain_vis(model, exp_dir: Path, cache: str, epoch: int,
                 axR.quiver(dist_uv[is_obj, 0], dist_uv[is_obj, 1], uc[is_obj], vc[is_obj],
                            angles='xy', scale_units='xy', scale=1, color='orange',
                            width=0.006, headwidth=3.5, headlength=4, alpha=0.95, zorder=4)
+            # GT correspondence: thin line pred_uv → true_uv (= the residual
+            # error after the model's correction). Object pts in red, bg in
+            # gray.
+            for _i in range(true_uv.shape[0]):
+                col = 'red' if is_obj[_i] else 'gray'
+                lw  = 0.6 if is_obj[_i] else 0.3
+                a   = 0.9 if is_obj[_i] else 0.4
+                axR.plot([pred_uv[_i, 0], true_uv[_i, 0]],
+                         [pred_uv[_i, 1], true_uv[_i, 1]],
+                         color=col, lw=lw, alpha=a, zorder=3.5)
+            # Σ ellipse at the predicted UV (1.5σ) — only top-K most-confident
+            # so the plot stays readable.
+            order = _np.argsort(sx*sy)[: min(64, len(sx))]
+            for _i in order:
+                cov = _np.array([[sx[_i]**2, rho[_i]*sx[_i]*sy[_i]],
+                                  [rho[_i]*sx[_i]*sy[_i], sy[_i]**2]])
+                vals, vecs = _np.linalg.eigh(cov)
+                vals = _np.maximum(vals, 1e-8)
+                w, h = 2 * 1.5 * _np.sqrt(vals)
+                ang = _m.degrees(_m.atan2(vecs[1, 1], vecs[0, 1]))
+                e = _Ellipse((pred_uv[_i, 0], pred_uv[_i, 1]),
+                             width=w, height=h, angle=ang,
+                             ec=('orange' if is_obj[_i] else 'deepskyblue'),
+                             fc='none', lw=0.5, alpha=0.7, zorder=4.5)
+                axR.add_patch(e)
             axR.scatter(true_uv[is_obj, 0], true_uv[is_obj, 1], c='lime', s=14,
                         marker='x', linewidths=0.9, zorder=5)
             axR.scatter(true_uv[~is_obj, 0], true_uv[~is_obj, 1], c='yellow', s=6,
