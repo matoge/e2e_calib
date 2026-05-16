@@ -55,6 +55,10 @@ from scipy.spatial.transform import Rotation, Slerp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.preprocessing._tile_split import cut_inst_to_tiles  # noqa: E402
+from scripts.util.projection import (
+    project_lidar_into_image,
+    project_kannala,
+)  # noqa: E402
 
 
 # ─── conventions ────────────────────────────────────────────────────────────
@@ -212,40 +216,28 @@ def _load_pts_intensity(seq: Path, frame_id: str) -> tuple[np.ndarray, np.ndarra
     return np.stack([xs, ys, zs], axis=1), intensity
 
 
-def _project_kannala(pts_cam: np.ndarray, K: np.ndarray, dist: np.ndarray) -> np.ndarray:
-    x, y, z = pts_cam[:, 0], pts_cam[:, 1], pts_cam[:, 2]
-    r = np.sqrt(x * x + y * y)
-    theta = np.arctan2(r, np.maximum(z, 1e-6))
-    k1, k2, k3, k4 = dist
-    t2 = theta * theta
-    theta_d = theta * (1.0 + k1 * t2 + k2 * t2 ** 2 + k3 * t2 ** 3 + k4 * t2 ** 4)
-    r_safe = np.where(r > 1e-9, r, 1.0)
-    fx, fy = float(K[0, 0]), float(K[1, 1])
-    cx, cy = float(K[0, 2]), float(K[1, 2])
-    u = fx * (theta_d * x / r_safe) + cx
-    v = fy * (theta_d * y / r_safe) + cy
-    return np.stack([u, v], axis=-1).astype(np.float32)
+def _T_lidar_to_cam_at_camera_time(pose_curr: np.ndarray,
+                                     pose_camera: np.ndarray,
+                                     R_cam_from_veh: np.ndarray,
+                                     t_cam_in_veh: np.ndarray) -> np.ndarray:
+    """Compose the 4×4 LiDAR(FLU @ lidar time) → camera(FRD @ camera time)
+    rigid transform used by the backend's projection_utils.
 
-
-def _lidar_to_cam_at_camera_time(pts_lidar_flu: np.ndarray,
-                                  pose_curr: np.ndarray,
-                                  pose_camera: np.ndarray,
-                                  R_cam_from_veh: np.ndarray,
-                                  t_cam_in_veh: np.ndarray) -> np.ndarray:
-    """Take lidar pts in vehicle FLU at lidar time, return cam-FRD at camera time.
-
-    Backend formula:  T_lidar_to_camera = inv(pose_camera) @ pose_curr
-    applied to homogeneous pts in vehicle frame, then rotate to cam-FRD.
+    Equivalent to:
+        T_lc(veh→veh) = inv(pose_camera) @ pose_curr
+        X_cam = R_cam_from_veh @ (T_lc @ X_lidar - t_cam_in_veh)
+    composed into a single 4×4 so it can be passed to the shared
+    project_lidar_into_image helper.
     """
-    N = pts_lidar_flu.shape[0]
-    homo = np.column_stack([pts_lidar_flu.astype(np.float64),
-                             np.ones(N, dtype=np.float64)])
-    T_lc = np.linalg.inv(pose_camera) @ pose_curr  # vehicle FLU @ camera time
-    pts_veh_at_cam = (T_lc @ homo.T).T[:, :3]
-    # Now express in camera FRD (mirror backend: X_cam = R_total @ X_veh + tvec
-    # where R_total = R_to_rdf @ inv(R_cv) and tvec = -R_total @ mp).
-    return ((R_cam_from_veh @ (pts_veh_at_cam - t_cam_in_veh[None, :]).T).T
-            ).astype(np.float32)
+    T_vv = np.linalg.inv(pose_camera) @ pose_curr           # veh@lidar → veh@cam
+    R_cv = R_cam_from_veh.astype(np.float64)
+    t_cv = t_cam_in_veh.astype(np.float64).reshape(3)
+    R_lc = R_cv @ T_vv[:3, :3]
+    t_lc = R_cv @ (T_vv[:3, 3] - t_cv)
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R_lc
+    T[:3, 3]  = t_lc
+    return T
 
 
 # ─── annotations ────────────────────────────────────────────────────────────
@@ -346,20 +338,19 @@ def process_frame(args_tuple):
         pose_curr = poses[frame_id]
         pose_cam = _pose_at_camera_time(poses, frame_ids, idx, camera_delay_ms)
 
-        pts_cam = _lidar_to_cam_at_camera_time(
-            pts_flu, pose_curr, pose_cam, R_cv.astype(np.float64),
-            t_cv.astype(np.float64))
-        uv = _project_kannala(pts_cam, K, dist)
-        z = pts_cam[:, 2].astype(np.float32)
-        valid = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < W) \
-                & (uv[:, 1] >= 0) & (uv[:, 1] < H)
-        if int(valid.sum()) < 64:
+        # Fold the temporal correction (lidar-time → camera-shutter-time)
+        # into a single 4×4 LiDAR→camera transform so the projection step
+        # is byte-identical with kamikado/CaaaS via the shared helper.
+        T_cl = _T_lidar_to_cam_at_camera_time(
+            pose_curr, pose_cam, R_cv, t_cv)
+        # Pack LiDAR pts + intensity into a single (N,4) for the shared helper.
+        pts_xyzi = np.column_stack(
+            [pts_flu.astype(np.float32), intensity.astype(np.float32)])
+        _, pts_vis, uv_vis, z_vis, int_vis = project_lidar_into_image(
+            pts_xyzi, K, T_cl, W, H,
+            is_fisheye=True, dist=dist, z_min=0.5)
+        if len(pts_vis) < 64:
             return frame_id, 0
-
-        pts_vis  = pts_cam[valid]
-        uv_vis   = uv[valid]
-        z_vis    = z[valid]
-        int_vis  = intensity[valid]
 
         cubs = _load_cuboids_vehicle(seq, frame_id)
         # is_obj test runs in vehicle FLU (boxes are stored there). Lift the

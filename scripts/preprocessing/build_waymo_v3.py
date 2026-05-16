@@ -31,6 +31,7 @@ import torch
 from PIL import Image
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+from scripts.util.projection import unproject_pinhole
 from datasets.waymo_lcp import (CAM_NAMES, ALL_LASERS, ensure_lcp,
                                   read_lcp_all, read_range_all, per_cam_projections)
 from datasets.waymo import WAYMO_DIR
@@ -196,11 +197,8 @@ def process_seg(args_tuple):
             with Image.open(io.BytesIO(jpg_bytes)) as _im:
                 IW, IH = _im.size
             K, T_c_v = calib_per_cam[cam_id]
-            fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-            xc = (uv[:, 0] - cx) * depth / fx
-            yc = (uv[:, 1] - cy) * depth / fy
             zc = depth
-            pts_cam = np.stack([xc, yc, zc], axis=-1).astype(np.float32)
+            pts_cam = unproject_pinhole(uv, depth, K)
 
             # Transform vehicle-frame boxes at this ts → cv2-cam-frame AABBs
             cuboids = boxes_cam_frame(boxes_by_ts.get(ts, []), T_c_v)

@@ -34,6 +34,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.preprocessing._tile_split import cut_inst_to_tiles  # noqa: E402
+from scripts.util.projection import project_lidar_into_image  # noqa: E402
 
 
 DEFAULT_SRC = Path('/mnt/datadisk3/tmpoc_kamikado/scenes')
@@ -74,23 +75,6 @@ def _load_calib(scene: Path):
     T_VS = np.eye(4); T_VS[:3, :3] = R_VS; T_VS[:3, 3] = t_VS
     T_SV = np.linalg.inv(T_VS)
     return K, dist, T_VS.astype(np.float32), T_SV.astype(np.float32)
-
-
-def _project_kannala(pts_cam: np.ndarray, K: np.ndarray,
-                      dist: np.ndarray) -> np.ndarray:
-    """Kannala-Brandt forward projection. pts_cam: (N,3) cam frame."""
-    x, y, z = pts_cam[:, 0], pts_cam[:, 1], pts_cam[:, 2]
-    r = np.sqrt(x * x + y * y)
-    theta = np.arctan2(r, np.maximum(z, 1e-6))
-    k1, k2, k3, k4 = dist
-    t2 = theta * theta
-    theta_d = theta * (1.0 + k1 * t2 + k2 * t2 ** 2 + k3 * t2 ** 3 + k4 * t2 ** 4)
-    r_safe = np.where(r > 1e-9, r, 1.0)
-    fx, fy = float(K[0, 0]), float(K[1, 1])
-    cx, cy = float(K[0, 2]), float(K[1, 2])
-    u = fx * (theta_d * x / r_safe) + cx
-    v = fy * (theta_d * y / r_safe) + cy
-    return np.stack([u, v], axis=-1).astype(np.float32)
 
 
 def _read_points_V(p: Path) -> np.ndarray:
@@ -147,26 +131,12 @@ def process_frame(args_tuple):
         if pts_V.size == 0:
             return frame_idx, 0
 
-        # V → S (camera) frame. Intensity (col 3) is invariant under rigid
-        # transforms.
-        N = pts_V.shape[0]
-        xyz_V = pts_V[:, :3].astype(np.float64)
-        intensity = pts_V[:, 3].astype(np.float32)
-        xyz_V_h = np.column_stack([xyz_V, np.ones(N, dtype=np.float64)])
-        pts_cam = (T_SV.astype(np.float64) @ xyz_V_h.T).T[:, :3].astype(np.float32)
-
-        uv = _project_kannala(pts_cam, K.astype(np.float64),
-                               dist.astype(np.float64))
-        z = pts_cam[:, 2].astype(np.float32)
-        valid = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW) \
-                & (uv[:, 1] >= 0) & (uv[:, 1] < IH)
-        if int(valid.sum()) < 64:
+        # Shared LiDAR→cam→fisheye-projection pipeline (matches CaaaS).
+        _, pts_vis, uv_vis, z_vis, intensity_vis = project_lidar_into_image(
+            pts_V, K, T_SV, IW, IH,
+            is_fisheye=True, dist=dist, z_min=0.5)
+        if len(pts_vis) < 64:
             return frame_idx, 0
-
-        pts_vis = pts_cam[valid]
-        uv_vis  = uv[valid]
-        z_vis   = z[valid]
-        intensity_vis = intensity[valid]
         is_obj_vis = np.zeros(len(pts_vis), dtype=np.float32)
 
         common_inst = dict(
