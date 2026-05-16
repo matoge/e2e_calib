@@ -2,6 +2,8 @@
 
 E2E_CALIB σ-net. Progress / Problem / Plan.
 
+Confluence (LOOM blog): <https://confluence.tri-ad.tech/spaces/LOOM/blog/2026/05/15/1613444388/Weekly+3P+2026-05-09+%E2%86%92+2026-05-15>
+
 ---
 
 ## Progress

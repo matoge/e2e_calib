@@ -373,9 +373,17 @@ def resolve_dof_list(ba_cfg: dict) -> list:
 
 
 def solve_dofs(uv: np.ndarray, par: np.ndarray, z: np.ndarray, K: np.ndarray,
-                dof_names: list, damping: float = 1e-3):
-    """1-step linearized GN over a config-supplied list of DoFs. Returns
-    delta of len(dof_names) in declaration order."""
+                dof_names: list, damping: float = 1e-3,
+                huber_k: float | None = None, n_iter: int = 1):
+    """Linearized GN over a config-supplied list of DoFs. Returns δ of
+    len(dof_names) in declaration order.
+
+    If `huber_k` is set, runs IRLS for `n_iter` iterations with a Huber
+    M-estimator on the per-point Mahalanobis distance — same H = ΣJᵀWJ
+    pipeline, just with W_i scaled by w(d_i) = min(1, k/d_i) where
+    d_i² = r_iᵀ W_i r_i (post-correction residual). Plain 1-step (no
+    outlier handling) when huber_k is None.
+    """
     for name in dof_names:
         if name not in DOF_JAC:
             raise KeyError(f"unknown DoF '{name}' — valid: {sorted(DOF_JAC)}")
@@ -390,30 +398,47 @@ def solve_dofs(uv: np.ndarray, par: np.ndarray, z: np.ndarray, K: np.ndarray,
         Jvs.append(np.broadcast_to(jv, Z.shape))
     J_u = np.column_stack(Jus)
     J_v = np.column_stack(Jvs)
-    r_u, r_v = par[:, 0], par[:, 1]
+    r_u0, r_v0 = par[:, 0], par[:, 1]
     su, sv, rho = par[:, 2], par[:, 3], par[:, 4]
     det = su * su * sv * sv * (1 - rho * rho)
-    Wuu = (sv * sv) / det
-    Wvv = (su * su) / det
-    Wuv = -(rho * su * sv) / det
+    Wuu0 = (sv * sv) / det
+    Wvv0 = (su * su) / det
+    Wuv0 = -(rho * su * sv) / det
     n = len(dof_names)
-    H = np.zeros((n, n)); b = np.zeros(n)
-    for i in range(n):
-        for j in range(n):
-            H[i, j] = ((J_u[:, i] * Wuu * J_u[:, j]).sum()
-                       + (J_v[:, i] * Wvv * J_v[:, j]).sum()
-                       + (J_u[:, i] * Wuv * J_v[:, j]).sum()
-                       + (J_v[:, i] * Wuv * J_u[:, j]).sum())
-        b[i] = ((J_u[:, i] * Wuu * r_u).sum()
-                + (J_v[:, i] * Wvv * r_v).sum()
-                + (J_u[:, i] * Wuv * r_v).sum()
-                + (J_v[:, i] * Wuv * r_u).sum())
-    H += damping * np.eye(n)
-    delta = np.linalg.solve(H, b)
+
+    delta = np.zeros(n)
+    weights = np.ones_like(r_u0)
+    iters = max(1, int(n_iter)) if huber_k is not None else 1
+    for it in range(iters):
+        Wuu = Wuu0 * weights
+        Wvv = Wvv0 * weights
+        Wuv = Wuv0 * weights
+        H = np.zeros((n, n)); b = np.zeros(n)
+        for i in range(n):
+            for j in range(n):
+                H[i, j] = ((J_u[:, i] * Wuu * J_u[:, j]).sum()
+                           + (J_v[:, i] * Wvv * J_v[:, j]).sum()
+                           + (J_u[:, i] * Wuv * J_v[:, j]).sum()
+                           + (J_v[:, i] * Wuv * J_u[:, j]).sum())
+            b[i] = ((J_u[:, i] * Wuu * r_u0).sum()
+                    + (J_v[:, i] * Wvv * r_v0).sum()
+                    + (J_u[:, i] * Wuv * r_v0).sum()
+                    + (J_v[:, i] * Wuv * r_u0).sum())
+        H += damping * np.eye(n)
+        delta = np.linalg.solve(H, b)
+        if huber_k is None:
+            break
+        # Post-correction residuals & Mahalanobis distance per point
+        ru = r_u0 - J_u @ delta
+        rv = r_v0 - J_v @ delta
+        d2 = (ru * Wuu0 * ru) + (rv * Wvv0 * rv) + 2.0 * (ru * Wuv0 * rv)
+        d = np.sqrt(np.maximum(d2, 1e-12))
+        weights = np.where(d <= huber_k, 1.0, huber_k / d)
     # Cov(δ) = H^{-1}; useful for downstream (CaaaS, sequence-fuse).
     solve_dofs._last_cov = np.linalg.inv(H)
     solve_dofs._last_H = H
     solve_dofs._last_b = b
+    solve_dofs._last_weights = weights
     return delta
 
 

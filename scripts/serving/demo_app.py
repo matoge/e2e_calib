@@ -35,27 +35,58 @@ from scripts.ba.ba_multicam_corr import resolve_dof_list, solve_dofs, delta_to_d
 
 
 CACHE = Path(os.environ.get(
-    'DEMO_CACHE', '/mnt/nvme6t/e2e_calib_cache/tss4_v3_tiled'))
+    'DEMO_CACHE', '/cache/kamikado_v3_tiled'))
+DEMO_EXP = os.environ.get('DEMO_EXP', 'km_wv_8gpu_200ep_os4')
 CKPT = Path(os.environ.get(
-    'DEMO_CKPT', 'experiments/tss4_20260514_intensity_4ch_100ep_framesplit/best_model.pt'))
+    'DEMO_CKPT', f'experiments/{DEMO_EXP}/best_model.pt'))
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-MODEL_CFG = dict(
-    img_size=128, in_channels=3, n_layers=4,
-    use_convnext=True, use_frustum=True, deform_mode='sl',
-    use_intensity=True,
-)
-# Match the training-time dataset config; only oversample dropped to 1 (we
-# never iterate, just call ds[idx]). `pose_frame='orig'` matches the TSS4
-# 100ep cfg (no vcam reparam at training).
-DS_KW = dict(
-    img_size=128, min_crop_px=128, max_crop_px=384,
-    max_rot_deg=1.5, max_offset_m=0.6,
-    oversample=1, pose_frame='orig',
-)
-# Crop chosen for the demo: centered, 384 px (= training max_crop_px) so the
-# model gets an in-distribution input.
-DEMO_CS = 384
+# Read MODEL_CFG from the same experiments/{exp}/config.py that the trainer
+# wrote, so this stays in sync with whichever ckpt is loaded.
+def _read_exp_cfg() -> dict:
+    cfg_path = Path('experiments') / DEMO_EXP / 'config.py'
+    if not cfg_path.is_file():
+        return dict(img_size=128, in_channels=3, n_layers=2,
+                    use_convnext=False, use_frustum=True, deform_mode='sl',
+                    use_intensity=True)
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location('_demo_cfg', cfg_path)
+    mod = _ilu.module_from_spec(spec); spec.loader.exec_module(mod)
+    c = mod.CFG
+    return dict(
+        img_size=c.get('img_size', 128),
+        in_channels=c.get('in_channels', 3),
+        n_layers=c.get('n_layers', 2),
+        use_convnext=c.get('use_convnext', False),
+        use_frustum=c.get('use_frustum', True),
+        deform_mode=c.get('deform_mode', 'sl'),
+        use_intensity=c.get('use_intensity', True),
+    )
+MODEL_CFG = _read_exp_cfg()
+# Read DS_KW from the same exp config (img_size / crop / pose_frame).
+def _read_exp_ds_kw() -> dict:
+    cfg_path = Path('experiments') / DEMO_EXP / 'config.py'
+    if not cfg_path.is_file():
+        return dict(img_size=128, min_crop_px=128, max_crop_px=384,
+                    max_rot_deg=1.5, max_offset_m=0.6,
+                    oversample=1, pose_frame='orig')
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location('_demo_dskw', cfg_path)
+    mod = _ilu.module_from_spec(spec); spec.loader.exec_module(mod)
+    c = mod.CFG
+    return dict(
+        img_size=c.get('img_size', 128),
+        min_crop_px=c.get('min_crop_px', 128),
+        max_crop_px=c.get('max_crop_px', 384),
+        max_rot_deg=c.get('max_rot_deg', 1.5),
+        max_offset_m=c.get('max_offset_m', 0.6),
+        oversample=1,
+        pose_frame=c.get('pose_frame', 'orig'),
+    )
+DS_KW = _read_exp_ds_kw()
+# UI crop slider goes up to 384 (extrapolating beyond max_crop_px is fine for
+# inspection — model handles it via vfp rescaling, just out-of-distribution).
+DEMO_CS = int(os.environ.get('DEMO_CS_MAX', 384))
 
 MODEL: CalibNetDepth | None = None
 DS: PandaSetCalibDatasetFull | None = None
@@ -66,15 +97,11 @@ RENDER_LOCK = threading.Lock()
 def _ensure_loaded():
     global MODEL, DS, KEYS
     if MODEL is None:
-        m = CalibNetDepth(**MODEL_CFG).to(DEVICE).eval()
-        sd = torch.load(CKPT, map_location=DEVICE, weights_only=False)
-        if isinstance(sd, dict) and 'state_dict' in sd:
-            sd = sd['state_dict']
-        m.load_state_dict(sd, strict=False)
-        MODEL = m
+        # Use the official loader so MODEL_CFG matches the ckpt's training cfg.
+        from scripts.inference.infer_calib import load_calib_model
+        MODEL = load_calib_model(DEMO_EXP, device=str(DEVICE)).eval()
     if DS is None:
-        # TSS4 frame-split puts ALL val frames in one short recording segment;
-        # use 'train' so the seed→scene mapping cycles across multiple scenes.
+        # Use the same DS_KW the trainer logged in experiments/{exp}/config.py.
         DS = PandaSetCalibDatasetFull(str(CACHE), split='train', **DS_KW)
     if not KEYS:
         # Use the dataset's own fnames so seed indexing matches val-split sizing.
@@ -85,11 +112,13 @@ def _ensure_loaded():
         KEYS.extend(keys)
 
 
-def _build_sample(seed: int, ox: float, oy: float, tx: float, ty: float):
+def _build_sample(seed: int, ox: float, oy: float, tx: float, ty: float,
+                  cs_override: int | None = None):
     """Use the dataset's exact build_window helper. We bypass __getitem__'s
     random pivot+crop+perturb sampling and supply the user's perturbation +
     a centered DEMO_CS crop instead. Skips empty / tiny-pts tiles so a single
-    seed always lands on something with usable LiDAR."""
+    seed always lands on something with usable LiDAR. cs_override (px) lets
+    the UI pick a non-default crop size."""
     # Retry up to 30 sequential seeds — empty tiles cluster at fisheye edges.
     for offset in range(30):
         fname = KEYS[(seed + offset) % len(KEYS)]
@@ -130,8 +159,9 @@ def _build_sample(seed: int, ox: float, oy: float, tx: float, ty: float):
     if tile_u0 or tile_v0:
         uv_full = uv_full - np.array([tile_u0, tile_v0], dtype=np.float32)
 
-    # Centered crop, clamped to tile.
-    cs = min(DEMO_CS, IW, IH)
+    # Centered crop, clamped to tile. UI may override via cs_override.
+    cs_target = int(cs_override) if cs_override else DEMO_CS
+    cs = min(cs_target, IW, IH)
     u0 = max(0, (IW - cs) // 2)
     v0 = max(0, (IH - cs) // 2)
 
@@ -186,11 +216,12 @@ def _run_model(pkt: dict) -> np.ndarray:
     return params
 
 
-def _render(seed: int, ox: float, oy: float, tx: float, ty: float):
+def _render(seed: int, ox: float, oy: float, tx: float, ty: float,
+            cs_override: int | None = None):
     """Return (png_bytes, metrics_dict)."""
     _ensure_loaded()
     with RENDER_LOCK:
-        pkt = _build_sample(seed, ox, oy, tx, ty)
+        pkt = _build_sample(seed, ox, oy, tx, ty, cs_override=cs_override)
         if pkt is None:
             buf = io.BytesIO()
             fig, ax = plt.subplots(1, 1, figsize=(7, 7))
@@ -382,15 +413,17 @@ def _startup():
 
 @router.get('/sample.png')
 def sample_png(seed: int = Query(0), ox: float = Query(0.0), oy: float = Query(0.0),
-               tx: float = Query(0.0), ty: float = Query(0.0)):
-    png, _ = _render(seed, ox, oy, tx, ty)
+               tx: float = Query(0.0), ty: float = Query(0.0),
+               cs: int = Query(0)):
+    png, _ = _render(seed, ox, oy, tx, ty, cs_override=cs or None)
     return Response(content=png, media_type='image/png')
 
 
 @router.get('/sample')
 def sample(seed: int = Query(0), ox: float = Query(0.0), oy: float = Query(0.0),
-            tx: float = Query(0.0), ty: float = Query(0.0)):
-    png, metrics = _render(seed, ox, oy, tx, ty)
+            tx: float = Query(0.0), ty: float = Query(0.0),
+            cs: int = Query(0)):
+    png, metrics = _render(seed, ox, oy, tx, ty, cs_override=cs or None)
     return dict(png_b64=base64.b64encode(png).decode(), metrics=metrics)
 
 
@@ -443,6 +476,8 @@ DEMO_HTML = """<!doctype html>
     <input type="range" id="tx" min="-1" max="1" step="0.01" value="0">
     <label>ty: <span class="val" id="tyv">0.00</span> m</label>
     <input type="range" id="ty" min="-1" max="1" step="0.01" value="0">
+    <label>crop size (px): <span class="val" id="csv">__DEMO_CS__</span></label>
+    <input type="range" id="cs" min="64" max="__DEMO_CS_MAX__" step="16" value="__DEMO_CS__">
     <p>
       <button id="prev">Prev</button>
       <button id="next">Next</button>
@@ -525,13 +560,58 @@ DEMO_HTML = """<!doctype html>
         <div class="ba-diff" id="d_ty">–</div>
       </div>
       <div class="scene" id="scene">–</div>
+
+      <details style="margin-top:18px;font-size:13px;line-height:1.5">
+      <summary style="cursor:pointer;color:#9cf">How is the BA correction computed?</summary>
+      <div style="margin-top:8px;padding:10px 14px;background:#1a1a1a;border:1px solid #444;border-radius:6px">
+      <p><b>Pipeline</b>: per-tile model output is a 2-D residual
+      <code>(Δu, Δv)</code> with a 2×2 covariance <code>Σ_uv</code> per
+      LiDAR point (parametrised as <code>σx, σy, ρ</code> in the network's
+      head). BA lifts that 2-D residual into a 4-DoF (or 6-DoF) extrinsic
+      <code>δ</code> by Gauss–Newton on the linearised re-projection.</p>
+
+      <p><b>Per-point Jacobian</b>: for a 3-D LiDAR point at depth
+      <code>Z</code> with image projection <code>(u, v)</code>, the
+      derivatives <code>J_p = [∂u/∂δ, ∂v/∂δ]</code> are closed-form
+      (see <code>scripts/ba/ba_multicam_corr.py</code>: <code>_jac_omega_x
+      / omega_y / omega_z / tx / ty / tz</code>). For example
+      <code>∂u/∂tx = fx/Z</code>, <code>∂u/∂ωy = fx + fx·X²/Z²</code>.</p>
+
+      <p><b>Information-matrix accumulation</b>: each point contributes
+      <code>H_p = J_pᵀ Σ_uv⁻¹ J_p</code> and
+      <code>b_p = J_pᵀ Σ_uv⁻¹ r_p</code>, where
+      <code>r_p = (Δu, Δv)</code> is the predicted residual. We sum
+      across <i>all valid points in the tile</i>:
+      <code>H = Σ H_p, b = Σ b_p</code>.</p>
+
+      <p><b>Linear solve</b>: <code>δ = (H + λI)⁻¹ b</code>
+      (Levenberg damping <code>λ = 1e-3</code>). The solver returns
+      <code>(ωx, ωy, tx, ty)</code> in degrees / metres.
+      <code>Cov(δ) = (H + λI)⁻¹</code> is also exposed so each DoF gets a
+      one-sigma uncertainty.</p>
+
+      <p><b>Why 2-D → 4-D works</b>: a horizontal pixel shift can be
+      explained by either yaw or tx, but the two have different per-pixel
+      Jacobians (yaw scales with <code>fx + fx·X²/Z²</code>, tx with
+      <code>fx/Z</code>). Points at varying depth break the degeneracy;
+      bg points near the edge constrain rotations, foreground close-by
+      objects constrain translations. The per-point Σ from the model lets
+      BA down-weight uncertain points automatically.</p>
+
+      <p><b>Currently shown above</b>: BA pred is the GN solution
+      <code>δ</code>; "your input" is the perturbation you added with the
+      sliders (<code>−</code>your_input is the GT correction sign).
+      "diff" is the absolute residual between BA's recovered correction
+      and what would exactly cancel your input.</p>
+      </div>
+      </details>
     </div>
   </div>
 </div>
 <script>
 let SEED = 0;
 let busy = false, pending = false;
-const ids = ['ox','oy','tx','ty'];
+const ids = ['ox','oy','tx','ty','cs'];
 const imgEl = document.getElementById('vis');
 const $ = id => document.getElementById(id);
 function vals() {
@@ -587,7 +667,7 @@ async function render() {
   if (busy) { pending = true; return; }
   busy = true; pending = false;
   const v = vals();
-  const qs = `seed=${SEED}&ox=${v.ox}&oy=${v.oy}&tx=${v.tx}&ty=${v.ty}`;
+  const qs = `seed=${SEED}&ox=${v.ox}&oy=${v.oy}&tx=${v.tx}&ty=${v.ty}&cs=${v.cs}`;
   try {
     const r = await fetch('sample?' + qs);
     if (!r.ok) { busy = false; if (pending) render(); return; }
@@ -618,7 +698,9 @@ render();
 
 @router.get('/', response_class=HTMLResponse)
 def index():
-    return DEMO_HTML
+    return (DEMO_HTML
+            .replace('__DEMO_CS__', str(DEMO_CS))
+            .replace('__DEMO_CS_MAX__', str(DEMO_CS)))
 
 
 # Mount the same router at both root and /demo so direct LAN access
