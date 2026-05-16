@@ -191,6 +191,173 @@ def calibrate_sequence():
                           'wire scripts/ba/vcam_aggregator.py here'), 501
 
 
+# ── Demo endpoints (PandaSet/Waymo cache, deterministic seed) ────────────
+
+_DEMO_DS = {}
+
+
+def _get_demo_ds(cache_key: str):
+    if cache_key not in _DEMO_DS:
+        from scripts.inference.infer_pipeline import make_ds
+        cache_path = {
+            'kamikado': '/cache/kamikado_v3_tiled',
+            'woven': '/cache/woven_v3_tile',
+            'waymo': '/cache/waymo_v3_tiled_i',
+        }.get(cache_key)
+        if cache_path is None:
+            raise ValueError(f'unknown demo cache_key {cache_key}')
+        ds, c = make_ds(DEFAULT_EXP, cache_path, split='val', oversample=1)
+        _DEMO_DS[cache_key] = (ds, c)
+    return _DEMO_DS[cache_key]
+
+
+@app.route('/api/calibrate_demo')
+def calibrate_demo():
+    """GET ?cache=kamikado&idx=0&seed=42
+
+    Picks the val sample idx, applies the dataset's deterministic
+    perturbation under the given seed (so δ_GT is known), runs
+    CaaaS BA on the full frame, returns δ_GT, δ_pred, Cov diag, plus
+    a base64-encoded JPEG of the tile.
+    """
+    import base64, io as _io
+    from PIL import Image as _PIL
+    from scripts.ba.ba_multicam_corr import infer_tiles, solve_dofs, _DOF_PRESETS
+
+    cache_key = request.args.get('cache', 'kamikado')
+    idx = int(request.args.get('idx', 0))
+    seed = int(request.args.get('seed', 42))
+
+    np.random.seed(seed)
+    ds, c = _get_demo_ds(cache_key)
+    model = _get_model(DEFAULT_EXP)
+
+    # Pull the perturbed sample so δ_GT (pert_vec) is set on the dataset
+    sample = ds[idx]
+    pert_vec = sample[6].numpy() if len(sample) >= 7 else None
+
+    inst = ds._load_inst(idx)
+    full_jpg = bytes(inst['jpg_bytes'])
+    img = np.asarray(_PIL.open(_io.BytesIO(full_jpg)).convert('RGB'))
+    uv = inst['uv_full'].numpy().astype(np.float32)
+    z  = inst['z_cam'].numpy().astype(np.float32)
+    intensity = (inst['intensity'].numpy().astype(np.float32)
+                 if 'intensity' in inst else None)
+    K = inst['K_full'].numpy().astype(np.float32)
+    tu0 = int(inst.get('tile_u0', 0)); tv0 = int(inst.get('tile_v0', 0))
+    if tu0 or tv0:
+        uv = uv - np.array([tu0, tv0], dtype=np.float32)
+        K = K.copy(); K[0, 2] -= tu0; K[1, 2] -= tv0
+    H, W = img.shape[:2]
+    keep = ((uv[:, 0] >= 0) & (uv[:, 0] < W) &
+            (uv[:, 1] >= 0) & (uv[:, 1] < H) & (z > 0))
+    uv = uv[keep]; z = z[keep]
+    if intensity is not None:
+        intensity = np.clip(intensity[keep] / 128.0, 0.0, 1.0).astype(np.float32)
+
+    ba_cfg = dict(tile_size=512, model_input_size=c['img_size'],
+                  max_pts_per_tile=256, min_pts_per_tile=8,
+                  tile_stride=384)
+    res = infer_tiles(model, img, uv, z, K, ba_cfg, torch.device(_DEVICE),
+                      intensity=intensity)
+    if res is None:
+        return jsonify(error='no tiles passed min_pts'), 500
+    uv_full, par, z_full = res
+    delta_6 = solve_dofs(uv_full, par, z_full, K,
+                          _DOF_PRESETS['6dof_ext'], damping=1e-3)
+    cov = solve_dofs._last_cov
+    sigma = np.sqrt(np.diag(cov))
+
+    # Encode the (perturbed) tile image for the demo UI.
+    buf = _io.BytesIO()
+    _PIL.fromarray(img).save(buf, format='JPEG', quality=85)
+    img_b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+
+    return jsonify(
+        ok=True,
+        cache=cache_key,
+        idx=idx,
+        seed=seed,
+        n_pool=int(uv_full.shape[0]),
+        dof_names=_DOF_PRESETS['6dof_ext'],
+        delta_pred=delta_6.tolist(),
+        sigma_pred=sigma.tolist(),
+        cov=cov.tolist(),
+        delta_gt=(pert_vec.tolist() if pert_vec is not None else None),
+        img_b64=img_b64,
+    )
+
+
+@app.route('/demo')
+def demo_page():
+    return DEMO_HTML
+
+
+DEMO_HTML = '''<!doctype html>
+<html><head><meta charset="utf-8"><title>CaaaS demo</title>
+<style>
+body{font-family:system-ui;background:#111;color:#eee;padding:24px}
+h1{margin:0 0 8px} .row{display:flex;gap:24px;align-items:flex-start}
+button{font-size:18px;padding:8px 16px;border-radius:6px;
+  background:#3a7;color:#fff;border:0;cursor:pointer}
+button:hover{background:#4c8}
+table{border-collapse:collapse;margin-top:12px}
+td,th{border:1px solid #444;padding:4px 10px;text-align:right;font-family:monospace}
+th{background:#222} td.label{text-align:left;background:#1a1a1a}
+img{max-width:512px;border:2px solid #555;border-radius:6px}
+small{color:#888}
+</style></head><body>
+<h1>CaaaS — Calibration As A Service <small>(Triple-A)</small></h1>
+<div class="row">
+  <div>
+    <p>cache:
+      <select id="cache"><option>kamikado</option><option>woven</option><option>waymo</option></select>
+      idx <input id="idx" type="number" value="0" style="width:60px">
+      seed <input id="seed" type="number" value="42" style="width:60px">
+      <button onclick="run()">Random shift &amp; predict</button>
+      <button onclick="random_seed()">Re-roll seed</button>
+    </p>
+    <img id="img" alt="">
+    <p><small id="meta"></small></p>
+  </div>
+  <div>
+    <h3>6-DoF δ (predicted vs GT)</h3>
+    <table id="tbl">
+      <tr><th>DoF</th><th>δ_pred</th><th>σ_pred</th><th>δ_GT</th><th>err</th></tr>
+    </table>
+  </div>
+</div>
+<script>
+async function run() {
+  const c = document.getElementById('cache').value;
+  const i = document.getElementById('idx').value;
+  const s = document.getElementById('seed').value;
+  const base = location.pathname.replace(/\/demo$/, '');
+  const r = await fetch(`${base}/api/calibrate_demo?cache=${c}&idx=${i}&seed=${s}`);
+  const d = await r.json();
+  if (!d.ok) { document.getElementById('meta').innerText = 'ERROR: ' + d.error; return; }
+  document.getElementById('img').src = 'data:image/jpeg;base64,' + d.img_b64;
+  document.getElementById('meta').innerText =
+    `cache=${d.cache} idx=${d.idx} seed=${d.seed} pool_N=${d.n_pool}`;
+  const tb = document.getElementById('tbl');
+  tb.innerHTML = '<tr><th>DoF</th><th>δ_pred</th><th>σ_pred</th><th>δ_GT</th><th>err</th></tr>';
+  const gt = d.delta_gt || new Array(6).fill(null);
+  d.dof_names.forEach((nm, k) => {
+    const dp = d.delta_pred[k], sp = d.sigma_pred[k];
+    const dg = gt[k];
+    const err = (dg !== null && dg !== undefined) ? (dp - dg) : null;
+    tb.innerHTML += `<tr><td class=label>${nm}</td><td>${dp.toFixed(4)}</td><td>${sp.toFixed(4)}</td><td>${dg!==null?dg.toFixed(4):'—'}</td><td>${err!==null?err.toFixed(4):'—'}</td></tr>`;
+  });
+}
+function random_seed() {
+  document.getElementById('seed').value = Math.floor(Math.random() * 100000);
+  run();
+}
+window.onload = run;
+</script>
+</body></html>'''
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('CAAAS_PORT', 5005))
     app.run(host='0.0.0.0', port=port, threaded=True)
