@@ -311,39 +311,14 @@ def main(cfg=None):
     # same per-dataset samples but on the actual model (untrained at ep=0)
     # so we get the GT correspondence + Σ ellipse overlays for free.
 
-    # ── PRE-FLIGHT (ep=0): full val pass + per-dataset midtrain_vis on the
-    # untrained model. Fails fast (within minutes, before training spends an
-    # hour) if loader/model/vis pipeline is broken.
-    log("preflight: val + midtrain_vis(ep=0) on untrained model")
+    # ── PRE-FLIGHT (ep=0): val pass on the untrained model so we fail fast
+    # (within minutes) if loader/model is broken. midtrain_vis is gated to
+    # rank-0 and the other ranks would otherwise NCCL-AllReduce-timeout
+    # (10 min watchdog) waiting for it — keep vis to the regular every-10ep
+    # cadence inside the train loop.
+    log("preflight: val pass on untrained model")
     with torch.no_grad():
         epoch_loop(model, val_loader, optimizer, accel, False)
-    if accel.is_main_process:
-        try:
-            from scripts.util.midtrain_vis import midtrain_vis
-            n_vis = 15 if len(cache_paths) > 1 else 10
-            for cp in cache_paths:
-                ds_name = Path(cp).name
-                per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
-                per_ds_exp.mkdir(exist_ok=True)
-                midtrain_vis(
-                    accel.unwrap_model(model), per_ds_exp, cp, 0,
-                    img_size=c["img_size"],
-                    min_crop_px=c.get("min_crop_px", 128),
-                    max_crop_px=c.get("max_crop_px", 384),
-                    cml_logger=None, device=accel.device,
-                    amp_dtype=torch.float16, n=n_vis, log=log)
-                if cml_logger is not None:
-                    vis_dir = per_ds_exp / f'vis_ep000'
-                    for p in sorted(vis_dir.glob('*.png')):
-                        try:
-                            cml_logger.report_image(
-                                f'vis_ep__{ds_name}', p.stem,
-                                iteration=0, local_path=str(p))
-                        except Exception:
-                            pass
-        except Exception as _e:
-            log(f"preflight midtrain_vis FAILED: {_e}")
-            raise
     accel.wait_for_everyone()
     log("preflight OK — entering train loop")
 
