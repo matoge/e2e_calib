@@ -85,9 +85,14 @@ def infer_one(model, ds, idx: int, device: str = 'cuda', seed: int | None = None
     img_in = img.unsqueeze(0).to(device).float().div_(255.0)
     Nmax = dist_uvd.shape[0]
     pad = torch.zeros(1, Nmax, dtype=torch.bool, device=device)
+    use_intensity = bool(getattr(model, 'use_intensity', False))
+    if use_intensity and dist_uvd.shape[-1] >= 5:
+        point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
+    else:
+        point_in = dist_uvd[..., :3]
     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
         out = model(img_in,
-                    dist_uvd.unsqueeze(0).to(device)[..., :3],
+                    point_in.unsqueeze(0).to(device),
                     key_padding_mask=pad,
                     vfp=vfp.view(1).to(device),
                     bucket_uvd=bucket_uvd.unsqueeze(0).to(device),
@@ -123,11 +128,14 @@ def infer_one(model, ds, idx: int, device: str = 'cuda', seed: int | None = None
         else:
             full = inst['img'].permute(1, 2, 0).numpy().astype(np.uint8)
         img_orig = full[v0:v0 + cs, u0:u0 + cs].copy()
+    # depth (D_norm × 100 m) for BA Jacobians. dist_uvd col 2 is normalized
+    # depth (z / 100), put it back into metres.
+    z_m = (dist_uvd[:, 2].numpy().astype(np.float32) * 100.0)
     return dict(
         idx=int(idx), img=img_np, img_orig=img_orig, crop=crop, scale=scale,
         hyp_uv=hyp_uv, true_uv=true_uv, pred_uv=pred_uv, delta=delta,
         sigma_x=sx.astype(np.float32), sigma_y=sy.astype(np.float32), rho=rho.astype(np.float32),
-        sigma_scalar=sigma_scalar, is_obj=is_obj, valid=valid,
+        sigma_scalar=sigma_scalar, is_obj=is_obj, valid=valid, z=z_m,
     )
 
 

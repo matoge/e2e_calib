@@ -121,16 +121,20 @@ def load_frame(root: Path, scene: str, cam: str, frame: int):
 
 
 def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int):
-    """Replicate datasets/pandaset_full.py bucket layout. uvd_local is (n,3)
-    with uv in MODEL_S-scale pixels and d normalized /100."""
+    """Replicate datasets/pandaset_full.py bucket layout.
+
+    uvd_local is (n, C) with C ∈ {3, 4} — 3 for legacy uv+d caches, 4 when
+    the dataset feeds intensity as the 4th channel (V3-i caches that the
+    current ckpts were trained on)."""
     G = grid_n
     cell_S = float(S) / G
+    C = uvd_local.shape[-1]
     cu = np.clip((uvd_local[:, 0] / cell_S).astype(np.int32), 0, G - 1)
     cv = np.clip((uvd_local[:, 1] / cell_S).astype(np.int32), 0, G - 1)
     cell_id = cv * G + cu
     n = uvd_local.shape[0]
     if n == 0:
-        return (np.zeros((G * G, K_per_cell, 3), dtype=np.float32),
+        return (np.zeros((G * G, K_per_cell, C), dtype=np.float32),
                 np.zeros((G * G, K_per_cell), dtype=bool))
     shuf = np.random.permutation(n)
     sorted_idx = shuf[np.argsort(cell_id[shuf], kind="stable")]
@@ -143,7 +147,7 @@ def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int):
     keep = intra < K_per_cell
     slots = intra[keep]
     cells = sorted_cid[keep]
-    bucket_uvd = np.zeros((G * G, K_per_cell, 3), dtype=np.float32)
+    bucket_uvd = np.zeros((G * G, K_per_cell, C), dtype=np.float32)
     bucket_valid = np.zeros((G * G, K_per_cell), dtype=bool)
     bucket_uvd[cells, slots] = sorted_uvd[keep]
     bucket_valid[cells, slots] = True
@@ -152,7 +156,8 @@ def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int):
 
 @torch.no_grad()
 def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.ndarray,
-                 ba_cfg: dict, device: torch.device, y_cam: np.ndarray | None = None):
+                 ba_cfg: dict, device: torch.device, y_cam: np.ndarray | None = None,
+                 intensity: np.ndarray | None = None):
     """Batched sliding-tile inference: one forward call per frame (B = n_tiles)
     instead of one per tile. Returns (uv_full[N,2], par[N,5], z_cam[N]) in
     FULL-image px units, identical contract to the per-tile version.
@@ -214,12 +219,19 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
             X = (uv[idx, 0] - K[0, 2]) * z_local / K[0, 0]
             Y = (uv[idx, 1] - K[1, 2]) * z_local / K[1, 1]
             d_eucl = np.sqrt(X * X + Y * Y + z_local * z_local)
-            uvd_t = np.stack([u_local, v_local,
-                               (d_eucl / 100.0).astype(np.float32)], axis=1
-                              ).astype(np.float32)
+            cols = [u_local, v_local, (d_eucl / 100.0).astype(np.float32)]
+            use_intensity = bool(getattr(model, 'use_intensity', False))
+            if use_intensity:
+                if intensity is not None:
+                    intens_pt = intensity[idx].astype(np.float32)
+                else:
+                    intens_pt = np.zeros_like(u_local, dtype=np.float32)
+                cols.append(intens_pt)
+            uvd_t = np.stack(cols, axis=1).astype(np.float32)
+            C = uvd_t.shape[-1]
             # Pad to max_pts, build mask (True = pad / ignore).
             n = len(idx)
-            uvd_pad = np.zeros((max_pts, 3), dtype=np.float32)
+            uvd_pad = np.zeros((max_pts, C), dtype=np.float32)
             uvd_pad[:n] = uvd_t
             mask = np.ones(max_pts, dtype=bool)
             mask[:n] = False
@@ -347,6 +359,8 @@ _DOF_PRESETS = {
     "5dof": ["omega_x", "omega_y", "tx", "ty", "df_common"],
     "6dof": ["omega_x", "omega_y", "omega_z", "tx", "ty", "df_common"],
     "7dof": ["omega_x", "omega_y", "omega_z", "tx", "ty", "tz", "df_common"],
+    # Pure extrinsic 6-DoF (no intrinsic): for the CaaaS sequence endpoint.
+    "6dof_ext": ["omega_x", "omega_y", "omega_z", "tx", "ty", "tz"],
 }
 
 
@@ -395,7 +409,12 @@ def solve_dofs(uv: np.ndarray, par: np.ndarray, z: np.ndarray, K: np.ndarray,
                 + (J_u[:, i] * Wuv * r_v).sum()
                 + (J_v[:, i] * Wuv * r_u).sum())
     H += damping * np.eye(n)
-    return np.linalg.solve(H, b)
+    delta = np.linalg.solve(H, b)
+    # Cov(δ) = H^{-1}; useful for downstream (CaaaS, sequence-fuse).
+    solve_dofs._last_cov = np.linalg.inv(H)
+    solve_dofs._last_H = H
+    solve_dofs._last_b = b
+    return delta
 
 
 # Back-compat thin wrappers — keep old call sites working.
