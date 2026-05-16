@@ -295,6 +295,22 @@ def main(cfg=None):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     best_val  = float("inf")
     ckpt      = exp_dir / "best_model.pt"
+
+    # Optional warm-start: load weights from another experiment's best_model.pt.
+    # Only the model state_dict is restored; optimizer / scheduler / epoch
+    # counter start fresh (use a longer --epochs to budget for the extra
+    # training). Useful for "extend N→N+M epochs" without resume bookkeeping.
+    init_from = c.get('init_from')
+    if init_from:
+        ifp = Path(init_from)
+        if not ifp.is_absolute():
+            ifp = REPO_ROOT / 'experiments' / ifp / 'best_model.pt' \
+                  if (REPO_ROOT := Path(__file__).resolve().parents[2]) else ifp
+        if not ifp.is_file():
+            ifp = Path('experiments') / init_from / 'best_model.pt'
+        log(f"warm-start from: {ifp}")
+        sd = torch.load(ifp, map_location='cpu', weights_only=True)
+        accel.unwrap_model(model).load_state_dict(sd, strict=False)
     t0        = time.time()
     history = {'ep': [], 'tr_nll': [], 'va_nll': [], 'tr_mse': [], 'va_mse': []}
 
@@ -497,6 +513,9 @@ if __name__ == "__main__":
                          '(2026-05-05: True caused 22× slowdown). Turn on '
                          'only if DDP AllReduce actually hangs at backward.')
     ap.add_argument('--clearml', action='store_true')
+    ap.add_argument('--init-from', default=None,
+                    help='warm-start from another exp\'s best_model.pt '
+                         '(name only, e.g. km_wv_8gpu_200ep_os4)')
     ap.add_argument('--why',     default='')
     args = ap.parse_args()
     cfg = dict(CFG)
@@ -522,6 +541,7 @@ if __name__ == "__main__":
     if args.deform_mode is not None: cfg['deform_mode'] = args.deform_mode
     if args.train_size is not None: cfg['train_size'] = args.train_size
     if args.val_size   is not None: cfg['val_size']   = args.val_size
+    if args.init_from  is not None: cfg['init_from']  = args.init_from
     if args.no_frustum: cfg['use_frustum'] = False
     if args.find_unused_parameters: cfg['find_unused_parameters'] = True
 
