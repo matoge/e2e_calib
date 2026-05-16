@@ -88,13 +88,15 @@ def _read_points_V(p: Path) -> np.ndarray:
     return np.atleast_2d(arr)
 
 
-def _png_to_jpeg_bytes(png_path: Path, quality: int) -> tuple[bytes, int, int]:
+def _png_to_arr(png_path: Path) -> tuple[np.ndarray, int, int]:
+    """PNG → (H, W, 3) uint8 numpy array. No JPEG round-trip; tiles are
+    encoded straight from this array by cut_inst_to_tiles, so the JPEG
+    quality loss only happens once at tile-write time (was twice when
+    we used to pre-encode the parent into JPEG_q=95)."""
     img = Image.open(png_path).convert('RGB')
-    W, H = img.size
-    import io
-    buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=quality)
-    return buf.getvalue(), int(W), int(H)
+    arr = np.asarray(img)
+    H, W = arr.shape[:2]
+    return arr, int(W), int(H)
 
 
 def _double_scan_frames(scene: Path, ratio: float) -> set[int]:
@@ -125,7 +127,9 @@ def process_frame(args_tuple):
         pts_path = scene_dir / f'points_V_{frame_idx}.txt'
         if not img_path.exists() or not pts_path.exists():
             return frame_idx, 0
-        jpg_bytes, IW, IH = _png_to_jpeg_bytes(img_path, jpg_q)
+        # PNG → numpy directly. cut_inst_to_tiles encodes each tile to JPEG
+        # exactly once (was twice: PNG→JPEG-95 then re-encode at TJ.encode).
+        img_arr, IW, IH = _png_to_arr(img_path)
 
         pts_V = _read_points_V(pts_path)   # (N, 4) xyzi
         if pts_V.size == 0:
@@ -151,9 +155,12 @@ def process_frame(args_tuple):
         )
 
         if tile_layout is None:
+            import io as _io
+            _b = _io.BytesIO()
+            Image.fromarray(img_arr).save(_b, format='JPEG', quality=jpg_q)
             inst = dict(common_inst)
             inst.update(dict(
-                jpg_bytes = jpg_bytes,
+                jpg_bytes = _b.getvalue(),
                 IH=IH, IW=IW,
                 pts       = torch.from_numpy(pts_vis),
                 uv_full   = torch.from_numpy(uv_vis),
@@ -166,7 +173,7 @@ def process_frame(args_tuple):
 
         tw, th, st, pad, y0, q = tile_layout
         tile_files = cut_inst_to_tiles(
-            jpg_bytes=jpg_bytes, IW=IW, IH=IH,
+            img_full_arr=img_arr, IW=IW, IH=IH,
             pts_vis=pts_vis, uv_vis=uv_vis, z_vis=z_vis,
             is_obj_vis=is_obj_vis,
             extra_per_point={'intensity': intensity_vis},

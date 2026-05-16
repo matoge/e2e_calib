@@ -3,13 +3,22 @@
 Image size (IW × IH) varies per dataset / camera, so we compute tile origins
 on the fly. Reusable from build_pandaset_full_v3 / build_nuscenes_v3 /
 build_waymo_v3.
+
+Tile-start computation lives in scripts.util.tile_layout so the cache
+build and the online sliding inference (infer_tiles) split frames the
+exact same way. Do NOT reintroduce a local copy — re-export only.
 """
 from __future__ import annotations
 import io
+import sys
 from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+
+# scripts/util on path even when imported from the bare preprocessing package
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.util.tile_layout import make_tile_starts  # noqa: F401, E402
 
 DEFAULT_TILE   = 512
 DEFAULT_STRIDE = 384   # 128 px overlap with tile=512
@@ -17,31 +26,9 @@ DEFAULT_PAD    = 64    # ~10 % of tile side
 DEFAULT_QUAL   = 90
 
 
-def make_tile_starts(span: int, tile: int, stride: int, axis_start: int = 0) -> list[int]:
-    """Return tile origins along an axis covering [axis_start, span).
-
-    Adds a right-edge tile only if the natural-strided last start is at least
-    `stride/2` short of the edge — otherwise the natural last is too close
-    to the edge to warrant a duplicate, and we just shift it to the edge.
-    Examples:
-      span=1920, tile=512, stride=384, start=0   → [0, 384, 768, 1152, 1408] (5)
-      span=1080, tile=512, stride=384, start=200 → [200, 568] (2, top sky skipped)
-      span= 900, tile=512, stride=384, start=0   → [0, 388]   (2, NS-height short)
-    """
-    if span < tile + axis_start:
-        return [max(0, axis_start)]
-    starts = list(range(axis_start, span - tile + 1, stride))
-    if not starts:
-        return [span - tile]
-    edge = span - tile
-    if edge - starts[-1] >= stride // 2:
-        starts.append(edge)
-    elif starts[-1] != edge:
-        starts[-1] = edge
-    return starts
-
-
-def cut_inst_to_tiles(*, jpg_bytes: bytes, IW: int, IH: int,
+def cut_inst_to_tiles(*, jpg_bytes: bytes = None,
+                       img_full_arr: np.ndarray = None,
+                       IW: int, IH: int,
                        pts_vis: np.ndarray, uv_vis: np.ndarray,
                        z_vis: np.ndarray, is_obj_vis: np.ndarray,
                        intensity_vis: np.ndarray | None = None,
@@ -55,7 +42,12 @@ def cut_inst_to_tiles(*, jpg_bytes: bytes, IW: int, IH: int,
                        jpg_quality: int = DEFAULT_QUAL,
                        out_dir: Path = None,
                        gid_base: int = 0) -> list[str]:
-    """Decode the parent JPEG once, slice into tiles, save each as inst .pt.
+    """Slice a parent image into tiles, save each as inst .pt.
+
+    Pass EITHER `img_full_arr` (preferred, no decode loss) OR `jpg_bytes`
+    (back-compat). When jpg_bytes is provided we still TJ-decode → encode,
+    but builders that originally have a numpy frame should pass img_full_arr
+    so the JPEG round-trip happens only once at tile-write time.
 
     `common_inst` carries the per-frame fields (cam_pos, R_gt, T_gt, K_full,
     cuboids, scene, cam, frame) that are inherited by every tile from this
@@ -66,11 +58,15 @@ def cut_inst_to_tiles(*, jpg_bytes: bytes, IW: int, IH: int,
     try:
         import turbojpeg as _tj
         _TJ = _tj.TurboJPEG()
-        img_full_arr = np.asarray(_TJ.decode(jpg_bytes, pixel_format=_tj.TJPF_RGB))
+        if img_full_arr is None:
+            assert jpg_bytes is not None, 'pass img_full_arr or jpg_bytes'
+            img_full_arr = np.asarray(_TJ.decode(jpg_bytes, pixel_format=_tj.TJPF_RGB))
         def _encode(arr):
             return _TJ.encode(arr, quality=jpg_quality, pixel_format=_tj.TJPF_RGB)
     except Exception:
-        img_full_arr = np.asarray(Image.open(io.BytesIO(jpg_bytes)).convert('RGB'))
+        if img_full_arr is None:
+            assert jpg_bytes is not None, 'pass img_full_arr or jpg_bytes'
+            img_full_arr = np.asarray(Image.open(io.BytesIO(jpg_bytes)).convert('RGB'))
         def _encode(arr, q=jpg_quality):
             buf = io.BytesIO()
             Image.fromarray(arr).save(buf, format='JPEG', quality=q)

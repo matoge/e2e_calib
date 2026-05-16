@@ -192,12 +192,11 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
     stride = ba_cfg.get("tile_stride", 128)
     scale = TILE / S
     y_thresh = ba_cfg.get("exclude_ground_y_cam", None)
-    us = list(range(0, max(W - TILE, 0) + 1, stride))
-    vs = list(range(0, max(H - TILE, 0) + 1, stride))
-    if us and us[-1] != W - TILE:
-        us.append(W - TILE)
-    if vs and vs[-1] != H - TILE:
-        vs.append(H - TILE)
+    # Tile starts: route through the shared layout fn so build (cache) and
+    # online sliding inference split frames identically. Never re-implement.
+    from scripts.util.tile_layout import make_tile_starts
+    us = make_tile_starts(W, TILE, stride)
+    vs = make_tile_starts(H, TILE, stride)
 
     # Pass 1: collect per-tile crop/uvd/idx (CPU). Skip tiles with < min_pts.
     crops_np: list = []
