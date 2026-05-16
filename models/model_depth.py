@@ -221,8 +221,16 @@ class FrustumLocalEncoder(nn.Module):
         # rel relative to query
         rel_all = cands - query_uvd.unsqueeze(2)                       # (B, Nq, 72, C)
 
-        # Density-invariant: k random points from the valid set.
-        rand_score = torch.rand(B, N_q, 9 * K_pc, device=query_uvd.device, dtype=query_uvd.dtype)
+        # Density-invariant: k random points from the valid set. In eval()
+        # we want determinism (same input → same output), so seed a local
+        # generator. In training the global RNG drives randomisation as
+        # before.
+        if self.training:
+            rand_score = torch.rand(B, N_q, 9 * K_pc, device=query_uvd.device, dtype=query_uvd.dtype)
+        else:
+            _gen = torch.Generator(device=query_uvd.device).manual_seed(0)
+            rand_score = torch.rand(B, N_q, 9 * K_pc, generator=_gen,
+                                      device=query_uvd.device, dtype=query_uvd.dtype)
         rand_score = rand_score.masked_fill(~cand_valid, -1.0)
         kk = min(self.k, 9 * K_pc)
         _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)        # (B, N_q, k)

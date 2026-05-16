@@ -120,12 +120,18 @@ def load_frame(root: Path, scene: str, cam: str, frame: int):
     return img, K, T_cw, pts_w, pts_c, uv, z
 
 
-def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int):
+def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int,
+                  rng: np.random.RandomState | None = None):
     """Replicate datasets/pandaset_full.py bucket layout.
 
     uvd_local is (n, C) with C ∈ {3, 4} — 3 for legacy uv+d caches, 4 when
     the dataset feeds intensity as the 4th channel (V3-i caches that the
-    current ckpts were trained on)."""
+    current ckpts were trained on).
+
+    `rng` controls the per-cell shuffle that decides which K points each
+    over-full cell keeps. Pass a seeded RandomState for run-to-run
+    determinism (e.g. for tests or repeatable inference); pass None to
+    use the global numpy RNG (legacy training behaviour)."""
     G = grid_n
     cell_S = float(S) / G
     C = uvd_local.shape[-1]
@@ -136,7 +142,8 @@ def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int):
     if n == 0:
         return (np.zeros((G * G, K_per_cell, C), dtype=np.float32),
                 np.zeros((G * G, K_per_cell), dtype=bool))
-    shuf = np.random.permutation(n)
+    shuf = (rng.permutation(n) if rng is not None
+            else np.random.permutation(n))
     sorted_idx = shuf[np.argsort(cell_id[shuf], kind="stable")]
     sorted_uvd = uvd_local[sorted_idx]
     sorted_cid = cell_id[sorted_idx]
@@ -157,7 +164,14 @@ def build_bucket(uvd_local: np.ndarray, S: int, grid_n: int, K_per_cell: int):
 @torch.no_grad()
 def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.ndarray,
                  ba_cfg: dict, device: torch.device, y_cam: np.ndarray | None = None,
-                 intensity: np.ndarray | None = None):
+                 intensity: np.ndarray | None = None,
+                 bucket_rng: np.random.RandomState | None = None):
+    # Inference must be deterministic: same image+pts in → same params out.
+    # Training relies on the global numpy RNG to randomise per-cell point
+    # selection (regularisation), but at inference we want a fixed-seed
+    # shuffle so subsampling cells doesn't drift run-to-run.
+    if bucket_rng is None:
+        bucket_rng = np.random.RandomState(0)
     """Batched sliding-tile inference: one forward call per frame (B = n_tiles)
     instead of one per tile. Returns (uv_full[N,2], par[N,5], z_cam[N]) in
     FULL-image px units, identical contract to the per-tile version.
@@ -235,7 +249,8 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
             uvd_pad[:n] = uvd_t
             mask = np.ones(max_pts, dtype=bool)
             mask[:n] = False
-            buc, buc_v = build_bucket(uvd_t, S, grid_n=16, K_per_cell=8)
+            buc, buc_v = build_bucket(uvd_t, S, grid_n=16, K_per_cell=8,
+                                       rng=bucket_rng)
             crop_r = np.asarray(Image.fromarray(crop).resize((S, S)))
             crops_np.append(crop_r)
             uvd_np.append(uvd_pad)
@@ -257,7 +272,10 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
     vfp_t = torch.full((B,), vfp, dtype=torch.float32, device=device)
     buc_t = torch.from_numpy(np.stack(buc_np, axis=0)).to(device)
     buc_v_t = torch.from_numpy(np.stack(buc_v_np, axis=0)).to(device)
-    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    # fp16 to match training (accelerate launch --mixed_precision=fp16). bf16
+    # would silently fall back to fp32 emulation on V100 (sm_70) and drift from
+    # the trained distribution. Revisit when we run on Blackwell (sm_100+).
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16):
         out = model(img_t, dist_uvd, key_padding_mask=pad_mask,
                     vfp=vfp_t, bucket_uvd=buc_t, bucket_valid=buc_v_t)
     params = out[0] if isinstance(out, tuple) else out
