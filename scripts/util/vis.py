@@ -88,7 +88,7 @@ def visualize(model, exp_dir, cache: str, epoch: int,
     one PNG each. Logs per-sample err so train.log values stay
     comparable.
     """
-    out_dir = Path(exp_dir) / f'_vis_per_{Path(cache).name}' / f'vis_ep{epoch:03d}'
+    out_dir = Path(exp_dir) / f'vis_ep{epoch:03d}'
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob('*.png'):
         old.unlink()
