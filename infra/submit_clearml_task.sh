@@ -227,36 +227,33 @@ else
     GPU_SPEC="\"device=${CUDA_DEVICES}\""
     echo "[info] pinning GPUs via CUDA_DEVICES=${CUDA_DEVICES}"
   fi
-  # Explicitly pass --repo/--branch/--commit so the agent does a full clone
-  # rather than treating the script as standalone (which strips other repo
-  # files and breaks launch_ddp_ps.py's target-script lookup).
-  # Inside the submit container the bind-mounted repo trips git's
-  # "dubious ownership" check; whitelist it once.
-  git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
-  REPO_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
-  BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
-  COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
-  # clearml-task v3 rejects --commit + --branch together; prefer commit
-  # for reproducibility (avoids race when main moves during enqueue).
-  REPO_FLAGS=""
-  if [[ -n "$REPO_URL" ]]; then
-    if [[ -n "$COMMIT" ]]; then
-      REPO_FLAGS="--repo $REPO_URL --commit $COMMIT"
-      echo "[info] full-clone mode: $REPO_URL @ $COMMIT"
-    else
-      REPO_FLAGS="--repo $REPO_URL --branch $BRANCH"
-      echo "[info] full-clone mode: $REPO_URL @ $BRANCH"
-    fi
-  fi
+  # Bypass agent's pip downgrade / apt install / git clone phases by
+  # giving clearml-task a docker_bash_setup_script: agent will *only*
+  # run that script inside the container, with no automatic env setup.
+  # The image (e2e-calib-train:np2) already has every dep + the repo is
+  # bind-mounted at /workspace.
+  BASH_SETUP=$(mktemp /tmp/cml_setup.XXXXXX.sh)
+  cat > "$BASH_SETUP" <<EOSETUP
+#!/bin/bash
+set -euo pipefail
+cd /workspace
+exec ${ENTRY}
+EOSETUP
+  echo "[info] bash_setup_script:"
+  sed 's/^/    /' "$BASH_SETUP"
   clearml-task \
     --project     "$PROJECT" \
     --name        "$NAME" \
     --queue       "$QUEUE" \
     --docker      "$DOCKER_IMAGE" \
-    --docker_args "--shm-size=64g --gpus $GPU_SPEC -v /mnt/fsx:/mnt/fsx -v /home/hfunaya:/home/hfunaya -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PYTHON_ENV_INSTALL=1 -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
+    --docker_args "--shm-size=64g --gpus $GPU_SPEC -v /mnt/fsx:/mnt/fsx -v /home/hfunaya/git/e2e_calib:/workspace -v /home/hfunaya:/home/hfunaya -v /dev/shm:/dev/shm --ipc=host -e PYTHONPATH=/workspace" \
+    --docker_bash_setup_script "$BASH_SETUP" \
     --script      "$SCRIPT" \
-    --cwd         "." \
-    --packages    "clearml" \
-    $REPO_FLAGS \
+    --skip-repo-detection \
+    --skip-python-env-install \
+    --force-no-requirements \
+    --cwd         "/workspace" \
+    --packages    "" \
     --args        $CT_ARGS
+  rm -f "$BASH_SETUP"
 fi
