@@ -341,20 +341,18 @@ def main(cfg=None):
     # NCCL's 600 s watchdog even on slow Lustre.
     if accel.is_main_process:
         try:
-            from scripts.util.midtrain_vis import midtrain_vis
+            from scripts.util.vis import visualize
             for cp in cache_paths:
                 ds_name = Path(cp).name
                 per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
                 per_ds_exp.mkdir(exist_ok=True)
-                midtrain_vis(
+                visualize(
                     accel.unwrap_model(model), per_ds_exp, cp, 0,
-                    img_size=c["img_size"],
-                    min_crop_px=c.get("min_crop_px", 128),
-                    max_crop_px=c.get("max_crop_px", 384),
-                    cml_logger=None, device=accel.device,
-                    amp_dtype=torch.float16, n=5, log=log)
+                    ds_kw=dict(ds_kw),
+                    n=5, device=accel.device,
+                    amp_dtype=torch.float16, log=log)
                 if cml_logger is not None:
-                    vis_dir = per_ds_exp / 'vis_ep000'
+                    vis_dir = per_ds_exp / f'vis_ep000'
                     for p in sorted(vis_dir.glob('*.png')):
                         try:
                             cml_logger.report_image(
@@ -432,20 +430,17 @@ def main(cfg=None):
             # cache means parent + workers share one env per path → safe.
             if epoch % 10 == 0 or epoch == epochs:
                 try:
-                    from scripts.util.midtrain_vis import midtrain_vis
+                    from scripts.util.vis import visualize
                     n_vis = 15 if len(cache_paths) > 1 else 10
                     for cp in cache_paths:
                         ds_name = Path(cp).name
                         per_ds_exp = exp_dir / f'_vis_per_{ds_name}'
                         per_ds_exp.mkdir(exist_ok=True)
-                        midtrain_vis(
+                        visualize(
                             accel.unwrap_model(model), per_ds_exp, cp, epoch,
-                            img_size=c["img_size"],
-                            min_crop_px=c.get("min_crop_px", 128),
-                            max_crop_px=c.get("max_crop_px", 384),
-                            cml_logger=None,
-                            device=accel.device,
-                            amp_dtype=torch.float16, n=n_vis, log=log)
+                            ds_kw=dict(ds_kw),
+                            n=n_vis, device=accel.device,
+                            amp_dtype=torch.float16, log=log)
                         if cml_logger is not None:
                             vis_dir = per_ds_exp / f'vis_ep{epoch:03d}'
                             for p in sorted(vis_dir.glob('*.png')):
