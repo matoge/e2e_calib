@@ -21,7 +21,7 @@
 set -euo pipefail
 
 NAME=""
-PROJECT="e2e_calib"
+PROJECT="e2e_calib/calib"
 SCRIPT=""
 QUEUE="dgx2"
 ARGS=""
