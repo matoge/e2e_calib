@@ -202,6 +202,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  k_per_cell: int = 8,
                  zoom_aug: bool = False,
                  rep_strategy: str = 'cell_center',
+                 center_band: float = 0.0,
                  preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
@@ -275,6 +276,12 @@ class PandaSetCalibDatasetFull(Dataset):
         assert rep_strategy in ('cell_center', 'nearest_cam'), \
             f'bad rep_strategy={rep_strategy}'
         self.rep_strategy = rep_strategy
+        # Restrict pivot rows to the central horizontal band of the image. 0
+        # = disabled (full height); 0.5 = central 50% of rows (v ∈ [0.25H,
+        # 0.75H]). Useful for val: top/bottom slivers are sky / road close-up
+        # with few lidar points, hard to interpret. Affects pivot pick only;
+        # frustum context still uses every visible point.
+        self.center_band = float(center_band)
         # Preload every inst .pt into RAM. The full PS cache is ~1 GB, and
         # torch.load per-sample shows up as ~3.8 ms in cProfile — roughly
         # 40% of the remaining __getitem__ cost once TurboJPEG is in place.
@@ -452,6 +459,14 @@ class PandaSetCalibDatasetFull(Dataset):
         valid_in_image = ((z > 0.5) &
                           (uv_full[:,0] >= 0) & (uv_full[:,0] < IW) &
                           (uv_full[:,1] >= 0) & (uv_full[:,1] < IH))
+        # Optional: only consider pivots in the central horizontal band of the
+        # image (sky / road slivers excluded). Implemented as a mask on v.
+        if self.center_band > 0.0:
+            half = 0.5 * self.center_band
+            v_lo = (0.5 - half) * IH
+            v_hi = (0.5 + half) * IH
+            in_band = (uv_full[:, 1] >= v_lo) & (uv_full[:, 1] < v_hi)
+            valid_in_image = valid_in_image & in_band
         # Pivots: must be valid AND in_box. Frustum context still uses all pts.
         obj_idxs = np.where(is_obj_full & valid_in_image & in_box)[0]
         bg_mask  = (~is_obj_full) & valid_in_image & in_box

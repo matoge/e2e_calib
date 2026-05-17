@@ -233,7 +233,12 @@ def main(cfg=None):
         if 'waymo' in cp.lower():
             cp_kw['oversample'] = 1
         tr_p = PandaSetCalibDatasetFull(cp, split='train', **cp_kw)
-        va_p = PandaSetCalibDatasetFull(cp, split='val',   **cp_kw)
+        # Val: optionally restrict pivots to the central vertical band so the
+        # set is dominated by interpretable mid-image samples (default 0.5 =
+        # central 50% of rows). Set val_center_band=0 to disable.
+        va_kw = dict(cp_kw)
+        va_kw['center_band'] = float(c.get('val_center_band', 0.5))
+        va_p = PandaSetCalibDatasetFull(cp, split='val',   **va_kw)
         log(f"  [{cp}] train={len(tr_p)} val={len(va_p)} (os={cp_kw['oversample']})")
         tr_parts.append(tr_p); va_parts.append(va_p)
     tr_full = ConcatDataset(tr_parts) if len(tr_parts) > 1 else tr_parts[0]
