@@ -32,7 +32,11 @@ def main():
                     help='per-rank batch_size; matches train default')
     ap.add_argument('--prefetch', type=int, default=4,
                     help='matches train default')
+    ap.add_argument('--min-crop-px', type=int, default=128)
     ap.add_argument('--max-crop-px', type=int, default=384)
+    ap.add_argument('--img-size', type=int, default=64)
+    ap.add_argument('--max-rot-deg', type=float, default=0.5)
+    ap.add_argument('--max-offset-m', type=float, default=0.20)
     ap.add_argument('--start-method', default='spawn',
                     choices=['spawn', 'forkserver', 'fork'])
     ap.add_argument('--skip-single', action='store_true',
@@ -53,8 +57,12 @@ def main():
     from datasets.pandaset_full import PandaSetCalibDatasetFull, collate_full
 
     ds = PandaSetCalibDatasetFull(args.cache, split='train',
-                                   img_size=64, min_crop_px=128,
-                                   max_crop_px=args.max_crop_px, oversample=1)
+                                   img_size=args.img_size,
+                                   min_crop_px=args.min_crop_px,
+                                   max_crop_px=args.max_crop_px,
+                                   max_rot_deg=args.max_rot_deg,
+                                   max_offset_m=args.max_offset_m,
+                                   oversample=1)
     print(f'cache: {args.cache}  insts: {len(ds)}  start_method={args.start_method}')
 
     if not args.skip_single:

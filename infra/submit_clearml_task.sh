@@ -66,7 +66,7 @@ done
 [[ -z "$NAME"   ]] && { echo "[err] --name required" >&2;   usage; }
 [[ -z "$SCRIPT" ]] && { echo "[err] --script required" >&2; usage; }
 
-ENTRY="accelerate launch --num_processes=${NUM_PROCESSES} --mixed_precision=bf16 ${SCRIPT} ${ARGS}"
+ENTRY="accelerate launch --num_processes=${NUM_PROCESSES} --mixed_precision=fp16 ${SCRIPT} ${ARGS}"
 
 CUDA_LINE=""
 if [[ -n "${CUDA_DEVICES:-}" ]]; then

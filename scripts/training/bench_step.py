@@ -81,13 +81,16 @@ def main():
         use_frustum=not args.no_frustum,
         deform_mode=args.deform_mode,
         frustum_dense=(not args.no_frustum_dense and not args.no_frustum),
+        use_intensity=True,
     ).to(DEV).train()
 
     B, N = args.batch, args.n_pivots
     img = torch.randn(B, 3, args.img_size, args.img_size, device=DEV)
+    # 4ch input: u, v, d, intensity (use_intensity=True)
     dist_uvd = torch.cat([
         torch.rand(B, N, 2, device=DEV) * args.img_size,
         torch.rand(B, N, 1, device=DEV) * 0.5,
+        torch.rand(B, N, 1, device=DEV),
     ], dim=-1)
     pad = torch.zeros(B, N, dtype=torch.bool, device=DEV)
     vfp = torch.full((B,), 1500.0, device=DEV)
@@ -96,6 +99,7 @@ def main():
     bucket_uvd = torch.cat([
         torch.rand(B, G * G, K, 2, device=DEV) * args.img_size,
         torch.rand(B, G * G, K, 1, device=DEV) * 0.5,
+        torch.rand(B, G * G, K, 1, device=DEV),
     ], dim=-1)
     # ~half the slots populated on average — realistic
     bucket_valid = torch.rand(B, G * G, K, device=DEV) < 0.5
