@@ -93,22 +93,39 @@ class _ConvNeXtBlock(nn.Module):
 
 
 class ConvNeXtBackbone(nn.Module):
-    def __init__(self, d: int = D, in_channels: int = 3, n_blocks: int = 2):
+    def __init__(self, d: int = D, in_channels: int = 3, n_blocks: int = 2,
+                 stem_d: int | None = None, fine_d: int | None = None):
+        """ConvNeXt-style backbone for calibration.
+
+        d:        coarse stage channels & decoder token dim (default 128).
+        fine_d:   fine stage channels (None → d for legacy behavior, or pass
+                  smaller value e.g. 96 for graduated stem→fine→coarse expansion
+                  64 → 96 → 128 closer to the official ConvNeXt-Tiny [96, 192,
+                  384, 768] pattern). When fine_d != d a 1×1 projection is
+                  appended so cross_fine still receives `d`-channel tokens.
+        stem_d:   stem channels (None → 64).
+        n_blocks: ConvNeXt blocks per stage (default 2). 4 ≈ +0.7 M params /
+                  +30 % forward but still small vs official Tiny's [3,3,9,3].
+        """
         super().__init__()
-        # 4x4 stride-4 patchify stem (ConvNeXt-Tiny standard) — img/4 → 64ch.
+        stem_d = stem_d or 64
+        fine_d = fine_d or d
+        # 4x4 stride-4 patchify stem (ConvNeXt-Tiny standard) — img/4 → stem_d.
         # img=128 → 32, img=64 → 16. Below stages: fine /2, coarse /2 = ÷16 total.
         # Final feature shapes: img=128 → fine 16×16, coarse 8×8 (= same token
         # count as img=64 with the pre-2026-05-04 stride-2 stem).
         self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 4, stride=4),
-            nn.BatchNorm2d(64), nn.GELU(),
+            nn.Conv2d(in_channels, stem_d, 4, stride=4),
+            nn.BatchNorm2d(stem_d), nn.GELU(),
         )
-        # /2 → fine features
-        self.fine_down   = nn.Conv2d(64, d, 3, stride=2, padding=1)
-        self.fine_norm   = nn.BatchNorm2d(d)
-        self.fine_blocks = nn.Sequential(*[_ConvNeXtBlock(d) for _ in range(n_blocks)])
-        # /2 → coarse features
-        self.coarse_down   = nn.Conv2d(d, d, 3, stride=2, padding=1)
+        # /2 → fine features (channels = fine_d)
+        self.fine_down   = nn.Conv2d(stem_d, fine_d, 3, stride=2, padding=1)
+        self.fine_norm   = nn.BatchNorm2d(fine_d)
+        self.fine_blocks = nn.Sequential(*[_ConvNeXtBlock(fine_d) for _ in range(n_blocks)])
+        # 1×1 projection to decoder dim if fine_d != d (no-op otherwise).
+        self.fine_proj = (nn.Conv2d(fine_d, d, 1) if fine_d != d else nn.Identity())
+        # /2 → coarse features (channels = d)
+        self.coarse_down   = nn.Conv2d(fine_d, d, 3, stride=2, padding=1)
         self.coarse_norm   = nn.BatchNorm2d(d)
         self.coarse_blocks = nn.Sequential(*[_ConvNeXtBlock(d) for _ in range(n_blocks)])
         self.pe_fine   = PosEnc2D(d)
@@ -118,7 +135,8 @@ class ConvNeXtBackbone(nn.Module):
         s      = self.stem(x)
         fine   = self.fine_blocks(torch.relu(self.fine_norm(self.fine_down(s))))
         coarse = self.coarse_blocks(torch.relu(self.coarse_norm(self.coarse_down(fine))))
-        return self.pe_coarse(coarse), self.pe_fine(fine)
+        fine_out = self.fine_proj(fine)
+        return self.pe_coarse(coarse), self.pe_fine(fine_out)
 
 
 # ---------------------------------------------------------------------------

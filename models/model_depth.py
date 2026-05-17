@@ -487,7 +487,10 @@ class CalibNetDepth(nn.Module):
                  local_3d_k=(8, 8, 8),
                  use_frame_pose: bool = False, frame_pose_dof: int = 6,
                  frame_pose_full_cov: bool = False,
-                 use_intensity: bool = True):
+                 use_intensity: bool = True,
+                 convnext_n_blocks: int = 2,
+                 convnext_fine_d: int | None = None,
+                 convnext_stem_d: int | None = None):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -496,7 +499,10 @@ class CalibNetDepth(nn.Module):
         assert deform_mode in ('none', 'sl', 'ml'), f'bad deform_mode: {deform_mode}'
         self.img_size    = img_size
         self.n_layers    = n_layers
-        self.cnn         = (ConvNeXtBackbone(d, in_channels=in_channels)
+        self.cnn         = (ConvNeXtBackbone(d, in_channels=in_channels,
+                                                n_blocks=convnext_n_blocks,
+                                                fine_d=convnext_fine_d,
+                                                stem_d=convnext_stem_d)
                             if use_convnext else CNNBackbone(d, in_channels=in_channels))
         # Point input dim: 3 (u, v, d) for legacy caches; 4 (+ intensity) for V3-i.
         self.use_intensity = bool(use_intensity)

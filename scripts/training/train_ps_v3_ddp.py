@@ -275,7 +275,10 @@ def main(cfg=None):
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", True),
-                          deform_mode=c.get("deform_mode", "none"))
+                          deform_mode=c.get("deform_mode", "none"),
+                          convnext_n_blocks=c.get("convnext_n_blocks", 2),
+                          convnext_fine_d=c.get("convnext_fine_d", None),
+                          convnext_stem_d=c.get("convnext_stem_d", None))
     # torch.compile BEFORE accel.prepare so DDP wraps the compiled graph.
     # mode='reduce-overhead' is the sweet spot: CUDA graph capture for static
     # shapes, minimal compile time (~30-60s vs max-autotune's 5+ min).
@@ -500,6 +503,12 @@ if __name__ == "__main__":
     ap.add_argument('--n-layers', type=int, default=None)
     ap.add_argument('--img-size', type=int, default=None)
     ap.add_argument('--convnext', action='store_true')
+    ap.add_argument('--convnext-n-blocks', type=int, default=None,
+                    help='ConvNeXt blocks per stage (default 2). 4 ~= +0.7 M params, +30%% forward.')
+    ap.add_argument('--convnext-fine-d', type=int, default=None,
+                    help='ConvNeXt fine-stage channels (default = d). Pass 96 for 64→96→128 graduated stem→fine→coarse expansion.')
+    ap.add_argument('--convnext-stem-d', type=int, default=None,
+                    help='ConvNeXt stem channels (default 64).')
     ap.add_argument('--compile', action='store_true',
                     help='wrap model with torch.compile(mode="reduce-overhead") '
                          'BEFORE accel.prepare so DDP wraps the compiled graph. '
@@ -538,6 +547,9 @@ if __name__ == "__main__":
     if args.n_layers is not None: cfg['n_layers'] = args.n_layers
     if args.img_size is not None: cfg['img_size'] = args.img_size
     if args.convnext: cfg['use_convnext'] = True
+    if args.convnext_n_blocks is not None: cfg['convnext_n_blocks'] = args.convnext_n_blocks
+    if args.convnext_fine_d   is not None: cfg['convnext_fine_d']   = args.convnext_fine_d
+    if args.convnext_stem_d   is not None: cfg['convnext_stem_d']   = args.convnext_stem_d
     if args.compile:  cfg['compile'] = True
     if args.deform_mode is not None: cfg['deform_mode'] = args.deform_mode
     if args.train_size is not None: cfg['train_size'] = args.train_size
