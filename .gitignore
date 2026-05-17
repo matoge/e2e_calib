@@ -19,3 +19,4 @@ build/
 .DS_Store
 experiments/*/best_model.pt
 experiments/*/train.log
+infra/.cml_setup.sh

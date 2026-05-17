@@ -12,7 +12,7 @@ from scripts.ba.ba_multicam_corr import solve_dofs, _DOF_PRESETS
 
 
 def main():
-    exp = 'km_wv_8gpu_200ep_os4'
+    exp = 'km_only_15deg_06m_n2_img128_fp16_dgx2'
     cache = '/cache/kamikado_v3_tiled'
     ds, c = make_ds(exp, cache, split='val', oversample=1)
     model = load_calib_model(exp)
@@ -56,3 +56,13 @@ def main():
 
 if __name__ == '__main__':
     main()
+    # also dump GT pert_vec for δ comparison
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+    from scripts.inference.infer_pipeline import make_ds
+    ds, c = make_ds('km_only_15deg_06m_n2_img128_fp16_dgx2', '/cache/kamikado_v3_tiled', split='val', oversample=1)
+    sample = ds[0]
+    if len(sample) >= 7:
+        pert_vec = sample[6].numpy()
+        print(f'\nGT pert_vec (tx,ty,tz,yaw,pitch,roll,dfx_pct,dfy_pct):')
+        print(f'  {pert_vec}')

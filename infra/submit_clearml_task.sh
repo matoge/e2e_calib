@@ -68,19 +68,19 @@ done
 
 ENTRY="accelerate launch --num_processes=${NUM_PROCESSES} --mixed_precision=fp16 ${SCRIPT} ${ARGS}"
 
-CUDA_LINE=""
+CUDA_LINE="true"
 if [[ -n "${CUDA_DEVICES:-}" ]]; then
   CUDA_LINE="export CUDA_VISIBLE_DEVICES=${CUDA_DEVICES}"
   echo "[info] pinning GPUs via CUDA_VISIBLE_DEVICES=${CUDA_DEVICES}"
 fi
 
-BASH_SETUP=$(mktemp /tmp/cml_setup.XXXXXX.sh)
+BASH_SETUP="$(pwd)/infra/.cml_setup.sh"
+# Bind-mount mode (legacy/working): host has the repo at /home/hfunaya/git/
+# e2e_calib (rsynced before submit), agent docker mounts it at /workspace,
+# bash_setup just `cd /workspace && exec ...`. One-liner: agent v3 joins
+# every newline with `;` which breaks multi-line bash control flow.
 cat > "$BASH_SETUP" <<EOSETUP
-#!/bin/bash
-set -euo pipefail
-${CUDA_LINE}
-cd /workspace
-exec ${ENTRY}
+${CUDA_LINE} && cd /workspace && exec ${ENTRY}
 EOSETUP
 
 echo "[info] submitting:"

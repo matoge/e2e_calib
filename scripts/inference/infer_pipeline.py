@@ -96,7 +96,10 @@ def infer_one(model, ds, idx: int, device: str = 'cuda', seed: int | None = None
         point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
     else:
         point_in = dist_uvd[..., :3]
-    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+    # fp16 to match training (--mixed_precision=fp16). bf16 silently runs as
+    # fp32-emulated on V100 (sm_70) and shifts the per-pt Δuv distribution
+    # away from what the model actually saw during training.
+    with torch.autocast(device_type='cuda', dtype=torch.float16):
         out = model(img_in,
                     point_in.unsqueeze(0).to(device),
                     key_padding_mask=pad,
