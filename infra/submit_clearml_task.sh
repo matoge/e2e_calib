@@ -232,7 +232,7 @@ else
     --name        "$NAME" \
     --queue       "$QUEUE" \
     --docker      "$DOCKER_IMAGE" \
-    --docker_args "--shm-size=64g --gpus $GPU_SPEC -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
+    --docker_args "--shm-size=64g --gpus $GPU_SPEC -v /mnt/fsx:/mnt/fsx -v /home/hfunaya:/home/hfunaya -v /dev/shm:/dev/shm --ipc=host -e CLEARML_AGENT_SKIP_PIP_VENV_INSTALL=1 -e PYTHONPATH=/workspace" \
     --script      "$SCRIPT" \
     --cwd         "." \
     --packages    "clearml" \

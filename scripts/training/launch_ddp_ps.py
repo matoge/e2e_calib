@@ -188,14 +188,41 @@ def main():
             num_gpus, mp, target, passthrough = _parse_known(restored)
     passthrough = _require_cache(passthrough)
 
-    # Resolve repo root = parent of scripts/ (same layout on dgx1 and dgx2).
-    here = Path(__file__).resolve()
-    repo_root = here.parents[2]
-    target_abs = (repo_root / target).resolve()
-    if not target_abs.exists():
-        print(f"[launch_ddp_ps] ERR: target script not found: {target_abs}",
+    # Resolve repo root. On dgx1/2 host runs we are at <repo>/scripts/training/
+    # so parents[2] works. But clearml-agent v3.0.1 copies just the launcher to
+    # /root/.clearml/venvs-builds/scripts/training/launch_ddp_ps.py and clones
+    # the actual repo elsewhere — so parents[2] points at /root/.clearml/...
+    # where the target script does NOT exist. Walk up looking for a directory
+    # that actually contains the target script; fall back to scanning known
+    # agent layout dirs.
+    def _find_repo_root_with(target_rel: str) -> Path | None:
+        # 1) walk up from this file
+        here = Path(__file__).resolve()
+        for parent in [here.parents[2], *here.parents]:
+            if (parent / target_rel).exists():
+                return parent
+        # 2) clearml-agent v3 docker layout: /root/.clearml/venvs-builds/<id>/code/
+        for base in (Path('/root/.clearml/venvs-builds'),
+                      Path('/workspace')):
+            if not base.exists():
+                continue
+            cand = base / target_rel
+            if cand.exists():
+                return base
+            for child in base.iterdir():
+                code_dir = child / 'code'
+                if (code_dir / target_rel).exists():
+                    return code_dir
+                if (child / target_rel).exists():
+                    return child
+        return None
+
+    repo_root = _find_repo_root_with(target)
+    if repo_root is None:
+        print(f"[launch_ddp_ps] ERR: target script not found anywhere: {target}",
               flush=True)
         sys.exit(2)
+    target_abs = (repo_root / target).resolve()
 
     accelerate_bin = shutil.which("accelerate")
     if accelerate_bin is None:
