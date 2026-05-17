@@ -227,6 +227,20 @@ else
     GPU_SPEC="\"device=${CUDA_DEVICES}\""
     echo "[info] pinning GPUs via CUDA_DEVICES=${CUDA_DEVICES}"
   fi
+  # Explicitly pass --repo/--branch/--commit so the agent does a full clone
+  # rather than treating the script as standalone (which strips other repo
+  # files and breaks launch_ddp_ps.py's target-script lookup).
+  REPO_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+  BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
+  COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
+  REPO_FLAGS=""
+  if [[ -n "$REPO_URL" ]]; then
+    REPO_FLAGS="--repo $REPO_URL --branch $BRANCH"
+    if [[ -n "$COMMIT" ]]; then
+      REPO_FLAGS="$REPO_FLAGS --commit $COMMIT"
+    fi
+    echo "[info] full-clone mode: $REPO_URL @ $BRANCH ($COMMIT)"
+  fi
   clearml-task \
     --project     "$PROJECT" \
     --name        "$NAME" \
@@ -236,5 +250,6 @@ else
     --script      "$SCRIPT" \
     --cwd         "." \
     --packages    "clearml" \
+    $REPO_FLAGS \
     --args        $CT_ARGS
 fi
