@@ -207,7 +207,9 @@ def _run_model(pkt: dict) -> np.ndarray:
     else:
         dist_in = dist[..., :3]
     pad = torch.zeros(1, dist.shape[1], dtype=torch.bool, device=DEVICE)
-    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+    # fp16 to match training (--mixed_precision=fp16). bf16 silently runs
+    # as fp32-emulated on V100 (sm_70) and shifts the input distribution.
+    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.float16):
         out = MODEL(img, dist_in, key_padding_mask=pad,
                     vfp=pkt['vfp'].view(1).to(DEVICE),
                     bucket_uvd=pkt['bucket_uvd'].unsqueeze(0).to(DEVICE),

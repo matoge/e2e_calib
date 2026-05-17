@@ -166,12 +166,11 @@ def infer_tiles(model, img: np.ndarray, uv: np.ndarray, z: np.ndarray, K: np.nda
                  ba_cfg: dict, device: torch.device, y_cam: np.ndarray | None = None,
                  intensity: np.ndarray | None = None,
                  bucket_rng: np.random.RandomState | None = None):
-    # Inference must be deterministic: same image+pts in → same params out.
-    # Training relies on the global numpy RNG to randomise per-cell point
-    # selection (regularisation), but at inference we want a fixed-seed
-    # shuffle so subsampling cells doesn't drift run-to-run.
-    if bucket_rng is None:
-        bucket_rng = np.random.RandomState(0)
+    # Use the global numpy RNG (not a fixed seed) so inference matches
+    # the trainer's val-pass distribution exactly. The trainer never
+    # switches model.eval(); fixing the seed here changed which K points
+    # each cell keeps and biased the model's output away from the
+    # distribution it was trained on.
     """Batched sliding-tile inference: one forward call per frame (B = n_tiles)
     instead of one per tile. Returns (uv_full[N,2], par[N,5], z_cam[N]) in
     FULL-image px units, identical contract to the per-tile version.
