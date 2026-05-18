@@ -459,12 +459,19 @@ class PandaSetCalibDatasetFull(Dataset):
         valid_in_image = ((z > 0.5) &
                           (uv_full[:,0] >= 0) & (uv_full[:,0] < IW) &
                           (uv_full[:,1] >= 0) & (uv_full[:,1] < IH))
-        # Optional: only consider pivots in the central horizontal band of the
-        # image (sky / road slivers excluded). Implemented as a mask on v.
+        # Optional: keep pivots in a vertical band centred on the vanishing
+        # point (= principal point cy from K). On a vehicle camera the
+        # geometric center 0.5*IH is below the horizon — using cy keeps
+        # objects (cars, people, signs) in frame instead of road / hood.
+        # Falls back to 0.5*IH if K is missing.
         if self.center_band > 0.0:
-            half = 0.5 * self.center_band
-            v_lo = (0.5 - half) * IH
-            v_hi = (0.5 + half) * IH
+            try:
+                cy = float(K[1, 2])
+            except Exception:
+                cy = 0.5 * IH
+            half = 0.5 * self.center_band * IH
+            v_lo = max(0.0, cy - half)
+            v_hi = min(float(IH), cy + half)
             in_band = (uv_full[:, 1] >= v_lo) & (uv_full[:, 1] < v_hi)
             valid_in_image = valid_in_image & in_band
         # Pivots: must be valid AND in_box. Frustum context still uses all pts.
