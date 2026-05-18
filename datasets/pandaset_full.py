@@ -633,6 +633,84 @@ class PandaSetCalibDatasetFull(Dataset):
 
         return self[random.randint(0, len(self) - 1)]
 
+    # ─── Explicit-perturbation API for eval / BA / multi-tile demos ──────
+    # Same projection / crop / bucketing as __getitem__, but caller supplies
+    # (t_delta, ypr_deg) so multiple tiles of the same frame can share one
+    # rig-level perturbation (= what BA needs). Crop position is the tile's
+    # full extent (u0=v0=0, cs=tile_size) so this works on tile_cutter outputs.
+    def apply_perturbation_explicit(self, idx: int,
+                                     t_delta: np.ndarray,
+                                     ypr_deg: np.ndarray,
+                                     dfx_pct: float = 0.0,
+                                     dfy_pct: float = 0.0):
+        inst = self._load_inst(idx)
+        if 'jpg_bytes' in inst:
+            IH, IW = int(inst['IH']), int(inst['IW'])
+        else:
+            IH, IW = int(inst['img'].shape[-2]), int(inst['img'].shape[-1])
+        K = inst['K_full'].numpy()
+        pts = inst['pts'].numpy()
+        cp  = inst['cam_pos'].numpy()
+        R_gt = inst['R_gt'].numpy()
+        cubs = inst.get('cuboids', [])
+        intensity = inst['intensity'].numpy() if hasattr(inst['intensity'], 'numpy') \
+                    else np.asarray(inst['intensity'])
+        intensity = np.clip(np.asarray(intensity, dtype=np.float32), 0.0, 1.0)
+
+        if 'uv_full' in inst and 'z_cam' in inst:
+            uv_full = inst['uv_full'].numpy()
+            z = inst['z_cam'].numpy()
+        else:
+            T_gt = inst['T_gt'].numpy()
+            homo = np.column_stack([pts, np.ones(len(pts))])
+            pts_cam_gt = (T_gt @ homo.T)[:3].T
+            z = pts_cam_gt[:, 2].astype(np.float32)
+            uv_full = ((K @ pts_cam_gt.T)[:2] / np.maximum(pts_cam_gt[:, 2:].T, 1e-6)).T.astype(np.float32)
+        if 'is_obj' in inst:
+            is_obj_full = inst['is_obj'].numpy().astype(bool)
+        else:
+            is_obj_full = _is_obj_per_point(pts, cubs).astype(bool)
+
+        tile_u0 = int(inst.get('tile_u0', 0))
+        tile_v0 = int(inst.get('tile_v0', 0))
+        if tile_u0 or tile_v0:
+            uv_full = uv_full - np.array([tile_u0, tile_v0], dtype=np.float32)
+        img_full = None if 'jpg_bytes' in inst else inst['img']
+
+        # Crop = the full tile (no random pivot). Pre-filter pts inside the
+        # padded bbox.
+        cs = min(IW, IH)
+        u0 = (IW - cs) // 2
+        v0 = (IH - cs) // 2
+        pad_px = int(cs * 0.10)
+        in_pad = ((uv_full[:, 0] >= u0 - pad_px) & (uv_full[:, 0] < u0 + cs + pad_px) &
+                  (uv_full[:, 1] >= v0 - pad_px) & (uv_full[:, 1] < v0 + cs + pad_px) &
+                  (z > 0.5))
+        cand_idx = np.where(in_pad)[0]
+        if len(cand_idx) < self.min_pts:
+            return None
+        if len(cand_idx) > self.n_full:
+            cand_idx = np.random.choice(cand_idx, size=self.n_full, replace=False)
+        pts_c    = pts[cand_idx]
+        intens_c = intensity[cand_idx]
+        uv_gt_c  = uv_full[cand_idx]
+
+        # Build R_off / cp_off / K_pert from the supplied perturbation.
+        ypr = np.asarray(ypr_deg, dtype=np.float64).reshape(3)
+        t   = np.asarray(t_delta, dtype=np.float64).reshape(3)
+        R_off  = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
+        cp_off = cp + t
+        K_pert = K.copy()
+        if dfx_pct != 0.0: K_pert[0, 0] = K[0, 0] * (1.0 + dfx_pct)
+        if dfy_pct != 0.0: K_pert[1, 1] = K[1, 1] * (1.0 + dfy_pct)
+        pert_vec = np.array([t[0], t[1], t[2], ypr[0], ypr[1], ypr[2],
+                              dfx_pct, dfy_pct], dtype=np.float32)
+        return self.build_window(
+            inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
+            u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
+            tile_u0, tile_v0, img_full, IW, IH,
+        )
+
     # ─── Shared helper used by both training (__getitem__) and inference demos.
     # ─── Takes pre-sampled pts / perturbation / crop, returns the same tuple
     # ─── __getitem__ used to inline-build. Keeping this on the class so the
