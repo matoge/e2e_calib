@@ -203,6 +203,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  zoom_aug: bool = False,
                  rep_strategy: str = 'cell_center',
                  center_band: float = 0.0,
+                 fixed_center_crop: bool = False,
                  preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
@@ -282,6 +283,11 @@ class PandaSetCalibDatasetFull(Dataset):
         # with few lidar points, hard to interpret. Affects pivot pick only;
         # frustum context still uses every visible point.
         self.center_band = float(center_band)
+        # When True, skip pivot/random-crop entirely and just take a cs=
+        # max_crop_px square centred on (W/2, cy). Used by val/eval/demo
+        # to look at "the middle of the image" instead of stratified bg
+        # cells (which often dump sky/road tiles).
+        self.fixed_center_crop = bool(fixed_center_crop)
         # Preload every inst .pt into RAM. The full PS cache is ~1 GB, and
         # torch.load per-sample shows up as ~3.8 ms in cProfile — roughly
         # 40% of the remaining __getitem__ cost once TurboJPEG is in place.
@@ -477,13 +483,22 @@ class PandaSetCalibDatasetFull(Dataset):
         # Pivots: must be valid AND in_box. Frustum context still uses all pts.
         obj_idxs = np.where(is_obj_full & valid_in_image & in_box)[0]
         bg_mask  = (~is_obj_full) & valid_in_image & in_box
-        # 10x5 grid for bg-pivot stratification
+        # 10x5 grid for bg-pivot stratification. Drop the top + bottom GV-band
+        # rows (sky / hood-and-near-road close-up): with GV=5 keep only rows
+        # 1..3 (= mid 60% vertically). Anchored on cy (vanishing point) when
+        # available so a sloped horizon doesn't bias the band off-screen.
         GU, GV = 10, 5
         cell_w = IW / GU; cell_h = IH / GV
         cell_u = np.clip((uv_full[:, 0] / cell_w).astype(int), 0, GU-1)
         cell_v = np.clip((uv_full[:, 1] / cell_h).astype(int), 0, GV-1)
         cell_id_full = cell_v * GU + cell_u
-        bg_cells = np.unique(cell_id_full[bg_mask]) if bg_mask.any() else np.array([], dtype=int)
+        try:
+            cy_row = int(np.clip(K[1, 2] / cell_h, 0, GV - 1))
+        except Exception:
+            cy_row = GV // 2
+        # keep cy_row ± 1 (3 rows out of 5) → drops top sky and bottom hood/road
+        ok_row = (cell_v >= max(0, cy_row - 1)) & (cell_v <= min(GV - 1, cy_row + 1))
+        bg_cells = np.unique(cell_id_full[bg_mask & ok_row]) if (bg_mask & ok_row).any() else np.array([], dtype=int)
 
         S = self.img_size
         # If new cache: defer JPEG decode until crop is chosen (partial decode on the
