@@ -472,6 +472,56 @@ class CLSFramePoseHead(nn.Module):
         return mu, log_sigma, L
 
 
+class InfoHead2x2(nn.Module):
+    """Per-query 2x2 information matrix head.
+
+    Reads the transformer's per-query feature q (B, N, D) and emits
+    W = L Lᵀ ∈ R²ˣ² (PSD) via a Cholesky parameterisation:
+
+        raw  = MLP(q)            ∈ R³  per query
+        L    = [[softplus(raw_0)+ε,           0           ],
+                [        raw_2          , softplus(raw_1)+ε]]
+        W    = L Lᵀ
+
+    No conditioning beyond q — by design (see blog
+    docs/blog/2026-05-20_principled_ml_calib.md §5). The query already
+    carries image+UVD context through the transformer; if it doesn't carry
+    enough for pose-aware trust, we want to find that out.
+
+    Output is the right shape for scripts.ba.ba_torch.solve_pinhole's W
+    argument: (B, N, 2, 2). Use raw.detach() at first to confirm autograd
+    is connected end-to-end through gn_step.
+    """
+    def __init__(self, d: int, eps_diag: float = 1e-3,
+                 hidden_mul: int = 2, init_log_w: float = 0.0):
+        super().__init__()
+        self.eps_diag = float(eps_diag)
+        h = d * hidden_mul
+        self.mlp = nn.Sequential(
+            nn.Linear(d, h), nn.GELU(),
+            nn.Linear(h, h), nn.GELU(),
+            nn.Linear(h, 3),
+        )
+        # Init the last layer so that softplus(0) ≈ 0.69 and the head
+        # starts close to W ≈ 0.5·I — not 0, not huge. init_log_w shifts
+        # this if you want a different starting trust scale.
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.constant_(self.mlp[-1].bias, init_log_w)
+
+    def forward(self, q: torch.Tensor) -> torch.Tensor:
+        raw = self.mlp(q)                                     # (B, N, 3)
+        a   = F.softplus(raw[..., 0]) + self.eps_diag         # (B, N)  L[0,0]
+        b   = F.softplus(raw[..., 1]) + self.eps_diag         # (B, N)  L[1,1]
+        c   = raw[..., 2]                                      # (B, N)  L[1,0] (free)
+        zero = torch.zeros_like(a)
+        # L = [[a, 0], [c, b]]
+        row0 = torch.stack([a,    zero], dim=-1)              # (B, N, 2)
+        row1 = torch.stack([c,    b   ], dim=-1)              # (B, N, 2)
+        L    = torch.stack([row0, row1], dim=-2)              # (B, N, 2, 2)
+        W    = torch.matmul(L, L.transpose(-1, -2))           # (B, N, 2, 2)
+        return W
+
+
 class CalibNetDepth(nn.Module):
     def __init__(self, d: int = D_DIM, img_size: int = 128, in_channels: int = 1,
                  n_layers: int = 3, self_first: bool = False, kv_self_attn: bool = False,
@@ -490,7 +540,8 @@ class CalibNetDepth(nn.Module):
                  use_intensity: bool = True,
                  convnext_n_blocks: int = 2,
                  convnext_fine_d: int | None = None,
-                 convnext_stem_d: int | None = None):
+                 convnext_stem_d: int | None = None,
+                 use_info_head: bool = False):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -570,6 +621,14 @@ class CalibNetDepth(nn.Module):
         # Adding intrinsic params later = swap head + jacobian, body reusable.
         self.frame_pose_head = (CLSFramePoseHead(d, n_dof=frame_pose_dof, full_cov=frame_pose_full_cov)
                                  if use_frame_pose else None)
+        # Per-query 2x2 information matrix head (Phase 1 of principled ML
+        # design — see docs/blog/2026-05-20_principled_ml_calib.md). When
+        # use_info_head=True, forward() returns (per_pt, W) instead of just
+        # per_pt; W is consumed by scripts.ba.ba_torch.solve_pinhole. Old
+        # ckpts load unchanged because info_head's params are absent from
+        # their state_dict (strict=False on load required when flipping the
+        # flag on a frozen ckpt).
+        self.info_head = InfoHead2x2(d) if use_info_head else None
 
         # DDP support: freeze parameters whose forward path is never taken in
         # the current config so find_unused_parameters=False doesn't crash.
@@ -795,5 +854,11 @@ class CalibNetDepth(nn.Module):
         if self.frame_pose_head is not None:
             # q here is the final per-pt feature stack (B, N, D) — input to CLS.
             mu, log_sigma, L = self.frame_pose_head(q, key_padding_mask=key_padding_mask)
+            if self.info_head is not None:
+                W = self.info_head(q)                            # (B, N, 2, 2)
+                return per_pt, (mu, log_sigma, L), W
             return per_pt, (mu, log_sigma, L)
+        if self.info_head is not None:
+            W = self.info_head(q)                                # (B, N, 2, 2)
+            return per_pt, W
         return per_pt
