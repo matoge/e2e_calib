@@ -404,6 +404,32 @@ class PandaSetCalibDatasetFull(Dataset):
         return torch.load(self.inst_dir / self.fnames[i], weights_only=False)
 
     def __getitem__(self, idx: int):
+        # Iterative re-roll on failure. The inner `_build_one_window` returns
+        # None when the chosen idx has no valid window after self.max_tries
+        # bucket samples. Previously this fallback was a *recursive* call
+        # `return self[random.randint(...)]`, which blew the Python stack
+        # (~978 deep RecursionError) when many indices in a row were bad.
+        N = len(self)
+        seen = {idx}
+        for _ in range(1024):
+            built = self._build_one_window(idx)
+            if built is not None:
+                return built
+            # re-roll an unseen idx
+            for _ in range(128):
+                j = random.randint(0, N - 1)
+                if j not in seen:
+                    seen.add(j)
+                    idx = j
+                    break
+            else:
+                break
+        raise RuntimeError(
+            f"no valid window after 1024 re-rolls; "
+            f"center_band={self.center_band}, min_pts={self.min_pts}"
+        )
+
+    def _build_one_window(self, idx: int):
         inst = self._load_inst(idx)
         # New cache stores jpg_bytes; old cache stored decoded uint8 'img'
         if 'jpg_bytes' in inst:
@@ -470,9 +496,12 @@ class PandaSetCalibDatasetFull(Dataset):
         # geometric center 0.5*IH is below the horizon — using cy keeps
         # objects (cars, people, signs) in frame instead of road / hood.
         # Falls back to 0.5*IH if K is missing.
+        # NOTE: K is in PARENT-image coords; uv_full above was shifted by
+        # (tile_u0, tile_v0) into tile-local. Subtract tile_v0 from cy too,
+        # otherwise on tile caches the band sits off-frame.
         if self.center_band > 0.0:
             try:
-                cy = float(K[1, 2])
+                cy = float(K[1, 2]) - float(tile_v0)
             except Exception:
                 cy = 0.5 * IH
             half = 0.5 * self.center_band * IH
@@ -493,7 +522,8 @@ class PandaSetCalibDatasetFull(Dataset):
         cell_v = np.clip((uv_full[:, 1] / cell_h).astype(int), 0, GV-1)
         cell_id_full = cell_v * GU + cell_u
         try:
-            cy_row = int(np.clip(K[1, 2] / cell_h, 0, GV - 1))
+            cy_local = float(K[1, 2]) - float(tile_v0)
+            cy_row = int(np.clip(cy_local / cell_h, 0, GV - 1))
         except Exception:
             cy_row = GV // 2
         # keep cy_row ± 1 (3 rows out of 5) → drops top sky and bottom hood/road
@@ -631,7 +661,12 @@ class PandaSetCalibDatasetFull(Dataset):
                 continue
             return built
 
-        return self[random.randint(0, len(self) - 1)]
+        # No valid window for this idx after max_tries. Signal to the caller
+        # so the outer loop can re-roll a different idx without recursing
+        # (the previous form `return self[random.randint(...)]` blew the
+        # Python stack on tile caches where many indices in a row had empty
+        # bg_cells, ~978 deep RecursionError).
+        return None
 
     # ─── Explicit-perturbation API for eval / BA / multi-tile demos ──────
     # Same projection / crop / bucketing as __getitem__, but caller supplies
