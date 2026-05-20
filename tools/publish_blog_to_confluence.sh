@@ -89,10 +89,26 @@ for a in "${attachments[@]}"; do echo "         - $a"; done
 
 case "$cmd" in
   create)
+    # Pull title from the first H1 of the md (publisher requires --title).
+    auto_title="$(awk '/^# /{sub(/^# +/, ""); print; exit}' "$md_abs")"
+    if [[ -z "${auto_title:-}" ]]; then
+      auto_title="$(basename "${md_abs%.md}")"
+    fi
+    # Strip any caller-supplied --title so the auto one wins; otherwise
+    # forward extras as-is.
+    extra_args=()
+    skip_next=0
+    user_title=""
+    for arg in "$@"; do
+      if [[ $skip_next -eq 1 ]]; then user_title="$arg"; skip_next=0; continue; fi
+      if [[ "$arg" == "--title" ]]; then skip_next=1; continue; fi
+      extra_args+=("$arg")
+    done
+    title="${user_title:-$auto_title}"
     exec python3 "$LOOM_PUB" create "$md_abs" \
-      --blog --auto-title \
+      --blog --title "$title" \
       --attachments "${attachments[@]}" \
-      "$@"
+      "${extra_args[@]}"
     ;;
   update)
     exec python3 "$LOOM_PUB" update "$page_id" "$md_abs" \
