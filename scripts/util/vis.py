@@ -21,20 +21,35 @@ from datasets.pandaset_full import PandaSetCalibDatasetFull, collate_full
 
 def _build_loader(cache: str, ds_kw: dict, n: int) -> DataLoader:
     ds = PandaSetCalibDatasetFull(cache, split='val', **ds_kw)
-    return DataLoader(Subset(ds, list(range(n))), batch_size=n,
+    # batch_size=1 so `ds._last_crop` after each yield reflects this sample;
+    # we collect per-sample crops + decoded full images for the thumbnail
+    # inset. Batching is fine to drop here — vis is N=10ish, not perf-critical.
+    return DataLoader(Subset(ds, list(range(n))), batch_size=1,
                        num_workers=0, collate_fn=collate_full,
                        shuffle=False), ds
 
 
 def _render(img_t, true_uv, dist_uv, pred_uv, sx, sy, rho, out_path: Path,
-             title: str = ''):
+             title: str = '', thumb_full: np.ndarray | None = None,
+             crop_box: tuple | None = None):
+    """Render one calibration sample. If thumb_full + crop_box given, draw a
+    small full-image preview in the upper-left with a red rectangle showing
+    where this crop was taken from."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Ellipse
+    from matplotlib.patches import Ellipse, Rectangle
     img = img_t.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
     S = img.shape[0]
-    fig, ax = plt.subplots(figsize=(6, 6), dpi=110)
+    # Layout: left thumbnail (where in the full frame this crop is) +
+    # right main panel (the prediction image).
+    fig = plt.figure(figsize=(8, 6), dpi=110)
+    if crop_box is not None:
+        ax_t = fig.add_axes([0.02, 0.10, 0.30, 0.80])
+        ax = fig.add_axes([0.36, 0.04, 0.62, 0.92])
+    else:
+        ax_t = None
+        ax = fig.add_axes([0.04, 0.04, 0.92, 0.92])
     ax.imshow(img)
     valid = ~((dist_uv[:, 0] == 0) & (dist_uv[:, 1] == 0))
     if valid.any():
@@ -75,8 +90,23 @@ def _render(img_t, true_uv, dist_uv, pred_uv, sx, sy, rho, out_path: Path,
                     zorder=7, label='pred')
     ax.set_xlim(0, S); ax.set_ylim(S, 0); ax.axis('off')
     ax.set_title(title, fontsize=8)
-    ax.legend(loc='lower right', fontsize=7)
-    plt.tight_layout(pad=0.2)
+    ax.legend(loc='lower right', fontsize=7, framealpha=0.9)
+    # Thumbnail: black canvas with a red rectangle = where this crop came
+    # from inside the FULL parent frame. crop_box is (u0_parent, v0_parent,
+    # cs, parent_W, parent_H) — when parent_W/H aren't known we fall back
+    # to (cs, cs) which makes the rectangle fill the box (still informative
+    # for crop_in_tile cases where u0/v0 are tile-local).
+    if ax_t is not None and crop_box is not None:
+        u0, v0, cs = crop_box[:3]
+        IW = crop_box[3] if len(crop_box) > 3 else cs
+        IH = crop_box[4] if len(crop_box) > 4 else cs
+        ax_t.set_facecolor('black')
+        ax_t.add_patch(Rectangle((u0, v0), cs, cs, fill=False,
+                                   edgecolor='red', linewidth=1.6))
+        ax_t.set_xticks([]); ax_t.set_yticks([])
+        ax_t.set_xlim(0, IW); ax_t.set_ylim(IH, 0)
+        ax_t.set_aspect('equal')
+        for s in ax_t.spines.values(): s.set_edgecolor('white'); s.set_linewidth(0.5)
     fig.savefig(out_path, dpi=96)
     plt.close(fig)
 
@@ -94,36 +124,56 @@ def visualize(model, exp_dir, cache: str, epoch: int,
         old.unlink()
 
     loader, ds = _build_loader(cache, ds_kw, n)
-    batch = next(iter(loader))
-    imgs, true_uvd, dist_uvd, pad_mask, vfp, b_uvd, b_v = batch[:7]
-    imgs_g = imgs.to(device).float().div(255.0)
-    true_uvd_g = true_uvd.to(device); dist_uvd_g = dist_uvd.to(device)
-    pad_mask_g = pad_mask.to(device); vfp_g = vfp.to(device)
-    b_uvd_g = b_uvd.to(device); b_v_g = b_v.to(device)
     use_intensity = bool(getattr(model, 'use_intensity', False))
-    point_in = (torch.cat([dist_uvd_g[..., :3], dist_uvd_g[..., 4:5]], -1)
-                  if use_intensity else dist_uvd_g[..., :3])
-    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=amp_dtype):
-        params = model(imgs_g, point_in, key_padding_mask=pad_mask_g,
-                        vfp=vfp_g, bucket_uvd=b_uvd_g, bucket_valid=b_v_g)
-    p = params.float().cpu().numpy()        # (B, Nmax, 5)
-    dist_uv_b = dist_uvd[..., :2].numpy()
-    true_uv_b = true_uvd[..., :2].numpy()
-    pred_uv_b = dist_uv_b + p[..., :2]
-    sx_b = np.exp(p[..., 2]); sy_b = np.exp(p[..., 3])
-    rho_b = np.tanh(p[..., 4])
-
-    for k in range(imgs.shape[0]):
-        valid = ~((dist_uv_b[k, :, 0] == 0) & (dist_uv_b[k, :, 1] == 0))
+    k = 0
+    for batch in loader:
+        # batch_size=1 so each iteration is one sample with its own
+        # ds._last_crop. Decode the full frame for the thumbnail inset.
+        imgs, true_uvd, dist_uvd, pad_mask, vfp, b_uvd, b_v = batch[:7]
+        crop = getattr(ds, '_last_crop', None)
+        # Resolve parent-frame extent + tile offset so the thumbnail rectangle
+        # lands at the true position inside the full sensor image. Parent
+        # size: 2*cx, 2*cy from K_full (typical pinhole). Tile origin:
+        # inst['tile_u0'/'tile_v0'] (0 if cache wasn't tiled).
+        parent_box = None
+        if crop is not None:
+            try:
+                inst = ds._load_inst(k)
+                K_full = inst['K_full'].numpy()
+                pW = int(round(K_full[0, 2] * 2))
+                pH = int(round(K_full[1, 2] * 2))
+                tu0 = int(inst.get('tile_u0', 0))
+                tv0 = int(inst.get('tile_v0', 0))
+                parent_box = (crop['u0'] + tu0, crop['v0'] + tv0,
+                              crop['cs'], pW, pH)
+            except Exception:
+                parent_box = None
+        imgs_g = imgs.to(device).float().div(255.0)
+        dist_uvd_g = dist_uvd.to(device)
+        pad_mask_g = pad_mask.to(device); vfp_g = vfp.to(device)
+        b_uvd_g = b_uvd.to(device); b_v_g = b_v.to(device)
+        point_in = (torch.cat([dist_uvd_g[..., :3], dist_uvd_g[..., 4:5]], -1)
+                      if use_intensity else dist_uvd_g[..., :3])
+        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=amp_dtype):
+            params = model(imgs_g, point_in, key_padding_mask=pad_mask_g,
+                            vfp=vfp_g, bucket_uvd=b_uvd_g, bucket_valid=b_v_g)
+        p = params[0].float().cpu().numpy()
+        dist_uv = dist_uvd[0, :, :2].numpy()
+        true_uv = true_uvd[0, :, :2].numpy()
+        pred_uv = dist_uv + p[:, :2]
+        sx = np.exp(p[:, 2]); sy = np.exp(p[:, 3]); rho = np.tanh(p[:, 4])
+        valid = ~((dist_uv[:, 0] == 0) & (dist_uv[:, 1] == 0))
         if not valid.any():
-            continue
-        err_pre  = float(np.linalg.norm(dist_uv_b[k, valid] - true_uv_b[k, valid],
-                                          axis=1).mean())
-        err_post = float(np.linalg.norm(pred_uv_b[k, valid] - true_uv_b[k, valid],
-                                          axis=1).mean())
-        title = (f'ep{epoch:03d} k={k:02d}  N={int(valid.sum())}  '
+            k += 1; continue
+        err_pre  = float(np.linalg.norm(dist_uv[valid] - true_uv[valid], axis=1).mean())
+        err_post = float(np.linalg.norm(pred_uv[valid] - true_uv[valid], axis=1).mean())
+        crop_box = parent_box
+        cs_title = f' cs={int(crop["cs"])}' if crop is not None else ''
+        title = (f'ep{epoch:03d} k={k:02d}{cs_title}  N={int(valid.sum())}  '
                  f'pre={err_pre:.2f}→post={err_post:.2f}px')
         log(f'  vis k={k:02d} N={int(valid.sum())}  pre={err_pre:.2f}  post={err_post:.2f}')
-        _render(imgs[k], true_uv_b[k], dist_uv_b[k], pred_uv_b[k],
-                 sx_b[k], sy_b[k], rho_b[k],
-                 out_dir / f'idx{k:02d}.png', title)
+        _render(imgs[0], true_uv, dist_uv, pred_uv,
+                 sx, sy, rho,
+                 out_dir / f'idx{k:02d}.png', title,
+                 thumb_full=None, crop_box=crop_box)
+        k += 1

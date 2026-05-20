@@ -511,6 +511,12 @@ async function run() {
     tb.innerHTML += `<tr><td class=label>${nm}</td><td>${dp.toFixed(4)}</td><td>${sp.toFixed(4)}</td><td>${dg!==null?dg.toFixed(4):'—'}</td><td>${err!==null?err.toFixed(4):'—'}</td></tr>`;
   });
 }
+function show_tab(name) {
+  for (const t of ['full', 'tile']) {
+    document.getElementById('tab_' + t).classList.toggle('active', t === name);
+    document.getElementById('tab_btn_' + t).classList.toggle('active', t === name);
+  }
+}
 function random_seed() {
   document.getElementById('seed').value = Math.floor(Math.random() * 100000);
   run();
