@@ -1,0 +1,1 @@
+# image already has these — empty requirements file makes clearml-task happy
