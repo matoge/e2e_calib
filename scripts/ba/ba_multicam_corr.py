@@ -347,13 +347,28 @@ def _jac_tz(X, Y, Z, uv, K):
 
 
 def _jac_dfx(X, Y, Z, uv, K):
-    fx, cx = K[0, 0], K[0, 2]
-    return (uv[:, 0] - cx) / fx, np.zeros_like(Z)
+    # dfx is a FRACTIONAL intrinsic perturbation: fx_new = fx · (1 + dfx).
+    # Then u_new = (u - cx)·(1 + dfx) + cx, so ∂u/∂dfx = (u - cx).
+    # Earlier version divided by fx; that was a sign of mixed conventions
+    # (absolute-px vs fractional). Production samples dfx as a fraction
+    # (max_fx_pct), so the Jacobian here must match that.
+    cx = K[0, 2]
+    return (uv[:, 0] - cx), np.zeros_like(Z)
 
 
 def _jac_dfy(X, Y, Z, uv, K):
-    fy, cy = K[1, 1], K[1, 2]
-    return np.zeros_like(Z), (uv[:, 1] - cy) / fy
+    cy = K[1, 2]
+    return np.zeros_like(Z), (uv[:, 1] - cy)
+
+
+def _jac_dcx(X, Y, Z, uv, K):
+    # ∂u/∂(Δcx) = 1, ∂v/∂(Δcx) = 0. cx perturbation is in pixels.
+    return np.ones_like(Z), np.zeros_like(Z)
+
+
+def _jac_dcy(X, Y, Z, uv, K):
+    # ∂u/∂(Δcy) = 0, ∂v/∂(Δcy) = 1. cy perturbation is in pixels.
+    return np.zeros_like(Z), np.ones_like(Z)
 
 
 def _jac_df_common(X, Y, Z, uv, K):
@@ -373,6 +388,8 @@ DOF_JAC = {
     "tz":        _jac_tz,
     "dfx":       _jac_dfx,
     "dfy":       _jac_dfy,
+    "dcx":       _jac_dcx,
+    "dcy":       _jac_dcy,
     "df_common": _jac_df_common,
 }
 

@@ -285,3 +285,56 @@ def gaussian2d_nll(params: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
     nll = 0.5 * (log_det + maha)  # + const (log 2π, ignored)
     return nll.mean()
+
+
+def compute_calibnet_loss(model_out, gt_uv, valid_mask, *, pert_vec=None,
+                           frame_pose_weight: float = 0.5):
+    """Unified per-pt + frame-pose loss for CalibNetDepth.
+
+    Used by both train_ps_v3 (single-GPU) and train_ps_v3_ddp (Accelerate).
+
+    Args:
+        model_out: model(...) return value. Either `params` (B, N, 5) for
+            per-pt only, or `(params, head_out)` where `head_out` is
+            either `(μ, log_σ)` or `(μ, log_σ, L)` from the CLS frame-pose
+            head.
+        gt_uv:       (B, N, 2) target Δuv.
+        valid_mask:  (B, N) bool, True where the point is valid.
+        pert_vec:    (B, K) perturbation label for the frame-pose head.
+            Only required when `use_frame_pose=True`. K must be ≥ n_dof
+            of the head; the leading n_dof entries are taken as the
+            target.
+        frame_pose_weight: scalar weight on the frame-pose NLL term.
+
+    Returns:
+        (loss, loss_pt, loss_fr) — `loss_fr` is None when the frame-pose
+        head is disabled or pert_vec is missing.
+    """
+    frame_mu = frame_logsig = frame_L = None
+    if isinstance(model_out, tuple):
+        params, head_out = model_out
+        if len(head_out) == 3:
+            frame_mu, frame_logsig, frame_L = head_out
+        else:
+            frame_mu, frame_logsig = head_out
+    else:
+        params = model_out
+
+    loss_pt = gaussian2d_nll(params[valid_mask], gt_uv[valid_mask])
+    loss = loss_pt
+
+    loss_fr = None
+    if frame_mu is not None and pert_vec is not None:
+        resid = pert_vec[..., :frame_mu.shape[-1]] - frame_mu  # (B, n_dof)
+        if frame_L is not None:
+            z = torch.linalg.solve_triangular(
+                frame_L, resid.unsqueeze(-1), upper=False).squeeze(-1)
+            fr_nll = 0.5 * (z * z).sum(dim=-1) + frame_logsig.sum(dim=-1)
+        else:
+            inv_var = torch.exp(-2.0 * frame_logsig)
+            fr_nll  = 0.5 * (resid * resid * inv_var).sum(dim=-1) \
+                       + frame_logsig.sum(dim=-1)
+        loss_fr = fr_nll.mean()
+        loss = loss + float(frame_pose_weight) * loss_fr
+
+    return loss, loss_pt, loss_fr, params
