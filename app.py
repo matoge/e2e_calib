@@ -6,7 +6,9 @@ and depth-aware covariance (?mode=depth) modes.
 import io, base64, os, re, torch, numpy as np, importlib.util
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches, matplotlib.patheffects as pe
-from flask import Flask, jsonify, request, send_from_directory, redirect
+from flask import (Flask, jsonify, request, send_from_directory, redirect,
+                   abort)
+from werkzeug.utils import secure_filename
 from pathlib import Path
 
 from datasets.synthetic import (make_image_and_points, make_image_and_points_multi,
@@ -53,8 +55,14 @@ def _get_ns_ps_dataset():
     return _ns_ps_dataset
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+# 1 GB cap per request — phone-recorded ZIPs are typically 200-800 MB.
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 DEVICE   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMG_SIZE = 128
+
+# Where /api/upload writes ZIPs. Match the existing manual drop-box at
+# ~/cache/kamikado (Windows-side phone capture lands here).
+UPLOAD_DIR = Path.home() / "cache" / "kamikado"
 _models  = {}   # cache per ckpt path
 _exp_cfg_cache = {}  # cache parsed experiment configs
 
@@ -598,6 +606,54 @@ def model_graph():
     threading.Thread(target=_start, daemon=True).start()
     import time; time.sleep(1)
     return redirect("http://localhost:5002", code=302)
+
+
+# ─── ZIP upload (LAN-only, no auth) ──────────────────────────────────
+# Drops the uploaded file into ~/cache/kamikado/ as-is. Replaces existing
+# files of the same name. Used to retire the Google-Drive hop for phone
+# captures.
+
+def _safe_zip_path(filename: str) -> Path:
+    if not filename:
+        abort(400, description="missing filename")
+    safe = secure_filename(filename)
+    if not safe.lower().endswith(".zip"):
+        abort(400, description="only .zip files accepted")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    return UPLOAD_DIR / safe
+
+
+@app.route("/api/upload_list")
+def api_upload_list():
+    """List ZIPs currently in UPLOAD_DIR (name + size + mtime)."""
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    out = []
+    for p in sorted(UPLOAD_DIR.glob("*.zip")):
+        st = p.stat()
+        out.append({
+            "name":  p.name,
+            "size":  st.st_size,
+            "mtime": int(st.st_mtime),
+        })
+    return jsonify({"dir": str(UPLOAD_DIR), "files": out})
+
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    """Multipart: field name 'file'. Saves into UPLOAD_DIR, overwrites."""
+    f = request.files.get("file")
+    if f is None:
+        abort(400, description="form field 'file' missing")
+    dst = _safe_zip_path(f.filename)
+    f.save(str(dst))
+    st = dst.stat()
+    return jsonify({"ok": True, "name": dst.name, "size": st.st_size,
+                    "path": str(dst)})
+
+
+@app.route("/upload")
+def upload_page():
+    return send_from_directory("static", "upload.html")
 
 
 if __name__ == "__main__":

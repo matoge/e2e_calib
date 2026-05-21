@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kamikado upload</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d1117; --card: #12171e; --line: #2d3742;
+    --ink: #e8edf2; --dim: #7a8593; --acc: #4ff0c4;
+    --warn: #f0b84f; --err: #ff6a5c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    min-height: 100vh; padding: 32px 24px;
+  }
+  h1 {
+    font-family: 'JetBrains Mono', monospace; font-weight: 600;
+    font-size: 18px; color: var(--acc); letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 22px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 6px; padding: 22px; max-width: 740px;
+    margin-bottom: 18px;
+  }
+  .drop {
+    border: 1.5px dashed var(--line); border-radius: 6px;
+    padding: 28px; text-align: center; transition: 0.15s ease;
+    cursor: pointer; background: rgba(79,240,196,0.02);
+  }
+  .drop.over { border-color: var(--acc); background: rgba(79,240,196,0.06); }
+  .drop p { margin-bottom: 10px; font-size: 13px; color: var(--dim); }
+  .drop strong { color: var(--ink); font-family: 'JetBrains Mono', monospace; }
+  input[type=file] { display: none; }
+  button {
+    background: var(--acc); color: #001b14; border: none;
+    padding: 9px 18px; font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; font-size: 12px; letter-spacing: 0.05em;
+    border-radius: 4px; cursor: pointer; text-transform: uppercase;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .row {
+    display: flex; align-items: center; gap: 12px; padding: 8px 0;
+    border-bottom: 1px solid var(--line); font-size: 13px;
+  }
+  .row:last-child { border-bottom: none; }
+  .name { flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  .size { color: var(--dim); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+  .bar {
+    flex: 0 0 180px; height: 4px; background: var(--line);
+    border-radius: 2px; overflow: hidden;
+  }
+  .fill { height: 100%; background: var(--acc); width: 0%; transition: width 0.2s; }
+  .status { font-size: 11px; font-family: 'JetBrains Mono', monospace;
+            min-width: 70px; text-align: right; color: var(--dim); }
+  .status.ok   { color: var(--acc); }
+  .status.err  { color: var(--err); }
+  table { width: 100%; border-collapse: collapse; }
+  td, th {
+    text-align: left; padding: 6px 8px; font-size: 12px;
+    border-bottom: 1px solid var(--line);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  th { color: var(--dim); font-weight: 500; }
+  td.size { text-align: right; color: var(--dim); }
+  .h2 {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    color: var(--dim); margin-bottom: 10px; letter-spacing: 0.04em;
+  }
+  .path {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--acc); margin-bottom: 14px;
+  }
+  pre.api {
+    background: #0a0e13; border: 1px solid var(--line); border-radius: 4px;
+    padding: 12px 14px; overflow-x: auto;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--ink); line-height: 1.55; margin: 8px 0 4px;
+  }
+  pre.api .c { color: var(--dim); }
+  pre.api .k { color: var(--acc); }
+  pre.api .w { color: var(--warn); }
+  .api-note { font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .api-note code {
+    font-family: 'JetBrains Mono', monospace; color: var(--ink);
+    background: #0a0e13; padding: 1px 5px; border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+  <h1>kamikado upload</h1>
+  <div class="sub">phone-capture ZIPs land directly in the dataset cache. LAN-only, no auth.</div>
+
+  <div class="card">
+    <div class="drop" id="drop">
+      <p>drop ZIP files here, or</p>
+      <button id="pickBtn">choose files</button>
+      <input id="picker" type="file" accept=".zip" multiple>
+      <p style="margin-top: 12px; font-size: 11px;">existing names are <strong>overwritten</strong>.</p>
+    </div>
+    <div id="queue" style="margin-top: 14px;"></div>
+  </div>
+
+  <div class="card">
+    <div class="h2">current zips</div>
+    <div class="path" id="dirPath">…</div>
+    <table>
+      <thead><tr><th>name</th><th class="size">size</th><th>mtime</th></tr></thead>
+      <tbody id="listBody"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="h2">api</div>
+    <p class="api-note">
+      base URL: <code id="baseUrl">…</code> &nbsp;·&nbsp;
+      LAN-only, no auth. <code>.zip</code> only. existing names overwrite.
+    </p>
+
+    <p class="api-note" style="margin-top: 14px;"><strong style="color:var(--ink)">POST /api/upload</strong> &nbsp; multipart, field <code>file</code> &nbsp;→&nbsp; <code>{name, size, mtime}</code></p>
+<pre class="api"><span class="c"># curl</span>
+curl -F <span class="k">"file=@./capture.zip"</span> <span id="curlPost">…</span>/api/upload
+
+<span class="c"># Python</span>
+<span class="k">import</span> requests
+r = requests.post(<span id="pyBase">…</span> + <span class="k">"/api/upload"</span>,
+                  files={<span class="k">"file"</span>: open(<span class="k">"capture.zip"</span>, <span class="k">"rb"</span>)})
+print(r.json())
+
+<span class="c"># PowerShell (Windows)</span>
+curl.exe -F <span class="k">"file=@C:\path\capture.zip"</span> <span id="psPost">…</span>/api/upload</pre>
+
+    <p class="api-note" style="margin-top: 14px;"><strong style="color:var(--ink)">GET /api/upload_list</strong> &nbsp;→&nbsp; <code>{dir, files: [{name, size, mtime}]}</code></p>
+<pre class="api">curl <span id="curlGet">…</span>/api/upload_list</pre>
+
+    <p class="api-note" style="margin-top: 10px;">
+      errors: <span class="w">400</span> non-zip / missing <code>file</code> field &nbsp;·&nbsp;
+      <span class="w">413</span> body &gt; 1.5 GB
+    </p>
+  </div>
+
+<script>
+const drop   = document.getElementById('drop');
+const picker = document.getElementById('picker');
+const pickBtn = document.getElementById('pickBtn');
+const queue  = document.getElementById('queue');
+const listBody = document.getElementById('listBody');
+const dirPath = document.getElementById('dirPath');
+
+pickBtn.onclick = (e) => { e.stopPropagation(); picker.click(); };
+drop.onclick = () => picker.click();
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = (e) => {
+  e.preventDefault(); drop.classList.remove('over');
+  uploadFiles(e.dataTransfer.files);
+};
+picker.onchange = () => uploadFiles(picker.files);
+
+function fmtSize(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
+  return n + ' B';
+}
+function fmtTime(epoch) {
+  const d = new Date(epoch * 1000);
+  return d.toISOString().replace('T', ' ').slice(0, 19);
+}
+
+function uploadFiles(files) {
+  for (const f of files) uploadOne(f);
+}
+
+function uploadOne(file) {
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    addRow(file.name, file.size, 'err', 'not a .zip', null);
+    return;
+  }
+  const row = addRow(file.name, file.size, '', '0%', null);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/upload');
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const pct = (e.loaded / e.total) * 100;
+    row.fill.style.width = pct.toFixed(1) + '%';
+    row.status.textContent = pct.toFixed(0) + '%';
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      row.status.textContent = 'done';
+      row.status.classList.add('ok');
+      row.fill.style.width = '100%';
+      refreshList();
+    } else {
+      row.status.textContent = 'err ' + xhr.status;
+      row.status.classList.add('err');
+    }
+  };
+  xhr.onerror = () => {
+    row.status.textContent = 'net err';
+    row.status.classList.add('err');
+  };
+  const fd = new FormData();
+  fd.append('file', file);
+  xhr.send(fd);
+}
+
+function addRow(name, size, statusClass, statusText, _) {
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.innerHTML = `
+    <span class="name">${name}</span>
+    <span class="size">${fmtSize(size)}</span>
+    <span class="bar"><span class="fill"></span></span>
+    <span class="status ${statusClass || ''}">${statusText}</span>
+  `;
+  queue.appendChild(div);
+  return {
+    fill:   div.querySelector('.fill'),
+    status: div.querySelector('.status'),
+  };
+}
+
+function refreshList() {
+  fetch('/api/upload_list').then(r => r.json()).then(j => {
+    dirPath.textContent = j.dir;
+    listBody.innerHTML = '';
+    for (const f of j.files) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${f.name}</td>
+        <td class="size">${fmtSize(f.size)}</td>
+        <td>${fmtTime(f.mtime)}</td>
+      `;
+      listBody.appendChild(tr);
+    }
+  }).catch(() => {});
+}
+refreshList();
+
+// fill API examples with the actual base URL the user came in on
+(function fillBaseUrl() {
+  const base = window.location.origin;
+  const slots = ['baseUrl', 'curlPost', 'pyBase', 'psPost', 'curlGet'];
+  for (const id of slots) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = id === 'pyBase' ? `"${base}"` : base;
+  }
+})();
+</script>
+</body>
+</html>
