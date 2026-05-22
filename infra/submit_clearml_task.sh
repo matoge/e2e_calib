@@ -66,7 +66,11 @@ done
 [[ -z "$NAME"   ]] && { echo "[err] --name required" >&2;   usage; }
 [[ -z "$SCRIPT" ]] && { echo "[err] --script required" >&2; usage; }
 
-ENTRY="accelerate launch --num_processes=${NUM_PROCESSES} --mixed_precision=fp16 ${SCRIPT} ${ARGS}"
+# Auto-inject --name into the python script args so the on-disk exp dir
+# (`experiments/<CFG['name']>/`) matches the ClearML task name. Prepended
+# so a caller who explicitly passes --name in --args still wins (argparse
+# keeps the last occurrence).
+ENTRY="accelerate launch --num_processes=${NUM_PROCESSES} --mixed_precision=fp16 ${SCRIPT} --name ${NAME} ${ARGS}"
 
 CUDA_LINE="true"
 if [[ -n "${CUDA_DEVICES:-}" ]]; then
