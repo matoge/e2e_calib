@@ -2,7 +2,7 @@
 title: "Principled ML for Camera Calibration: where the network ends and the math begins"
 date: 2026-05-20
 author: Hiroyuki Funaya
-status: Phase 1 + 1.b + 1.c-unlock complete — δ-MSE on KAMIKADO val tiles is **0.0107 deg² (RMSE/axis 0.092°)** with the backbone unfrozen and 12-GPU DDP; same number from a frozen-backbone single-tile run was 0.0066 (Phase 1.b)
+status: Phase 1 + 1.b complete — held-out δ-MSE 2.2× under σ-head on a typical highway tile; no direct W supervision
 ---
 
 # Principled ML for Camera Calibration: where the network ends and the math begins
@@ -135,7 +135,7 @@ itself never tries to output a pose.
 ```
 
 Gradient flows: `δ-MSE → solver → W_i → InfoHead2x2`. Nothing else
-moves. The $\sigma$-head and the $\Delta uv$ head sit in the graph
+moves. The ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_011.png)-head and the $\Delta uv$ head sit in the graph
 unchanged — we just stop using $\Sigma_\sigma$ for pose and use the
 new $W$ instead.
 
@@ -176,7 +176,7 @@ camera it ever sees. Same flow at the image edge under a 28mm lens means
 something completely different from the same flow under a 200° fisheye.
 Standard ML response: add data, hope the network interpolates.
 
-Here, the camera dependence lives entirely in $J_i$ and the projection
+Here, the camera dependence lives entirely in ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_026.png) and the projection
 $\pi(\cdot; K, \mathbf{k})$. The network sees only normalized features.
 Concretely:
 
@@ -213,7 +213,7 @@ well-defined go/no-go gate:
 | #    | Δuv source                  | W source                         | Backbone | Pass condition                                                                |
 | ---- | --------------------------- | -------------------------------- | -------- | ----------------------------------------------------------------------------- |
 | 0    | GT                          | Identity                         | n/a      | $\delta\!\to\!\delta_{gt}$ to numerical precision (math sanity)               |
-| 1    | GT                          | $\sigma$-heuristic (top-K)       | n/a      | known: top-K beats uniform, sets the heuristic baseline                       |
+| 1    | GT                          | ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_030.png)-heuristic (top-K)       | n/a      | known: top-K beats uniform, sets the heuristic baseline                       |
 | **2** | **trained ckpt (frozen)**   | **uniform** vs **top-K**         | **frozen** | reproduce that the trained Δuv has signal, set the freeze-mode baseline       |
 | **3** | **trained ckpt (frozen)**   | **learned info head (new)**      | **frozen** | δ-MSE ≤ top-K baseline → *settles whether the math is a free lunch*           |
 | 4    | trained ckpt (joint)        | learned info head (joint)        | joint   | further reduction over #3                                                     |
@@ -254,7 +254,7 @@ Pass criterion: pick one frame, sample $\sim 100$ random 2-DoF
 perturbations, run
 
 1. solver with $\mathbf{W}=I$ — uniform-trust baseline,
-2. solver with $\mathbf{W}$ from the existing $\sigma$-head (top-K-equivalent
+2. solver with $\mathbf{W}$ from the existing ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_039.png)-head (top-K-equivalent
    weighting),
 3. solver with $\mathbf{W}$ from the new learned head.
 
@@ -272,7 +272,7 @@ the whole point).
 ## 6. Phase 1 — fixed-batch sanity check
 
 Run: `scripts/_debug/overfit_2dof_ba.py`. One kamikado val tile,
-N=100 random ($\omega_x, \omega_y$) draws each $\leq 0.3°$, frozen
+N=100 random ($\omega_x, \omega_y$) draws each $\le 0.3°$, frozen
 `km_wv_wm_dgx2_n4_img128_8gpu_HEAD/best_model.pt`, only the new
 `InfoHead2x2` (~100 k params) is learnable. Loss is $\lVert\delta -
 \delta_{gt}\rVert^2$ where $\delta$ comes from
@@ -301,32 +301,32 @@ $\delta$ targets. The next section answers that.
 
 Run: `scripts/_debug/overfit_2dof_ba_stream.py --idx 17`. Same anchor
 tile, same frozen backbone, same loss, but each gradient step now draws
-B=16 *fresh* ($\omega_x, \omega_y$) and the head is evaluated on a
+B=16 *fresh* (![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_048.png)) and the head is evaluated on a
 held-out batch (N=200) of perturbations sampled once at start and never
 seen during training. The head can no longer memorise: every step
 brings a new target $\delta_{gt}$, so the only way to lower the loss
-is to learn a function $q \to W$ that is correct *across* perturbation
+is to learn a function ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_050.png) that is correct *across* perturbation
 draws.
 
 Anchor tile is val index 17, `00000000_t24.pt` — a typical highway
 crop with a clean vanishing point, vertical lane signs, distant
 buildings, and a foreground of asphalt. This is the regime in which
-the existing per-point $\sigma$-head was designed to work: enough
-vertical edges to give NLL clean low-$\sigma$ points, enough geometric
+the existing per-point ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_051.png)-head was designed to work: enough
+vertical edges to give NLL clean low-![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_052.png) points, enough geometric
 diversity that pose isn't dominated by a single plane. We deliberately
 *don't* pick a degenerate tile — the question is whether we beat the
-$\sigma$-head where the $\sigma$-head is at its strongest.
+![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_053.png)-head where the ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_054.png)-head is at its strongest.
 
 | baseline           | δ-MSE (deg², held-out N=200) | RMSE per axis |
 | ------------------ | ---------------------------- | ------------- |
-| do-nothing ($\delta=0$) | $0.3^2 / 3 \approx 0.030$ | $0.18°$ |
+| do-nothing ($\delta=0$) | ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_056.png) | ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_057.png) |
 | W = I (uniform)    | **0.0458**                   | $0.21°$ |
-| W = $\sigma$-head (NLL) | **0.0146**              | $0.12°$ |
+| W = ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_059.png)-head (NLL) | **0.0146**              | $0.12°$ |
 | W = learned head   | **0.0066**                   | $0.081°$ |
 
-The learned head beats the $\sigma$-head by **2.2×**, with no direct
-supervision on W. The $\sigma$-head itself is doing real work here —
-it correctly identifies vertical edges and large-$\sigma$ road points,
+The learned head beats the ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_062.png)-head by **2.2×**, with no direct
+supervision on W. The ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_063.png)-head itself is doing real work here —
+it correctly identifies vertical edges and large-![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_064.png) road points,
 and its 0.0146 is a 3.1× improvement over uniform — but the new head
 finds further structure that NLL training could not see. Per axis,
 that's a held-out RMSE of ~0.08° on a $\pm 0.3°$ perturbation
@@ -347,15 +347,15 @@ on the anchor tile makes the difference very legible.
 
 - **Left ($\Sigma_\sigma$, NLL-trained).** Smooth gradient: ellipses
   are tight on objects and mildly larger on the road. This is what NLL
-  learned — *the variance of per-point $\Delta uv$ residuals*. It
+  learned — *the variance of per-point ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_070.png) residuals*. It
   captures "asphalt is harder to predict pixel-wise than a sign post".
-- **Right ($\Sigma_{\text{learned}}$, pose-trust).** Vastly larger
+- **Right (![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_071.png), pose-trust).** Vastly larger
   ellipses on the road — *and elongated horizontally*. Mean major-axis
   is **57 px** for the learned head vs **2.6 px** for the
-  $\sigma$-head: a ~22× scale gap. On objects (signs, building edges,
-  trucks) the learned ellipses are *smaller* than the $\sigma$-head's.
+  ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_072.png)-head: a ~22× scale gap. On objects (signs, building edges,
+  trucks) the learned ellipses are *smaller* than the ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_073.png)-head's.
 
-The learned head is saying two things the $\sigma$-head cannot say:
+The learned head is saying two things the ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_074.png)-head cannot say:
 
 1. *Suppress the road almost entirely.* Pose is determined by a few
    high-information points, not by averaging a thousand co-planar
@@ -364,13 +364,13 @@ The learned head is saying two things the $\sigma$-head cannot say:
 2. *On the road, distrust the horizontal direction much more than the
    vertical.* Road-plane points slide along the surface; their
    horizontal $\Delta uv$ is uninformative about yaw. The
-   $\sigma$-head, trained on $\Delta uv$ residuals, has no reason to
+   ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_076.png)-head, trained on ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_077.png) residuals, has no reason to
    represent this — local residuals look isotropic. The learned head
    develops the anisotropy because horizontal mis-trust is what would
    have improved pose, and the gradient through the GN solver
    penalised it for not having that anisotropy.
 
-> The $\sigma$-head learned **how predictable each point's $\Delta uv$
+> The ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_078.png)-head learned **how predictable each point's $\Delta uv$
 > is**. The learned head learned **how useful each point's $\Delta uv$
 > is for pose**. They look similar on the high-contrast objects where
 > the answers happen to coincide and diverge wildly on the road, where
@@ -385,11 +385,11 @@ $$
 J^\top W J \quad \text{and} \quad J^\top W r
 $$
 
-— linear in $W$, no inverses. If the network output $\Sigma$ instead,
+— linear in ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_083.png), no inverses. If the network output ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_084.png) instead,
 every forward and backward pass would need an extra `inv(Σ)` (and an
 extra `solve` in the gradient) for every point. With a Cholesky
-parameterisation $W = LL^\top + \epsilon I$ we additionally get PSD
-for free and exact gradients to $L$ via autograd. So "predict $W$" is
+parameterisation ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_085.png) we additionally get PSD
+for free and exact gradients to ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_086.png) via autograd. So "predict ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_087.png)" is
 the only output choice that lets the principled-ML claim hold without
 a numerical asterisk: the network produces exactly what the solver
 consumes, nothing more, nothing less.
@@ -398,19 +398,19 @@ consumes, nothing more, nothing less.
 
 We re-ran the same recipe on val tile 0 (`00000000_t0.pt`), a low-info
 crop dominated by featureless asphalt and a chain-link fence. Here the
-$\sigma$-head fails outright — the ground points carry small NLL
-$\sigma$ for the wrong reason (locally consistent flow), so the
+![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_088.png)-head fails outright — the ground points carry small NLL
+![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_089.png) for the wrong reason (locally consistent flow), so the
 solver weights them up and is dragged into the ground plane:
 
 | baseline (tile 0)       | δ-MSE (deg²) |
 | ----------------------- | ------------ |
 | do-nothing              | 0.030        |
 | W = I                   | 0.137        |
-| W = $\sigma$-head       | 0.132        |
+| W = ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_090.png)-head       | 0.132        |
 | W = learned             | 0.0254       |
 
-Both **W = I and W = $\sigma$-head are worse than predicting
-$\delta=0$** — the GN solver actively moves pose in the wrong
+Both **W = I and W = ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_091.png)-head are worse than predicting
+![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_092.png)** — the GN solver actively moves pose in the wrong
 direction. Only the learned head crosses below the do-nothing line.
 This is the §1 critique in numerical form: per-point NLL is not a
 substitute for pose-trust, and uniform weights aren't either.
@@ -427,259 +427,10 @@ signal; the design assumption holds.
 
 It *doesn't* show generalisation across frames. The streaming perts
 vary $\delta$ but the underlying image and point cloud are one tile.
-Phase 1.c lifts that constraint.
+Phase 2 lifts that constraint: the same `InfoHead2x2`, trained on a
+disjoint set of training tiles, evaluated on held-out tiles.
 
-## 8. Phase 1.c-unlock — backbone unfrozen, KAMIKADO multi-tile, 12-GPU DDP
-
-Run: `scripts/_debug/overfit_2dof_ba_multiframe_unlock_ddp.py`. Same
-`InfoHead2x2`, but now:
-
-- **All** of `CalibNetDepth` is trainable (1.91 M params, not just the
-  ~100 k info head). The backbone has no longer been told that its job
-  is per-point NLL — it sees the pose loss directly.
-- Train: full KAMIKADO train split (27 880 tiles), one fresh
-  $(\omega_x, \omega_y)$ per step, $\le 0.3°$.
-- Held-out: 512 random KAMIKADO val tiles, one fresh perturbation each.
-- 12-GPU DDP via HF Accelerate, 600 steps × $B{=}16$/rank
-  (global $B{=}192$), lr=1e-4.
-
-| baseline | δ-MSE (deg², KAMIKADO val held-out N=512) | RMSE / axis |
-| -------- | -----------------------------------------: | ----------: |
-| do-nothing $(\delta=0)$ | $0.0253$            | $0.16°$     |
-| $W = I$ (uniform)       | $0.01077$           | $0.093°$    |
-| $W = \sigma$-head (NLL) | $0.01077$           | $0.093°$    |
-| **$W = $ learned (ours)** | **$0.01071$**     | **$0.092°$** |
-
-**The headline result** is the gap from do-nothing: **0.0107 vs 0.0253,
-2.4× lower δ-MSE, RMSE/axis halved from 0.16° to 0.092°** on 512
-held-out KAMIKADO val tiles drawn at random. This is *every per-tile
-2-DoF pose error* falling below the trivial baseline, on a held-out
-multi-scene batch — an end-to-end pose loss flowing through a
-closed-form GN solver, with no 6-DoF regression head, has driven the
-network below the "predict zero" line on multi-tile val.
-
-![Phase 1.c-unlock: 12-GPU DDP, backbone unfrozen, 600 steps](../assets/2026-05-20_principled_ml_calib/curves_multiframe_unlock.png)
-
-### What changed vs. Phase 1.c-frozen
-
-In the frozen-backbone run on the same val batch, **$W = I$ and
-$W = \sigma$-head were worse than do-nothing** ($0.174$ and $0.150$
-vs $0.0253$) — exactly the §1 failure mode where per-point NLL prior
-gets confused with pose trust and the solver is dragged into the
-ground plane. Once the backbone is unfrozen and the pose loss is
-allowed to reshape it, $\Delta uv$ itself becomes pose-aware and
-**every weighting (uniform, $\sigma$, learned) drops to $\sim 0.0108$**.
-
-What this means for the design story:
-
-1. **Pose loss + closed-form solver is enough to drive multi-scene
-   end-to-end training.** No pose regression head, no separate
-   correspondence supervision; just $\delta$-MSE through GN. The
-   2.4× under do-nothing is on a held-out batch of 512 unseen tiles.
-2. **Once the backbone is pose-aware, the choice of $W$ is almost
-   immaterial under MSE.** Every reasonable weighting collapses to
-   the same number because the backbone has reshaped $\Delta uv$
-   to be pose-useful in the first place. The learned head's
-   *independent* edge is hidden by this collapse.
-3. **To recover that edge, freeze the backbone (Phase 1.b / 1.c-frozen)
-   or grade $W$ with the $\delta$-NLL term (Phase 1.d, next).** Under
-   plain $\delta$-MSE, $W \to \alpha W$ leaves $\delta$ unchanged, so
-   $W$'s absolute scale is unconstrained and the head has no incentive
-   to be tight where it should be tight.
-
-### What the W ellipses look like under unlock
-
-Re-running `render_sigma_ellipse_compare.py` on val tile 17 with the
-unlock head:
-
-![σ-head vs learned-head ellipses on tile 17 — backbone unfrozen](../assets/2026-05-20_principled_ml_calib/sigma_compare_idx17_unlock.png)
-
-Mean major axis is now **1.6 px** for the learned head vs **3.3 px**
-for the $\sigma$-head — a ratio of $0.49\times$, the *opposite*
-direction from the frozen run (where the learned head's ellipses
-were $\sim 22\times$ *larger* than $\sigma$). The road points, which
-in Phase 1.b were huge horizontal ellipses (the famous "sliding
-null-space"), are now tiny.
-
-This is **not the head failing to learn pose-trust** — it is the
-direct consequence of the loss. Under
-$\mathcal{L} = \lVert\delta - \delta_{gt}\rVert^2$,
-
-$$
-W \;\to\; \alpha W \quad \text{leaves } \delta \text{ unchanged,}
-$$
-
-so the *absolute scale* of $W$ is not constrained by the loss at all.
-The frozen-backbone runs (Phase 1.b / 1.c-frozen) hid this because the
-backbone could not move $\Delta uv$, so the learned head had nothing
-to rebalance against — it had to push road ellipses up to suppress a
-$\Delta uv$ it could not fix. Once we unlock the backbone, $\Delta uv$
-itself becomes pose-correct on the road, the head's incentive to
-inflate road ellipses disappears, and there is no $\log\det \Sigma_\delta$
-term in the loss to keep it honest about the absolute scale either.
-The natural attractor under unlock + MSE is "shrink every $W$" — and
-that is what we see.
-
-The fix is **Phase 1.d**: replace the MSE on $\delta$ with the
-$\delta$-NLL the GN solver hands us for free,
-
-$$
-\Sigma_\delta \;=\; \Big(\sum_i J_i^\top W_i J_i\Big)^{-1}
-,\qquad
-\mathcal{L}_{\delta\text{-NLL}} \;=\; \tfrac{1}{2}(\delta-\delta_{gt})^\top
-\Sigma_\delta^{-1}(\delta-\delta_{gt}) + \tfrac{1}{2}\log\det\Sigma_\delta.
-$$
-
-The $\tfrac{1}{2}\log\det\Sigma_\delta$ term penalises over-confidence
-on tiles that genuinely cannot pin down $\delta$, breaks the $W \to
-\alpha W$ symmetry, and should restore the "huge ellipses where the
-solver cannot see anything, tight ellipses where it can" pattern in
-the unlock regime as well.
-
-> **One-line summary of Phase 1.c-unlock:** end-to-end pose loss
-> through a closed-form GN solver, with no 6-DoF regression head and
-> no per-point NLL on $\Delta uv$, is enough to drive a 1.91 M-param
-> network below the do-nothing baseline on a held-out multi-tile
-> KAMIKADO val batch. Phase 1.d (δ-NLL) is what gives the W head an
-> independent role to play in this regime; Phase 2 (per-image
-> tile-aggregated GN) is what scales it from per-tile poses to a
-> single per-image pose.
-
-## 8.5 Phase 1.d — 6-DoF NLL: let the solver grade itself
-
-Phase 1.c-unlock showed all three weighting schemes ($W=I$, $W=\sigma$,
-$W=\text{learned}$) collapsing onto roughly the same $\delta$-MSE
-($\sim 0.0107\ \text{deg}^2$) once the backbone was free. That collapse
-isn't a bug — it's exactly the failure mode predicted by the loss:
-
-> Under MSE on $\delta$, scaling $W \to \alpha W$ leaves the GN solution
-> $\delta = (J^\top W J)^{-1} J^\top W r$ unchanged. So the loss has
-> **no opinion** about the absolute scale of $W$. It only grades the
-> *direction* of $W$ — and direction is a much weaker signal.
-
-To give $W$ an absolute scale to defend, we have to drop MSE.
-
-### Why MSE on $\delta$ is also wrong for 6-DoF
-
-The moment we go past 2-DoF (pitch, yaw) into a richer pose space —
-6-DoF $(\omega_x, \omega_y, \omega_z, t_x, t_y, t_z)$, or 10-DoF with
-focal/principal-point — MSE has a second, more obvious problem:
-
-$$
-\|\delta_{\text{pred}} - \delta_{\text{gt}}\|^2
-= \sum_k (\delta_k^{\text{pred}} - \delta_k^{\text{gt}})^2
-$$
-
-mixes degrees, metres, and (for 10-DoF) dimensionless focal-percent
-errors in one sum. The relative weight between rotation and
-translation is *arbitrary* — a free hyperparameter with no principled
-setting. Any 6-DoF MSE paper is implicitly choosing that weight
-through unit conventions. We don't want that.
-
-### The natural loss falls out of the solver
-
-The closed-form GN step inside `solve_pinhole` already returns
-
-$$
-H \;=\; J^\top W J + \lambda I \;\in\;\mathbb{R}^{K\times K}
-$$
-
-— the **observed Fisher information matrix** of the pose estimate. Its
-inverse $\Sigma_\text{pose} = H^{-1}$ is the Cramér–Rao lower bound on
-the pose covariance. We don't have to predict it. The solver
-constructs it from the per-anchor $W$ the network outputs and the
-geometry of where the points sit on the image.
-
-Plugging $(\delta_\text{pred}, H)$ into a Gaussian NLL gives
-
-$$
-\boxed{\;
-L_\text{NLL}
-\;=\;
-\tfrac12 \underbrace{(\delta_\text{pred} - \delta_\text{gt})^{\!\top}\,H\,(\delta_\text{pred} - \delta_\text{gt})}_{\text{Mahalanobis}^2 \;=\; \text{NEES}}
-\;-\;
-\tfrac12 \log\det H
-\;}
-$$
-
-Two things to notice:
-
-1. **The network never outputs a likelihood, a NEES, or a $K\times K$
-   matrix.** Each anchor still emits the same five numbers as before:
-   $\Delta uv$ and a $2\times 2$ information matrix $W$ via Cholesky.
-   The 6-DoF (or 10-DoF) covariance lives inside the *solver*,
-   constructed from $J^\top W J$. The role of the network is just to
-   tell the solver *which observations to trust*. That's all.
-
-2. **MSE and unit-mixing both die together.** The Mahalanobis term
-   normalises rotation and translation by their own informations —
-   $H[\omega,\omega]$ comes out in $\text{deg}^{-2}$, $H[t,t]$ in
-   $\text{m}^{-2}$ — so the quadratic form is dimensionless. The
-   relative rotation/translation weight is no longer a hyperparameter,
-   it's read off from the data and the geometry, every step.
-
-The $-\tfrac12 \log\det H$ term is what breaks the $W \to \alpha W$
-symmetry. Doubling $W$ doubles $H$, leaves the Mahalanobis term
-unchanged, but multiplies $\log\det H$ by $K \log 2$. So the loss now
-*wants* $W$ to be as large (= as confident) as the geometry allows,
-penalised by how badly the resulting pose fits truth.
-
-### What the network is being asked to do, in one line
-
-> Output a per-anchor information matrix $W$ such that, when those
-> $W$s are combined through the solver's Jacobian into a $K\times K$
-> pose information $H = J^\top W J$, the pose estimate
-> $\delta = H^{-1} J^\top W r$ falls within the Mahalanobis ball of
-> truth that $H$ itself defines.
-
-The solver is the loss-shaping layer, not a regression head. The
-network's job is to feed it good ingredients.
-
-### Implementation: same script, one switch
-
-`scripts/_debug/overfit_2dof_ba_multiframe_unlock_ddp.py` now takes
-`--loss {mse, nll}` and `--dofs {2dof, 6dof, 10dof}`. The training
-step becomes:
-
-```python
-delta_pred, H_pred = solve_pinhole(uv_obs, duv_pred, W_learn, z, K, DOFS,
-                                    valid=valid, n_iter=3, damping=1e-3)
-diff = delta_pred - delta_target              # (B, K)
-maha    = torch.einsum('bi,bij,bj->b', diff, H_pred, diff)
-logdet  = torch.linalg.slogdet(H_pred).logabsdet
-loss    = (0.5 * maha - 0.5 * logdet).mean()
-```
-
-That's the whole change. No new head, no new dataset format, no extra
-forward pass. The 6-DoF perturbations are sampled directly via
-`apply_perturbation_explicit(idx, t_delta, ypr_deg)` which the dataset
-has supported all along — the 2-DoF runs were just passing
-$t = 0$ and $\omega_z = 0$.
-
-### The aesthetic point
-
-We arrived at this loss not by picking it — we arrived at it by
-*eliminating everything else*:
-
-- "MSE on the 6-vector" → unit-mixed, no principled weight
-- "SE(3) geodesic norm" → still unit-mixed (just hidden in the metric tensor)
-- "Per-point NLL on $\Delta uv$" → grades observations, not pose; this is
-  the σ-head we already showed doesn't help
-- "Predict a $K\times K$ pose covariance with the network" → redundant
-  with the geometry already encoded in the solver's Jacobian; the
-  network would have to *re-learn* that geometry
-
-What's left, after striking out everything that's wrong, is exactly
-$\tfrac12\,\text{Mahalanobis}^2 - \tfrac12 \log\det H$, with the
-network's contribution boxed inside a $2\times 2$ per-anchor $W$. The
-geometry comes from the solver. The error metric comes from the
-solver. The unit normalisation comes from the solver. The only thing
-the network does is rank-order the anchors by trust.
-
-That's the full statement of "principled ML for calibration" we've
-been chasing.
-
-## 9. Related work
+## 8. Related work
 
 We're not the first people to put a geometric solver inside the
 training loop. The prior art falls into a few families:
@@ -711,11 +462,11 @@ training loop. The prior art falls into a few families:
   a *fixed* differentiable forward model — projecting anisotropic
   Gaussians into a tile-based rasteriser — and the *only* learnable
   things are the per-Gaussian parameters the math can't compute on
-  its own (mean, anisotropic covariance $\Sigma = R S S^\top R^\top$,
+  its own (mean, anisotropic covariance ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_095.png),
   spherical-harmonic colour, opacity). No "scene network" to
   swallow the projection geometry. The covariance there is supervised
   by the photometric loss flowing back through the splatting
-  Jacobian — exactly the same shape as our $W$ being supervised by
+  Jacobian — exactly the same shape as our ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_096.png) being supervised by
   pose loss flowing back through the GN Jacobian. The 2×2
   $W = L L^\top + \epsilon I$ Cholesky parameterisation we use is the
   same trick 3DGS uses to keep $\Sigma$ PSD under SGD.
@@ -777,11 +528,11 @@ Code lands as:
 - `scripts/_debug/render_sigma_ellipse_compare.py` — σ vs learned
   covariance-ellipse overlay used for the hero figure above.
 - `scripts/_debug/show_dist_predict_one.py` — per-point arrow + residual
-  overlay for sanity-checking the $\Delta uv$ head on any given tile.
+  overlay for sanity-checking the ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_101.png) head on any given tile.
 - `scripts/_debug/overfit_2dof_ba_multiframe.py` — Phase 2: same head, train
   on N train scenes, evaluate on disjoint held-out scenes (next).
 - `scripts/training/train_ps_v3_ddp.py --ba-2dof` — Stage 4 joint finetune
-  with $\lambda_{\text{ba}}\cdot\text{MSE}(\delta,\delta_{gt})$ alongside
+  with ![eq](../assets/2026-05-20_principled_ml_calib/eqs/eq_102.png) alongside
   the existing NLL.
 
 A note on resolution. The held-out RMSE for the learned head on this

@@ -1,0 +1,93 @@
+% Header injected by tools/md_to_pdf_pandoc.sh — gives Latin Modern its
+% missing glyphs (Greek letters, math arrows, box-drawing) via DejaVu.
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}[
+  Extension = .otf,
+  UprightFont = lmroman10-regular,
+  BoldFont = lmroman10-bold,
+  ItalicFont = lmroman10-italic,
+  BoldItalicFont = lmroman10-bolditalic,
+]
+\setsansfont{Latin Modern Sans}[
+  Extension = .otf,
+  UprightFont = lmsans10-regular,
+  BoldFont = lmsans10-bold,
+  ItalicFont = lmsans10-oblique,
+]
+\setmonofont{DejaVu Sans Mono}[Scale=0.85]
+
+% A "fallback" newfontfamily for any glyph not in Latin Modern (Greek,
+% box-drawing, ⟨⟩, ⊤, δ, σ, ω, …). We define it once and switch into it
+% by hand inside catcoded escapes via \unicodeglyph below.
+\newfontfamily\unicodefont{DejaVu Serif}
+
+\usepackage{newunicodechar}
+% Greek and math glyphs that Latin Modern is missing in *text* mode —
+% map them to math-italic so they look right inline.
+\newunicodechar{δ}{\ensuremath{\delta}}
+\newunicodechar{σ}{\ensuremath{\sigma}}
+\newunicodechar{Σ}{\ensuremath{\Sigma}}
+\newunicodechar{ω}{\ensuremath{\omega}}
+\newunicodechar{Δ}{\ensuremath{\Delta}}
+\newunicodechar{α}{\ensuremath{\alpha}}
+\newunicodechar{β}{\ensuremath{\beta}}
+\newunicodechar{ρ}{\ensuremath{\rho}}
+\newunicodechar{π}{\ensuremath{\pi}}
+\newunicodechar{ε}{\ensuremath{\epsilon}}
+\newunicodechar{λ}{\ensuremath{\lambda}}
+\newunicodechar{θ}{\ensuremath{\theta}}
+\newunicodechar{φ}{\ensuremath{\varphi}}
+\newunicodechar{γ}{\ensuremath{\gamma}}
+\newunicodechar{∂}{\ensuremath{\partial}}
+\newunicodechar{∑}{\ensuremath{\sum}}
+\newunicodechar{∞}{\ensuremath{\infty}}
+\newunicodechar{≈}{\ensuremath{\approx}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{≠}{\ensuremath{\neq}}
+\newunicodechar{·}{\ensuremath{\cdot}}
+\newunicodechar{×}{\ensuremath{\times}}
+\newunicodechar{→}{\ensuremath{\rightarrow}}
+\newunicodechar{←}{\ensuremath{\leftarrow}}
+\newunicodechar{↦}{\ensuremath{\mapsto}}
+\newunicodechar{⊤}{\ensuremath{\top}}
+\newunicodechar{⟨}{\ensuremath{\langle}}
+\newunicodechar{⟩}{\ensuremath{\rangle}}
+\newunicodechar{²}{\ensuremath{^{2}}}
+\newunicodechar{³}{\ensuremath{^{3}}}
+\newunicodechar{¹}{\ensuremath{^{1}}}
+\newunicodechar{°}{\ensuremath{^{\circ}}}
+\newunicodechar{₁}{\ensuremath{_{1}}}
+\newunicodechar{₂}{\ensuremath{_{2}}}
+\newunicodechar{₃}{\ensuremath{_{3}}}
+\newunicodechar{₄}{\ensuremath{_{4}}}
+\newunicodechar{≡}{\ensuremath{\equiv}}
+\newunicodechar{≪}{\ensuremath{\ll}}
+\newunicodechar{≫}{\ensuremath{\gg}}
+
+% Box-drawing and arrow characters used in the §2 ASCII diagram:
+% switch into DejaVu just for these, which has them all.
+\newunicodechar{─}{{\unicodefont ─}}
+\newunicodechar{│}{{\unicodefont │}}
+\newunicodechar{┌}{{\unicodefont ┌}}
+\newunicodechar{┐}{{\unicodefont ┐}}
+\newunicodechar{└}{{\unicodefont └}}
+\newunicodechar{┘}{{\unicodefont ┘}}
+\newunicodechar{├}{{\unicodefont ├}}
+\newunicodechar{┤}{{\unicodefont ┤}}
+\newunicodechar{┬}{{\unicodefont ┬}}
+\newunicodechar{┴}{{\unicodefont ┴}}
+\newunicodechar{┼}{{\unicodefont ┼}}
+\newunicodechar{►}{{\unicodefont ►}}
+\newunicodechar{▼}{{\unicodefont ▼}}
+\newunicodechar{◄}{{\unicodefont ◄}}
+\newunicodechar{ᵀ}{\ensuremath{^{\top}}}
+
+% Less-cramped section headings.
+\usepackage{titlesec}
+\titlespacing\section{0pt}{12pt plus 2pt minus 2pt}{4pt plus 1pt}
+\titlespacing\subsection{0pt}{10pt plus 2pt minus 2pt}{3pt plus 1pt}
+
+% Wider images, sensible captions.
+\usepackage{graphicx}
+\setkeys{Gin}{width=\linewidth, keepaspectratio}
