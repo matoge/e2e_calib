@@ -347,11 +347,21 @@ def main(cfg=None):
         try:
             from scripts.eval import eval_shared_256x800 as _baeval
             ba_idx       = int(c.get('ba_eval_idx', 17))
-            ba_rot_deg   = float(c.get('ba_eval_rot_deg', 0.30))
-            ba_t_m       = float(c.get('ba_eval_t_m', 0.05))
+            # Sweep over multiple perturbation magnitudes per epoch so we see
+            # how residual scales with target. Default: 0.5° / 1.0° / 1.5° at
+            # matching translation. Caller can override via --ba-eval-levels
+            # (parsed below) or set --ba-eval-rot-deg / --ba-eval-t-m for a
+            # single-level run.
+            ba_levels = c.get('ba_eval_levels')
+            if ba_levels is None:
+                if 'ba_eval_rot_deg' in c or 'ba_eval_t_m' in c:
+                    ba_levels = [(float(c.get('ba_eval_rot_deg', 0.5)),
+                                  float(c.get('ba_eval_t_m', 0.05)))]
+                else:
+                    ba_levels = [(0.5, 0.05), (1.0, 0.10), (1.5, 0.20)]
             ba_n_seeds   = int(c.get('ba_eval_n_seeds', 4))
             ba_n_inst    = int(c.get('ba_eval_n_inst', 20))
-            ba_start_ep  = int(c.get('ba_eval_start_ep', 5))
+            ba_start_ep  = int(c.get('ba_eval_start_ep', 1))
             ba_cache     = c.get('ba_eval_cache', cache_paths[0])
             # cs/n_per_inst: use 256-quadrant split when img_size==256 (matches
             # the 800-tile recipe). Otherwise fall back to cs=img_size, 1-per.
@@ -374,11 +384,12 @@ def main(cfg=None):
             _baeval.DEVICE = accel.device
             ba_eval_state = dict(
                 mod=_baeval, ds=ba_ds, dist_one=ba_dist_one, fx=ba_fx,
-                idx=ba_idx, rot_deg=ba_rot_deg, t_m=ba_t_m,
+                idx=ba_idx, levels=ba_levels,
                 n_seeds=ba_n_seeds, n_inst=ba_n_inst, start_ep=ba_start_ep,
                 cs=ba_cs, npi=ba_npi,
             )
-            log(f"BA eval: idx={ba_idx} ±{ba_rot_deg}°/±{ba_t_m}m "
+            levels_str = ' / '.join(f'±{r}°,±{t}m' for (r, t) in ba_levels)
+            log(f"BA eval: idx={ba_idx} levels=[{levels_str}] "
                 f"K={ba_n_seeds} seeds × n_inst={ba_n_inst} × cs={ba_cs}({ba_npi}-per) "
                 f"start_ep={ba_start_ep}  fx={ba_fx:.1f}px")
         except Exception as _e:
@@ -386,35 +397,64 @@ def main(cfg=None):
             ba_eval_state = None
 
     def _run_ba_eval(unwrapped, ep):
-        """Returns dict with mean ω-deg, ω-px, t-m residuals across seeds."""
+        """Returns list of per-level dicts (omega_deg, omega_px, t_m, label,
+        vis_path). Renders one 3-panel overlay per level (seed=0) so the
+        ClearML images tab shows GT / perturbed / corrected at each ep.
+        """
         if ba_eval_state is None or ep < ba_eval_state['start_ep']:
             return None
         s = ba_eval_state
         import numpy as _np
-        omegas, ts = [], []
         was_train = unwrapped.training
         unwrapped.eval()
+        out = []
+        vis_dir = exp_dir / '_ba_vis' / f'ep{ep:03d}'
+        target_inst = s['ds']._load_inst(int(s['idx']))
         try:
-            for k in range(s['n_seeds']):
-                rng = _np.random.RandomState(1000 + k)
-                ypr_t, t_t = s['mod']._draw_pert(rng, rot_deg=s['rot_deg'], t_m=s['t_m'])
-                rng2 = _np.random.RandomState(2000 + k)
-                d, _, _ = s['mod']._solve_one(
-                    unwrapped, s['ds'],
-                    target_idx=s['idx'], n_inst=s['n_inst'],
-                    cs=s['cs'], n_per_inst=s['npi'], rng=rng2,
-                    ypr_target=ypr_t, t_target=t_t,
-                    dist_one=s['dist_one'], cfg=c, label=f'ep{ep}-s{k}')
-                tgt = _np.array([ypr_t[2], ypr_t[1], ypr_t[0]], dtype=_np.float64)
-                d_np = d.detach().cpu().numpy()
-                omegas.append(_np.linalg.norm(d_np[:3] - tgt))
-                ts.append(_np.linalg.norm(d_np[3:] - t_t))
+            for li, (rot_deg, t_m) in enumerate(s['levels']):
+                omegas, ts = [], []
+                first_delta = None
+                first_ypr = first_tt = None
+                for k in range(s['n_seeds']):
+                    rng = _np.random.RandomState(1000 + 100 * li + k)
+                    ypr_t, t_t = s['mod']._draw_pert(rng, rot_deg=rot_deg, t_m=t_m)
+                    rng2 = _np.random.RandomState(2000 + 100 * li + k)
+                    d, _, _ = s['mod']._solve_one(
+                        unwrapped, s['ds'],
+                        target_idx=s['idx'], n_inst=s['n_inst'],
+                        cs=s['cs'], n_per_inst=s['npi'], rng=rng2,
+                        ypr_target=ypr_t, t_target=t_t,
+                        dist_one=s['dist_one'], cfg=c, label=f'ep{ep}-L{li}-s{k}')
+                    if k == 0:
+                        first_delta, first_ypr, first_tt = d, ypr_t, t_t
+                    tgt = _np.array([ypr_t[2], ypr_t[1], ypr_t[0]], dtype=_np.float64)
+                    d_np = d.detach().cpu().numpy()
+                    omegas.append(_np.linalg.norm(d_np[:3] - tgt))
+                    ts.append(_np.linalg.norm(d_np[3:] - t_t))
+                omega_mean = float(_np.mean(omegas))
+                t_mean     = float(_np.mean(ts))
+                omega_px   = float(s['fx'] * _np.tan(_np.deg2rad(omega_mean)))
+                label = f'r{rot_deg}_t{t_m}'
+                # Render overlay for the seed=0 solve
+                vis_path = None
+                try:
+                    vis_path = vis_dir / f'L{li}_{label}.png'
+                    suptitle = (f'ep={ep} idx={s["idx"]}  ±{rot_deg}°/±{t_m}m  '
+                                f'ω={omega_mean:.4f}° ({omega_px:.3f}px@fx) '
+                                f't={t_mean:.4f}m  (mean over K={s["n_seeds"]} seeds)')
+                    s['mod'].render_3panel_overlay(
+                        target_inst, first_ypr, first_tt, first_delta,
+                        out_path=vis_path, suptitle=suptitle,
+                        panel_label=f'BA-corrected (seed0)')
+                except Exception as _e:
+                    log(f"BA vis ep={ep} L{li} skipped: {_e!r}")
+                    vis_path = None
+                out.append(dict(omega_deg=omega_mean, omega_px=omega_px,
+                                t_m=t_mean, rot_deg=rot_deg, t_m_target=t_m,
+                                label=label, vis_path=vis_path))
         finally:
             if was_train: unwrapped.train()
-        omega_mean = float(_np.mean(omegas))
-        t_mean     = float(_np.mean(ts))
-        omega_px   = float(s['fx'] * _np.tan(_np.deg2rad(omega_mean)))
-        return dict(omega_deg=omega_mean, omega_px=omega_px, t_m=t_mean)
+        return out
 
     # ── PRE-FLIGHT (ep=0): val pass on the untrained model so we fail fast
     # (within minutes) if loader/model is broken. midtrain_vis is gated to
@@ -502,8 +542,9 @@ def main(cfg=None):
                 f"sps(global)={tr_sps_global:.0f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  tot={(time.time()-t0)/60:.1f}min")
             if ba_metrics is not None:
-                log(f"  BA  ω={ba_metrics['omega_deg']:.4f}° "
-                    f"({ba_metrics['omega_px']:.3f}px@fx)  t={ba_metrics['t_m']:.4f}m")
+                for m in ba_metrics:
+                    log(f"  BA[{m['label']}]  ω={m['omega_deg']:.4f}° "
+                        f"({m['omega_px']:.3f}px@fx)  t={m['t_m']:.4f}m")
             if va_nll < best_val:
                 best_val = va_nll
                 # unwrap before state_dict so keys don't carry 'module.' prefix
@@ -526,9 +567,17 @@ def main(cfg=None):
                     rs('sps', 'val_rank',     iteration=epoch, value=va_sps_rank_mean)
                     rs('sps', 'val_global',   iteration=epoch, value=va_sps_global)
                     if ba_metrics is not None:
-                        rs('ba_residual', 'omega_deg', iteration=epoch, value=ba_metrics['omega_deg'])
-                        rs('ba_residual', 'omega_px',  iteration=epoch, value=ba_metrics['omega_px'])
-                        rs('ba_residual', 't_m',       iteration=epoch, value=ba_metrics['t_m'])
+                        for m in ba_metrics:
+                            rs('ba_omega_deg', m['label'], iteration=epoch, value=m['omega_deg'])
+                            rs('ba_omega_px',  m['label'], iteration=epoch, value=m['omega_px'])
+                            rs('ba_t_m',       m['label'], iteration=epoch, value=m['t_m'])
+                            if m.get('vis_path') is not None:
+                                try:
+                                    cml_logger.report_image(
+                                        'ba_overlay', m['label'],
+                                        iteration=epoch, local_path=str(m['vis_path']))
+                                except Exception:
+                                    pass
                 except Exception:
                     pass
             # Per-10-epoch debug images (rank-0 only; needs the unwrapped model
@@ -620,6 +669,11 @@ if __name__ == "__main__":
                      help='enable BA pose-residual eval starting at this epoch (default: 5)')
     ap.add_argument('--ba-eval-n-seeds', type=int, default=None)
     ap.add_argument('--ba-eval-n-inst',  type=int, default=None)
+    ap.add_argument('--ba-eval-rot-deg', type=float, default=None,
+                     help='rot perturbation magnitude for BA eval; defaults to '
+                          'train rot magnitude so the metric is in-distribution')
+    ap.add_argument('--ba-eval-t-m',     type=float, default=None,
+                     help='translation perturbation magnitude for BA eval')
     ap.add_argument('--no-ba-eval', action='store_true')
     ap.add_argument('--use-pose-emb', action='store_true',
                     help='enable PoseEmb (effectively log(vfp) bias on Q + img tokens)')
@@ -665,6 +719,8 @@ if __name__ == "__main__":
     if args.ba_eval_start_ep is not None: cfg['ba_eval_start_ep'] = args.ba_eval_start_ep
     if args.ba_eval_n_seeds  is not None: cfg['ba_eval_n_seeds']  = args.ba_eval_n_seeds
     if args.ba_eval_n_inst   is not None: cfg['ba_eval_n_inst']   = args.ba_eval_n_inst
+    if args.ba_eval_rot_deg  is not None: cfg['ba_eval_rot_deg']  = args.ba_eval_rot_deg
+    if args.ba_eval_t_m      is not None: cfg['ba_eval_t_m']      = args.ba_eval_t_m
     if args.no_ba_eval: cfg['ba_eval'] = False
     if args.find_unused_parameters: cfg['find_unused_parameters'] = True
 

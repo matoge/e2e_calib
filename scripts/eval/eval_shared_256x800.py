@@ -235,6 +235,89 @@ def _solve_one(model, ds_imgs, *, target_idx, n_inst, cs, n_per_inst,
     return delta_shared, B, H_last
 
 
+def render_3panel_overlay(inst, ypr_target, t_target, delta_solved,
+                            *, out_path, suptitle, panel_label='BA-corrected'):
+    """3-panel parent-tile overlay (GT yellow / perturbed red / corrected lime)
+    rendered against the FULL LiDAR cloud projected via KB. Used both by the
+    standalone scripts/visualization/vis_256x800_3stage.py and by the
+    in-training BA eval hook in train_ps_v3_ddp.py — keeps a single canonical
+    sign-convention for the BA-correction step.
+    """
+    import io as _io
+    import numpy as _np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    from PIL import Image as _Image
+    from scipy.spatial.transform import Rotation as _R
+    from scripts.util.projection import project_kannala as _proj_kb
+
+    if 'jpg_bytes' in inst:
+        parent = _np.array(_Image.open(_io.BytesIO(inst['jpg_bytes'])).convert('RGB'))
+    else:
+        parent = _np.asarray(inst['img'])
+        if parent.ndim == 3 and parent.shape[0] in (1, 3):
+            parent = _np.transpose(parent, (1, 2, 0))
+    pH, pW = parent.shape[:2]
+    K_full = inst['K_full'].numpy().astype(_np.float64)
+    dist_kb = inst['distortion'].numpy().astype(_np.float64)
+    pts_full_cam = inst['pts'].numpy().astype(_np.float64)
+    tile_u0 = float(inst.get('tile_u0', 0))
+    tile_v0 = float(inst.get('tile_v0', 0))
+
+    R_pert = _R.from_euler('zyx', ypr_target, degrees=True).as_matrix()
+    pts_pert = (pts_full_cam - t_target) @ R_pert
+    d = delta_solved.detach().cpu().numpy().astype(_np.float64)
+    R_d = _R.from_rotvec(_np.deg2rad(d[:3])).as_matrix()
+    pts_corr = pts_pert @ R_d.T + d[3:]
+
+    def _project(pts):
+        uv = _proj_kb(pts, K_full, dist_kb)
+        return (uv - _np.array([tile_u0, tile_v0])).astype(_np.float64)
+
+    uv_gt   = _project(pts_full_cam)
+    uv_pert = _project(pts_pert)
+    uv_corr = _project(pts_corr)
+
+    def _in(uv, z):
+        return ((z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < pW)
+                & (uv[:, 1] >= 0) & (uv[:, 1] < pH))
+
+    def _stats(uv_a, uv_b, z):
+        m = _in(uv_a, z) & _in(uv_b, z)
+        if not m.any():
+            return float('nan'), float('nan'), 0
+        e = _np.linalg.norm(uv_a[m] - uv_b[m], axis=1)
+        return float(e.mean()), float(_np.median(e)), int(m.sum())
+
+    s_p = _stats(uv_pert, uv_gt, pts_full_cam[:, 2])
+    s_c = _stats(uv_corr, uv_gt, pts_corr[:, 2])
+
+    panels = [
+        (f'GT ({int(_in(uv_gt, pts_full_cam[:, 2]).sum())} pts)',
+            uv_gt, pts_full_cam[:, 2], 'yellow'),
+        (f'Perturbed   mean={s_p[0]:.2f}px med={s_p[1]:.2f}px',
+            uv_pert, pts_pert[:, 2], 'red'),
+        (f'{panel_label}   mean={s_c[0]:.2f}px med={s_c[1]:.2f}px',
+            uv_corr, pts_corr[:, 2], 'lime'),
+    ]
+    fig, axes = _plt.subplots(1, 3, figsize=(3*pW/200, pH/200), dpi=140)
+    for ax, (title, uv, z, colr) in zip(axes, panels):
+        m = _in(uv, z)
+        ax.imshow(parent)
+        ax.scatter(uv[m, 0], uv[m, 1], s=4, c=colr, marker='.',
+                   linewidths=0, alpha=0.9)
+        ax.set_xlim(0, pW); ax.set_ylim(pH, 0); ax.axis('off')
+        ax.set_title(title, fontsize=9)
+    fig.suptitle(suptitle, fontsize=10, y=1.02)
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120, bbox_inches='tight')
+    _plt.close(fig)
+    return dict(reproj_pert_mean=s_p[0], reproj_corr_mean=s_c[0])
+
+
 def _residual_str(delta, ypr_target, t_target):
     """Pose residual = solved - target, in cam-frame (ω_x, ω_y, ω_z, tx, ty, tz).
     ypr_target is [ω_z, ω_y, ω_x] (zyx euler) so we re-order to xyz for compare."""
