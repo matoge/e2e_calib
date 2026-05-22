@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>e2e_calib — calibration API</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main class="r-blog">
+  <p class="meta" id="header-meta">e2e_calib · σ-head + closed-form GN · GPU 15 resident</p>
+  <h1>Calibration API</h1>
+  <p class="lede">
+    Push the rig out of alignment with the <b>perturbation</b> sliders below,
+    then hit <b>Run calibration</b>. The frozen ~8 MB σ-head emits per-point
+    Fisher info on every sub-tile of the same camera frame; one closed-form
+    Gauss-Newton step recovers the rig pose in original-camera coordinates.
+    Default sample is <code>idx = 17</code> from the kamikado fisheye val set
+    (preloaded on the server).
+  </p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>1 · Source frame</h2>
+      <img id="parent" alt="parent tile">
+      <p class="dim" id="parent-meta">loading…</p>
+      <div class="row">
+        <select id="frame-sel" title="pick a fisheye frame from the val catalog"></select>
+        <button id="frame-rand" class="ghost" title="random fisheye frame">🎲 random</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2 · Perturbation (target δ to undo)</h2>
+      <div class="slider">
+        <label>roll  <span id="rv">0.30</span>°</label>
+        <input id="r" type="range" min="-1" max="1" step="0.05" value="0.30">
+      </div>
+      <div class="slider">
+        <label>pitch <span id="pv">-0.20</span>°</label>
+        <input id="p" type="range" min="-1" max="1" step="0.05" value="-0.20">
+      </div>
+      <div class="slider">
+        <label>yaw   <span id="yv">0.50</span>°</label>
+        <input id="y" type="range" min="-1" max="1" step="0.05" value="0.50">
+      </div>
+      <div class="slider">
+        <label>tx <span id="txv">0.030</span> m</label>
+        <input id="tx" type="range" min="-0.1" max="0.1" step="0.005" value="0.030">
+      </div>
+      <div class="slider">
+        <label>ty <span id="tyv">-0.020</span> m</label>
+        <input id="ty" type="range" min="-0.1" max="0.1" step="0.005" value="-0.020">
+      </div>
+      <div class="slider">
+        <label>tz <span id="tzv">0.040</span> m</label>
+        <input id="tz" type="range" min="-0.1" max="0.1" step="0.005" value="0.040">
+      </div>
+
+      <h2>3 · Aggregation</h2>
+      <select id="preset"></select>
+
+      <button id="go">Run calibration</button>
+      <p class="dim" id="go-status">idle</p>
+    </section>
+  </div>
+
+  <section class="card wide">
+    <h2>Result</h2>
+    <p class="dim" id="result-meta">— run calibration above to populate —</p>
+    <img id="overlay" alt="overlay" style="display:none">
+  </section>
+
+  <section class="card wide">
+    <h2>API reference</h2>
+    <p class="dim">
+      The same engine that powers the form is exposed as a tiny JSON API.
+      Hit <code>POST /api/calibrate</code> with a perturbation, get back the
+      shared-frame δ̂ and the 3-panel overlay PNG. The model is GPU-resident,
+      so a request is one forward pass and one closed-form Gauss-Newton step.
+    </p>
+
+    <h3>Endpoints</h3>
+    <table class="api">
+      <thead>
+        <tr><th>Method</th><th>Path</th><th>Purpose</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GET</td>
+            <td><code>/api/default</code></td>
+            <td>metadata for the default sample (idx=17) + the 4 presets used by this UI.</td></tr>
+        <tr><td>GET</td>
+            <td><code>/api/frames</code></td>
+            <td>catalog of fisheye frames in the val split with ≥4 sibling tiles. Each entry is one frame you can anchor on.</td></tr>
+        <tr><td>GET</td>
+            <td><code>/api/frame/{first_idx}</code></td>
+            <td>parent-tile PNG + size for a specific frame. Used by the random-frame picker above.</td></tr>
+        <tr><td>POST</td>
+            <td><code>/api/calibrate</code></td>
+            <td>perturb-and-recover. Returns δ̂, pre/post reproj px, and a 3-panel overlay URL.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Request body for <code>POST /api/calibrate</code></h3>
+<pre><code>{
+  "ypr":         [<i>roll_deg, pitch_deg, yaw_deg</i>],   // ZYX-Euler, deg
+  "t":           [<i>tx_m, ty_m, tz_m</i>],               // metres
+  "mode":        "tile_only" | "whole_frame" | "random_val",
+  "n_tiles":     1..400,                            // number of source tiles to batch
+  "cs":          256 | 512,                         // sub-crop side, px
+  "target_idx":  17,                                // first_idx from /api/frames; 17 = default
+  "seed":        1008                               // only used when mode=random_val
+}</code></pre>
+
+    <p class="dim">
+      <code>mode=tile_only</code> uses only the anchor tile (≤4 sub-crops at cs=256).
+      <code>whole_frame</code> uses every sibling tile of the same (scene, cam, frame).
+      <code>random_val</code> samples random val tiles globally — the headline
+      mode in the paper (200 tiles × 4 sub-crops ≈ 800 sub-crops).
+    </p>
+
+    <h3>Response</h3>
+<pre><code>{
+  "delta": { "omega_deg": [r,p,y], "t_m": [tx,ty,tz] },  // δ̂: rig pose correction
+  "mode":         "whole_frame",
+  "B":            128,                                   // sub-crops actually batched
+  "cs":           256,
+  "target_idx":   17,
+  "pert_px_mean": 6.41,                                  // before correction (mean reproj px)
+  "corr_px_mean": 0.45,                                  // after correction
+  "took_s":       0.21,
+  "overlay_url":  "/calibrate/result/overlay_<i>...</i>.png"
+}</code></pre>
+
+    <h3>Examples</h3>
+    <p class="dim">curl — whole-frame on the default frame, perturb 0.3°/-0.2°/0.5° and 3/-2/4 cm:</p>
+<pre><code>curl -s -X POST http://172.16.200.185:8082/api/calibrate \
+  -H "Content-Type: application/json" \
+  -d '{"ypr":[0.3,-0.2,0.5],"t":[0.030,-0.020,0.040],
+       "mode":"whole_frame","n_tiles":32,"cs":256,"target_idx":17}'</code></pre>
+
+    <p class="dim">Python — pick a random fisheye frame from the catalog and calibrate:</p>
+<pre><code>import random, requests
+BASE = "http://172.16.200.185:8082"
+frames = requests.get(f"{BASE}/api/frames").json()["frames"]
+target = random.choice(frames)["first_idx"]
+r = requests.post(f"{BASE}/api/calibrate", json={
+    "ypr": [0.3, -0.2, 0.5], "t": [0.030, -0.020, 0.040],
+    "mode": "whole_frame", "n_tiles": 32, "cs": 256,
+    "target_idx": target,
+}).json()
+print(f"δ̂ ω={r['delta']['omega_deg']} t={r['delta']['t_m']}")
+print(f"reproj {r['pert_px_mean']:.2f}px → {r['corr_px_mean']:.2f}px in {r['took_s']}s")
+print(f"overlay: {BASE}{r['overlay_url']}")</code></pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const slid = (id, label, fmt) => {
+  const inp = $(id), v = $(label);
+  inp.addEventListener("input", () => v.textContent = fmt(inp.value));
+};
+slid("r",  "rv",  v => Number(v).toFixed(2));
+slid("p",  "pv",  v => Number(v).toFixed(2));
+slid("y",  "yv",  v => Number(v).toFixed(2));
+slid("tx", "txv", v => Number(v).toFixed(3));
+slid("ty", "tyv", v => Number(v).toFixed(3));
+slid("tz", "tzv", v => Number(v).toFixed(3));
+
+let PRESETS = [];
+let FRAMES = [];
+let CKPT = "";
+let IMG_SIZE = 0;
+let TARGET_IDX = 17;
+
+function setParentMeta(meta) {
+  const sib = meta.n_sibling_tiles ?? meta.n_sibling_tiles_default ?? 0;
+  const where = (meta.scene && meta.cam)
+    ? `${meta.scene}/${meta.cam}@${meta.frame}`
+    : "default frame";
+  $("parent-meta").textContent =
+    `first_idx=${meta.first_idx ?? meta.idx}  ${where}  parent ${meta.parent_size[0]}×${meta.parent_size[1]} px  siblings=${sib}  ckpt=${CKPT}  img_size=${IMG_SIZE}`;
+}
+
+async function loadFrame(firstIdx) {
+  TARGET_IDX = firstIdx;
+  const r = await fetch(`/api/frame/${firstIdx}`);
+  if (!r.ok) { $("go-status").textContent = `frame ${firstIdx} load error`; return; }
+  const meta = await r.json();
+  $("parent").src = meta.parent_url + "?t=" + Date.now();
+  setParentMeta(meta);
+  // Update whole_frame preset label/n_tiles to match this frame.
+  const wfIdx = PRESETS.findIndex(p => p.mode === "whole_frame");
+  if (wfIdx >= 0) {
+    PRESETS[wfIdx].n_tiles = meta.n_sibling_tiles;
+    PRESETS[wfIdx].label =
+      `whole frame, 256² (${meta.n_sibling_tiles} tiles × 4 sub-crops ≈ ${meta.n_sibling_tiles*4})`;
+    $("preset").options[wfIdx].textContent = PRESETS[wfIdx].label;
+  }
+  // Sync the frame dropdown selection if user came in via random.
+  const fsel = $("frame-sel");
+  for (const opt of fsel.options) {
+    if (Number(opt.value) === firstIdx) { fsel.value = opt.value; break; }
+  }
+}
+
+(async () => {
+  const d = await fetch("/api/default").then(r => r.json());
+  CKPT = d.ckpt; IMG_SIZE = d.img_size; TARGET_IDX = d.idx;
+  if (d.api_version) {
+    $("header-meta").textContent =
+      `e2e_calib · σ-head + closed-form GN · GPU 15 resident · v${d.api_version} (${d.git_rev})`;
+  }
+  $("parent").src = d.parent_url;
+  setParentMeta({
+    first_idx: d.idx, parent_size: d.parent_size,
+    n_sibling_tiles: d.n_sibling_tiles,
+  });
+  PRESETS = d.presets;
+  const sel = $("preset");
+  d.presets.forEach((p, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = p.label;
+    if (p.mode === "whole_frame") o.selected = true;
+    sel.appendChild(o);
+  });
+  // Frame catalog → dropdown.
+  const fr = await fetch("/api/frames").then(r => r.json());
+  FRAMES = fr.frames;
+  const fsel = $("frame-sel");
+  // Always include the default at the top.
+  const def = document.createElement("option");
+  def.value = String(d.idx);
+  def.textContent = `[default] idx=${d.idx} (${d.n_sibling_tiles} tiles)`;
+  fsel.appendChild(def);
+  FRAMES.forEach(f => {
+    if (f.first_idx === d.idx) return;  // already added
+    const o = document.createElement("option");
+    o.value = String(f.first_idx);
+    o.textContent = `${f.scene}/${f.cam}@${f.frame} — ${f.n_tiles} tiles (idx=${f.first_idx})`;
+    fsel.appendChild(o);
+  });
+  fsel.addEventListener("change", () => loadFrame(Number(fsel.value)));
+  $("frame-rand").addEventListener("click", () => {
+    if (!FRAMES.length) return;
+    const pick = FRAMES[Math.floor(Math.random() * FRAMES.length)];
+    loadFrame(pick.first_idx);
+  });
+})();
+
+$("go").addEventListener("click", async () => {
+  const preset = PRESETS[Number($("preset").value)];
+  const body = {
+    ypr: [Number($("r").value), Number($("p").value), Number($("y").value)],
+    t:   [Number($("tx").value), Number($("ty").value), Number($("tz").value)],
+    mode: preset.mode,
+    n_tiles: preset.n_tiles,
+    cs: preset.cs,
+    target_idx: TARGET_IDX,
+  };
+  $("go-status").textContent = `solving (${preset.mode}, idx=${TARGET_IDX}) B≈${preset.n_tiles * (preset.cs===256?4:1)} sub-tiles…`;
+  $("go").disabled = true;
+  try {
+    const r = await fetch("/api/calibrate", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    $("result-meta").innerHTML =
+      `idx=<b>${d.target_idx}</b> · mode=${d.mode} · B=<b>${d.B}</b> · cs=${d.cs} · solver=${d.took_s}s &nbsp;|&nbsp; ` +
+      `pert <b>${d.pert_px_mean.toFixed(2)} px</b> → corr <b>${d.corr_px_mean.toFixed(2)} px</b> &nbsp;|&nbsp; ` +
+      `δ̂ ω=[${d.delta.omega_deg.map(x => x.toFixed(3)).join(", ")}]°  ` +
+      `t=[${d.delta.t_m.map(x => x.toFixed(3)).join(", ")}] m`;
+    $("overlay").src = d.overlay_url + "?t=" + Date.now();
+    $("overlay").style.display = "block";
+    $("go-status").textContent = "done";
+  } catch (e) {
+    $("go-status").textContent = "error: " + e.message;
+  } finally {
+    $("go").disabled = false;
+  }
+});
+</script>
+</body>
+</html>

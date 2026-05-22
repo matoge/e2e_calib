@@ -382,16 +382,18 @@ def main(cfg=None):
             ba_dist_one = inst0['distortion'].clone().detach().to(torch.float32).reshape(1, 4)
             ba_fx = float(inst0['K_full'].numpy()[0, 0])
             _baeval.DEVICE = accel.device
+            ba_every_n   = int(c.get('ba_eval_every', 1))
             ba_eval_state = dict(
                 mod=_baeval, ds=ba_ds, dist_one=ba_dist_one, fx=ba_fx,
                 idx=ba_idx, levels=ba_levels,
                 n_seeds=ba_n_seeds, n_inst=ba_n_inst, start_ep=ba_start_ep,
+                every_n=ba_every_n,
                 cs=ba_cs, npi=ba_npi,
             )
             levels_str = ' / '.join(f'±{r}°,±{t}m' for (r, t) in ba_levels)
             log(f"BA eval: idx={ba_idx} levels=[{levels_str}] "
                 f"K={ba_n_seeds} seeds × n_inst={ba_n_inst} × cs={ba_cs}({ba_npi}-per) "
-                f"start_ep={ba_start_ep}  fx={ba_fx:.1f}px")
+                f"start_ep={ba_start_ep} every_n={ba_every_n}  fx={ba_fx:.1f}px")
         except Exception as _e:
             log(f"BA eval setup skipped: {_e!r}")
             ba_eval_state = None
@@ -404,6 +406,12 @@ def main(cfg=None):
         if ba_eval_state is None or ep < ba_eval_state['start_ep']:
             return None
         s = ba_eval_state
+        # Skip ep that aren't on the every_n cadence — but always run on
+        # ep == start_ep (sanity gate) and on the last epoch.
+        every_n = int(s.get('every_n', 1))
+        if every_n > 1 and ep != s['start_ep'] and ep != int(c.get('epochs', ep)) \
+                and (ep - s['start_ep']) % every_n != 0:
+            return None
         import numpy as _np
         was_train = unwrapped.training
         unwrapped.eval()
@@ -667,6 +675,9 @@ if __name__ == "__main__":
                     help='disable FrustumLocalEncoder (ablation vs CFG default)')
     ap.add_argument('--ba-eval-start-ep', type=int, default=None,
                      help='enable BA pose-residual eval starting at this epoch (default: 5)')
+    ap.add_argument('--ba-eval-every', type=int, default=None,
+                     help='run BA eval every N epochs (default: 1). '
+                          'Always runs on start_ep and on the last epoch.')
     ap.add_argument('--ba-eval-n-seeds', type=int, default=None)
     ap.add_argument('--ba-eval-n-inst',  type=int, default=None)
     ap.add_argument('--ba-eval-rot-deg', type=float, default=None,
@@ -717,6 +728,7 @@ if __name__ == "__main__":
     if args.no_frustum: cfg['use_frustum'] = False
     if args.use_pose_emb: cfg['use_pose_emb'] = True
     if args.ba_eval_start_ep is not None: cfg['ba_eval_start_ep'] = args.ba_eval_start_ep
+    if args.ba_eval_every    is not None: cfg['ba_eval_every']    = args.ba_eval_every
     if args.ba_eval_n_seeds  is not None: cfg['ba_eval_n_seeds']  = args.ba_eval_n_seeds
     if args.ba_eval_n_inst   is not None: cfg['ba_eval_n_inst']   = args.ba_eval_n_inst
     if args.ba_eval_rot_deg  is not None: cfg['ba_eval_rot_deg']  = args.ba_eval_rot_deg
