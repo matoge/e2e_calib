@@ -72,12 +72,10 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
     _t_start = time.time()
     _last_log_step = 0
     for batch in loader:
-        # collate_full now returns 8-tuple (pert_6vec at end). DDP path doesn't
-        # yet train the CLS frame-pose head — discard pert_6vec.
-        if len(batch) == 8:
-            imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid, _ = batch
-        else:
-            imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch
+        # collate_full evolved 7 → 8 (pert_6vec) → 12-tuple (orig-cam solver
+        # tensors). DDP path needs only the first 7 fields here; the rest are
+        # consumed by the BA eval hook.
+        imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch[:7]
         # accel.prepare already puts tensors in device via DataLoader wrap, but
         # the collate returns uint8 images — convert to float on-device here.
         imgs     = imgs.float().div_(255.0)
@@ -338,6 +336,86 @@ def main(cfg=None):
     # same per-dataset samples but on the actual model (untrained at ep=0)
     # so we get the GT correspondence + Σ ellipse overlays for free.
 
+    # ── BA pose-residual eval setup (rank-0 only, optional) ─────────────────
+    # Re-uses _solve_one from scripts/eval/eval_shared_256x800.py: builds
+    # B = n_inst × n_per_inst sub-crops with one shared rig-level perturbation,
+    # runs frozen-current-model forward + shared-GN, returns δ̂ vs δ_target.
+    # The 2026-05-22 256×800 result (ω res 0.45 px @ fx) used the same path
+    # against the HEAD ckpt; here we run it as a tiny in-train metric.
+    ba_eval_state = None
+    if c.get('ba_eval', True) and accel.is_main_process:
+        try:
+            from scripts.eval import eval_shared_256x800 as _baeval
+            ba_idx       = int(c.get('ba_eval_idx', 17))
+            ba_rot_deg   = float(c.get('ba_eval_rot_deg', 0.30))
+            ba_t_m       = float(c.get('ba_eval_t_m', 0.05))
+            ba_n_seeds   = int(c.get('ba_eval_n_seeds', 4))
+            ba_n_inst    = int(c.get('ba_eval_n_inst', 20))
+            ba_start_ep  = int(c.get('ba_eval_start_ep', 5))
+            ba_cache     = c.get('ba_eval_cache', cache_paths[0])
+            # cs/n_per_inst: use 256-quadrant split when img_size==256 (matches
+            # the 800-tile recipe). Otherwise fall back to cs=img_size, 1-per.
+            ba_cs        = 256 if int(c['img_size']) == 256 else int(c['img_size'])
+            ba_npi       = 4 if ba_cs == 256 else 1
+
+            ba_ds = PandaSetCalibDatasetFull(
+                cache_dir=ba_cache, split='val',
+                img_size=c['img_size'],
+                min_crop_px=c.get('min_crop_px', 128),
+                max_crop_px=c.get('max_crop_px', 512),
+                max_offset_m=0.0, max_rot_deg=0.0,
+                oversample=1, grid_n=c.get('grid_n', 16),
+                center_band=0.0, preload=False,
+            )
+            inst0 = ba_ds._load_inst(ba_idx)
+            assert inst0.get('is_fisheye', False), f'BA eval idx={ba_idx} not fisheye'
+            ba_dist_one = inst0['distortion'].clone().detach().to(torch.float32).reshape(1, 4)
+            ba_fx = float(inst0['K_full'].numpy()[0, 0])
+            _baeval.DEVICE = accel.device
+            ba_eval_state = dict(
+                mod=_baeval, ds=ba_ds, dist_one=ba_dist_one, fx=ba_fx,
+                idx=ba_idx, rot_deg=ba_rot_deg, t_m=ba_t_m,
+                n_seeds=ba_n_seeds, n_inst=ba_n_inst, start_ep=ba_start_ep,
+                cs=ba_cs, npi=ba_npi,
+            )
+            log(f"BA eval: idx={ba_idx} ±{ba_rot_deg}°/±{ba_t_m}m "
+                f"K={ba_n_seeds} seeds × n_inst={ba_n_inst} × cs={ba_cs}({ba_npi}-per) "
+                f"start_ep={ba_start_ep}  fx={ba_fx:.1f}px")
+        except Exception as _e:
+            log(f"BA eval setup skipped: {_e!r}")
+            ba_eval_state = None
+
+    def _run_ba_eval(unwrapped, ep):
+        """Returns dict with mean ω-deg, ω-px, t-m residuals across seeds."""
+        if ba_eval_state is None or ep < ba_eval_state['start_ep']:
+            return None
+        s = ba_eval_state
+        import numpy as _np
+        omegas, ts = [], []
+        was_train = unwrapped.training
+        unwrapped.eval()
+        try:
+            for k in range(s['n_seeds']):
+                rng = _np.random.RandomState(1000 + k)
+                ypr_t, t_t = s['mod']._draw_pert(rng, rot_deg=s['rot_deg'], t_m=s['t_m'])
+                rng2 = _np.random.RandomState(2000 + k)
+                d, _, _ = s['mod']._solve_one(
+                    unwrapped, s['ds'],
+                    target_idx=s['idx'], n_inst=s['n_inst'],
+                    cs=s['cs'], n_per_inst=s['npi'], rng=rng2,
+                    ypr_target=ypr_t, t_target=t_t,
+                    dist_one=s['dist_one'], cfg=c, label=f'ep{ep}-s{k}')
+                tgt = _np.array([ypr_t[2], ypr_t[1], ypr_t[0]], dtype=_np.float64)
+                d_np = d.detach().cpu().numpy()
+                omegas.append(_np.linalg.norm(d_np[:3] - tgt))
+                ts.append(_np.linalg.norm(d_np[3:] - t_t))
+        finally:
+            if was_train: unwrapped.train()
+        omega_mean = float(_np.mean(omegas))
+        t_mean     = float(_np.mean(ts))
+        omega_px   = float(s['fx'] * _np.tan(_np.deg2rad(omega_mean)))
+        return dict(omega_deg=omega_mean, omega_px=omega_px, t_m=t_mean)
+
     # ── PRE-FLIGHT (ep=0): val pass on the untrained model so we fail fast
     # (within minutes) if loader/model is broken. midtrain_vis is gated to
     # rank-0 and the other ranks would otherwise NCCL-AllReduce-timeout
@@ -388,6 +466,17 @@ def main(cfg=None):
             (va_nll, va_mse, va_obj, va_bg, va_obj_mse, va_bg_mse,
              va_obj_med, va_obj_p95, va_bg_med, va_bg_p95, va_sps_rank) = epoch_loop(
                 model, val_loader, optimizer, accel, False)
+
+        # rank-0 BA pose-residual eval. All other ranks idle at the barrier
+        # below; keep K small (default 4 seeds × 20 inst × 4 sub-crops = 320
+        # tiles per seed) so this stays under a few seconds on V100.
+        ba_metrics = None
+        if accel.is_main_process and ba_eval_state is not None:
+            try:
+                ba_metrics = _run_ba_eval(accel.unwrap_model(model), epoch)
+            except Exception as _e:
+                log(f"BA eval ep={epoch} skipped: {_e!r}")
+        accel.wait_for_everyone()
         scheduler.step()
         # tr/va numbers are PER-RANK means; for reporting we average across ranks.
         # sps is also per-rank; global sps = mean-across-ranks × num_processes
@@ -412,6 +501,9 @@ def main(cfg=None):
                 f"val nll={va_nll:+.3f}(obj={va_obj:+.3f} bg={va_bg:+.3f}) mse={va_mse:.2f}  "
                 f"sps(global)={tr_sps_global:.0f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  tot={(time.time()-t0)/60:.1f}min")
+            if ba_metrics is not None:
+                log(f"  BA  ω={ba_metrics['omega_deg']:.4f}° "
+                    f"({ba_metrics['omega_px']:.3f}px@fx)  t={ba_metrics['t_m']:.4f}m")
             if va_nll < best_val:
                 best_val = va_nll
                 # unwrap before state_dict so keys don't carry 'module.' prefix
@@ -433,6 +525,10 @@ def main(cfg=None):
                     rs('sps', 'train_global', iteration=epoch, value=tr_sps_global)
                     rs('sps', 'val_rank',     iteration=epoch, value=va_sps_rank_mean)
                     rs('sps', 'val_global',   iteration=epoch, value=va_sps_global)
+                    if ba_metrics is not None:
+                        rs('ba_residual', 'omega_deg', iteration=epoch, value=ba_metrics['omega_deg'])
+                        rs('ba_residual', 'omega_px',  iteration=epoch, value=ba_metrics['omega_px'])
+                        rs('ba_residual', 't_m',       iteration=epoch, value=ba_metrics['t_m'])
                 except Exception:
                     pass
             # Per-10-epoch debug images (rank-0 only; needs the unwrapped model
@@ -520,6 +616,11 @@ if __name__ == "__main__":
     ap.add_argument('--val-size', type=int, default=None)
     ap.add_argument('--no-frustum', action='store_true',
                     help='disable FrustumLocalEncoder (ablation vs CFG default)')
+    ap.add_argument('--ba-eval-start-ep', type=int, default=None,
+                     help='enable BA pose-residual eval starting at this epoch (default: 5)')
+    ap.add_argument('--ba-eval-n-seeds', type=int, default=None)
+    ap.add_argument('--ba-eval-n-inst',  type=int, default=None)
+    ap.add_argument('--no-ba-eval', action='store_true')
     ap.add_argument('--use-pose-emb', action='store_true',
                     help='enable PoseEmb (effectively log(vfp) bias on Q + img tokens)')
     ap.add_argument('--find-unused-parameters', action='store_true',
@@ -561,6 +662,10 @@ if __name__ == "__main__":
     if args.init_from  is not None: cfg['init_from']  = args.init_from
     if args.no_frustum: cfg['use_frustum'] = False
     if args.use_pose_emb: cfg['use_pose_emb'] = True
+    if args.ba_eval_start_ep is not None: cfg['ba_eval_start_ep'] = args.ba_eval_start_ep
+    if args.ba_eval_n_seeds  is not None: cfg['ba_eval_n_seeds']  = args.ba_eval_n_seeds
+    if args.ba_eval_n_inst   is not None: cfg['ba_eval_n_inst']   = args.ba_eval_n_inst
+    if args.no_ba_eval: cfg['ba_eval'] = False
     if args.find_unused_parameters: cfg['find_unused_parameters'] = True
 
     # ClearML init happens before main so the task is available to cml_logger

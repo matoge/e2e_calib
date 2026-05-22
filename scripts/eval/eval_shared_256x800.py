@@ -202,12 +202,16 @@ def _solve_one(model, ds_imgs, *, target_idx, n_inst, cs, n_per_inst,
                                           device=P0_orig.device)
     dist = dist_one.to(DEVICE).expand(B, 4).contiguous()
 
-    point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
+    use_intensity = getattr(model, 'use_intensity', True)
+    if use_intensity:
+        point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
+    else:
+        point_in = dist_uvd[..., :3]
     img_norm = imgs.float().div(255.0)
     with torch.no_grad():
         out = model(img_norm, point_in, key_padding_mask=pad_mask, vfp=vfp,
                     bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
-    per_pt = out[0]
+    per_pt = out[0] if isinstance(out, tuple) else out
     duv_pred_local = per_pt[..., :2].detach()
     if pad_full.any():
         duv_pred_local = duv_pred_local.clone()
