@@ -275,6 +275,8 @@ def main(cfg=None):
                           n_layers=c["n_layers"], self_first=c.get("self_first", False),
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", True),
+                          frustum_grid_n=c.get("grid_n", 16),
+                          use_pose_emb=c.get("use_pose_emb", False),
                           deform_mode=c.get("deform_mode", "none"),
                           convnext_n_blocks=c.get("convnext_n_blocks", 2),
                           convnext_fine_d=c.get("convnext_fine_d", None),
@@ -518,6 +520,8 @@ if __name__ == "__main__":
     ap.add_argument('--val-size', type=int, default=None)
     ap.add_argument('--no-frustum', action='store_true',
                     help='disable FrustumLocalEncoder (ablation vs CFG default)')
+    ap.add_argument('--use-pose-emb', action='store_true',
+                    help='enable PoseEmb (effectively log(vfp) bias on Q + img tokens)')
     ap.add_argument('--find-unused-parameters', action='store_true',
                     help='DDP find_unused_parameters=True. Off by default '
                          '(2026-05-05: True caused 22× slowdown). Turn on '
@@ -556,6 +560,7 @@ if __name__ == "__main__":
     if args.val_size   is not None: cfg['val_size']   = args.val_size
     if args.init_from  is not None: cfg['init_from']  = args.init_from
     if args.no_frustum: cfg['use_frustum'] = False
+    if args.use_pose_emb: cfg['use_pose_emb'] = True
     if args.find_unused_parameters: cfg['find_unused_parameters'] = True
 
     # ClearML init happens before main so the task is available to cml_logger
