@@ -17,16 +17,17 @@ Run
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -39,10 +40,19 @@ import scripts.eval.eval_shared_256x800 as ess
 from datasets.pandaset_full import PandaSetCalibDatasetFull, collate_full
 from scripts.ba.ba_torch import solve_kb_xyz_shared, make_info_from_sigma_rho
 from services.calib_api import __version__ as API_VERSION
+from services.calib_api.raw_pipeline import (
+    build_calib_frame,
+    load_calib_bytes,
+    load_kamikado_frame_from_disk,
+    load_points_text,
+    solve_from_calib_frame,
+)
 
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
 STATIC = HERE / "static"
+HISTORY = HERE / "history.jsonl"
+RAW_KAMIKADO_DIR = Path("/raw/kamikado/scenes")
 RESULTS.mkdir(exist_ok=True)
 DEFAULT_IDX = 17
 
@@ -419,7 +429,7 @@ def calibrate(req: CalibReq):
     )
 
     delta_np = delta.detach().cpu().numpy().tolist()
-    return {
+    out = {
         "delta": {"omega_deg": delta_np[:3], "t_m": delta_np[3:]},
         "mode": req.mode,
         "B": int(B),
@@ -430,3 +440,212 @@ def calibrate(req: CalibReq):
         "took_s": round(solve_s, 2),
         "overlay_url": f"/calibrate/result/{out_png.name}",
     }
+    _history_append({
+        "ts": time.time(),
+        "endpoint": "/api/calibrate",
+        "source": f"tile target_idx={req.target_idx} mode={req.mode}",
+        "ypr": req.ypr, "t": req.t, "cs": req.cs, "B": int(B),
+        "pert_px_mean": float(info["reproj_pert_mean"]),
+        "corr_px_mean": float(info["reproj_corr_mean"]),
+        "took_s": round(solve_s, 2),
+        "overlay_url": f"/calibrate/result/{out_png.name}",
+        "delta": out["delta"],
+    })
+    return out
+
+
+# ─── v0.2 raw-frame endpoints ───────────────────────────────────────────────
+def _history_append(entry: dict):
+    """Append one JSON line to history.jsonl. Best-effort; never raise."""
+    try:
+        with HISTORY.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[history] append failed: {e}")
+
+
+def _solve_raw_frame(cf, *, ypr, t, cs, n_per_inst, source: str):
+    """Run σ-head + shared GN on a CalibFrame, render overlay, log history.
+
+    Returns the response dict (same shape as /api/calibrate).
+    """
+    ds = _state["ds"]
+    model = _state["model"]
+    t0 = time.time()
+    delta, B, n_tiles, n_subcrops = solve_from_calib_frame(
+        model, ds, cf,
+        ypr_target=np.asarray(ypr, dtype=np.float64),
+        t_target=np.asarray(t, dtype=np.float64),
+        cs=cs, n_per_inst=n_per_inst,
+    )
+    solve_s = time.time() - t0
+
+    # Render against the FULL frame (whole 3840×2160 image + all projected
+    # LiDAR points), not just the anchor tile window.
+    rid = uuid.uuid4().hex[:12]
+    out_png = RESULTS / f"overlay_{rid}.png"
+    ypr_np = np.asarray(ypr, dtype=np.float64)
+    t_np = np.asarray(t, dtype=np.float64)
+    full_inst = {
+        "img": cf.img,
+        "K_full": torch.from_numpy(cf.K.astype(np.float64)),
+        "distortion": torch.from_numpy(cf.dist.astype(np.float64)),
+        "pts": torch.from_numpy(cf.pts_cam.astype(np.float64)),
+        "tile_u0": 0,
+        "tile_v0": 0,
+    }
+    info = ess.render_3panel_overlay(
+        full_inst, ypr_np, t_np, delta,
+        out_path=out_png,
+        suptitle=f"raw {cf.scene_id}@{cf.frame_id}  full-frame overlay  "
+                 f"B={B}  tiles={n_tiles}  cs={cs}  "
+                 f"δ_target ypr={ypr_np.tolist()} t={t_np.tolist()}",
+        panel_label=f"BA-corrected (whole frame, B={B})",
+    )
+
+    delta_np = delta.detach().cpu().numpy().tolist()
+    resp = {
+        "delta": {"omega_deg": delta_np[:3], "t_m": delta_np[3:]},
+        "B": int(B),
+        "cs": int(cs),
+        "n_tiles": int(n_tiles),
+        "n_subcrops": int(n_subcrops),
+        "scene": cf.scene_id,
+        "frame": int(cf.frame_id),
+        "pert_px_mean": float(info["reproj_pert_mean"]),
+        "corr_px_mean": float(info["reproj_corr_mean"]),
+        "took_s": round(solve_s, 2),
+        "overlay_url": f"/calibrate/result/{out_png.name}",
+    }
+    _history_append({
+        "ts": time.time(),
+        "endpoint": "/api/calibrate_scene" if source.startswith("scene:") else "/api/calibrate_frame",
+        "source": source,
+        "ypr": list(map(float, ypr)),
+        "t": list(map(float, t)),
+        "cs": int(cs), "B": int(B),
+        "n_tiles": int(n_tiles), "n_subcrops": int(n_subcrops),
+        "pert_px_mean": float(info["reproj_pert_mean"]),
+        "corr_px_mean": float(info["reproj_corr_mean"]),
+        "took_s": round(solve_s, 2),
+        "overlay_url": f"/calibrate/result/{out_png.name}",
+        "delta": resp["delta"],
+    })
+    return resp
+
+
+@app.get("/api/scenes")
+def list_scenes():
+    """Enumerate kamikado scenes available on the server (under /raw/kamikado/scenes)."""
+    if not RAW_KAMIKADO_DIR.exists():
+        return {"scenes": [], "raw_dir": str(RAW_KAMIKADO_DIR), "available": False}
+    out = []
+    for d in sorted(RAW_KAMIKADO_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        n_frames = len(list(d.glob("image_*.png")))
+        has_calib = (d / "calib.calib").exists()
+        if n_frames > 0 and has_calib:
+            out.append({"name": d.name, "n_frames": n_frames})
+    return {"scenes": out, "raw_dir": str(RAW_KAMIKADO_DIR), "available": True}
+
+
+class CalibSceneReq(BaseModel):
+    scene: str = Field(..., description="scene directory name under /raw/kamikado/scenes")
+    frame: int = Field(0, ge=0, description="frame index (image_<N>.png)")
+    ypr: List[float] = Field(..., min_items=3, max_items=3)
+    t: List[float] = Field(..., min_items=3, max_items=3)
+    cs: int = Field(256)
+
+
+@app.post("/api/calibrate_scene")
+def calibrate_scene(req: CalibSceneReq):
+    """GT-demo: load a server-side raw frame, perturb, solve, return δ̂."""
+    if req.cs not in (256, 512):
+        raise HTTPException(400, "cs must be 256 or 512")
+    scene_dir = RAW_KAMIKADO_DIR / req.scene
+    if not scene_dir.is_dir():
+        raise HTTPException(404, f"scene {req.scene!r} not found under {RAW_KAMIKADO_DIR}")
+    if not (scene_dir / f"image_{req.frame}.png").exists():
+        raise HTTPException(404, f"frame {req.frame} not in scene {req.scene}")
+    try:
+        cf = load_kamikado_frame_from_disk(scene_dir, req.frame)
+    except Exception as e:
+        raise HTTPException(500, f"failed to load frame: {e}")
+    n_per_inst = 4 if req.cs == 256 else 1
+    return _solve_raw_frame(
+        cf, ypr=req.ypr, t=req.t, cs=req.cs, n_per_inst=n_per_inst,
+        source=f"scene:{req.scene}@{req.frame}",
+    )
+
+
+@app.post("/api/calibrate_frame")
+async def calibrate_frame(
+    image: UploadFile = File(..., description="PNG/JPG camera image"),
+    points: UploadFile = File(..., description="kamikado points_V_*.txt (x y z intensity)"),
+    calib: UploadFile = File(..., description="kamikado calib.calib JSON"),
+    ypr: str = Form("[0,0,0]", description="JSON [roll,pitch,yaw] deg"),
+    t: str = Form("[0,0,0]", description="JSON [tx,ty,tz] m"),
+    cs: int = Form(256),
+    scene_id: str = Form("upload"),
+    frame_id: int = Form(0),
+):
+    """User-supplied raw frame upload: image + points_V + calib.calib → δ̂."""
+    if cs not in (256, 512):
+        raise HTTPException(400, "cs must be 256 or 512")
+    try:
+        ypr_v = json.loads(ypr)
+        t_v = json.loads(t)
+        if not (isinstance(ypr_v, list) and len(ypr_v) == 3):
+            raise ValueError("ypr must be 3-list")
+        if not (isinstance(t_v, list) and len(t_v) == 3):
+            raise ValueError("t must be 3-list")
+    except Exception as e:
+        raise HTTPException(400, f"invalid ypr/t: {e}")
+
+    img_bytes = await image.read()
+    pts_bytes = await points.read()
+    calib_bytes = await calib.read()
+    try:
+        img_arr = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+        pts_V = load_points_text(pts_bytes.decode("utf-8"))
+        K, dist, T_SV = load_calib_bytes(calib_bytes)
+        cf = build_calib_frame(
+            img_arr=img_arr, pts_V=pts_V, K=K, dist=dist, T_SV=T_SV,
+            scene_id=scene_id, frame_id=int(frame_id),
+        )
+    except Exception as e:
+        raise HTTPException(400, f"failed to parse uploaded frame: {e}")
+
+    n_per_inst = 4 if cs == 256 else 1
+    return _solve_raw_frame(
+        cf, ypr=ypr_v, t=t_v, cs=cs, n_per_inst=n_per_inst,
+        source=f"upload:{scene_id}@{frame_id}",
+    )
+
+
+@app.get("/api/history")
+def history(limit: int = 20):
+    """Return the most recent N history entries (newest first)."""
+    if not HISTORY.exists():
+        return {"entries": []}
+    try:
+        with HISTORY.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        raise HTTPException(500, f"history read error: {e}")
+    out = []
+    for ln in lines[-max(1, int(limit)):][::-1]:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
+    return {"entries": out}
+
+
+@app.get("/calibrate/frame", response_class=HTMLResponse)
+def page_frame():
+    return (STATIC / "frame.html").read_text(encoding="utf-8")

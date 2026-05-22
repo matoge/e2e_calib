@@ -1,3 +1,4 @@
 __pycache__/
 results/
 server.log
+history.jsonl

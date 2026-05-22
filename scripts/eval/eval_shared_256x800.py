@@ -149,12 +149,12 @@ def _solve_one(model, ds_imgs, *, target_idx, n_inst, cs, n_per_inst,
     """Build B = n_inst × n_per_inst sub-crops with a SHARED rig-level
     perturbation, run model + shared GN, return solved δ̂."""
     if cs == 512:
-        # Whole-tile, single sub-crop per instance: trivially the existing path.
         u0v0_list = [(0, 0)]
         assert n_per_inst == 1
     elif cs == 256:
-        u0v0_list = [(0, 0), (256, 0), (0, 256), (256, 256)]
-        assert n_per_inst == 4
+        all4 = [(0, 0), (256, 0), (0, 256), (256, 256)]
+        assert 1 <= n_per_inst <= 4
+        u0v0_list = all4[:n_per_inst]
     else:
         raise ValueError(f'unsupported cs={cs}')
 
@@ -294,21 +294,25 @@ def render_3panel_overlay(inst, ypr_target, t_target, delta_solved,
     s_c = _stats(uv_corr, uv_gt, pts_corr[:, 2])
 
     panels = [
-        (f'GT ({int(_in(uv_gt, pts_full_cam[:, 2]).sum())} pts)',
+        (f'GT\n({int(_in(uv_gt, pts_full_cam[:, 2]).sum())} pts)',
             uv_gt, pts_full_cam[:, 2], 'yellow'),
-        (f'Perturbed   mean={s_p[0]:.2f}px med={s_p[1]:.2f}px',
+        (f'Perturbed\nmean={s_p[0]:.2f}px\nmed={s_p[1]:.2f}px',
             uv_pert, pts_pert[:, 2], 'red'),
-        (f'{panel_label}   mean={s_c[0]:.2f}px med={s_c[1]:.2f}px',
+        (f'{panel_label}\nmean={s_c[0]:.2f}px\nmed={s_c[1]:.2f}px',
             uv_corr, pts_corr[:, 2], 'lime'),
     ]
-    fig, axes = _plt.subplots(1, 3, figsize=(3*pW/200, pH/200), dpi=140)
-    for ax, (title, uv, z, colr) in zip(axes, panels):
+    fig, axes = _plt.subplots(1, 3, figsize=(3*pW/200, pH/200 + 0.4), dpi=140)
+    title_colors = ['black', 'black', 'crimson']
+    title_weights = ['normal', 'normal', 'bold']
+    for ax, (title, uv, z, colr), tc, tw in zip(
+            axes, panels, title_colors, title_weights):
         m = _in(uv, z)
         ax.imshow(parent)
         ax.scatter(uv[m, 0], uv[m, 1], s=4, c=colr, marker='.',
                    linewidths=0, alpha=0.9)
         ax.set_xlim(0, pW); ax.set_ylim(pH, 0); ax.axis('off')
-        ax.set_title(title, fontsize=9)
+        ax.set_title(title, fontsize=9, linespacing=1.2,
+                     color=tc, fontweight=tw)
     fig.suptitle(suptitle, fontsize=10, y=1.02)
     fig.tight_layout()
     out_path = Path(out_path)

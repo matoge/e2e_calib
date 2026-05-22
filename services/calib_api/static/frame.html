@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>e2e_calib — raw-frame calibration (v0.2)</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main class="r-blog">
+  <p class="meta" id="header-meta">e2e_calib · raw-frame ingest · GPU 15 resident</p>
+  <h1>Calibration API · v0.2 raw frame</h1>
+  <p class="lede">
+    v0.2 takes a raw kamikado-format frame (image + <code>points_V_*.txt</code>
+    + <code>calib.calib</code>) and slices it server-side into 256² sub-crops,
+    batches them through the σ-head, and runs one closed-form Gauss-Newton step.
+    Same engine as <a href="/calibrate">v0.1</a>, no LMDB tile required.
+    Two flows below — pick a server-side scene for a GT demo, or upload your own
+    three files. The v0.1 page is unchanged.
+  </p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>1 · GT demo (server-side scene)</h2>
+      <p class="dim">Pick a scene already on the server (under <code>/raw/kamikado/scenes</code>),
+      pick a frame, set the perturbation, and the API perturbs the GT for you.</p>
+      <div class="row">
+        <select id="scene-sel" title="kamikado scene"></select>
+      </div>
+      <div class="row">
+        <label>frame <input id="scene-frame" type="number" min="0" value="0" style="width:6em"></label>
+        <span class="dim" id="scene-meta">—</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2 · Upload your own frame</h2>
+      <p class="dim">Three kamikado files: PNG/JPG image, <code>points_V_*.txt</code>,
+      <code>calib.calib</code>. Server slices into tiles and runs the same pipeline.</p>
+      <div class="row"><label>image    <input id="up-image"  type="file" accept="image/png,image/jpeg"></label></div>
+      <div class="row"><label>points_V <input id="up-points" type="file" accept=".txt"></label></div>
+      <div class="row"><label>calib    <input id="up-calib"  type="file" accept=".calib,.json"></label></div>
+      <div class="row">
+        <label>scene_id <input id="up-scene" type="text" value="upload" style="width:10em"></label>
+        <label>frame_id <input id="up-frame" type="number" min="0" value="0" style="width:6em"></label>
+      </div>
+    </section>
+  </div>
+
+  <section class="card wide">
+    <h2>3 · Perturbation (target δ to undo)</h2>
+    <div class="grid">
+      <div>
+        <div class="slider"><label>roll  <span id="rv">0.30</span>°</label>
+          <input id="r" type="range" min="-1" max="1" step="0.05" value="0.30"></div>
+        <div class="slider"><label>pitch <span id="pv">-0.20</span>°</label>
+          <input id="p" type="range" min="-1" max="1" step="0.05" value="-0.20"></div>
+        <div class="slider"><label>yaw   <span id="yv">0.50</span>°</label>
+          <input id="y" type="range" min="-1" max="1" step="0.05" value="0.50"></div>
+      </div>
+      <div>
+        <div class="slider"><label>tx <span id="txv">0.030</span> m</label>
+          <input id="tx" type="range" min="-0.1" max="0.1" step="0.005" value="0.030"></div>
+        <div class="slider"><label>ty <span id="tyv">-0.020</span> m</label>
+          <input id="ty" type="range" min="-0.1" max="0.1" step="0.005" value="-0.020"></div>
+        <div class="slider"><label>tz <span id="tzv">0.040</span> m</label>
+          <input id="tz" type="range" min="-0.1" max="0.1" step="0.005" value="0.040"></div>
+      </div>
+    </div>
+    <div class="row">
+      <label>cs
+        <select id="cs">
+          <option value="256" selected>256 (4 sub-crops/tile)</option>
+          <option value="512">512 (1 sub-crop/tile)</option>
+        </select>
+      </label>
+      <button id="go-scene">Run on scene (GT demo)</button>
+      <button id="go-upload">Run on uploaded files</button>
+    </div>
+    <p class="dim" id="go-status">idle</p>
+  </section>
+
+  <section class="card wide">
+    <h2>Result</h2>
+    <p class="dim" id="result-meta">— run the calibration above to populate —</p>
+    <img id="overlay" alt="overlay" style="display:none">
+  </section>
+
+  <section class="card wide">
+    <h2>History (latest 20)</h2>
+    <p class="dim">Every successful API call is appended to <code>history.jsonl</code>
+    on the server. Click a thumbnail to open the full overlay.</p>
+    <div id="history" class="history"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>API reference (v0.2)</h2>
+    <h3>Endpoints</h3>
+    <table class="api">
+      <thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td>GET</td><td><code>/api/scenes</code></td>
+            <td>list kamikado scenes available on the server.</td></tr>
+        <tr><td>POST</td><td><code>/api/calibrate_scene</code></td>
+            <td>GT-demo: server loads scene/frame, applies perturbation, solves.</td></tr>
+        <tr><td>POST</td><td><code>/api/calibrate_frame</code></td>
+            <td>multipart upload: image + points_V + calib.calib → δ̂.</td></tr>
+        <tr><td>GET</td><td><code>/api/history?limit=20</code></td>
+            <td>most recent calibration calls, newest first.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>POST <code>/api/calibrate_scene</code> — JSON</h3>
+<pre><code>{
+  "scene": "points_ip664_D_20260226_224648_d005_3000_3020",
+  "frame": 0,
+  "ypr":   [0.30, -0.20, 0.50],
+  "t":     [0.030, -0.020, 0.040],
+  "cs":    256
+}</code></pre>
+
+    <h3>POST <code>/api/calibrate_frame</code> — multipart</h3>
+<pre><code>curl -X POST http://172.16.200.185:8082/api/calibrate_frame \
+  -F image=@image_0.png \
+  -F points=@points_V_0.txt \
+  -F calib=@calib.calib \
+  -F 'ypr=[0.30,-0.20,0.50]' \
+  -F 't=[0.030,-0.020,0.040]' \
+  -F cs=256 \
+  -F scene_id=mycar -F frame_id=0</code></pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const slid = (id, label, fmt) => {
+  const inp = $(id), v = $(label);
+  inp.addEventListener("input", () => v.textContent = fmt(inp.value));
+};
+slid("r",  "rv",  v => Number(v).toFixed(2));
+slid("p",  "pv",  v => Number(v).toFixed(2));
+slid("y",  "yv",  v => Number(v).toFixed(2));
+slid("tx", "txv", v => Number(v).toFixed(3));
+slid("ty", "tyv", v => Number(v).toFixed(3));
+slid("tz", "tzv", v => Number(v).toFixed(3));
+
+function ypr() { return [Number($("r").value), Number($("p").value), Number($("y").value)]; }
+function tt()  { return [Number($("tx").value), Number($("ty").value), Number($("tz").value)]; }
+function cs()  { return Number($("cs").value); }
+
+function showResult(d) {
+  $("result-meta").innerHTML =
+    `${d.scene ?? "(upload)"}@${d.frame ?? "?"} · B=<b>${d.B}</b> · cs=${d.cs} · ` +
+    `tiles=${d.n_tiles ?? "?"} · solver=${d.took_s}s &nbsp;|&nbsp; ` +
+    `pert <b>${d.pert_px_mean.toFixed(2)} px</b> → corr <b>${d.corr_px_mean.toFixed(2)} px</b> &nbsp;|&nbsp; ` +
+    `δ̂ ω=[${d.delta.omega_deg.map(x => x.toFixed(3)).join(", ")}]°  ` +
+    `t=[${d.delta.t_m.map(x => x.toFixed(3)).join(", ")}] m`;
+  $("overlay").src = d.overlay_url + "?t=" + Date.now();
+  $("overlay").style.display = "block";
+}
+
+async function loadHistory() {
+  try {
+    const r = await fetch("/api/history?limit=20");
+    if (!r.ok) return;
+    const d = await r.json();
+    const box = $("history");
+    box.innerHTML = "";
+    d.entries.forEach(e => {
+      const a = document.createElement("a");
+      a.href = e.overlay_url;
+      a.target = "_blank";
+      a.className = "hcell";
+      const ts = new Date(e.ts * 1000);
+      const w = e.delta && e.delta.omega_deg ? e.delta.omega_deg.map(x => x.toFixed(2)).join(",") : "";
+      const tv = e.delta && e.delta.t_m ? e.delta.t_m.map(x => x.toFixed(2)).join(",") : "";
+      a.innerHTML =
+        `<img src="${e.overlay_url}" loading="lazy">` +
+        `<div class="dim">${ts.toLocaleTimeString()} · ${e.source ?? e.endpoint}</div>` +
+        `<div class="dim">B=${e.B} pert ${e.pert_px_mean?.toFixed?.(2) ?? "?"}→corr ${e.corr_px_mean?.toFixed?.(2) ?? "?"} px</div>` +
+        `<div class="dim">δ̂ ω=[${w}]° t=[${tv}] m</div>`;
+      box.appendChild(a);
+    });
+  } catch (e) { /* ignore */ }
+}
+
+(async () => {
+  // Header version
+  try {
+    const d = await fetch("/api/default").then(r => r.json());
+    if (d.api_version) {
+      $("header-meta").textContent =
+        `e2e_calib · raw-frame ingest · GPU 15 resident · v${d.api_version} (${d.git_rev})`;
+    }
+  } catch {}
+  // Scenes
+  try {
+    const d = await fetch("/api/scenes").then(r => r.json());
+    const sel = $("scene-sel");
+    if (!d.scenes.length) {
+      const o = document.createElement("option");
+      o.textContent = "(no scenes mounted on server)";
+      o.disabled = true; o.selected = true;
+      sel.appendChild(o);
+    } else {
+      d.scenes.forEach(s => {
+        const o = document.createElement("option");
+        o.value = s.name;
+        o.textContent = `${s.name} (${s.n_frames} frames)`;
+        sel.appendChild(o);
+      });
+      const update = () => {
+        const cur = d.scenes.find(s => s.name === sel.value);
+        $("scene-meta").textContent = cur ? `${cur.n_frames} frames available` : "—";
+        $("scene-frame").max = String((cur?.n_frames ?? 1) - 1);
+      };
+      sel.addEventListener("change", update);
+      update();
+    }
+  } catch (e) { console.error(e); }
+  loadHistory();
+})();
+
+$("go-scene").addEventListener("click", async () => {
+  const scene = $("scene-sel").value;
+  if (!scene) { $("go-status").textContent = "no scene selected"; return; }
+  const body = {
+    scene, frame: Number($("scene-frame").value),
+    ypr: ypr(), t: tt(), cs: cs(),
+  };
+  $("go-status").textContent = `solving scene=${scene} frame=${body.frame}…`;
+  $("go-scene").disabled = true; $("go-upload").disabled = true;
+  try {
+    const r = await fetch("/api/calibrate_scene", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    showResult(d);
+    $("go-status").textContent = "done";
+    loadHistory();
+  } catch (e) {
+    $("go-status").textContent = "error: " + e.message;
+  } finally {
+    $("go-scene").disabled = false; $("go-upload").disabled = false;
+  }
+});
+
+$("go-upload").addEventListener("click", async () => {
+  const img = $("up-image").files[0];
+  const pts = $("up-points").files[0];
+  const cal = $("up-calib").files[0];
+  if (!img || !pts || !cal) {
+    $("go-status").textContent = "select all 3 files (image / points_V / calib)";
+    return;
+  }
+  const fd = new FormData();
+  fd.append("image", img);
+  fd.append("points", pts);
+  fd.append("calib", cal);
+  fd.append("ypr", JSON.stringify(ypr()));
+  fd.append("t", JSON.stringify(tt()));
+  fd.append("cs", String(cs()));
+  fd.append("scene_id", $("up-scene").value);
+  fd.append("frame_id", $("up-frame").value);
+  $("go-status").textContent = `uploading ${img.name} + ${pts.name} + ${cal.name}…`;
+  $("go-scene").disabled = true; $("go-upload").disabled = true;
+  try {
+    const r = await fetch("/api/calibrate_frame", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    showResult(d);
+    $("go-status").textContent = "done";
+    loadHistory();
+  } catch (e) {
+    $("go-status").textContent = "error: " + e.message;
+  } finally {
+    $("go-scene").disabled = false; $("go-upload").disabled = false;
+  }
+});
+</script>
+</body>
+</html>

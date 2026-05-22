@@ -1,15 +1,15 @@
-@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap");
 
 :root {
-  --ink: #0f0f0e;
-  --ink-dim: #6b6a63;
-  --bg: #f6f4ed;
+  --ink: #0f1117;
+  --ink-dim: #6b7280;
+  --bg: #fafafa;
   --panel: #ffffff;
-  --panel-soft: #fbf9f2;
-  --border: #e0ddd2;
+  --panel-soft: #f4f5f7;
+  --border: #e5e7eb;
   --accent: #c13c14;
   --deep: #174734;
-  --f-display: "Instrument Serif", serif;
+  --f-display: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
   --f-sans: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
   --f-mono: "JetBrains Mono", ui-monospace, monospace;
 }
@@ -19,8 +19,10 @@ body {
   background: var(--bg);
   color: var(--ink);
   font-family: var(--f-sans);
-  font-size: 16px;
-  line-height: 1.65;
+  font-size: 14.5px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 main.r-blog { max-width: 1180px; margin: 0 auto; padding: 64px 36px 120px; }
 .meta {
@@ -33,15 +35,17 @@ main.r-blog { max-width: 1180px; margin: 0 auto; padding: 64px 36px 120px; }
 }
 h1 {
   font-family: var(--f-display);
-  font-weight: 400;
-  font-size: clamp(40px, 5vw, 60px);
-  line-height: 1.1;
+  font-weight: 700;
+  font-size: clamp(28px, 3.4vw, 40px);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
   margin: 0 0 12px;
 }
 h2 {
   font-family: var(--f-display);
-  font-weight: 400;
-  font-size: 22px;
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.005em;
   margin: 0 0 14px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
@@ -145,8 +149,10 @@ button.ghost:hover:not(:disabled) {
 
 h3 {
   font-family: var(--f-display);
-  font-weight: 400;
-  font-size: 17px;
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
   margin: 22px 0 8px;
   color: var(--deep);
 }
@@ -197,3 +203,38 @@ pre code {
   color: var(--ink);
 }
 pre code i { color: var(--ink-dim); font-style: italic; }
+
+.history {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.history .hcell {
+  display: block;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  border-radius: 4px;
+  padding: 8px;
+  text-decoration: none;
+  color: var(--ink);
+}
+.history .hcell:hover { border-color: var(--accent); }
+.history .hcell img {
+  width: 100%; height: auto;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+.history .hcell .dim {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  line-height: 1.4;
+}
+input[type="file"], input[type="number"], input[type="text"] {
+  font-family: var(--f-mono);
+  font-size: 12.5px;
+  padding: 6px 8px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
