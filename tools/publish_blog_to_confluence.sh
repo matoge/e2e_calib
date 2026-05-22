@@ -29,6 +29,10 @@ if [[ ! -f "$LOOM_PUB" ]]; then
   exit 2
 fi
 
+if [[ -z "${CONFLUENCE_TOKEN:-}" && -f "$HOME/.secrets" ]]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.secrets"
+fi
 if [[ -z "${CONFLUENCE_TOKEN:-}" && -n "${CONFLUENCE_API_TOKEN:-}" ]]; then
   export CONFLUENCE_TOKEN="$CONFLUENCE_API_TOKEN"
 fi

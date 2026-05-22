@@ -213,15 +213,25 @@ def kb_jacobian(X: Tensor, Y: Tensor, Z: Tensor,
 def gn_step(J: Tensor, W: Tensor, r: Tensor,
              valid: Tensor | None = None,
              damping: float = 0.0,
+             prior_diag: Tensor | None = None,
              ) -> Tuple[Tensor, Tensor]:
-    """One Gauss-Newton step: δ = (JᵀWJ + λI)⁻¹ JᵀWr.
+    """One Gauss-Newton step: δ = (JᵀWJ + Λ)⁻¹ JᵀWr.
 
     J     : (B, N, 2, K)
     W     : (B, N, 2, 2)  (symmetric PSD; pre-zero invalid rows yourself
                             OR pass `valid` to do it here)
     r     : (B, N, 2)
     valid : (B, N) bool — False entries are zeroed before the reduction
-    damping : Levenberg-Marquardt diagonal scale (added to H)
+    damping : isotropic LM diagonal scale (kept for back-compat). Mixes
+              translation (m) and rotation (deg) on a single ladder, so
+              you almost never want this above 1e-3.
+    prior_diag : (K,) per-axis Gaussian prior precision (information
+                 = 1/σ²) added to H's diagonal. Use this — not damping —
+                 to encode physical bounds. e.g. for DOFs
+                 [omega_x,omega_y,omega_z,tx,ty,tz] with σ_ω=3° σ_t=0.2m
+                 → prior_diag = [1/9, 1/9, 1/9, 25, 25, 25]. Caps the
+                 covariance Σ_δ = H⁻¹ at 1/prior_diag on each axis,
+                 which is what stops degenerate-tile NLL blowups.
 
     Returns (delta, H) of shapes (B, K), (B, K, K).
     """
@@ -232,10 +242,13 @@ def gn_step(J: Tensor, W: Tensor, r: Tensor,
     # H[b,k,l] = Σ_n,i,j J[b,n,i,k] W[b,n,i,j] J[b,n,j,l]
     H = torch.einsum('bnik,bnij,bnjl->bkl', J, W, J)
     bvec = torch.einsum('bnik,bnij,bnj->bk', J, W, r)
+    K = H.shape[-1]
     if damping > 0.0:
-        K = H.shape[-1]
         eye = torch.eye(K, dtype=H.dtype, device=H.device).expand_as(H)
         H = H + damping * eye
+    if prior_diag is not None:
+        pd = prior_diag.to(dtype=H.dtype, device=H.device).reshape(K)
+        H = H + torch.diag(pd)
     delta = torch.linalg.solve(H, bvec.unsqueeze(-1)).squeeze(-1)
     return delta, H
 
@@ -294,7 +307,8 @@ def _split_delta(delta: Tensor, dof_names: Sequence[str]) -> dict:
 def solve_pinhole(uv: Tensor, duv: Tensor, W: Tensor, z: Tensor,
                    K: Tensor, dof_names: Sequence[str],
                    *, valid: Tensor | None = None,
-                   n_iter: int = 1, damping: float = 0.0
+                   n_iter: int = 1, damping: float = 0.0,
+                   prior_diag: Tensor | None = None,
                    ) -> Tuple[Tensor, Tensor]:
     """Multi-step pinhole BA. Re-linearises at the current δ each step.
 
@@ -324,15 +338,162 @@ def solve_pinhole(uv: Tensor, duv: Tensor, W: Tensor, z: Tensor,
         r = target_uv - uv_pred
         Xc, Yc, Zc = P_lin.unbind(-1)
         J = pinhole_jacobian(Xc, Yc, Zc, K_lin, uv_pred, dof_names)
-        step, H_last = gn_step(J, W, r, valid=valid, damping=damping)
+        step, H_last = gn_step(J, W, r, valid=valid, damping=damping,
+                                prior_diag=prior_diag)
         delta = delta + step
     return delta, H_last
+
+
+def solve_pinhole_xyz(P0: Tensor, duv: Tensor, W: Tensor,
+                        K: Tensor, dof_names: Sequence[str],
+                        *, valid: Tensor | None = None,
+                        n_iter: int = 1, damping: float = 0.0,
+                        prior_diag: Tensor | None = None,
+                        ) -> Tuple[Tensor, Tensor]:
+    """uv-free pinhole BA. Consumes cam-frame XYZ directly so units stay
+    metric/original-camera and there is no (cs/S) leakage from a local-
+    px focal hidden in K. Equivalent to `solve_pinhole(project(P0,K),
+    duv, W, P0[...,2], K, ...)` for n_iter=1, but skips the back-
+    projection round-trip and any unit ambiguity that goes with it.
+
+    Inputs:
+        P0     : (B, N, 3) cam-frame XYZ in metres (parent-camera frame)
+        duv    : (B, N, 2) Δuv in original-camera px (uv_target = uv0 + duv)
+        W      : (B, N, 2, 2) per-point info matrix in (orig-px)⁻²
+        K      : (B, 3, 3) parent-camera intrinsics
+
+    Returns (delta, H) — same shape contract as `solve_pinhole`.
+    """
+    B, K_dim = P0.shape[0], len(dof_names)
+    delta = torch.zeros(B, K_dim, dtype=P0.dtype, device=P0.device)
+    H_last = None
+    for _ in range(max(1, int(n_iter))):
+        d = _split_delta(delta, dof_names)
+        omega = torch.stack([d['omega_x'], d['omega_y'], d['omega_z']], dim=-1)
+        t_v = torch.stack([d['tx'], d['ty'], d['tz']], dim=-1)
+        P_lin = _apply_extrinsic(P0, omega, t_v)
+        K_lin = _K_with_delta(K, d['dfx'], d['dfy'], d['dcx'], d['dcy'])
+        uv_pred = project_pinhole(P_lin, K_lin)
+        uv0 = project_pinhole(P0, K)
+        target_uv = uv0 + duv
+        r = target_uv - uv_pred
+        Xc, Yc, Zc = P_lin.unbind(-1)
+        J = pinhole_jacobian(Xc, Yc, Zc, K_lin, uv_pred, dof_names)
+        step, H_last = gn_step(J, W, r, valid=valid, damping=damping,
+                                prior_diag=prior_diag)
+        delta = delta + step
+    return delta, H_last
+
+
+def solve_kb_xyz(P0: Tensor, duv: Tensor, W: Tensor,
+                  K: Tensor, dist: Tensor, dof_names: Sequence[str],
+                  *, valid: Tensor | None = None,
+                  n_iter: int = 1, damping: float = 0.0,
+                  prior_diag: Tensor | None = None,
+                  ) -> Tuple[Tensor, Tensor]:
+    """KB analogue of `solve_pinhole_xyz`. Consumes cam-frame XYZ directly
+    (P0 in metres, parent-camera frame) so units stay metric and there is
+    no (cs/S) leakage from a local-px focal hidden in K.
+
+    Inputs:
+        P0   : (B, N, 3) cam-frame XYZ in metres
+        duv  : (B, N, 2) Δuv in original-camera px (uv_target = uv0 + duv)
+        W    : (B, N, 2, 2) per-point info matrix in (orig-px)⁻²
+        K    : (B, 3, 3) parent intrinsics
+        dist : (B, 4) Kannala-Brandt k1..k4
+
+    Returns (delta, H) — same shape contract as `solve_kb`.
+    """
+    B, K_dim = P0.shape[0], len(dof_names)
+    delta = torch.zeros(B, K_dim, dtype=P0.dtype, device=P0.device)
+    H_last = None
+    for _ in range(max(1, int(n_iter))):
+        d = _split_delta(delta, dof_names)
+        omega = torch.stack([d['omega_x'], d['omega_y'], d['omega_z']], dim=-1)
+        t_v = torch.stack([d['tx'], d['ty'], d['tz']], dim=-1)
+        P_lin = _apply_extrinsic(P0, omega, t_v)
+        K_lin = _K_with_delta(K, d['dfx'], d['dfy'], d['dcx'], d['dcy'])
+        uv_pred = project_kb(P_lin, K_lin, dist)
+        uv0 = project_kb(P0, K, dist)
+        target_uv = uv0 + duv
+        r = target_uv - uv_pred
+        Xc, Yc, Zc = P_lin.unbind(-1)
+        J = kb_jacobian(Xc, Yc, Zc, K_lin, dist, dof_names)
+        step, H_last = gn_step(J, W, r, valid=valid, damping=damping,
+                                prior_diag=prior_diag)
+        delta = delta + step
+    return delta, H_last
+
+
+def solve_kb_xyz_shared(P0: Tensor, duv: Tensor, W: Tensor,
+                          K: Tensor, dist: Tensor, dof_names: Sequence[str],
+                          *, valid: Tensor | None = None,
+                          n_iter: int = 1, damping: float = 0.0,
+                          prior_diag: Tensor | None = None,
+                          ) -> Tuple[Tensor, Tensor]:
+    """KB BA where ALL B tiles share ONE δ. Per iter we re-linearise each
+    tile at the current shared δ, then aggregate the normal equations
+    across BOTH batch and points before solving once:
+        H = Σ_b Σ_n J_bnᵀ W_bn J_bn   (+ diag(prior))
+        b = Σ_b Σ_n J_bnᵀ W_bn r_bn
+        δ ← δ + H⁻¹ b
+    The same numeric (ω, t) is applied in each tile's own cam-frame, so
+    a single shared δ describes a rig-level calibration error observed
+    through B different cameras / frames. Each tile keeps its own K, dist.
+
+    Inputs:
+        P0    : (B, N, 3) cam-frame XYZ in metres (per-tile)
+        duv   : (B, N, 2) Δuv in original-camera px
+        W     : (B, N, 2, 2) info matrix in (orig-px)⁻²
+        K     : (B, 3, 3) parent intrinsics (per-tile)
+        dist  : (B, 4) Kannala-Brandt k1..k4 (per-tile)
+        valid : (B, N) bool — invalid points zeroed before reduction
+        prior_diag : (K_dof,) physical prior added ONCE to the aggregated H
+
+    Returns (delta : (K_dof,), H : (K_dof, K_dof)) — single shared answer.
+    Use solve_kb_xyz when each tile should get its own δ.
+    """
+    B = P0.shape[0]
+    K_dof = len(dof_names)
+    delta_shared = torch.zeros(K_dof, dtype=P0.dtype, device=P0.device)
+    H_last = None
+    for _ in range(max(1, int(n_iter))):
+        # broadcast shared δ to (B, K) so existing per-batch helpers work
+        delta_b = delta_shared.unsqueeze(0).expand(B, K_dof)
+        d = _split_delta(delta_b, dof_names)
+        omega = torch.stack([d['omega_x'], d['omega_y'], d['omega_z']], dim=-1)
+        t_v = torch.stack([d['tx'], d['ty'], d['tz']], dim=-1)
+        P_lin = _apply_extrinsic(P0, omega, t_v)
+        K_lin = _K_with_delta(K, d['dfx'], d['dfy'], d['dcx'], d['dcy'])
+        uv_pred = project_kb(P_lin, K_lin, dist)
+        uv0 = project_kb(P0, K, dist)
+        target_uv = uv0 + duv
+        r = target_uv - uv_pred
+        Xc, Yc, Zc = P_lin.unbind(-1)
+        J = kb_jacobian(Xc, Yc, Zc, K_lin, dist, dof_names)
+        if valid is not None:
+            m = valid.to(J.dtype).unsqueeze(-1).unsqueeze(-1)
+            J = J * m
+            r = r * m.squeeze(-1)
+        # Aggregate across BOTH batch (b) and points (n) → (K_dof, K_dof) / (K_dof,)
+        H = torch.einsum('bnik,bnij,bnjl->kl', J, W, J)
+        bvec = torch.einsum('bnik,bnij,bnj->k', J, W, r)
+        if damping > 0.0:
+            H = H + damping * torch.eye(K_dof, dtype=H.dtype, device=H.device)
+        if prior_diag is not None:
+            pd = prior_diag.to(dtype=H.dtype, device=H.device).reshape(K_dof)
+            H = H + torch.diag(pd)
+        step = torch.linalg.solve(H, bvec.unsqueeze(-1)).squeeze(-1)
+        delta_shared = delta_shared + step
+        H_last = H
+    return delta_shared, H_last
 
 
 def solve_kb(uv: Tensor, duv: Tensor, W: Tensor, z: Tensor,
               K: Tensor, dist: Tensor, dof_names: Sequence[str],
               *, valid: Tensor | None = None,
-              n_iter: int = 1, damping: float = 0.0
+              n_iter: int = 1, damping: float = 0.0,
+              prior_diag: Tensor | None = None,
               ) -> Tuple[Tensor, Tensor]:
     """Multi-step KB BA. Same contract as `solve_pinhole` but with a
     fisheye projection model (`dist`: (B, 4) k1..k4)."""
@@ -358,6 +519,7 @@ def solve_kb(uv: Tensor, duv: Tensor, W: Tensor, z: Tensor,
         r = target_uv - uv_pred
         Xc, Yc, Zc = P_lin.unbind(-1)
         J = kb_jacobian(Xc, Yc, Zc, K_lin, dist, dof_names)
-        step, H_last = gn_step(J, W, r, valid=valid, damping=damping)
+        step, H_last = gn_step(J, W, r, valid=valid, damping=damping,
+                                prior_diag=prior_diag)
         delta = delta + step
     return delta, H_last

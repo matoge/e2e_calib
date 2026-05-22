@@ -493,9 +493,19 @@ class InfoHead2x2(nn.Module):
     is connected end-to-end through gn_step.
     """
     def __init__(self, d: int, eps_diag: float = 1e-3,
-                 hidden_mul: int = 2, init_log_w: float = 0.0):
+                 hidden_mul: int = 2, init_log_w: float = 0.0,
+                 w_diag_min: float | None = None,
+                 w_diag_max: float | None = None):
         super().__init__()
         self.eps_diag = float(eps_diag)
+        # Optional sigmoid hard clamp on L's diagonals (a, b). Bounds
+        # apply to L[0,0] and L[1,1] (so to σ_uv via 1/√a). Setting
+        # w_diag_min=1e-2, w_diag_max=4.0 maps to roughly
+        #   σ_uv ∈ [0.5 px, 10 px]   (orig-px world)
+        # which is the realistic uncertainty band for uv predictions.
+        # Leave both as None to keep the legacy softplus+eps_diag path.
+        self.w_diag_min = w_diag_min
+        self.w_diag_max = w_diag_max
         h = d * hidden_mul
         self.mlp = nn.Sequential(
             nn.Linear(d, h), nn.GELU(),
@@ -510,8 +520,14 @@ class InfoHead2x2(nn.Module):
 
     def forward(self, q: torch.Tensor) -> torch.Tensor:
         raw = self.mlp(q)                                     # (B, N, 3)
-        a   = F.softplus(raw[..., 0]) + self.eps_diag         # (B, N)  L[0,0]
-        b   = F.softplus(raw[..., 1]) + self.eps_diag         # (B, N)  L[1,1]
+        if self.w_diag_min is not None and self.w_diag_max is not None:
+            span = float(self.w_diag_max - self.w_diag_min)
+            lo   = float(self.w_diag_min)
+            a = lo + span * torch.sigmoid(raw[..., 0])
+            b = lo + span * torch.sigmoid(raw[..., 1])
+        else:
+            a = F.softplus(raw[..., 0]) + self.eps_diag       # (B, N)  L[0,0]
+            b = F.softplus(raw[..., 1]) + self.eps_diag       # (B, N)  L[1,1]
         c   = raw[..., 2]                                      # (B, N)  L[1,0] (free)
         zero = torch.zeros_like(a)
         # L = [[a, 0], [c, b]]

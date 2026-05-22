@@ -831,6 +831,24 @@ class PandaSetCalibDatasetFull(Dataset):
         true_uvd = np.concatenate([uv_gt_loc,  dist_m[:, None], is_obj[:, None], intens_sel[:, None]], axis=1)
         dist_uvd = np.concatenate([uv_off_loc, dist_m[:, None], is_obj[:, None], intens_sel[:, None]], axis=1)
 
+        # Original-camera-frame solver inputs:
+        #   pts_cam_orig : cam-frame XYZ (m), pre-perturbation. J(X,Y,Z,K) consumes
+        #                  this directly so units stay metric and original-camera.
+        #   duv_orig     : Δuv at original-camera resolution (px). Corresponds to
+        #                  uv_gt_sel - uv_off_sel before any local-128px scaling.
+        #   K_orig       : original intrinsics (3, 3). The solver uses fx_orig etc.
+        #                  so J's pixel-side stays in original-camera px.
+        # Network input (img/dist_uvd/vfp) stays local 128px; the solver path is a
+        # parallel exit from build_window. The W (or Σ_uv) the network predicts in
+        # local px is converted to original-camera px via (cs/S)² downstream.
+        pts_cam_orig = pts_sel.astype(np.float32)                      # (Nrep, 3) m
+        duv_orig     = (uv_gt_sel - uv_off_sel).astype(np.float32)     # (Nrep, 2) px (orig)
+        # K_orig: PARENT-camera intrinsics, exactly as stored in the cache.
+        # The GN solver only needs (fx, fy) for J = ∂(u,v)/∂δ — cx, cy don't
+        # enter J. duv_orig is tile-invariant (uv_gt - uv_off cancels tile_u0,v0)
+        # so the solver runs purely in parent-camera SE3 units.
+        K_orig = K.astype(np.float32)
+
         if img_full is None:
             # TurboJPEG partial decode of just the crop region (~4.5ms for 384px MCU-aligned).
             # DDAD stores PNG bytes in 'jpg_bytes' — TJ chokes on those, fall back to PIL.
@@ -908,7 +926,11 @@ class PandaSetCalibDatasetFull(Dataset):
         return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
                 torch.tensor(vfp, dtype=torch.float32),
                 torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid),
-                torch.from_numpy(pert_vec))
+                torch.from_numpy(pert_vec),
+                torch.from_numpy(pts_cam_orig),
+                torch.from_numpy(duv_orig),
+                torch.from_numpy(K_orig),
+                torch.tensor(float(cs), dtype=torch.float32))
 
 
 def collate_full(batch):
@@ -945,4 +967,22 @@ def collate_full(batch):
         true_p[k, :n] = t
         dist_p[k, :n] = d
         pad[k, :n] = False
-    return imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec
+
+    # Original-camera-frame solver inputs (None when the dataset still emits the
+    # old 7-tuple sample). pts_cam_orig and duv_orig share the (Nmax) padding of
+    # true_p/dist_p so the same `pad` mask applies. K_orig and cs are per-sample.
+    has_orig = len(batch[0]) >= 11
+    if has_orig:
+        pts_cam_orig = torch.zeros(B, Nmax, 3, dtype=torch.float32)
+        duv_orig     = torch.zeros(B, Nmax, 2, dtype=torch.float32)
+        for k, s in enumerate(batch):
+            n = s[7].shape[0]
+            pts_cam_orig[k, :n] = s[7]
+            duv_orig[k, :n]     = s[8]
+        K_orig = torch.stack([s[9] for s in batch])                 # (B, 3, 3)
+        cs_t   = torch.stack([s[10] for s in batch])                # (B,)
+    else:
+        pts_cam_orig = duv_orig = K_orig = cs_t = None
+
+    return (imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec,
+            pts_cam_orig, duv_orig, K_orig, cs_t)

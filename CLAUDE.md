@@ -1,5 +1,15 @@
 # CLAUDE.md
 
+## North Star (最重要)
+
+**セッション開始時、まず以下の2ファイルを必ず Read すること。**
+
+- `.claude/north_star.md` — 3ヶ月ゴール（自宅周辺数kmの1cm精度3D地図）
+- `.claude/tracks.md` — ACTIVE / PARALLEL / PARKED の作業トラック
+
+このリポでの全ての作業は北極星から見て critical path か常に問うこと。
+キャリブはあくまで手段であり目的ではない。tunnel vision 検知時は parallel track への切替を能動的に提案すること（詳細は `~/.claude/projects/-home-hfunaya/memory/feedback_strategic_frame.md`）。
+
 ## クイックスタート
 
 ```bash
