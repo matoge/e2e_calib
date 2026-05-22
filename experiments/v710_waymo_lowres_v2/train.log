@@ -1,8 +1,0 @@
-22:49:39  loading cache /mnt/nvme6t/e2e_calib_cache/waymo_v3_full (V3 full-image)
-22:49:39    perturbation: ±1.0 deg / ±0.2 m   crop_px=[128, 384] (full-image px → 64)
-22:49:39  train cache loaded: 441948 instances
-22:49:39  val cache loaded: 76560 instances
-22:49:39  object-level split: train=466658 val=51850 (seed=42)
-22:49:39    val subsample: 1000/51850 (deterministic first-N)
-22:49:39  params: 1.62M
-22:49:46  vis_pretrain → experiments/v710_waymo_lowres_v2/vis_pretrain
