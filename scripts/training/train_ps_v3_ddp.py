@@ -367,10 +367,14 @@ def main(cfg=None):
             ba_n_inst    = int(c.get('ba_eval_n_inst', 20))
             ba_start_ep  = int(c.get('ba_eval_start_ep', 1))
             ba_cache     = c.get('ba_eval_cache', cache_paths[0])
-            # cs/n_per_inst: use 256-quadrant split when img_size==256 (matches
-            # the 800-tile recipe). Otherwise fall back to cs=img_size, 1-per.
-            ba_cs        = 256 if int(c['img_size']) == 256 else int(c['img_size'])
-            ba_npi       = 4 if ba_cs == 256 else 1
+            # cs/n_per_inst: always 256-quadrant split (4-per-inst) so n_inst=200
+            # → 800 tiles. Decoupled from c['img_size']: even at img_size=128,
+            # eval crops are taken at 256 in original-camera units and then
+            # resized to S=img_size for the model — larger crops give more
+            # shared-GN Fisher info per tile (project_resolution_hypothesis_512).
+            # Caller can override via --ba-eval-cs / --ba-eval-npi.
+            ba_cs        = int(c.get('ba_eval_cs', 256))
+            ba_npi       = int(c.get('ba_eval_npi', 4))
 
             ba_ds = PandaSetCalibDatasetFull(
                 cache_dir=ba_cache, split='val',
@@ -689,6 +693,13 @@ if __name__ == "__main__":
                           'train rot magnitude so the metric is in-distribution')
     ap.add_argument('--ba-eval-t-m',     type=float, default=None,
                      help='translation perturbation magnitude for BA eval')
+    ap.add_argument('--ba-eval-cs',  type=int, default=None,
+                     help='BA eval crop side (orig-cam px). Default 256 — '
+                          'decoupled from training img_size so the shared-GN '
+                          'Fisher info per tile stays large even at img_size=128.')
+    ap.add_argument('--ba-eval-npi', type=int, default=None,
+                     help='BA eval n_per_inst (sub-crops per inst). Default 4 '
+                          '(quadrant split for cs=256). Use 1 for cs=512.')
     ap.add_argument('--no-ba-eval', action='store_true')
     ap.add_argument('--use-pose-emb', action='store_true',
                     help='enable PoseEmb (effectively log(vfp) bias on Q + img tokens)')
@@ -752,6 +763,8 @@ if __name__ == "__main__":
     if args.ba_eval_n_inst   is not None: cfg['ba_eval_n_inst']   = args.ba_eval_n_inst
     if args.ba_eval_rot_deg  is not None: cfg['ba_eval_rot_deg']  = args.ba_eval_rot_deg
     if args.ba_eval_t_m      is not None: cfg['ba_eval_t_m']      = args.ba_eval_t_m
+    if args.ba_eval_cs       is not None: cfg['ba_eval_cs']       = args.ba_eval_cs
+    if args.ba_eval_npi      is not None: cfg['ba_eval_npi']      = args.ba_eval_npi
     if args.no_ba_eval: cfg['ba_eval'] = False
     if args.find_unused_parameters: cfg['find_unused_parameters'] = True
 
