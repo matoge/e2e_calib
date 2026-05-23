@@ -690,13 +690,19 @@ class CalibNetDepth(nn.Module):
     def forward(self, image: torch.Tensor, distorted_uvd: torch.Tensor,
                 key_padding_mask=None, vfp: torch.Tensor = None,
                 bucket_uvd: torch.Tensor = None,
-                bucket_valid: torch.Tensor = None):
+                bucket_valid: torch.Tensor = None,
+                pose_emb_se3: torch.Tensor = None):
         """
         image           : (B, C, H, W)
         distorted_uvd   : (B, N, 3 or 4)  [U, V, D_norm, (intensity if use_intensity)]
         key_padding_mask: (B, N) bool  True = padding position
         bucket_uvd      : (B, G², K_per_cell, 3)  pre-binned lidar grid (geometric only)
         bucket_valid    : (B, G², K_per_cell)     bool valid mask
+        pose_emb_se3    : (B, 6) SE3 hint (tx, ty, tz, yaw_deg, pitch_deg, roll_deg)
+                          fed into pose_emb. Default None ↔ all zeros (legacy calib).
+                          When split_pert is on the dataset emits δ1 here so the
+                          network only has to regress the δ2-induced reproj
+                          residual; δ1=0 degenerates exactly to calib.
         Returns params  : (B, N, 5)  [tx, ty, log_sx, log_sy, rho]
         """
         coarse_feat, fine_feat = self.cnn(image)
@@ -773,16 +779,19 @@ class CalibNetDepth(nn.Module):
                                           query_pad_mask=key_padding_mask,
                                           img_size=self.img_size)
 
-        # pose_emb: per-sample (SE3=0 for calib) + log(vfp) → D-dim bias.
-        # Broadcast added to Q (per-point) AND to KV (image tokens, lidar tokens).
+        # pose_emb: per-sample SE3 hint (δ1 in split_pert mode, 0 in legacy
+        # calib) + log(vfp) → D-dim bias broadcast to Q AND KV.
         pose_emb_b = None
         if self._use_pose_emb:
             B = image.size(0)
             if vfp is None:
                 vfp = torch.full((B,), float(self.img_size), device=image.device)
             log_vfp = torch.log(vfp.clamp(min=1.0)).unsqueeze(-1)            # (B, 1)
-            zero_se3 = torch.zeros(B, 6, device=image.device, dtype=log_vfp.dtype)
-            pose_emb_b = self.pose_emb(torch.cat([zero_se3, log_vfp], dim=-1))  # (B, D)
+            if pose_emb_se3 is None:
+                se3 = torch.zeros(B, 6, device=image.device, dtype=log_vfp.dtype)
+            else:
+                se3 = pose_emb_se3.to(device=image.device, dtype=log_vfp.dtype)
+            pose_emb_b = self.pose_emb(torch.cat([se3, log_vfp], dim=-1))    # (B, D)
             q = q + pose_emb_b.unsqueeze(1)                                   # broadcast → (B, N, D)
             pe_2d = pose_emb_b.unsqueeze(-1).unsqueeze(-1)                    # (B, D, 1, 1)
             coarse_feat = coarse_feat + pe_2d

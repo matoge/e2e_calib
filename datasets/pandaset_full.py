@@ -193,6 +193,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  max_fx_pct: float = 0.0,
                  max_fy_pct: float = 0.0,
                  pose_frame: str = 'orig',
+                 split_pert: bool = False,
                  min_pts: int = 8,
                  max_tries: int = 8,
                  oversample: int = 12,
@@ -250,6 +251,17 @@ class PandaSetCalibDatasetFull(Dataset):
         # J_i = R_orig→vcam_i to recover orig-frame δ.
         assert pose_frame in ('orig', 'vcam'), f'bad pose_frame={pose_frame}'
         self.pose_frame = pose_frame
+        # split_pert: self-supervised pose_emb mode. Sample δ = δ1 + δ2 (each
+        # half-range, composed as R_δ1 @ R_δ2; t_δ1 + t_δ2). δ1 is exposed via
+        # pert_vec[8:14] so the model can fold it into pose_emb as a known hint;
+        # the network's job becomes regressing only δ2's reproj residual.
+        # true_uvd is set to uv_pre = (uv after applying ONLY δ1) so that
+        # target = true_uvd - dist_uvd = -δ2-induced shift. δ1=0 degenerates
+        # exactly to the calibration objective. orig-frame only.
+        self.split_pert = bool(split_pert)
+        if self.split_pert:
+            assert self.pose_frame == 'orig', \
+                'split_pert is implemented for pose_frame="orig" only'
         self.min_pts   = int(min_pts)
         self.max_tries = int(max_tries)
         self.oversample = int(oversample)
@@ -619,9 +631,38 @@ class PandaSetCalibDatasetFull(Dataset):
                 R_pert_orig = R_o_v.T @ R_pert_vcam @ R_o_v
                 t_delta = R_o_v.T @ t_vcam
                 ypr = Rotation.from_matrix(R_pert_orig).as_euler('zyx', degrees=True)
+                # split_pert is asserted-off for vcam; keep the variables defined.
+                t_delta1 = np.zeros(3, dtype=np.float64)
+                ypr1     = np.zeros(3, dtype=np.float64)
+                R_pre    = None
+                cp_pre   = None
             else:
-                t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset_m
-                ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+                if self.split_pert:
+                    # Split sampling: each of (δ1, δ2) drawn uniformly in
+                    # ±max_*. The composed total can exceed max_* by up to 2×
+                    # but the *delivered hint* δ1 is bounded by max_*, which
+                    # is exactly the regime the deployed pose_emb will see at
+                    # cross-frame inference time.
+                    t_delta1 = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+                    ypr1     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+                    t_delta2 = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+                    ypr2     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+                    R_d1 = Rotation.from_euler('zyx', ypr1, degrees=True).as_matrix()
+                    R_d2 = Rotation.from_euler('zyx', ypr2, degrees=True).as_matrix()
+                    # Compose: δ1 first (the "known hint"), then δ2 (residual).
+                    R_off_local = R_d1 @ R_d2
+                    ypr = Rotation.from_matrix(R_off_local).as_euler('zyx', degrees=True)
+                    t_delta = t_delta1 + t_delta2
+                    # R_pre / cp_pre = pose after applying ONLY δ1 (no δ2).
+                    R_pre  = R_gt @ R_d1
+                    cp_pre = cp + t_delta1
+                else:
+                    t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+                    ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+                    t_delta1 = np.zeros(3, dtype=np.float64)
+                    ypr1     = np.zeros(3, dtype=np.float64)
+                    R_pre  = None
+                    cp_pre = None
             R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
             cp_off = cp + t_delta
             # Intrinsic fx/fy multiplicative perturbation (independent — left/right
@@ -652,10 +693,16 @@ class PandaSetCalibDatasetFull(Dataset):
                 pert_vec = np.array([t_delta[0], t_delta[1], t_delta[2],
                                       ypr[0], ypr[1], ypr[2],
                                       dfx_pct, dfy_pct], dtype=np.float32)
+            # δ1 6-vec (tx, ty, tz, yaw_deg, pitch_deg, roll_deg) — the "hint"
+            # consumed by pose_emb. Zero when split_pert is off (pose_emb sees
+            # SE3=0, i.e. legacy calib mode).
+            delta1_se3 = np.array([t_delta1[0], t_delta1[1], t_delta1[2],
+                                    ypr1[0], ypr1[1], ypr1[2]], dtype=np.float32)
             built = self.build_window(
                 inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
                 u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
                 tile_u0, tile_v0, img_full, IW, IH,
+                R_pre=R_pre, cp_pre=cp_pre, delta1_se3=delta1_se3,
             )
             if built is None:
                 continue
@@ -740,10 +787,12 @@ class PandaSetCalibDatasetFull(Dataset):
         if dfy_pct != 0.0: K_pert[1, 1] = K[1, 1] * (1.0 + dfy_pct)
         pert_vec = np.array([t[0], t[1], t[2], ypr[0], ypr[1], ypr[2],
                               dfx_pct, dfy_pct], dtype=np.float32)
+        delta1_se3 = np.zeros(6, dtype=np.float32)
         return self.build_window(
             inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
             u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
             tile_u0, tile_v0, img_full, IW, IH,
+            R_pre=None, cp_pre=None, delta1_se3=delta1_se3,
         )
 
     # ─── Shared helper used by both training (__getitem__) and inference demos.
@@ -753,10 +802,19 @@ class PandaSetCalibDatasetFull(Dataset):
     # ─── bucket-bin / rep-selection logic.
     def build_window(self, inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
                        u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
-                       tile_u0, tile_v0, img_full, IW, IH):
+                       tile_u0, tile_v0, img_full, IW, IH,
+                       R_pre=None, cp_pre=None, delta1_se3=None):
         """Apply a given perturbation+crop to an inst → DataLoader sample tuple.
         Returns None when the crop ends up with < self.min_pts in-view points;
-        caller decides whether to retry (training) or report failure (demo)."""
+        caller decides whether to retry (training) or report failure (demo).
+
+        split_pert (R_pre, cp_pre, delta1_se3): when R_pre / cp_pre are given,
+        the *target* uv (true_uvd[..., :2]) becomes the reprojection AT THE
+        δ1-perturbed pose, not the GT pose. Then `gt = true - dist` is the
+        residual the network must regress AFTER pose_emb has consumed δ1 as a
+        hint. delta1_se3 (6-vec, tx/ty/tz + yaw/pitch/roll deg) flows through
+        as a per-sample tensor for the model forward.
+        """
         S = self.img_size
         R_inv = R_off.T.astype(np.float32)
         t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
@@ -786,6 +844,38 @@ class PandaSetCalibDatasetFull(Dataset):
         # matches the already-tile-local uv_full / u0 / v0.
         if tile_u0 or tile_v0:
             uv_off_c = uv_off_c - np.array([tile_u0, tile_v0], dtype=np.float32)
+
+        # split_pert path: project the SAME pts via R_pre / cp_pre (= GT⊕δ1)
+        # using the *unperturbed* intrinsics K (δ1 is a pose-only hint; intrinsic
+        # perturbation goes through K_pert→δ2 only). This produces uv_pre — the
+        # network's NEW target. The uv_gt path is unused when uv_pre is set so
+        # we just overwrite it below for symmetry with the existing uv_gt_loc
+        # consumer (`true_uvd[..., :2] - dist_uvd[..., :2]` becomes
+        # `uv_pre_loc - uv_off_loc` = -δ2-induced shift in tile-local px).
+        uv_pre_c = None
+        if R_pre is not None and cp_pre is not None:
+            R_pre_inv = R_pre.T.astype(np.float32)
+            t_pre_inv = (-(R_pre.T @ cp_pre)).astype(np.float32)
+            pts_cam_pre = pts_c @ R_pre_inv.T + t_pre_inv      # (M, 3)
+            z_pre = pts_cam_pre[:, 2]
+            if inst.get('is_fisheye', False) and 'distortion' in inst:
+                _dist = inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy') \
+                        else np.asarray(inst['distortion'], dtype=np.float32)
+                _x, _y, _z = pts_cam_pre[:, 0], pts_cam_pre[:, 1], pts_cam_pre[:, 2]
+                _r = np.sqrt(_x * _x + _y * _y)
+                _theta = np.arctan2(_r, np.maximum(_z, 1e-6))
+                _t2 = _theta * _theta
+                _td = _theta * (1.0 + _dist[0] * _t2 + _dist[1] * _t2 ** 2
+                                    + _dist[2] * _t2 ** 3 + _dist[3] * _t2 ** 4)
+                _r_safe = np.where(_r > 1e-9, _r, 1.0)
+                _u = K[0, 0] * (_td * _x / _r_safe) + K[0, 2]
+                _v = K[1, 1] * (_td * _y / _r_safe) + K[1, 2]
+                uv_pre_c = np.stack([_u, _v], axis=-1).astype(np.float32)
+            else:
+                uv_pre_c = (pts_cam_pre[:, :2] * (np.array([K[0,0], K[1,1]], dtype=np.float32))) / \
+                           np.maximum(z_pre[:, None], 1e-6) + np.array([K[0,2], K[1,2]], dtype=np.float32)
+            if tile_u0 or tile_v0:
+                uv_pre_c = uv_pre_c - np.array([tile_u0, tile_v0], dtype=np.float32)
 
         in_crop_off = ((uv_off_c[:, 0] >= u0) & (uv_off_c[:, 0] < u0 + cs) &
                        (uv_off_c[:, 1] >= v0) & (uv_off_c[:, 1] < v0 + cs) &
@@ -823,12 +913,21 @@ class PandaSetCalibDatasetFull(Dataset):
 
         uv_gt_loc  = ((uv_gt_sel  - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
         uv_off_loc = ((uv_off_sel - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
+        # split_pert: target uv is the δ1-perturbed projection (uv_pre). Reduces
+        # the network's regression target to the δ2-induced shift only.
+        if uv_pre_c is not None:
+            uv_pre_sel = uv_pre_c[sub_idx]
+            uv_target_loc = ((uv_pre_sel - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
+        else:
+            uv_target_loc = uv_gt_loc
         dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
         is_obj = is_obj_full[cand_idx[sub_idx]].astype(np.float32)
 
         # (N, 5): [u, v, d, is_obj, intensity]
         # idx 0-3 stay for backward compat; intensity is the new 5th channel.
-        true_uvd = np.concatenate([uv_gt_loc,  dist_m[:, None], is_obj[:, None], intens_sel[:, None]], axis=1)
+        # uv_target_loc == uv_gt_loc when split_pert is off (legacy calib),
+        # uv_pre_loc when split_pert is on (target = -δ2 residual after pose_emb).
+        true_uvd = np.concatenate([uv_target_loc, dist_m[:, None], is_obj[:, None], intens_sel[:, None]], axis=1)
         dist_uvd = np.concatenate([uv_off_loc, dist_m[:, None], is_obj[:, None], intens_sel[:, None]], axis=1)
 
         # Original-camera-frame solver inputs:
@@ -923,6 +1022,8 @@ class PandaSetCalibDatasetFull(Dataset):
 
         self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
                                 scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
+        if delta1_se3 is None:
+            delta1_se3 = np.zeros(6, dtype=np.float32)
         return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
                 torch.tensor(vfp, dtype=torch.float32),
                 torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid),
@@ -930,7 +1031,8 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.from_numpy(pts_cam_orig),
                 torch.from_numpy(duv_orig),
                 torch.from_numpy(K_orig),
-                torch.tensor(float(cs), dtype=torch.float32))
+                torch.tensor(float(cs), dtype=torch.float32),
+                torch.from_numpy(delta1_se3))
 
 
 def collate_full(batch):
@@ -984,5 +1086,14 @@ def collate_full(batch):
     else:
         pts_cam_orig = duv_orig = K_orig = cs_t = None
 
+    # δ1 hint (split_pert): per-sample 6-vec [tx, ty, tz, yaw, pitch, roll deg]
+    # consumed by pose_emb. Always emitted in the 12-tuple; zeros when split_pert
+    # is off (network sees SE3=0 → backward-compat with legacy calib mode).
+    has_d1 = len(batch[0]) >= 12
+    if has_d1:
+        delta1_se3 = torch.stack([s[11] for s in batch])            # (B, 6)
+    else:
+        delta1_se3 = torch.zeros(B, 6, dtype=torch.float32)
+
     return (imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec,
-            pts_cam_orig, duv_orig, K_orig, cs_t)
+            pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3)

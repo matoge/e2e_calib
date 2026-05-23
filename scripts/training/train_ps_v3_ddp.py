@@ -73,9 +73,10 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
     _last_log_step = 0
     for batch in loader:
         # collate_full evolved 7 → 8 (pert_6vec) → 12-tuple (orig-cam solver
-        # tensors). DDP path needs only the first 7 fields here; the rest are
-        # consumed by the BA eval hook.
+        # tensors) → 13-tuple (δ1 hint for split_pert). DDP path needs the first
+        # 7 fields + δ1 (slot 12); the rest are consumed by the BA eval hook.
         imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch[:7]
+        delta1_se3 = batch[12] if len(batch) >= 13 else None
         # accel.prepare already puts tensors in device via DataLoader wrap, but
         # the collate returns uint8 images — convert to float on-device here.
         imgs     = imgs.float().div_(255.0)
@@ -94,7 +95,8 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
         else:
             point_in = dist_uvd[..., :3]
         params = model(imgs, point_in, key_padding_mask=pad_mask, vfp=vfp,
-                       bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
+                       bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
+                       pose_emb_se3=delta1_se3)
         valid  = ~pad_mask
         loss   = gaussian2d_nll(params[valid], gt[valid])
         if train:
@@ -217,7 +219,8 @@ def main(cfg=None):
                   max_crop_px=c.get('max_crop_px', 512),
                   frame_stride=c.get('frame_stride', 1),
                   grid_n=c.get('grid_n', 16),
-                  oversample=c.get('oversample', 12))
+                  oversample=c.get('oversample', 12),
+                  split_pert=c.get('split_pert', False))
     log(f"cache={cache}  perturbation=±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m  "
         f"crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full → {c['img_size']})")
     cache_paths = [p.strip() for p in str(cache).split(',') if p.strip()]
@@ -274,6 +277,7 @@ def main(cfg=None):
                           use_convnext=c.get("use_convnext", False),
                           use_frustum=c.get("use_frustum", True),
                           frustum_grid_n=c.get("grid_n", 16),
+                          frustum_dense=c.get("frustum_dense", False),
                           use_pose_emb=c.get("use_pose_emb", False),
                           deform_mode=c.get("deform_mode", "none"),
                           convnext_n_blocks=c.get("convnext_n_blocks", 2),
@@ -688,6 +692,17 @@ if __name__ == "__main__":
     ap.add_argument('--no-ba-eval', action='store_true')
     ap.add_argument('--use-pose-emb', action='store_true',
                     help='enable PoseEmb (effectively log(vfp) bias on Q + img tokens)')
+    ap.add_argument('--pose-emb-self-sup', action='store_true',
+                    help='self-supervised pose_emb: dataset samples δ = δ1 + δ2 '
+                         '(each ±max_offset_m / ±max_rot_deg). δ1 is fed into '
+                         'pose_emb as a "known hint"; the network only has to '
+                         'regress the δ2-induced reproj residual. With δ1=0 '
+                         'this degenerates exactly to legacy calib. Implies '
+                         '--use-pose-emb. Stepping stone toward cross-frame.')
+    ap.add_argument('--frustum-dense', action='store_true',
+                    help='enable FrustumLocalEncoder.forward_dense (cell map with '
+                         'zero LiDAR + UV emb for empty cells). With deform_mode=ml '
+                         'this becomes a 3rd KV level (coarse, fine, lidar_dense).')
     ap.add_argument('--find-unused-parameters', action='store_true',
                     help='DDP find_unused_parameters=True. Off by default '
                          '(2026-05-05: True caused 22× slowdown). Turn on '
@@ -727,6 +742,10 @@ if __name__ == "__main__":
     if args.init_from  is not None: cfg['init_from']  = args.init_from
     if args.no_frustum: cfg['use_frustum'] = False
     if args.use_pose_emb: cfg['use_pose_emb'] = True
+    if args.pose_emb_self_sup:
+        cfg['use_pose_emb'] = True
+        cfg['split_pert']   = True
+    if args.frustum_dense: cfg['frustum_dense'] = True
     if args.ba_eval_start_ep is not None: cfg['ba_eval_start_ep'] = args.ba_eval_start_ep
     if args.ba_eval_every    is not None: cfg['ba_eval_every']    = args.ba_eval_every
     if args.ba_eval_n_seeds  is not None: cfg['ba_eval_n_seeds']  = args.ba_eval_n_seeds
