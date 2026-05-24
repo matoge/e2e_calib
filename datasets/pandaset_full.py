@@ -205,6 +205,8 @@ class PandaSetCalibDatasetFull(Dataset):
                  rep_strategy: str = 'cell_center',
                  center_band: float = 0.0,
                  fixed_center_crop: bool = False,
+                 pair_mode: bool = False,
+                 pair_stride: int = 1,
                  preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
@@ -300,6 +302,20 @@ class PandaSetCalibDatasetFull(Dataset):
         # to look at "the middle of the image" instead of stratified bg
         # cells (which often dump sky/road tiles).
         self.fixed_center_crop = bool(fixed_center_crop)
+        # pair_mode: emit (frame_A, frame_B, Δpose_AB) tuples for cross-frame
+        # supervision. v1 design (see project-cross-frame-design):
+        #   * frame_A: full δ_A SE3 perturbation (legacy calib).
+        #   * frame_B: cs_B=cs_A (VFP-identity), δ_B=0 (LiDAR perfect),
+        #              crop_B centred on uv_B = T_gt_B-projection of the
+        #              SAME world pivot picked for frame_A.
+        #   * Δpose_AB = T_cam_B ← T_cam_A in the original-camera frame
+        #     (R_AB = R_gt_B^T R_gt_A; t_AB = R_gt_B^T (cp_A - cp_B)).
+        # __len__ becomes len(pair_index) * oversample. Index is built below
+        # AFTER the cache / lmdb backend is wired, since it needs to read
+        # (scene, cam, frame) per inst.
+        self.pair_mode   = bool(pair_mode)
+        self.pair_stride = int(pair_stride)
+        self.pair_index: list[tuple[int, int]] = []
         # Preload every inst .pt into RAM. The full PS cache is ~1 GB, and
         # torch.load per-sample shows up as ~3.8 ms in cProfile — roughly
         # 40% of the remaining __getitem__ cost once TurboJPEG is in place.
@@ -324,7 +340,12 @@ class PandaSetCalibDatasetFull(Dataset):
             # when you trust your lmdb-py version + path doesn't get reopened.
             self._cubs_map = self._preload_cubs_map()
 
+        if self.pair_mode:
+            self.pair_index = self._build_pair_index()
+
     def __len__(self):
+        if self.pair_mode:
+            return len(self.pair_index) * self.oversample
         return len(self.fnames) * self.oversample
 
     # Process-wide LMDB env cache keyed by (pid, path). lmdb-py rejects a
@@ -402,6 +423,58 @@ class PandaSetCalibDatasetFull(Dataset):
         env.close()
         return out
 
+    def _build_pair_index(self) -> list[tuple[int, int]]:
+        """Group fnames by (scene, cam) and emit (i_A, i_B) idx pairs where
+        frame_B = frame_A + pair_stride. Both i_A and i_B are positions into
+        self.fnames so __getitem__'s _build_one_pair can reload them via
+        _load_inst (= same backend the rest of the dataset uses).
+
+        Reads (scene, cam, frame) per inst via a light path:
+          - LMDB: header contains 'scene' + 'frame'; cam encoded via filename.
+          - .pt:  torch.load is required, but only happens once at __init__.
+        Heavy fields (img/pts) are not retained — we only keep tuples.
+        """
+        keys: list[tuple[str, str, int]] = []
+        # Which cam an fname belongs to is encoded in the cache build script's
+        # naming convention; full-frame mode uses gid_start = scene_idx * 200,
+        # so cam is monotonic within scene. Easiest: read cam from the inst
+        # header (LMDB) or torch.load (.pt). Both are O(N) but only at init.
+        for i, fn in enumerate(self.fnames):
+            try:
+                if self._use_lmdb:
+                    if self._lmdb_env is None:
+                        self._open_lmdb()
+                    with self._lmdb_env.begin(write=False) as txn:
+                        blob = txn.get(fn.encode())
+                    hdr_len = struct.unpack_from(_LMDB_HDR_LEN_FMT, blob, 0)[0]
+                    header = pickle.loads(blob[_LMDB_HDR_LEN_SIZE:_LMDB_HDR_LEN_SIZE + hdr_len])
+                    scene = str(header.get('scene', ''))
+                    frame = int(header.get('frame', -1))
+                    cam   = str(header.get('cam', ''))
+                else:
+                    src = (self._cache[i] if self._cache is not None
+                           else torch.load(self.inst_dir / fn, weights_only=False))
+                    scene = str(src.get('scene', ''))
+                    frame = int(src.get('frame', -1))
+                    cam   = str(src.get('cam', ''))
+            except Exception:
+                continue
+            keys.append((scene, cam, frame))
+        # Group by (scene, cam): {(scene, cam): {frame: idx}}
+        groups: dict[tuple[str, str], dict[int, int]] = {}
+        for i, (scene, cam, frame) in enumerate(keys):
+            if not scene or frame < 0:
+                continue
+            groups.setdefault((scene, cam), {})[frame] = i
+        pairs: list[tuple[int, int]] = []
+        s = self.pair_stride
+        for fmap in groups.values():
+            for f, ia in fmap.items():
+                ib = fmap.get(f + s)
+                if ib is not None:
+                    pairs.append((ia, ib))
+        return pairs
+
     def _load_inst(self, idx: int) -> dict:
         # idx is in [0, len_fnames * oversample); modulo to wrap to file index
         i = idx % len(self.fnames)
@@ -423,8 +496,9 @@ class PandaSetCalibDatasetFull(Dataset):
         # (~978 deep RecursionError) when many indices in a row were bad.
         N = len(self)
         seen = {idx}
+        builder = self._build_one_pair if self.pair_mode else self._build_one_window
         for _ in range(1024):
-            built = self._build_one_window(idx)
+            built = builder(idx)
             if built is not None:
                 return built
             # re-roll an unseen idx
@@ -438,7 +512,8 @@ class PandaSetCalibDatasetFull(Dataset):
                 break
         raise RuntimeError(
             f"no valid window after 1024 re-rolls; "
-            f"center_band={self.center_band}, min_pts={self.min_pts}"
+            f"center_band={self.center_band}, min_pts={self.min_pts}, "
+            f"pair_mode={self.pair_mode}"
         )
 
     def _build_one_window(self, idx: int):
@@ -714,6 +789,226 @@ class PandaSetCalibDatasetFull(Dataset):
         # Python stack on tile caches where many indices in a row had empty
         # bg_cells, ~978 deep RecursionError).
         return None
+
+    # ─── Pair builder (cross-frame supervision, v1) ───────────────────────
+    # For pair_idx in [0, len(pair_index) * oversample), look up (i_A, i_B)
+    # and build:
+    #   * frame_A: same path as _build_one_window (full δ_A SE3, pivot picked
+    #              from A's in-image lidar that ALSO projects into B's tile).
+    #   * frame_B: cs_B = cs_A (VFP-identity), δ_B = 0, crop_B centred on
+    #              uv_B = T_gt_B-projection of the SAME world pivot.
+    # Returns (A12-tuple, B12-tuple, dpose_AB_6vec) or None on re-roll.
+    def _build_one_pair(self, idx: int):
+        N_pairs = len(self.pair_index)
+        if N_pairs == 0:
+            raise RuntimeError("pair_mode=True but pair_index is empty")
+        i_A, i_B = self.pair_index[idx % N_pairs]
+        inst_A = self._load_inst(i_A)
+        inst_B = self._load_inst(i_B)
+
+        if 'jpg_bytes' in inst_A:
+            IH_A, IW_A = int(inst_A['IH']), int(inst_A['IW'])
+        else:
+            IH_A, IW_A = int(inst_A['img'].shape[-2]), int(inst_A['img'].shape[-1])
+        if 'jpg_bytes' in inst_B:
+            IH_B, IW_B = int(inst_B['IH']), int(inst_B['IW'])
+        else:
+            IH_B, IW_B = int(inst_B['img'].shape[-2]), int(inst_B['img'].shape[-1])
+
+        K_A = inst_A['K_full'].numpy(); K_B = inst_B['K_full'].numpy()
+        R_gt_A = inst_A['R_gt'].numpy(); cp_A = inst_A['cam_pos'].numpy()
+        R_gt_B = inst_B['R_gt'].numpy(); cp_B = inst_B['cam_pos'].numpy()
+        pts_A = inst_A['pts'].numpy()
+        intensity_A = np.clip(inst_A['intensity'].numpy().astype(np.float32),
+                              0.0, 1.0) if 'intensity' in inst_A \
+                              else np.zeros(len(pts_A), dtype=np.float32)
+        is_obj_A = inst_A['is_obj'].numpy().astype(bool) if 'is_obj' in inst_A \
+                   else _is_obj_per_point(pts_A, inst_A.get('cuboids', [])).astype(bool)
+        if 'uv_full' in inst_A and 'z_cam' in inst_A:
+            uv_full_A = inst_A['uv_full'].numpy()
+            z_A = inst_A['z_cam'].numpy()
+        else:
+            T_gt_A = inst_A['T_gt'].numpy()
+            homo = np.column_stack([pts_A, np.ones(len(pts_A))])
+            pts_cam_gt = (T_gt_A @ homo.T)[:3].T
+            z_A = pts_cam_gt[:, 2].astype(np.float32)
+            uv_full_A = ((K_A @ pts_cam_gt.T)[:2] / np.maximum(pts_cam_gt[:, 2:].T, 1e-6)).T.astype(np.float32)
+        tile_u0_A = int(inst_A.get('tile_u0', 0))
+        tile_v0_A = int(inst_A.get('tile_v0', 0))
+        if tile_u0_A or tile_v0_A:
+            uv_full_A = uv_full_A - np.array([tile_u0_A, tile_v0_A], dtype=np.float32)
+
+        # Project pts_A into B's GT camera so we know which pivots also land
+        # inside the B tile. Used as the VALIDITY mask for pivot selection.
+        T_gt_B = inst_B.get('T_gt')
+        if T_gt_B is not None:
+            T_gt_B = T_gt_B.numpy()
+        else:
+            T_gt_B = np.eye(4, dtype=np.float32)
+            T_gt_B[:3, :3] = R_gt_B.T
+            T_gt_B[:3, 3]  = -R_gt_B.T @ cp_B
+        homo_A = np.column_stack([pts_A, np.ones(len(pts_A))])
+        pts_cam_B_pre = (T_gt_B @ homo_A.T)[:3].T
+        z_B_pre = pts_cam_B_pre[:, 2].astype(np.float32)
+        uv_Bproj_full = ((K_B @ pts_cam_B_pre.T)[:2]
+                         / np.maximum(pts_cam_B_pre[:, 2:].T, 1e-6)).T.astype(np.float32)
+        tile_u0_B = int(inst_B.get('tile_u0', 0))
+        tile_v0_B = int(inst_B.get('tile_v0', 0))
+        if tile_u0_B or tile_v0_B:
+            uv_Bproj_full = uv_Bproj_full - np.array([tile_u0_B, tile_v0_B], dtype=np.float32)
+        in_box_A = inst_A['in_box'].numpy().astype(bool) if 'in_box' in inst_A \
+                   else np.ones(len(uv_full_A), dtype=bool)
+        valid_A = ((z_A > 0.5) &
+                   (uv_full_A[:, 0] >= 0) & (uv_full_A[:, 0] < IW_A) &
+                   (uv_full_A[:, 1] >= 0) & (uv_full_A[:, 1] < IH_A) &
+                   in_box_A)
+        valid_in_B = ((z_B_pre > 0.5) &
+                      (uv_Bproj_full[:, 0] >= 0) & (uv_Bproj_full[:, 0] < IW_B) &
+                      (uv_Bproj_full[:, 1] >= 0) & (uv_Bproj_full[:, 1] < IH_B))
+        valid_pivot = valid_A & valid_in_B
+        obj_idxs   = np.where(is_obj_A & valid_pivot)[0]
+        bg_idxs    = np.where((~is_obj_A) & valid_pivot)[0]
+
+        for _ in range(self.max_tries):
+            # ── Pick pivot from A (preferring obj) that ALSO projects into B.
+            if len(obj_idxs) > 0 and (len(bg_idxs) == 0 or np.random.rand() < 0.5):
+                i = obj_idxs[np.random.randint(len(obj_idxs))]
+            elif len(bg_idxs) > 0:
+                i = bg_idxs[np.random.randint(len(bg_idxs))]
+            else:
+                return None  # this pair has no co-visible pivot — re-roll idx
+
+            pu_A, pv_A = float(uv_full_A[i, 0]), float(uv_full_A[i, 1])
+            piv_z = float(z_A[i])
+            if piv_z < 20.0:
+                cs_lo = max(self.min_crop_px, 256)
+                cs_hi = min(768, IW_A, IH_A, IW_B, IH_B)
+            else:
+                cs_lo = self.min_crop_px
+                cs_hi = min(self.max_crop_px, IW_A, IH_A, IW_B, IH_B)
+            if cs_hi < cs_lo:
+                cs_hi = cs_lo
+            cs = int(np.random.randint(cs_lo, cs_hi + 1))
+            cs = min(cs, IW_A, IH_A, IW_B, IH_B)
+
+            u0_A = int(np.clip(pu_A - cs / 2, 0, IW_A - cs))
+            v0_A = int(np.clip(pv_A - cs / 2, 0, IH_A - cs))
+            pu_B, pv_B = float(uv_Bproj_full[i, 0]), float(uv_Bproj_full[i, 1])
+            u0_B = int(np.clip(pu_B - cs / 2, 0, IW_B - cs))
+            v0_B = int(np.clip(pv_B - cs / 2, 0, IH_B - cs))
+
+            # ── frame_A: full δ_A SE3 in 'orig' frame (legacy calib).
+            t_delta_A = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+            ypr_A     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+            R_off_A = R_gt_A @ Rotation.from_euler('zyx', ypr_A, degrees=True).as_matrix()
+            cp_off_A = cp_A + t_delta_A
+            K_pert_A = K_A.copy()
+            pad_px_A = int(cs * 0.10)
+            in_pad_A = ((uv_full_A[:, 0] >= u0_A - pad_px_A) &
+                        (uv_full_A[:, 0] <  u0_A + cs + pad_px_A) &
+                        (uv_full_A[:, 1] >= v0_A - pad_px_A) &
+                        (uv_full_A[:, 1] <  v0_A + cs + pad_px_A) &
+                        (z_A > 0.5))
+            cand_idx_A = np.where(in_pad_A)[0]
+            if len(cand_idx_A) < self.min_pts:
+                continue
+            if len(cand_idx_A) > self.n_full:
+                cand_idx_A = np.random.choice(cand_idx_A, size=self.n_full, replace=False)
+            pts_c_A = pts_A[cand_idx_A]
+            intens_c_A = intensity_A[cand_idx_A]
+            uv_gt_c_A  = uv_full_A[cand_idx_A]
+            pert_vec_A = np.array([t_delta_A[0], t_delta_A[1], t_delta_A[2],
+                                   ypr_A[0], ypr_A[1], ypr_A[2], 0.0, 0.0],
+                                  dtype=np.float32)
+            built_A = self.build_window(
+                inst_A, pts_c_A, intens_c_A, uv_gt_c_A, cand_idx_A, is_obj_A,
+                u0_A, v0_A, cs, K_A, R_off_A, cp_off_A, K_pert_A, cp_A,
+                pert_vec_A, tile_u0_A, tile_v0_A,
+                None if 'jpg_bytes' in inst_A else inst_A['img'], IW_A, IH_A,
+            )
+            if built_A is None:
+                continue
+            self._last_pair_A = dict(self._last_crop,
+                                     pivot_uv=(pu_A, pv_A),
+                                     R_off=R_off_A.copy(),
+                                     cp_off=cp_off_A.copy(),
+                                     K_pert=K_pert_A.copy(),
+                                     pert_vec=pert_vec_A.copy())
+
+            # ── frame_B: δ_B = 0, crop centred on uv_B.
+            pts_B = inst_B['pts'].numpy()
+            intensity_B = np.clip(inst_B['intensity'].numpy().astype(np.float32),
+                                  0.0, 1.0) if 'intensity' in inst_B \
+                                  else np.zeros(len(pts_B), dtype=np.float32)
+            is_obj_B = inst_B['is_obj'].numpy().astype(bool) if 'is_obj' in inst_B \
+                       else _is_obj_per_point(pts_B, inst_B.get('cuboids', [])).astype(bool)
+            if 'uv_full' in inst_B and 'z_cam' in inst_B:
+                uv_full_B = inst_B['uv_full'].numpy()
+                z_B = inst_B['z_cam'].numpy()
+            else:
+                homo = np.column_stack([pts_B, np.ones(len(pts_B))])
+                pts_cam_gt = (T_gt_B @ homo.T)[:3].T
+                z_B = pts_cam_gt[:, 2].astype(np.float32)
+                uv_full_B = ((K_B @ pts_cam_gt.T)[:2]
+                             / np.maximum(pts_cam_gt[:, 2:].T, 1e-6)).T.astype(np.float32)
+            if tile_u0_B or tile_v0_B:
+                uv_full_B = uv_full_B - np.array([tile_u0_B, tile_v0_B], dtype=np.float32)
+            pad_px_B = int(cs * 0.10)
+            in_pad_B = ((uv_full_B[:, 0] >= u0_B - pad_px_B) &
+                        (uv_full_B[:, 0] <  u0_B + cs + pad_px_B) &
+                        (uv_full_B[:, 1] >= v0_B - pad_px_B) &
+                        (uv_full_B[:, 1] <  v0_B + cs + pad_px_B) &
+                        (z_B > 0.5))
+            cand_idx_B = np.where(in_pad_B)[0]
+            if len(cand_idx_B) < self.min_pts:
+                continue
+            if len(cand_idx_B) > self.n_full:
+                cand_idx_B = np.random.choice(cand_idx_B, size=self.n_full, replace=False)
+            pts_c_B = pts_B[cand_idx_B]
+            intens_c_B = intensity_B[cand_idx_B]
+            uv_gt_c_B  = uv_full_B[cand_idx_B]
+            # δ_AB: independent perturbation on the relative pose Δpose_AB.
+            # Compose with calib-drift δ_local so Q_B sees BOTH errors.
+            t_delta_AB = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+            ypr_AB_pert = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+            R_dAB = Rotation.from_euler('zyx', ypr_AB_pert, degrees=True).as_matrix()
+            R_local = R_gt_A.T @ R_off_A
+            t_local = R_gt_A.T @ (cp_off_A - cp_A)
+            R_off_B_drift = R_gt_B @ R_dAB @ R_local
+            cp_off_B_drift = cp_B + R_gt_B @ (t_local + t_delta_AB)
+            pert_vec_B = np.array([t_local[0] + t_delta_AB[0],
+                                   t_local[1] + t_delta_AB[1],
+                                   t_local[2] + t_delta_AB[2],
+                                   ypr_A[0] + ypr_AB_pert[0],
+                                   ypr_A[1] + ypr_AB_pert[1],
+                                   ypr_A[2] + ypr_AB_pert[2],
+                                   0.0, 0.0], dtype=np.float32)
+            built_B = self.build_window(
+                inst_B, pts_c_B, intens_c_B, uv_gt_c_B, cand_idx_B, is_obj_B,
+                u0_B, v0_B, cs, K_B, R_off_B_drift, cp_off_B_drift, K_B.copy(), cp_B,
+                pert_vec_B, tile_u0_B, tile_v0_B,
+                None if 'jpg_bytes' in inst_B else inst_B['img'], IW_B, IH_B,
+            )
+            if built_B is None:
+                continue
+            self._last_pair_B = dict(self._last_crop,
+                                     pivot_uv=(pu_B, pv_B),
+                                     pivot_world_idx=int(i),
+                                     R_off=R_off_B_drift.copy(),
+                                     cp_off=cp_off_B_drift.copy(),
+                                     dpose_pert_t=t_delta_AB.copy(),
+                                     dpose_pert_ypr=ypr_AB_pert.copy())
+
+            # ── Δpose_AB = T_cam_B ← T_cam_A in original-camera frame.
+            R_AB = R_gt_B.T @ R_gt_A
+            t_AB = R_gt_B.T @ (cp_A - cp_B)
+            ypr_AB = Rotation.from_matrix(R_AB).as_euler('zyx', degrees=True)
+            dpose_AB = np.array([t_AB[0], t_AB[1], t_AB[2],
+                                 ypr_AB[0], ypr_AB[1], ypr_AB[2]],
+                                dtype=np.float32)
+            return (built_A, built_B, torch.from_numpy(dpose_AB))
+
+        return None  # exhausted max_tries on this pair
 
     # ─── Explicit-perturbation API for eval / BA / multi-tile demos ──────
     # Same projection / crop / bucketing as __getitem__, but caller supplies
@@ -1097,3 +1392,20 @@ def collate_full(batch):
 
     return (imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec,
             pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3)
+
+
+def collate_pair(batch):
+    """Collate pair_mode samples: each sample is (A12, B12, dpose_AB).
+    Returns dict {'A': <collate_full(A_batch)>, 'B': <collate_full(B_batch)>,
+                  'dpose_AB': (B, 6) float32}.
+    Using a dict (not a flat tuple) so trainers can route A and B through the
+    existing single-frame collate-tuple unpacking unchanged.
+    """
+    A_batch = [s[0] for s in batch]
+    B_batch = [s[1] for s in batch]
+    dpose   = torch.stack([s[2] for s in batch])  # (B, 6)
+    return {
+        'A': collate_full(A_batch),
+        'B': collate_full(B_batch),
+        'dpose_AB': dpose,
+    }

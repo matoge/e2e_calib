@@ -887,3 +887,58 @@ class CalibNetDepth(nn.Module):
             W = self.info_head(q)                                # (B, N, 2, 2)
             return per_pt, W
         return per_pt
+
+    def forward_pair(self,
+                     image_A: torch.Tensor, distorted_uvd_A: torch.Tensor,
+                     image_B: torch.Tensor, distorted_uvd_B: torch.Tensor,
+                     dpose_AB: torch.Tensor,
+                     key_padding_mask_A=None, key_padding_mask_B=None,
+                     vfp_A: torch.Tensor = None, vfp_B: torch.Tensor = None,
+                     bucket_uvd_A=None, bucket_valid_A=None,
+                     bucket_uvd_B=None, bucket_valid_B=None,
+                     delta1_A=None, delta1_B=None):
+        """Cross-frame forward (LIVO-type pair learning, v1).
+
+        Calls the SAME `forward` (= shared cross-attn + PoseEmb) three times:
+
+          * pred_A     : single-frame calib on A (pose_emb = δ1_A, default 0).
+                         pose_emb_se3=0 + KV=own → degenerates to legacy calib.
+          * pred_B     : single-frame calib on B (pose_emb = δ1_B, default 0).
+                         B has δ_B=0 in v1 dataset, so this is mostly identity.
+          * pred_A_to_B: A's perturbed lidar Q against B's image+lidar KV with
+                         pose_emb = Δpose_AB. The query is asked "what uv would
+                         A's points hit on the B image, given the Δpose?".
+                         Target uv (supervised in trainer): A's lidar projected
+                         via T_gt_B into B's image px (= the same world points
+                         B-camera would see if calib were perfect).
+
+        PoseMLP is initialised so PoseEmb(0) ≈ 0 → pred_A and pred_A_to_B at
+        Δpose_AB=0 collapse to the standard calib forward, structurally
+        guaranteeing that calib is preserved as a special case.
+        """
+        # 1) self-frame on A (legacy calib, optionally with δ1 hint)
+        pred_A = self.forward(
+            image_A, distorted_uvd_A,
+            key_padding_mask=key_padding_mask_A,
+            vfp=vfp_A,
+            bucket_uvd=bucket_uvd_A, bucket_valid=bucket_valid_A,
+            pose_emb_se3=delta1_A,
+        )
+        # 2) self-frame on B (sanity gate; Δpose=0, KV=own).
+        pred_B = self.forward(
+            image_B, distorted_uvd_B,
+            key_padding_mask=key_padding_mask_B,
+            vfp=vfp_B,
+            bucket_uvd=bucket_uvd_B, bucket_valid=bucket_valid_B,
+            pose_emb_se3=delta1_B,
+        )
+        # 3) cross-frame: A's Q + Δpose_AB against B's KV (image+lidar bucket).
+        #    Target = uv of A's lidar pts under T_gt_B (caller computes label).
+        pred_A_to_B = self.forward(
+            image_B, distorted_uvd_A,
+            key_padding_mask=key_padding_mask_A,
+            vfp=vfp_B,
+            bucket_uvd=bucket_uvd_B, bucket_valid=bucket_valid_B,
+            pose_emb_se3=dpose_AB,
+        )
+        return pred_A, pred_B, pred_A_to_B
