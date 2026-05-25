@@ -219,11 +219,14 @@ pre code i { color: var(--ink-dim); font-style: italic; }
   color: var(--ink);
 }
 .history .hcell:hover { border-color: var(--accent); }
-.history .hcell img {
+.history .hcell img,
+.history .hcell canvas.hthumb {
   width: 100%; height: auto;
+  display: block;
   border-radius: 3px;
   border: 1px solid var(--border);
   margin-bottom: 6px;
+  background: #1a1a1a;
 }
 .history .hcell .dim {
   font-family: var(--f-mono);

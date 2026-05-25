@@ -68,7 +68,8 @@ def project_lidar_into_image(pts_xyzi: np.ndarray, K: np.ndarray,
                                T_cam_lidar: np.ndarray, IW: int, IH: int,
                                *, is_fisheye: bool = False,
                                dist: np.ndarray | None = None,
-                               z_min: float = 0.5):
+                               z_min: float = 0.5,
+                               pad_px: int = 0):
     """Full pipeline used by every tile-cache builder and by CaaaS.
 
     Inputs
@@ -101,8 +102,9 @@ def project_lidar_into_image(pts_xyzi: np.ndarray, K: np.ndarray,
     else:
         uv_all = project_pinhole(pts_cam_all, np.asarray(K, dtype=np.float64))
     z_all = pts_cam_all[:, 2].astype(np.float32)
+    p = int(pad_px)
     keep = ((z_all > z_min)
-            & (uv_all[:, 0] >= 0) & (uv_all[:, 0] < IW)
-            & (uv_all[:, 1] >= 0) & (uv_all[:, 1] < IH))
+            & (uv_all[:, 0] >= -p) & (uv_all[:, 0] < IW + p)
+            & (uv_all[:, 1] >= -p) & (uv_all[:, 1] < IH + p))
     return (keep, pts_cam_all[keep], uv_all[keep],
             z_all[keep], intensity_all[keep])

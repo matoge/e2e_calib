@@ -5,25 +5,42 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>e2e_calib — raw-frame calibration (v0.2)</title>
 <link rel="stylesheet" href="/static/style.css">
+<script src="https://unpkg.com/konva@9.3.18/konva.min.js"></script>
+<style>
+  .stage-wrap { position: relative; }
+  #stage { background: #111; border-radius: 6px; overflow: hidden; }
+  .stage-toolbar { display: flex; gap: .75rem; align-items: center;
+                   margin-bottom: .5rem; flex-wrap: wrap; }
+  .stage-toolbar label { display: inline-flex; gap: .35rem; align-items: center; }
+  .legend-dot { width: .8em; height: .8em; border-radius: 50%;
+                display: inline-block; vertical-align: middle;
+                box-shadow: 0 0 0 1px rgba(0,0,0,.5); }
+  .dot-gt   { background: #ffd400; }
+  .dot-pert { background: #ff3b30; }
+  .dot-corr { background: #32d74b; }
+  .stage-toolbar .ghost { font-size: .9em; }
+  .dropzone { border: 2px dashed #aaa; border-radius: 6px; padding: .8rem;
+              text-align: center; color: #888; transition: background .15s; }
+  .dropzone.drag { background: #eef; color: #224; border-color: #88c; }
+  .stage-hint { font-size: .85em; color: #888; }
+  #overlay-png { max-width: 100%; display:none; margin-top:.5rem; }
+</style>
 </head>
 <body>
 <main class="r-blog">
   <p class="meta" id="header-meta">e2e_calib · raw-frame ingest · GPU 15 resident</p>
   <h1>Calibration API · v0.2 raw frame</h1>
   <p class="lede">
-    v0.2 takes a raw kamikado-format frame (image + <code>points_V_*.txt</code>
-    + <code>calib.calib</code>) and slices it server-side into 256² sub-crops,
-    batches them through the σ-head, and runs one closed-form Gauss-Newton step.
-    Same engine as <a href="/calibrate">v0.1</a>, no LMDB tile required.
-    Two flows below — pick a server-side scene for a GT demo, or upload your own
-    three files. The v0.1 page is unchanged.
+    Raw kamikado frame (image + <code>points_V_*.txt</code> + <code>calib.calib</code>)
+    in, σ-head + closed-form GN out. Scroll to zoom, drag to pan, toggle layers
+    to compare GT / perturbed / corrected projections at sub-pixel detail.
   </p>
 
   <div class="grid">
     <section class="card">
       <h2>1 · GT demo (server-side scene)</h2>
-      <p class="dim">Pick a scene already on the server (under <code>/raw/kamikado/scenes</code>),
-      pick a frame, set the perturbation, and the API perturbs the GT for you.</p>
+      <p class="dim">Pick a scene already on the server (<code>/raw/kamikado/scenes</code>)
+      and the API perturbs the GT for you.</p>
       <div class="row">
         <select id="scene-sel" title="kamikado scene"></select>
       </div>
@@ -35,8 +52,9 @@
 
     <section class="card">
       <h2>2 · Upload your own frame</h2>
-      <p class="dim">Three kamikado files: PNG/JPG image, <code>points_V_*.txt</code>,
-      <code>calib.calib</code>. Server slices into tiles and runs the same pipeline.</p>
+      <p class="dim">Drop or pick three kamikado files. Server slices into tiles
+      and runs the same pipeline.</p>
+      <div id="dropzone" class="dropzone">drop image / points_V / calib here, or pick below</div>
       <div class="row"><label>image    <input id="up-image"  type="file" accept="image/png,image/jpeg"></label></div>
       <div class="row"><label>points_V <input id="up-points" type="file" accept=".txt"></label></div>
       <div class="row"><label>calib    <input id="up-calib"  type="file" accept=".calib,.json"></label></div>
@@ -81,9 +99,28 @@
   </section>
 
   <section class="card wide">
-    <h2>Result</h2>
+    <h2>Result · interactive overlay</h2>
     <p class="dim" id="result-meta">— run the calibration above to populate —</p>
-    <img id="overlay" alt="overlay" style="display:none">
+
+    <div class="stage-toolbar">
+      <span><span class="legend-dot dot-gt"></span> GT</span>
+      <span><span class="legend-dot dot-pert"></span> perturbed</span>
+      <span><span class="legend-dot dot-corr"></span> corrected</span>
+      <label><input type="checkbox" id="tg-gt"   checked> show GT</label>
+      <label><input type="checkbox" id="tg-pert" checked> show pert</label>
+      <label><input type="checkbox" id="tg-corr" checked> show corr</label>
+      <label>radius <input type="range" id="dot-r" min="0.5" max="6" step="0.25" value="1.5" style="width:6em"></label>
+      <label>opacity <input type="range" id="dot-a" min="0.1" max="1" step="0.05" value="0.85" style="width:6em"></label>
+      <button id="reset-view" class="ghost">reset view</button>
+      <button id="fit-view"   class="ghost">fit</button>
+      <button id="toggle-png" class="ghost">show 3-panel PNG</button>
+      <span class="stage-hint">wheel = zoom · drag = pan</span>
+    </div>
+
+    <div class="stage-wrap">
+      <div id="stage"></div>
+    </div>
+    <img id="overlay-png" alt="3-panel overlay">
   </section>
 
   <section class="card wide">
@@ -110,24 +147,110 @@
       </tbody>
     </table>
 
-    <h3>POST <code>/api/calibrate_scene</code> — JSON</h3>
+    <h3>Raw data format (kamikado)</h3>
+    <p class="dim">A "frame" = three files sharing an integer index <code>N</code>.
+      A "scene" is a directory of frames with one shared <code>calib.calib</code>.
+      Both <code>POST /api/calibrate_scene</code> and <code>/api/calibrate_frame</code>
+      consume exactly this trio. Server reference parser:
+      <code>scripts/data/adapters/kamikado.py</code>.</p>
+
+    <table class="api">
+      <thead><tr><th>File</th><th>Format</th><th>Contents / units</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>image_<i>N</i>.png</code></td>
+          <td>PNG (JPEG also accepted on upload)</td>
+          <td>full raw camera image, 3840×2160 RGB, fisheye (ip664). No crop.</td>
+        </tr>
+        <tr>
+          <td><code>points_V_<i>N</i>.txt</code></td>
+          <td>plain text, whitespace-separated, lines starting with <code>#</code> ignored</td>
+          <td>4 columns per line: <code>x y z intensity</code>.<br>
+              <code>x y z</code> are LiDAR points in the <b>vehicle (V) FLU frame</b>, in <b>metres</b>
+              (X-forward, Y-left, Z-up).<br>
+              <code>intensity</code> is the raw ip664 value (≈ 0–96, /128 quantum); the
+              adapter divides by 128 and clips to [0, 1] before feeding the model.</td>
+        </tr>
+        <tr>
+          <td><code>calib.calib</code></td>
+          <td>JSON</td>
+          <td>camera intrinsics + V → camera extrinsic. Schema below.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="dim">Sample <code>points_V_<i>N</i>.txt</code>:</p>
+<pre><code># x y z intensity
+0.0279306112724873  8.716605133179449  0.06962442470270619  0
+0.06262497844639636 8.731429248068375  0.06715762495165911  0
+...</code></pre>
+
+    <p class="dim">Schema of <code>calib.calib</code> (only the fields the server reads
+      are shown; ordering and any additional keys are tolerated):</p>
 <pre><code>{
-  "scene": "points_ip664_D_20260226_224648_d005_3000_3020",
-  "frame": 0,
-  "ypr":   [0.30, -0.20, 0.50],
-  "t":     [0.030, -0.020, 0.040],
-  "cs":    256
+  "calibration": {
+    "intrinsics": {
+      "camera_model": {
+        "type": "pinhole(1)",
+        "pinhole_parameters": {
+          "matrix_image_camera": {
+            "matrix": [   <i>// 3×3, COLUMN-MAJOR (server applies .T to get K)</i>
+              [ fx,    0,   0 ],
+              [  0,   fy,   0 ],
+              [ cx,   cy,   1 ]
+            ]
+          }
+        }
+      },
+      "distortion_model": {
+        "type": "generic_fisheye(4)",
+        "generic_fisheye_parameters": {
+          "coefficients": [ k1, k2, k3, k4 ]   <i>// Kannala-Brandt equidistant, 4 coeffs</i>
+        }
+      }
+    },
+    "extrinsics": {
+      "transform_VS": {     <i>// V (vehicle FLU) → S (sensor/camera) rigid transform</i>
+        "so3":         { "x": qx, "y": qy, "z": qz, "w": qw },
+        "translation": { "matrix": [[ tx, ty, tz ]] }   <i>// metres</i>
+      }
+    }
+  }
 }</code></pre>
 
-    <h3>POST <code>/api/calibrate_frame</code> — multipart</h3>
-<pre><code>curl -X POST http://172.16.200.185:8082/api/calibrate_frame \
-  -F image=@image_0.png \
-  -F points=@points_V_0.txt \
-  -F calib=@calib.calib \
-  -F 'ypr=[0.30,-0.20,0.50]' \
-  -F 't=[0.030,-0.020,0.040]' \
-  -F cs=256 \
-  -F scene_id=mycar -F frame_id=0</code></pre>
+    <p class="dim">Pipeline applied server-side (identical to the cache builder):
+      <code>pts_S = T_SV · pts_V</code> with <code>T_SV = inv(T_VS)</code>;
+      <code>(u,v) = KannalaBrandt(K, dist, pts_S)</code>; points with <code>z_S &lt; 0.5 m</code>
+      or outside the image are dropped before tiling.</p>
+
+    <h3>Wire format / response geometry</h3>
+    <p class="dim">Each calibrate response also returns
+      <code>parent_url</code>, <code>parent_size</code>, and three
+      <code>uv_gt / uv_pert / uv_corr</code> arrays (N × 2, parent-image px) plus
+      matching <code>z_*</code> arrays so a client can render the projection
+      itself — exactly what powers the Konva canvas above. The arrays are packed
+      back-to-back as little-endian float32 in the <code>geom_url</code> blob, in
+      the order <code>uv_gt | uv_pert | uv_corr | z_gt | z_pert | z_corr</code>.</p>
+
+    <h3>Examples</h3>
+    <p class="dim">curl — server-side scene (no upload, just pick scene/frame):</p>
+<pre><code>curl -s -X POST http://172.16.200.185:8082/api/calibrate_scene \
+  -H "Content-Type: application/json" \
+  -d '{"scene":"points_ip664_D_20260226_224648_d005_3000_3020",
+       "frame":0,
+       "ypr":[0.3,-0.2,0.5], "t":[0.030,-0.020,0.040],
+       "cs":256}'</code></pre>
+
+    <p class="dim">curl — upload your own frame (image + points_V + calib.calib):</p>
+<pre><code>curl -s -X POST http://172.16.200.185:8082/api/calibrate_frame \
+  -F "image=@image_0.png"            \
+  -F "points=@points_V_0.txt"        \
+  -F "calib=@calib.calib"            \
+  -F 'ypr=[0.3,-0.2,0.5]'            \
+  -F 't=[0.030,-0.020,0.040]'        \
+  -F "cs=256"                        \
+  -F "scene_id=mycar"                \
+  -F "frame_id=0"</code></pre>
   </section>
 </main>
 
@@ -144,19 +267,254 @@ slid("tx", "txv", v => Number(v).toFixed(3));
 slid("ty", "tyv", v => Number(v).toFixed(3));
 slid("tz", "tzv", v => Number(v).toFixed(3));
 
-function ypr() { return [Number($("r").value), Number($("p").value), Number($("y").value)]; }
+// Server uses scipy from_euler('zyx', arr) — arr[0]=Z=roll (about optical axis),
+// arr[1]=Y=yaw (left/right), arr[2]=X=pitch (up/down). Camera-frame convention.
+function ypr() { return [Number($("r").value), Number($("y").value), Number($("p").value)]; }
 function tt()  { return [Number($("tx").value), Number($("ty").value), Number($("tz").value)]; }
 function cs()  { return Number($("cs").value); }
 
-function showResult(d) {
+// ─── Konva stage ───────────────────────────────────────────────────────────
+const STAGE_DIV = $("stage");
+let STAGE = null, BG_LAYER = null, PT_LAYER = null;
+let BG_IMG = null;            // Konva.Image for parent
+let PARENT_W = 0, PARENT_H = 0;
+let LAST_GEOM = null;         // {uv_gt, uv_pert, uv_corr, z_gt, z_pert, z_corr}
+let HOME_TRANSFORM = null;    // {x,y,scale} after fit
+
+function initStage() {
+  const w = STAGE_DIV.clientWidth || 900;
+  const h = Math.round(w * 9 / 16);
+  STAGE_DIV.style.height = h + "px";
+  STAGE = new Konva.Stage({ container: "stage", width: w, height: h, draggable: true });
+  BG_LAYER = new Konva.Layer({ listening: false });
+  PT_LAYER = new Konva.Layer({ listening: false });
+  STAGE.add(BG_LAYER); STAGE.add(PT_LAYER);
+
+  STAGE.on("wheel", (e) => {
+    e.evt.preventDefault();
+    const oldScale = STAGE.scaleX();
+    const pointer = STAGE.getPointerPosition();
+    if (!pointer) return;
+    const mousePoint = {
+      x: (pointer.x - STAGE.x()) / oldScale,
+      y: (pointer.y - STAGE.y()) / oldScale,
+    };
+    const factor = e.evt.deltaY > 0 ? 1 / 1.15 : 1.15;
+    const newScale = Math.max(0.05, Math.min(80, oldScale * factor));
+    STAGE.scale({ x: newScale, y: newScale });
+    STAGE.position({
+      x: pointer.x - mousePoint.x * newScale,
+      y: pointer.y - mousePoint.y * newScale,
+    });
+    redrawPoints();   // dot radius is in screen px → re-render
+    BG_LAYER.batchDraw();
+  });
+
+  window.addEventListener("resize", () => {
+    if (!STAGE) return;
+    const w2 = STAGE_DIV.clientWidth || 900;
+    const h2 = Math.round(w2 * 9 / 16);
+    STAGE_DIV.style.height = h2 + "px";
+    STAGE.size({ width: w2, height: h2 });
+    fitView(false);
+  });
+}
+
+function fitView(animate) {
+  if (!STAGE || !PARENT_W) return;
+  const sx = STAGE.width()  / PARENT_W;
+  const sy = STAGE.height() / PARENT_H;
+  const s  = Math.min(sx, sy) * 0.98;
+  const x  = (STAGE.width()  - PARENT_W * s) / 2;
+  const y  = (STAGE.height() - PARENT_H * s) / 2;
+  HOME_TRANSFORM = { x, y, scale: s };
+  if (animate) {
+    new Konva.Tween({
+      node: STAGE, duration: 0.25, easing: Konva.Easings.EaseInOut,
+      x, y, scaleX: s, scaleY: s,
+      onFinish: () => redrawPoints(),
+    }).play();
+  } else {
+    STAGE.position({ x, y });
+    STAGE.scale({ x: s, y: s });
+    redrawPoints();
+    BG_LAYER.batchDraw();
+  }
+}
+
+function setParent(url, w, h) {
+  PARENT_W = w; PARENT_H = h;
+  const img = new window.Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    BG_LAYER.destroyChildren();
+    BG_IMG = new Konva.Image({ image: img, x: 0, y: 0, width: w, height: h, listening: false });
+    BG_LAYER.add(BG_IMG);
+    fitView(false);
+  };
+  img.onerror = () => { $("go-status").textContent = "parent image load failed"; };
+  img.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+}
+
+// Bulk-draw N circles via a single sceneFunc — much cheaper than N Konva.Circle
+// nodes when N ≈ 100k. The radius is converted to *parent-image px* so visual
+// size stays constant under zoom. uv is a flat Float32Array of length 2N
+// (interleaved u,v pairs); z is a Float32Array of length N.
+function makeDotShape(uv, z, color, opacity, getRadiusPx, visible) {
+  const N = z.length;
+  return new Konva.Shape({
+    listening: false, visible,
+    sceneFunc: (ctx, shape) => {
+      const stage = shape.getStage();
+      const scale = stage ? stage.scaleX() : 1;
+      const r = getRadiusPx() / Math.max(scale, 1e-6);  // screen-px → image-px
+      ctx.beginPath();
+      const W = PARENT_W, H = PARENT_H;
+      for (let i = 0; i < N; i++) {
+        const u = uv[i*2], v = uv[i*2 + 1];
+        if (z[i] <= 0.5) continue;
+        if (u < 0 || u >= W || v < 0 || v >= H) continue;
+        ctx.moveTo(u + r, v);
+        ctx.arc(u, v, r, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = color;
+      ctx.globalAlpha = opacity;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    },
+  });
+}
+
+function redrawPoints() {
+  if (!LAST_GEOM || !STAGE) return;
+  PT_LAYER.destroyChildren();
+  const r = () => Number($("dot-r").value);
+  const a = Number($("dot-a").value);
+  const showG = $("tg-gt").checked, showP = $("tg-pert").checked, showC = $("tg-corr").checked;
+  // Order: pert (red) bottom, corr (lime) middle, GT (yellow) on top so the
+  // truth dots visually win when they coincide.
+  PT_LAYER.add(makeDotShape(LAST_GEOM.uv_pert, LAST_GEOM.z_pert, "#ff3b30", a, r, showP));
+  PT_LAYER.add(makeDotShape(LAST_GEOM.uv_corr, LAST_GEOM.z_corr, "#32d74b", a, r, showC));
+  PT_LAYER.add(makeDotShape(LAST_GEOM.uv_gt,   LAST_GEOM.z_gt,   "#ffd400", a, r, showG));
+  PT_LAYER.batchDraw();
+}
+
+async function loadGeomBlob(url, N) {
+  // Server packs 6 float32 arrays back-to-back, all little-endian:
+  //   [N×2 uv_gt | N×2 uv_pert | N×2 uv_corr | N z_gt | N z_pert | N z_corr]
+  const r = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now());
+  if (!r.ok) throw new Error(`geom blob ${r.status}`);
+  const buf = await r.arrayBuffer();
+  const f4 = 4;          // bytes per float32
+  const uv = N * 2 * f4; // bytes per uv array
+  const zb = N * f4;     // bytes per z array
+  return {
+    uv_gt:   new Float32Array(buf, 0,         N * 2),
+    uv_pert: new Float32Array(buf, uv,        N * 2),
+    uv_corr: new Float32Array(buf, 2 * uv,    N * 2),
+    z_gt:    new Float32Array(buf, 3 * uv,            N),
+    z_pert:  new Float32Array(buf, 3 * uv + zb,       N),
+    z_corr:  new Float32Array(buf, 3 * uv + 2 * zb,   N),
+  };
+}
+
+async function showResult(d) {
   $("result-meta").innerHTML =
     `${d.scene ?? "(upload)"}@${d.frame ?? "?"} · B=<b>${d.B}</b> · cs=${d.cs} · ` +
     `tiles=${d.n_tiles ?? "?"} · solver=${d.took_s}s &nbsp;|&nbsp; ` +
     `pert <b>${d.pert_px_mean.toFixed(2)} px</b> → corr <b>${d.corr_px_mean.toFixed(2)} px</b> &nbsp;|&nbsp; ` +
     `δ̂ ω=[${d.delta.omega_deg.map(x => x.toFixed(3)).join(", ")}]°  ` +
     `t=[${d.delta.t_m.map(x => x.toFixed(3)).join(", ")}] m`;
-  $("overlay").src = d.overlay_url + "?t=" + Date.now();
-  $("overlay").style.display = "block";
+  if (d.parent_url && d.parent_size && d.geom_url && d.geom_n) {
+    try {
+      LAST_GEOM = await loadGeomBlob(d.geom_url, d.geom_n);
+    } catch (e) {
+      $("go-status").textContent = "geom load failed: " + e.message;
+      LAST_GEOM = null;
+    }
+    setParent(d.parent_url, d.parent_size[0], d.parent_size[1]);
+    // setParent calls fitView → redrawPoints once BG_IMG is loaded; also
+    // refresh once now in case the image is cached.
+    setTimeout(redrawPoints, 0);
+  }
+  if (d.overlay_url) {
+    $("overlay-png").src = d.overlay_url + "?t=" + Date.now();
+  } else {
+    // fast=true skips the matplotlib 3-panel render → no PNG to show.
+    $("overlay-png").removeAttribute("src");
+    $("overlay-png").style.display = "none";
+  }
+}
+
+["tg-gt","tg-pert","tg-corr","dot-r","dot-a"].forEach(id =>
+  $(id).addEventListener("input", redrawPoints));
+$("reset-view").addEventListener("click", () => {
+  if (HOME_TRANSFORM) {
+    new Konva.Tween({
+      node: STAGE, duration: 0.25, easing: Konva.Easings.EaseInOut,
+      x: HOME_TRANSFORM.x, y: HOME_TRANSFORM.y,
+      scaleX: HOME_TRANSFORM.scale, scaleY: HOME_TRANSFORM.scale,
+      onFinish: () => redrawPoints(),
+    }).play();
+  }
+});
+$("fit-view").addEventListener("click", () => fitView(true));
+$("toggle-png").addEventListener("click", () => {
+  const el = $("overlay-png");
+  el.style.display = el.style.display === "block" ? "none" : "block";
+});
+
+// ─── history ───────────────────────────────────────────────────────────────
+// Render a tiny pert/corr thumb (parent + red+lime dots) into a canvas.
+// Shared by history thumbnails so we never need server-side matplotlib.
+async function renderHistoryThumb(canvas, e) {
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0, 0, W, H);
+  if (!e.parent_url || !e.parent_size || !e.geom_url || !e.geom_n) return;
+  const [pw, ph] = e.parent_size;
+  const s = Math.min(W / pw, H / ph);
+  const ox = (W - pw * s) / 2, oy = (H - ph * s) / 2;
+
+  // parent JPEG/PNG
+  await new Promise((res) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => { ctx.drawImage(img, ox, oy, pw * s, ph * s); res(); };
+    img.onerror = () => res();
+    img.src = e.parent_url;
+  });
+
+  // geom blob → uv_pert + uv_corr only (skip uv_gt for thumbs — too cluttered)
+  try {
+    const r = await fetch(e.geom_url);
+    if (!r.ok) return;
+    const buf = await r.arrayBuffer();
+    const N = e.geom_n, f4 = 4, uv = N * 2 * f4, zb = N * f4;
+    const uv_pert = new Float32Array(buf, uv,        N * 2);
+    const uv_corr = new Float32Array(buf, 2 * uv,    N * 2);
+    const z_pert  = new Float32Array(buf, 3 * uv + zb,     N);
+    const z_corr  = new Float32Array(buf, 3 * uv + 2 * zb, N);
+    const draw = (uvA, zA, color) => {
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      const r = 0.7;
+      // Sub-sample so small thumbs render fast even at N≈55k.
+      const stride = Math.max(1, Math.floor(N / 4000));
+      ctx.beginPath();
+      for (let i = 0; i < N; i += stride) {
+        if (zA[i] <= 0.5) continue;
+        const u = uvA[i*2], v = uvA[i*2 + 1];
+        if (u < 0 || u >= pw || v < 0 || v >= ph) continue;
+        const x = ox + u * s, y = oy + v * s;
+        ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    };
+    draw(uv_pert, z_pert, "#ff3b30");
+    draw(uv_corr, z_corr, "#32d74b");
+  } catch {}
 }
 
 async function loadHistory() {
@@ -164,28 +522,47 @@ async function loadHistory() {
     const r = await fetch("/api/history?limit=20");
     if (!r.ok) return;
     const d = await r.json();
-    const box = $("history");
-    box.innerHTML = "";
-    d.entries.forEach(e => {
-      const a = document.createElement("a");
-      a.href = e.overlay_url;
-      a.target = "_blank";
-      a.className = "hcell";
+    const box = $("history"); box.innerHTML = "";
+    // Render up to N most-recent entries with our own canvas thumbs (cheap,
+    // avoids matplotlib). Older entries beyond that limit just show metadata.
+    const THUMB_LIMIT = 6;
+    let thumbsRendered = 0;
+    d.entries.forEach((e, idx) => {
+      const hasPng = !!e.overlay_url;
+      const canRenderThumb = !!e.geom_url && !!e.parent_url && thumbsRendered < THUMB_LIMIT;
+      const cell = document.createElement(hasPng ? "a" : "div");
+      cell.className = "hcell";
+      if (hasPng) { cell.href = e.overlay_url; cell.target = "_blank"; }
       const ts = new Date(e.ts * 1000);
-      const w = e.delta && e.delta.omega_deg ? e.delta.omega_deg.map(x => x.toFixed(2)).join(",") : "";
-      const tv = e.delta && e.delta.t_m ? e.delta.t_m.map(x => x.toFixed(2)).join(",") : "";
-      a.innerHTML =
-        `<img src="${e.overlay_url}" loading="lazy">` +
+      const w  = e.delta?.omega_deg?.map(x => x.toFixed(2)).join(",") ?? "";
+      const tv = e.delta?.t_m?.map(x => x.toFixed(2)).join(",") ?? "";
+      let thumb;
+      if (hasPng) {
+        thumb = `<img src="${e.overlay_url}" loading="lazy">`;
+      } else if (canRenderThumb) {
+        thumb = `<canvas class="hthumb" id="hthumb-${idx}" width="240" height="135"></canvas>`;
+        thumbsRendered++;
+      } else {
+        thumb = `<div class="dim" style="height:80px;display:flex;align-items:center;justify-content:center;background:#1a1a1a;border-radius:4px">no thumb</div>`;
+      }
+      cell.innerHTML =
+        thumb +
         `<div class="dim">${ts.toLocaleTimeString()} · ${e.source ?? e.endpoint}</div>` +
         `<div class="dim">B=${e.B} pert ${e.pert_px_mean?.toFixed?.(2) ?? "?"}→corr ${e.corr_px_mean?.toFixed?.(2) ?? "?"} px</div>` +
         `<div class="dim">δ̂ ω=[${w}]° t=[${tv}] m</div>`;
-      box.appendChild(a);
+      box.appendChild(cell);
+      if (!hasPng && canRenderThumb) {
+        // Defer canvas paint to next microtask so the DOM is mounted.
+        const cv = box.querySelector(`#hthumb-${idx}`);
+        if (cv) renderHistoryThumb(cv, e);
+      }
     });
-  } catch (e) { /* ignore */ }
+  } catch {}
 }
 
+// ─── boot ──────────────────────────────────────────────────────────────────
 (async () => {
-  // Header version
+  initStage();
   try {
     const d = await fetch("/api/default").then(r => r.json());
     if (d.api_version) {
@@ -193,7 +570,6 @@ async function loadHistory() {
         `e2e_calib · raw-frame ingest · GPU 15 resident · v${d.api_version} (${d.git_rev})`;
     }
   } catch {}
-  // Scenes
   try {
     const d = await fetch("/api/scenes").then(r => r.json());
     const sel = $("scene-sel");
@@ -221,13 +597,31 @@ async function loadHistory() {
   loadHistory();
 })();
 
+// ─── drag-and-drop upload ──────────────────────────────────────────────────
+const DZ = $("dropzone");
+function dispatchFile(file) {
+  const n = file.name.toLowerCase();
+  if (/\.(png|jpe?g)$/.test(n)) $("up-image").files  = makeFileList(file);
+  else if (/^points_v.*\.txt$/.test(n) || n.endsWith(".txt")) $("up-points").files = makeFileList(file);
+  else if (n.endsWith(".calib") || n.endsWith(".json")) $("up-calib").files = makeFileList(file);
+}
+function makeFileList(f) {
+  const dt = new DataTransfer(); dt.items.add(f); return dt.files;
+}
+DZ.addEventListener("dragover", e => { e.preventDefault(); DZ.classList.add("drag"); });
+DZ.addEventListener("dragleave", () => DZ.classList.remove("drag"));
+DZ.addEventListener("drop", e => {
+  e.preventDefault(); DZ.classList.remove("drag");
+  for (const f of e.dataTransfer.files) dispatchFile(f);
+  $("go-status").textContent = `picked: ${[...e.dataTransfer.files].map(f=>f.name).join(", ")}`;
+});
+
+// ─── run buttons ───────────────────────────────────────────────────────────
 $("go-scene").addEventListener("click", async () => {
   const scene = $("scene-sel").value;
   if (!scene) { $("go-status").textContent = "no scene selected"; return; }
-  const body = {
-    scene, frame: Number($("scene-frame").value),
-    ypr: ypr(), t: tt(), cs: cs(),
-  };
+  const body = { scene, frame: Number($("scene-frame").value),
+                 ypr: ypr(), t: tt(), cs: cs() };
   $("go-status").textContent = `solving scene=${scene} frame=${body.frame}…`;
   $("go-scene").disabled = true; $("go-upload").disabled = true;
   try {
@@ -236,8 +630,7 @@ $("go-scene").addEventListener("click", async () => {
       body: JSON.stringify(body),
     });
     if (!r.ok) throw new Error(await r.text());
-    const d = await r.json();
-    showResult(d);
+    await showResult(await r.json());
     $("go-status").textContent = "done";
     loadHistory();
   } catch (e) {
@@ -256,12 +649,10 @@ $("go-upload").addEventListener("click", async () => {
     return;
   }
   const fd = new FormData();
-  fd.append("image", img);
-  fd.append("points", pts);
-  fd.append("calib", cal);
+  fd.append("image", img); fd.append("points", pts); fd.append("calib", cal);
   fd.append("ypr", JSON.stringify(ypr()));
-  fd.append("t", JSON.stringify(tt()));
-  fd.append("cs", String(cs()));
+  fd.append("t",   JSON.stringify(tt()));
+  fd.append("cs",  String(cs()));
   fd.append("scene_id", $("up-scene").value);
   fd.append("frame_id", $("up-frame").value);
   $("go-status").textContent = `uploading ${img.name} + ${pts.name} + ${cal.name}…`;
@@ -269,8 +660,7 @@ $("go-upload").addEventListener("click", async () => {
   try {
     const r = await fetch("/api/calibrate_frame", { method: "POST", body: fd });
     if (!r.ok) throw new Error(await r.text());
-    const d = await r.json();
-    showResult(d);
+    await showResult(await r.json());
     $("go-status").textContent = "done";
     loadHistory();
   } catch (e) {

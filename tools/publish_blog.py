@@ -32,7 +32,7 @@ BASE_URL = "https://confluence.tri-ad.tech"
 def md_to_html(md_text: str) -> str:
     return markdown.markdown(
         md_text,
-        extensions=["tables", "fenced_code", "sane_lists", "nl2br"],
+        extensions=["tables", "fenced_code", "sane_lists"],
         output_format="xhtml",
     )
 
@@ -53,25 +53,25 @@ def collect_images(md_text: str, md_dir: Path) -> list[Path]:
 
 
 def rewrite_images_in_html(html: str) -> str:
-    # python-markdown emits <img alt="..." src="path" /> for ![](path).
+    """Replace <img> with Confluence storage <ac:image>. Drop the markdown
+    alt-text caption — alt slugs like "hero17" make the page look broken.
+    Pin every image to a fixed width so paired images line up cleanly.
+    """
+    IMG_WIDTH = 560  # px; Confluence default content column ~ 760
+
     def repl(m: re.Match) -> str:
         attrs = m.group(0)
         src = re.search(r'src="([^"]+)"', attrs)
-        alt = re.search(r'alt="([^"]*)"', attrs)
         if not src:
             return attrs
         url = src.group(1)
         if url.startswith(("http://", "https://")):
             return attrs
         filename = Path(url).name
-        caption = (
-            f"<p><em>{alt.group(1)}</em></p>"
-            if alt and alt.group(1)
-            else ""
-        )
         return (
-            f'<ac:image><ri:attachment ri:filename="{filename}" /></ac:image>'
-            f"{caption}"
+            f'<ac:image ac:width="{IMG_WIDTH}" ac:thumbnail="false">'
+            f'<ri:attachment ri:filename="{filename}" />'
+            f'</ac:image>'
         )
 
     return re.sub(r"<img[^>]+/?>", repl, html)

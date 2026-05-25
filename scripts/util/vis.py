@@ -155,13 +155,31 @@ def visualize(model, exp_dir, cache: str, epoch: int,
         point_in = (torch.cat([dist_uvd_g[..., :3], dist_uvd_g[..., 4:5]], -1)
                       if use_intensity else dist_uvd_g[..., :3])
         with torch.no_grad(), torch.autocast(device_type='cuda', dtype=amp_dtype):
-            params = model(imgs_g, point_in, key_padding_mask=pad_mask_g,
-                            vfp=vfp_g, bucket_uvd=b_uvd_g, bucket_valid=b_v_g)
-        p = params[0].float().cpu().numpy()
+            out = model(imgs_g, point_in, key_padding_mask=pad_mask_g,
+                        vfp=vfp_g, bucket_uvd=b_uvd_g, bucket_valid=b_v_g)
+        per_pt = out[0] if isinstance(out, tuple) else out
+        # InfoHead2x2 経路では tuple の最後が (B, N, 2, 2) の W 行列。
+        # σ/ρ 経路 (per_pt[..., 2..4]) との後方互換のためどちらにも対応。
+        W_t = None
+        if isinstance(out, tuple):
+            last = out[-1]
+            if torch.is_tensor(last) and last.dim() == 4 and last.shape[-2:] == (2, 2):
+                W_t = last
+        p = per_pt[0].float().cpu().numpy()
         dist_uv = dist_uvd[0, :, :2].numpy()
         true_uv = true_uvd[0, :, :2].numpy()
         pred_uv = dist_uv + p[:, :2]
-        sx = np.exp(p[:, 2]); sy = np.exp(p[:, 3]); rho = np.tanh(p[:, 4])
+        if W_t is not None:
+            # Σ = W⁻¹ ; clamp det for fp16 robustness, then derive σx, σy, ρ
+            Wnp = W_t[0].float().cpu().numpy()
+            a = Wnp[..., 0, 0]; b = Wnp[..., 1, 1]; c = Wnp[..., 0, 1]
+            det = np.maximum(a * b - c * c, 1e-8)
+            cov_xx = b / det; cov_yy = a / det; cov_xy = -c / det
+            sx = np.sqrt(np.maximum(cov_xx, 1e-8))
+            sy = np.sqrt(np.maximum(cov_yy, 1e-8))
+            rho = cov_xy / (sx * sy + 1e-8)
+        else:
+            sx = np.exp(p[:, 2]); sy = np.exp(p[:, 3]); rho = np.tanh(p[:, 4])
         valid = ~((dist_uv[:, 0] == 0) & (dist_uv[:, 1] == 0))
         if not valid.any():
             k += 1; continue

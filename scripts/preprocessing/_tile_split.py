@@ -39,6 +39,7 @@ def cut_inst_to_tiles(*, jpg_bytes: bytes = None,
                        stride: int = DEFAULT_STRIDE,
                        pad_px: int = DEFAULT_PAD,
                        y_start: int = 0,
+                       y_end: int | None = None,
                        jpg_quality: int = DEFAULT_QUAL,
                        out_dir: Path = None,
                        gid_base: int = 0) -> list[str]:
@@ -73,7 +74,8 @@ def cut_inst_to_tiles(*, jpg_bytes: bytes = None,
             return buf.getvalue()
 
     x_starts = make_tile_starts(IW, tile_w, stride)
-    y_starts = make_tile_starts(IH, tile_h, stride, axis_start=y_start)
+    y_span = IH if y_end is None else min(int(y_end), IH)
+    y_starts = make_tile_starts(y_span, tile_h, stride, axis_start=y_start)
 
     out_files = []
     tile_id = 0

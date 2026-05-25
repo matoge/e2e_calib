@@ -42,7 +42,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DOFS = ['omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz']
 PRIOR_DIAG = torch.tensor(
     [1.0/9.0, 1.0/9.0, 1.0/9.0, 25.0, 25.0, 25.0], dtype=torch.float32)
-BA_N_ITER = 6
+BA_N_ITER = 2
 DAMPING = 1e-3
 
 
@@ -61,7 +61,10 @@ def _build_model(cfg):
         convnext_n_blocks=cfg.get('convnext_n_blocks', 2),
         convnext_fine_d=cfg.get('convnext_fine_d', None),
         convnext_stem_d=cfg.get('convnext_stem_d', None),
-        use_info_head=True,
+        use_info_head=cfg.get('use_info_head', False),
+        use_pose_emb=cfg.get('use_pose_emb', False),
+        frustum_dense=cfg.get('frustum_dense', False),
+        frustum_grid_n=cfg.get('grid_n', 16),
     )
 
 
@@ -211,15 +214,25 @@ def _solve_one(model, ds_imgs, *, target_idx, n_inst, cs, n_per_inst,
     with torch.no_grad():
         out = model(img_norm, point_in, key_padding_mask=pad_mask, vfp=vfp,
                     bucket_uvd=bucket_uvd, bucket_valid=bucket_valid)
+    # InfoHead2x2 経路では tuple の最後が (B, N, 2, 2) の W そのもの。
+    # 旧 σ/ρ ヘッド経路では per_pt[..., 2..4] = (log_σx, log_σy, ρ)。
     per_pt = out[0] if isinstance(out, tuple) else out
+    W_direct = None
+    if isinstance(out, tuple):
+        last = out[-1]
+        if torch.is_tensor(last) and last.dim() == 4 and last.shape[-2:] == (2, 2):
+            W_direct = last
     duv_pred_local = per_pt[..., :2].detach()
     if pad_full.any():
         duv_pred_local = duv_pred_local.clone()
         duv_pred_local[pad_full] = 0.0
-    sx = per_pt[..., 2].exp()
-    sy = per_pt[..., 3].exp()
-    rho = per_pt[..., 4]
-    W_sigma_local = make_info_from_sigma_rho(sx, sy, rho).detach()
+    if W_direct is not None:
+        W_sigma_local = W_direct.detach()
+    else:
+        sx = per_pt[..., 2].exp()
+        sy = per_pt[..., 3].exp()
+        rho = per_pt[..., 4]
+        W_sigma_local = make_info_from_sigma_rho(sx, sy, rho).detach()
 
     scale_l2o = (cs_b / float(cfg['img_size'])).reshape(-1, 1, 1)
     inv_l2o = (1.0 / scale_l2o).reshape(-1, 1, 1, 1)
@@ -233,6 +246,83 @@ def _solve_one(model, ds_imgs, *, target_idx, n_inst, cs, n_per_inst,
             valid=valid, n_iter=BA_N_ITER, damping=DAMPING, prior_diag=prior,
         )
     return delta_shared, B, H_last
+
+
+def compute_overlay_geom(inst, ypr_target, t_target, delta_solved, *,
+                           drop_invisible=False):
+    """Project the full LiDAR cloud through KB at (gt / perturbed / corrected)
+    poses and return uv coordinates + per-point depth, all in parent-tile px.
+    Same math as render_3panel_overlay, no matplotlib.
+
+    If drop_invisible=True, returns only points where ALL three projections
+    pass (z>0.5 AND in [0,W)×[0,H)). Cuts payload ~3-5× for slider-driven UI.
+    """
+    import io as _io
+    import numpy as _np
+    from PIL import Image as _Image
+    from scipy.spatial.transform import Rotation as _R
+    from scripts.util.projection import project_kannala as _proj_kb
+
+    if 'jpg_bytes' in inst:
+        parent = _np.array(_Image.open(_io.BytesIO(inst['jpg_bytes'])).convert('RGB'))
+    else:
+        parent = _np.asarray(inst['img'])
+        if parent.ndim == 3 and parent.shape[0] in (1, 3):
+            parent = _np.transpose(parent, (1, 2, 0))
+    pH, pW = parent.shape[:2]
+    K_full = inst['K_full'].numpy().astype(_np.float64)
+    dist_kb = inst['distortion'].numpy().astype(_np.float64)
+    pts_full_cam = inst['pts'].numpy().astype(_np.float64)
+    tile_u0 = float(inst.get('tile_u0', 0))
+    tile_v0 = float(inst.get('tile_v0', 0))
+
+    R_pert = _R.from_euler('zyx', ypr_target, degrees=True).as_matrix()
+    pts_pert = (pts_full_cam - t_target) @ R_pert
+    d = delta_solved.detach().cpu().numpy().astype(_np.float64)
+    R_d = _R.from_rotvec(_np.deg2rad(d[:3])).as_matrix()
+    pts_corr = pts_pert @ R_d.T + d[3:]
+
+    def _proj(pts):
+        uv = _proj_kb(pts, K_full, dist_kb)
+        return (uv - _np.array([tile_u0, tile_v0])).astype(_np.float32)
+
+    uv_gt = _proj(pts_full_cam)
+    uv_pert = _proj(pts_pert)
+    uv_corr = _proj(pts_corr)
+
+    def _vis(uv, z):
+        return ((z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < pW)
+                & (uv[:, 1] >= 0) & (uv[:, 1] < pH))
+
+    m_p = _vis(uv_pert, pts_pert[:, 2]) & _vis(uv_gt, pts_full_cam[:, 2])
+    m_c = _vis(uv_corr, pts_corr[:, 2]) & _vis(uv_gt, pts_full_cam[:, 2])
+    pert_mean = (float(_np.linalg.norm(uv_pert[m_p] - uv_gt[m_p], axis=1).mean())
+                 if m_p.any() else float('nan'))
+    corr_mean = (float(_np.linalg.norm(uv_corr[m_c] - uv_gt[m_c], axis=1).mean())
+                 if m_c.any() else float('nan'))
+
+    z_gt = pts_full_cam[:, 2].astype(_np.float32)
+    z_pert = pts_pert[:, 2].astype(_np.float32)
+    z_corr = pts_corr[:, 2].astype(_np.float32)
+
+    if drop_invisible:
+        # Visible in ALL three projections (GT and pert and corr) — this is what
+        # the user actually sees on the canvas. Cuts payload in half on
+        # kamikado fisheye (200° FoV → most pts already in-frame at GT, but
+        # large δ_pert flings a third out of view).
+        m_gt = _vis(uv_gt, pts_full_cam[:, 2])
+        keep = m_gt & _vis(uv_pert, pts_pert[:, 2]) & _vis(uv_corr, pts_corr[:, 2])
+        uv_gt = uv_gt[keep]; uv_pert = uv_pert[keep]; uv_corr = uv_corr[keep]
+        z_gt = z_gt[keep]; z_pert = z_pert[keep]; z_corr = z_corr[keep]
+
+    return dict(
+        uv_gt=uv_gt, uv_pert=uv_pert, uv_corr=uv_corr,
+        z_gt=z_gt, z_pert=z_pert, z_corr=z_corr,
+        parent_size=[int(pW), int(pH)],
+        stats=dict(pert_mean_px=pert_mean, corr_mean_px=corr_mean,
+                   n_visible_pert=int(m_p.sum()),
+                   n_visible_corr=int(m_c.sum())),
+    )
 
 
 def render_3panel_overlay(inst, ypr_target, t_target, delta_solved,
@@ -295,24 +385,36 @@ def render_3panel_overlay(inst, ypr_target, t_target, delta_solved,
 
     panels = [
         (f'GT\n({int(_in(uv_gt, pts_full_cam[:, 2]).sum())} pts)',
-            uv_gt, pts_full_cam[:, 2], 'yellow'),
+            uv_gt, pts_full_cam[:, 2]),
         (f'Perturbed\nmean={s_p[0]:.2f}px\nmed={s_p[1]:.2f}px',
-            uv_pert, pts_pert[:, 2], 'red'),
+            uv_pert, pts_pert[:, 2]),
         (f'{panel_label}\nmean={s_c[0]:.2f}px\nmed={s_c[1]:.2f}px',
-            uv_corr, pts_corr[:, 2], 'lime'),
+            uv_corr, pts_corr[:, 2]),
     ]
     fig, axes = _plt.subplots(1, 3, figsize=(3*pW/200, pH/200 + 0.4), dpi=140)
     title_colors = ['black', 'black', 'crimson']
     title_weights = ['normal', 'normal', 'bold']
-    for ax, (title, uv, z, colr), tc, tw in zip(
-            axes, panels, title_colors, title_weights):
+    z_all = _np.concatenate([z for _, _, z in panels])
+    z_lo = float(_np.nanpercentile(z_all[(z_all > 0.5) & _np.isfinite(z_all)], 2)) \
+        if _np.isfinite(z_all).any() else 0.5
+    z_hi = float(_np.nanpercentile(z_all[(z_all > 0.5) & _np.isfinite(z_all)], 98)) \
+        if _np.isfinite(z_all).any() else 60.0
+    sc_last = None
+    for i, (ax, (title, uv, z), tc, tw) in enumerate(zip(
+            axes, panels, title_colors, title_weights)):
         m = _in(uv, z)
         ax.imshow(parent)
-        ax.scatter(uv[m, 0], uv[m, 1], s=4, c=colr, marker='.',
-                   linewidths=0, alpha=0.9)
+        sc_last = ax.scatter(uv[m, 0], uv[m, 1], s=4, c=z[m], cmap='turbo',
+                             vmin=z_lo, vmax=z_hi, marker='.', linewidths=0,
+                             alpha=0.95)
         ax.set_xlim(0, pW); ax.set_ylim(pH, 0); ax.axis('off')
         ax.set_title(title, fontsize=9, linespacing=1.2,
                      color=tc, fontweight=tw)
+    if sc_last is not None:
+        cb = fig.colorbar(sc_last, ax=axes.ravel().tolist(),
+                          fraction=0.012, pad=0.01)
+        cb.set_label('depth (m)', fontsize=7)
+        cb.ax.tick_params(labelsize=6)
     fig.suptitle(suptitle, fontsize=10, y=1.02)
     fig.tight_layout()
     out_path = Path(out_path)

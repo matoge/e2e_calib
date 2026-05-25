@@ -425,6 +425,49 @@ def solve_kb_xyz(P0: Tensor, duv: Tensor, W: Tensor,
     return delta, H_last
 
 
+def solve_pinhole_xyz_shared(P0: Tensor, duv: Tensor, W: Tensor,
+                                K: Tensor, dof_names: Sequence[str],
+                                *, valid: Tensor | None = None,
+                                n_iter: int = 1, damping: float = 0.0,
+                                prior_diag: Tensor | None = None,
+                                ) -> Tuple[Tensor, Tensor]:
+    """Pinhole twin of `solve_kb_xyz_shared`. Same shared-δ aggregation
+    pattern but with pinhole projection / Jacobian. Use for non-fisheye
+    datasets (PandaSet, Waymo)."""
+    B = P0.shape[0]
+    K_dof = len(dof_names)
+    delta_shared = torch.zeros(K_dof, dtype=P0.dtype, device=P0.device)
+    H_last = None
+    for _ in range(max(1, int(n_iter))):
+        delta_b = delta_shared.unsqueeze(0).expand(B, K_dof)
+        d = _split_delta(delta_b, dof_names)
+        omega = torch.stack([d['omega_x'], d['omega_y'], d['omega_z']], dim=-1)
+        t_v = torch.stack([d['tx'], d['ty'], d['tz']], dim=-1)
+        P_lin = _apply_extrinsic(P0, omega, t_v)
+        K_lin = _K_with_delta(K, d['dfx'], d['dfy'], d['dcx'], d['dcy'])
+        uv_pred = project_pinhole(P_lin, K_lin)
+        uv0 = project_pinhole(P0, K)
+        target_uv = uv0 + duv
+        r = target_uv - uv_pred
+        Xc, Yc, Zc = P_lin.unbind(-1)
+        J = pinhole_jacobian(Xc, Yc, Zc, K_lin, uv_pred, dof_names)
+        if valid is not None:
+            m = valid.to(J.dtype).unsqueeze(-1).unsqueeze(-1)
+            J = J * m
+            r = r * m.squeeze(-1)
+        H = torch.einsum('bnik,bnij,bnjl->kl', J, W, J)
+        bvec = torch.einsum('bnik,bnij,bnj->k', J, W, r)
+        if damping > 0.0:
+            H = H + damping * torch.eye(K_dof, dtype=H.dtype, device=H.device)
+        if prior_diag is not None:
+            pd = prior_diag.to(dtype=H.dtype, device=H.device).reshape(K_dof)
+            H = H + torch.diag(pd)
+        step = torch.linalg.solve(H, bvec.unsqueeze(-1)).squeeze(-1)
+        delta_shared = delta_shared + step
+        H_last = H
+    return delta_shared, H_last
+
+
 def solve_kb_xyz_shared(P0: Tensor, duv: Tensor, W: Tensor,
                           K: Tensor, dist: Tensor, dof_names: Sequence[str],
                           *, valid: Tensor | None = None,

@@ -252,7 +252,9 @@ async function loadFrame(firstIdx) {
 $("go").addEventListener("click", async () => {
   const preset = PRESETS[Number($("preset").value)];
   const body = {
-    ypr: [Number($("r").value), Number($("p").value), Number($("y").value)],
+    // Server uses scipy from_euler('zyx', arr) — arr[0]=Z=roll (about optical
+    // axis), arr[1]=Y=yaw (left/right), arr[2]=X=pitch (up/down). Camera frame.
+    ypr: [Number($("r").value), Number($("y").value), Number($("p").value)],
     t:   [Number($("tx").value), Number($("ty").value), Number($("tz").value)],
     mode: preset.mode,
     n_tiles: preset.n_tiles,

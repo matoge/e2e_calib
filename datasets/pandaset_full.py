@@ -1121,15 +1121,29 @@ class PandaSetCalibDatasetFull(Dataset):
             # Re-project via the same lens model the cache used at build time.
             _dist = inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy') \
                     else np.asarray(inst['distortion'], dtype=np.float32)
+            _tang = (inst['tangential_p'].numpy()
+                     if hasattr(inst.get('tangential_p', None), 'numpy')
+                     else (np.asarray(inst['tangential_p'], dtype=np.float32)
+                           if 'tangential_p' in inst else None))
             _x, _y, _z = pts_cam_off[:, 0], pts_cam_off[:, 1], pts_cam_off[:, 2]
             _r = np.sqrt(_x * _x + _y * _y)
             _theta = np.arctan2(_r, np.maximum(_z, 1e-6))
             _t2 = _theta * _theta
-            _td = _theta * (1.0 + _dist[0] * _t2 + _dist[1] * _t2 ** 2
-                                + _dist[2] * _t2 ** 3 + _dist[3] * _t2 ** 4)
+            _poly = np.ones_like(_theta); _tp = _t2.copy()
+            for _ki in _dist:
+                _poly = _poly + _ki * _tp
+                _tp = _tp * _t2
+            _td = _theta * _poly
             _r_safe = np.where(_r > 1e-9, _r, 1.0)
-            _u = K_pert[0, 0] * (_td * _x / _r_safe) + K_pert[0, 2]
-            _v = K_pert[1, 1] * (_td * _y / _r_safe) + K_pert[1, 2]
+            _Xp = _td * _x / _r_safe
+            _Yp = _td * _y / _r_safe
+            if _tang is not None:
+                _r2p = _Xp * _Xp + _Yp * _Yp
+                _du_t = 2 * _tang[0] * _Xp * _Yp + _tang[1] * (_r2p + 2 * _Xp * _Xp)
+                _dv_t = _tang[0] * (_r2p + 2 * _Yp * _Yp) + 2 * _tang[1] * _Xp * _Yp
+                _Xp = _Xp + _du_t; _Yp = _Yp + _dv_t
+            _u = K_pert[0, 0] * _Xp + K_pert[0, 2]
+            _v = K_pert[1, 1] * _Yp + K_pert[1, 2]
             uv_off_c = np.stack([_u, _v], axis=-1).astype(np.float32)
         else:
             uv_off_c = (pts_cam_off[:, :2] * (np.array([K_pert[0,0], K_pert[1,1]], dtype=np.float32))) / \
@@ -1156,15 +1170,29 @@ class PandaSetCalibDatasetFull(Dataset):
             if inst.get('is_fisheye', False) and 'distortion' in inst:
                 _dist = inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy') \
                         else np.asarray(inst['distortion'], dtype=np.float32)
+                _tang = (inst['tangential_p'].numpy()
+                         if hasattr(inst.get('tangential_p', None), 'numpy')
+                         else (np.asarray(inst['tangential_p'], dtype=np.float32)
+                               if 'tangential_p' in inst else None))
                 _x, _y, _z = pts_cam_pre[:, 0], pts_cam_pre[:, 1], pts_cam_pre[:, 2]
                 _r = np.sqrt(_x * _x + _y * _y)
                 _theta = np.arctan2(_r, np.maximum(_z, 1e-6))
                 _t2 = _theta * _theta
-                _td = _theta * (1.0 + _dist[0] * _t2 + _dist[1] * _t2 ** 2
-                                    + _dist[2] * _t2 ** 3 + _dist[3] * _t2 ** 4)
+                _poly = np.ones_like(_theta); _tp = _t2.copy()
+                for _ki in _dist:
+                    _poly = _poly + _ki * _tp
+                    _tp = _tp * _t2
+                _td = _theta * _poly
                 _r_safe = np.where(_r > 1e-9, _r, 1.0)
-                _u = K[0, 0] * (_td * _x / _r_safe) + K[0, 2]
-                _v = K[1, 1] * (_td * _y / _r_safe) + K[1, 2]
+                _Xp = _td * _x / _r_safe
+                _Yp = _td * _y / _r_safe
+                if _tang is not None:
+                    _r2p = _Xp * _Xp + _Yp * _Yp
+                    _du_t = 2 * _tang[0] * _Xp * _Yp + _tang[1] * (_r2p + 2 * _Xp * _Xp)
+                    _dv_t = _tang[0] * (_r2p + 2 * _Yp * _Yp) + 2 * _tang[1] * _Xp * _Yp
+                    _Xp = _Xp + _du_t; _Yp = _Yp + _dv_t
+                _u = K[0, 0] * _Xp + K[0, 2]
+                _v = K[1, 1] * _Yp + K[1, 2]
                 uv_pre_c = np.stack([_u, _v], axis=-1).astype(np.float32)
             else:
                 uv_pre_c = (pts_cam_pre[:, :2] * (np.array([K[0,0], K[1,1]], dtype=np.float32))) / \

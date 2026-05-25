@@ -28,7 +28,7 @@ from typing import List, Optional
 import numpy as np
 import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -352,7 +352,7 @@ def frame_meta(first_idx: int):
 
 class CalibReq(BaseModel):
     ypr: List[float] = Field(..., min_items=3, max_items=3,
-                              description="[roll, pitch, yaw] in deg, ZYX-Euler")
+                              description="ZYX-Euler array: [arr0=roll(Z), arr1=yaw(Y), arr2=pitch(X)] in deg")
     t:   List[float] = Field(..., min_items=3, max_items=3,
                               description="[tx, ty, tz] in m")
     mode: str = Field("whole_frame",
@@ -366,6 +366,8 @@ class CalibReq(BaseModel):
                      "of a frame in /api/frames, or DEFAULT_IDX (17). The frame's "
                      "sibling tiles are used for whole_frame mode."),
     )
+    fast: bool = Field(True,
+        description="if True: skip 3-panel matplotlib PNG, drop occluded/oob pts")
 
 
 def _resolve_target(target_idx: int):
@@ -420,38 +422,87 @@ def calibrate(req: CalibReq):
 
     rid = uuid.uuid4().hex[:12]
     out_png = RESULTS / f"overlay_{rid}.png"
-    info = ess.render_3panel_overlay(
-        inst, ypr, t, delta,
-        out_path=out_png,
-        suptitle=f"idx={int(req.target_idx)}  mode={req.mode}  B={B}  cs={req.cs}  "
-                 f"δ_target ypr={ypr.tolist()} t={t.tolist()}",
-        panel_label=f"BA-corrected ({req.mode}, B={B})",
-    )
+    t1 = time.time()
+    if req.fast:
+        info = None
+    else:
+        info = ess.render_3panel_overlay(
+            inst, ypr, t, delta,
+            out_path=out_png,
+            suptitle=f"idx={int(req.target_idx)}  mode={req.mode}  B={B}  cs={req.cs}  "
+                     f"δ_target ypr={ypr.tolist()} t={t.tolist()}",
+            panel_label=f"BA-corrected ({req.mode}, B={B})",
+        )
+    render_s = time.time() - t1
+    t2 = time.time()
+    geom = ess.compute_overlay_geom(inst, ypr, t, delta, drop_invisible=req.fast)
+    geom_s = time.time() - t2
+    t3 = time.time()
+    parent_url, _ = _ensure_parent_png(int(req.target_idx))
+    parent_s = time.time() - t3
+    print(f"[timing /api/calibrate fast={req.fast}] solve={solve_s:.2f}s "
+          f"3panel={render_s:.2f}s geom={geom_s:.2f}s parent={parent_s:.2f}s "
+          f"B={B} N_uv={len(geom['uv_gt'])}")
 
     delta_np = delta.detach().cpu().numpy().tolist()
+    geom_url, geom_n, geom_bytes = _write_geom_blob(rid, geom)
     out = {
         "delta": {"omega_deg": delta_np[:3], "t_m": delta_np[3:]},
         "mode": req.mode,
         "B": int(B),
         "cs": req.cs,
         "target_idx": int(req.target_idx),
-        "pert_px_mean": float(info["reproj_pert_mean"]),
-        "corr_px_mean": float(info["reproj_corr_mean"]),
+        "pert_px_mean": float(geom["stats"]["pert_mean_px"]),
+        "corr_px_mean": float(geom["stats"]["corr_mean_px"]),
         "took_s": round(solve_s, 2),
-        "overlay_url": f"/calibrate/result/{out_png.name}",
+        "overlay_url": (f"/calibrate/result/{out_png.name}" if info is not None
+                         else None),
+        "parent_url": parent_url,
+        "parent_size": geom["parent_size"],
+        "geom_url": geom_url,
+        "geom_n": geom_n,
+        "geom_bytes": geom_bytes,
     }
     _history_append({
         "ts": time.time(),
         "endpoint": "/api/calibrate",
         "source": f"tile target_idx={req.target_idx} mode={req.mode}",
         "ypr": req.ypr, "t": req.t, "cs": req.cs, "B": int(B),
-        "pert_px_mean": float(info["reproj_pert_mean"]),
-        "corr_px_mean": float(info["reproj_corr_mean"]),
+        "pert_px_mean": float(geom["stats"]["pert_mean_px"]),
+        "corr_px_mean": float(geom["stats"]["corr_mean_px"]),
         "took_s": round(solve_s, 2),
-        "overlay_url": f"/calibrate/result/{out_png.name}",
+        "overlay_url": out["overlay_url"],
+        "parent_url": out.get("parent_url"),
+        "parent_size": out.get("parent_size"),
+        "geom_url": out.get("geom_url"),
+        "geom_n": out.get("geom_n"),
         "delta": out["delta"],
     })
     return out
+
+
+# ─── geom binary blob ───────────────────────────────────────────────────────
+def _write_geom_blob(rid: str, geom: dict) -> tuple[str, int, int]:
+    """Pack uv_gt/pert/corr (Nx2 f32) + z_gt/pert/corr (N f32) into one
+    little-endian Float32Array blob. Saves the JSON tax for ~55k points.
+
+    Layout (all float32 LE):
+        [N×2 uv_gt | N×2 uv_pert | N×2 uv_corr | N z_gt | N z_pert | N z_corr]
+    Total = 36 N bytes. Browser reads via fetch().arrayBuffer() + Float32Array.
+    """
+    N = int(geom["uv_gt"].shape[0])
+    parts = [
+        geom["uv_gt"].astype(np.float32, copy=False).reshape(-1),
+        geom["uv_pert"].astype(np.float32, copy=False).reshape(-1),
+        geom["uv_corr"].astype(np.float32, copy=False).reshape(-1),
+        geom["z_gt"].astype(np.float32, copy=False).reshape(-1),
+        geom["z_pert"].astype(np.float32, copy=False).reshape(-1),
+        geom["z_corr"].astype(np.float32, copy=False).reshape(-1),
+    ]
+    buf = np.concatenate(parts).tobytes()  # native little-endian on x86
+    out_path = RESULTS / f"geom_{rid}.bin"
+    out_path.write_bytes(buf)
+    return f"/calibrate/result/{out_path.name}", N, len(buf)
 
 
 # ─── v0.2 raw-frame endpoints ───────────────────────────────────────────────
@@ -464,7 +515,7 @@ def _history_append(entry: dict):
         print(f"[history] append failed: {e}")
 
 
-def _solve_raw_frame(cf, *, ypr, t, cs, n_per_inst, source: str):
+def _solve_raw_frame(cf, *, ypr, t, cs, n_per_inst, source: str, fast: bool = True):
     """Run σ-head + shared GN on a CalibFrame, render overlay, log history.
 
     Returns the response dict (same shape as /api/calibrate).
@@ -494,16 +545,39 @@ def _solve_raw_frame(cf, *, ypr, t, cs, n_per_inst, source: str):
         "tile_u0": 0,
         "tile_v0": 0,
     }
-    info = ess.render_3panel_overlay(
-        full_inst, ypr_np, t_np, delta,
-        out_path=out_png,
-        suptitle=f"raw {cf.scene_id}@{cf.frame_id}  full-frame overlay  "
-                 f"B={B}  tiles={n_tiles}  cs={cs}  "
-                 f"δ_target ypr={ypr_np.tolist()} t={t_np.tolist()}",
-        panel_label=f"BA-corrected (whole frame, B={B})",
-    )
+    t1 = time.time()
+    if fast:
+        info = None
+    else:
+        info = ess.render_3panel_overlay(
+            full_inst, ypr_np, t_np, delta,
+            out_path=out_png,
+            suptitle=f"raw {cf.scene_id}@{cf.frame_id}  full-frame overlay  "
+                     f"B={B}  tiles={n_tiles}  cs={cs}  "
+                     f"δ_target ypr={ypr_np.tolist()} t={t_np.tolist()}",
+            panel_label=f"BA-corrected (whole frame, B={B})",
+        )
+    render_s = time.time() - t1
+
+    t2 = time.time()
+    geom = ess.compute_overlay_geom(full_inst, ypr_np, t_np, delta,
+                                     drop_invisible=fast)
+    geom_s = time.time() - t2
+
+    t3 = time.time()
+    # Cache parent PNG by content signature so repeated requests re-use it.
+    sig = f"{cf.scene_id}_{cf.frame_id}"
+    parent_png = RESULTS / f"parent_{sig}.png"
+    if not parent_png.exists():
+        Image.fromarray(cf.img.astype(np.uint8)).save(parent_png)
+    parent_url = f"/calibrate/result/{parent_png.name}"
+    parent_s = time.time() - t3
+    print(f"[timing _solve_raw_frame fast={fast}] solve={solve_s:.2f}s "
+          f"3panel={render_s:.2f}s geom={geom_s:.2f}s parent={parent_s:.2f}s "
+          f"B={B} tiles={n_tiles} N_uv={len(geom['uv_gt'])}")
 
     delta_np = delta.detach().cpu().numpy().tolist()
+    geom_url, geom_n, geom_bytes = _write_geom_blob(rid, geom)
     resp = {
         "delta": {"omega_deg": delta_np[:3], "t_m": delta_np[3:]},
         "B": int(B),
@@ -512,10 +586,16 @@ def _solve_raw_frame(cf, *, ypr, t, cs, n_per_inst, source: str):
         "n_subcrops": int(n_subcrops),
         "scene": cf.scene_id,
         "frame": int(cf.frame_id),
-        "pert_px_mean": float(info["reproj_pert_mean"]),
-        "corr_px_mean": float(info["reproj_corr_mean"]),
+        "pert_px_mean": float(geom["stats"]["pert_mean_px"]),
+        "corr_px_mean": float(geom["stats"]["corr_mean_px"]),
         "took_s": round(solve_s, 2),
-        "overlay_url": f"/calibrate/result/{out_png.name}",
+        "overlay_url": (f"/calibrate/result/{out_png.name}" if info is not None
+                         else None),
+        "parent_url": parent_url,
+        "parent_size": geom["parent_size"],
+        "geom_url": geom_url,
+        "geom_n": geom_n,
+        "geom_bytes": geom_bytes,
     }
     _history_append({
         "ts": time.time(),
@@ -525,10 +605,14 @@ def _solve_raw_frame(cf, *, ypr, t, cs, n_per_inst, source: str):
         "t": list(map(float, t)),
         "cs": int(cs), "B": int(B),
         "n_tiles": int(n_tiles), "n_subcrops": int(n_subcrops),
-        "pert_px_mean": float(info["reproj_pert_mean"]),
-        "corr_px_mean": float(info["reproj_corr_mean"]),
+        "pert_px_mean": float(geom["stats"]["pert_mean_px"]),
+        "corr_px_mean": float(geom["stats"]["corr_mean_px"]),
         "took_s": round(solve_s, 2),
-        "overlay_url": f"/calibrate/result/{out_png.name}",
+        "overlay_url": resp["overlay_url"],
+        "parent_url": resp["parent_url"],
+        "parent_size": resp["parent_size"],
+        "geom_url": resp["geom_url"],
+        "geom_n": resp["geom_n"],
         "delta": resp["delta"],
     })
     return resp
@@ -556,6 +640,9 @@ class CalibSceneReq(BaseModel):
     ypr: List[float] = Field(..., min_items=3, max_items=3)
     t: List[float] = Field(..., min_items=3, max_items=3)
     cs: int = Field(256)
+    fast: bool = Field(True,
+        description="if True: skip 3-panel matplotlib PNG, drop occluded/oob pts. "
+                    "Drops latency from ~3s to ~0.3s for slider-driven UI.")
 
 
 @app.post("/api/calibrate_scene")
@@ -575,7 +662,7 @@ def calibrate_scene(req: CalibSceneReq):
     n_per_inst = 4 if req.cs == 256 else 1
     return _solve_raw_frame(
         cf, ypr=req.ypr, t=req.t, cs=req.cs, n_per_inst=n_per_inst,
-        source=f"scene:{req.scene}@{req.frame}",
+        source=f"scene:{req.scene}@{req.frame}", fast=bool(req.fast),
     )
 
 

@@ -1,0 +1,28 @@
+{
+  "exp": "ps_full_n4_img256_grid32_dgx3_100ep",
+  "cache": "/mnt/fsx/tmp/hfunaya/e2e_calib_cache/pandaset_v3_full",
+  "target_idx": 17,
+  "n_inst": 20,
+  "n_per_inst": 4,
+  "cs": 256,
+  "n_seeds": 2,
+  "fx": 1970.0130615234375,
+  "summary": [
+    {
+      "level": 0,
+      "rot_deg": 1.0,
+      "t_m": 0.1,
+      "omega_deg": 1.0422939113723442,
+      "omega_px_at_fx": 35.841368585725014,
+      "t_m_residual": 0.10405794745999906,
+      "omega_per_seed": [
+        1.2240748248285165,
+        0.8605129979161721
+      ],
+      "t_per_seed": [
+        0.09412574378681712,
+        0.113990151133181
+      ]
+    }
+  ]
+}
