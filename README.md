@@ -108,10 +108,15 @@ sudo apt install -y git-lfs
 pip install torch torchvision flask matplotlib numpy pyceres clearml
 
 # 3) val cache を ClearML Dataset から取得 (woven_v3_tile, 圧縮 6.7 GiB)
-#    最初に `clearml-init` で ~/clearml.conf を作る (社内 ClearML server):
-#      web_server   = http://172.16.200.185:8002
-#      api_server   = http://172.16.200.185:8003
-#      files_server = http://172.16.200.185:8004
+#    事前準備: ClearML web (http://172.16.200.185:8002) にログインして
+#      Profile → "Create new credentials" でトークン発行 → `clearml-init` に貼る。
+#    `~/clearml.conf` は最終的にこんな感じになる:
+#      api {
+#        web_server   = http://172.16.200.185:8002
+#        api_server   = http://172.16.200.185:8003
+#        files_server = http://172.16.200.185:8004
+#        credentials { access_key = "..."  secret_key = "..." }
+#      }
 python -c "
 from clearml import Dataset
 p = Dataset.get(dataset_id='786a56a01d5a454a876352ecaf8c281f').get_local_copy()
