@@ -57,6 +57,7 @@ def load_calib_model(exp: str, device: str | torch.device = 'cuda'):
         use_convnext   = c.get('use_convnext', False),
         use_frustum    = c.get('use_frustum', False),
         deform_mode    = c.get('deform_mode', 'none'),
+        frustum_dense    = c.get('frustum_dense', False),
         use_frame_token  = c.get('use_frame_token',  False),
         frame_token_side = c.get('frame_token_side', 8),
         use_lidar_kv     = c.get('use_lidar_kv', False),

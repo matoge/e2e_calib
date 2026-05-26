@@ -42,15 +42,14 @@ def make_ds(exp: str, cache: str, split: str = 'train', oversample: int = 1):
     """Build PandaSetCalibDatasetFull with the EXACT hparams the experiment trained
     on. Always use this — never hand-construct the dataset elsewhere."""
     c = _load_cfg(exp)
-    # IMPORTANT: do NOT pass img_size from config. The trainer
-    # (train_ps_v3_ddp.py) builds ds_kw WITHOUT img_size, so
-    # PandaSetCalibDatasetFull's default img_size=64 is what was
-    # actually used at training time — even when config's
-    # `img_size: 128` reads otherwise (that key only configures the
-    # CalibNetDepth model, not the dataset). Mirror the trainer
-    # exactly so val_nll / val_mse / vis numbers reproduce.
+    # img_size: trainer & model use CFG['img_size']; ds must resize crops to
+    # the same size so per-pt UV is in the same coordinate frame the model
+    # was trained on. (Older v3_ddp builds left img_size out of ds_kw which
+    # silently used the dataset's default — but every modern config sets it
+    # explicitly, so honour it.)
     ds = PandaSetCalibDatasetFull(
         cache, split=split,
+        img_size      = c.get('img_size', 128),
         min_crop_px   = c.get('min_crop_px', 128),
         max_crop_px   = c.get('max_crop_px', 512),
         max_rot_deg   = c.get('max_rot_deg', 0.5),
