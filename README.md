@@ -153,6 +153,7 @@ done → out/quickstart_demo
 | Dataset (project=`e2e_calib/datasets`) | id | 用途 |
 |---|---|---|
 | `woven_v3_tile_v1` | `786a56a01d5a454a876352ecaf8c281f` | TSS4 fisheye val (上記 Quick start で使用) |
+| `kamikado_raw` | `93880ccd96ab49e0aa53cda9002276f9` | kamikado raw scene zip 群 (下の「kamikado raw 1 frame …」で使用) |
 | `pandaset_v3_tiled` / `nuscenes_v3_tiled` / `waymo_v3_tiled` | (`scripts/preprocessing/upload_tile_caches.py` 参照) | joint 学習用 tile cache |
 
 `Dataset.get(dataset_id=...).get_local_copy()` は ClearML cache に展開して
@@ -236,15 +237,18 @@ HTTP サーバを介さずローカルで実行する。`scripts/_debug/infer_ra
 を直接食ってタイル化推論 → BA → 6DoF δ̂ + σ をテキスト出力する。
 
 ```bash
-# 1) raw scene zip を dgx2 から落として展開 (例: 1 シーン ~900MB)
-mkdir -p data/kamikado_raw
-scp dgx2:/home/hfunaya/cache/kamikado/points_ip664_D_20260226_224648_d005_3000_3020.zip data/kamikado_raw/
-unzip -q data/kamikado_raw/points_ip664_D_20260226_224648_d005_3000_3020.zip -d data/kamikado_raw/
-#   展開後: data/kamikado_raw/<scene>/{calib.calib, image_N.png, points_V_N.txt} × N frames
+# 1) raw scene を ClearML Dataset から取得 (kamikado_raw, ~900MB / 1 シーン)
+#    Quick start の「データキャッシュ」と同じ ~/clearml.conf があれば即動く。
+python -c "
+from clearml import Dataset
+p = Dataset.get(dataset_id='93880ccd96ab49e0aa53cda9002276f9').get_local_copy()
+print(p)   # ClearML cache 上の展開済み path
+"
+#   → 表示された path に points_ip664_D_*/{calib.calib, image_N.png, points_V_N.txt} が並ぶ
 
 # 2) 1 frame 走らせる
 PYTHONPATH=. python scripts/_debug/infer_raw_frame.py \
-    --scene data/kamikado_raw/points_ip664_D_20260226_224648_d005_3000_3020 \
+    --scene <上で表示された path>/points_ip664_D_20260226_224648_d005_3000_3020 \
     --frame 0 \
     --exp km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2
 ```
