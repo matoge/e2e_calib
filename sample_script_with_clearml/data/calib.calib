@@ -1,0 +1,67 @@
+{
+  "calibration" : {
+    "intrinsics" : {
+      "camera_model" : {
+        "type" : "pinhole(1)",
+        "pinhole_parameters" : {
+          "matrix_image_camera" : {
+            "matrix" : [
+              [
+              1887.6627723927459,
+              0,
+              0
+            ],
+              [
+              0,
+              1887.6627723927459,
+              0
+            ],
+              [
+              1916.334716796875,
+              1487.838134765625,
+              1
+            ]
+            ]
+          }
+        }
+      },
+      "distortion_model" : {
+        "type" : "generic_fisheye(4)",
+        "polynomial_parameters" : null,
+        "fov_fisheye_parameters" : null,
+        "generic_fisheye_parameters" : {
+          "coefficients" : [
+            -0.009282238781452179,
+            -0.024711247533559799,
+            0.013705254532396793,
+            -0.0020679759327322245
+          ]
+        }
+      },
+      "intrinsic_reprojection_error" : 0,
+      "timestamp" : "2026-Jan-22 21:31:59"
+    },
+    "extrinsics" : {
+      "type" : "valid(2)",
+      "transform_VS" : {
+        "so3" : {
+          "w" : 0.49266626202260466,
+          "x" : -0.50569774326287931,
+          "y" : 0.50093824183813851,
+          "z" : -0.50061025217989696
+        },
+        "translation" : {
+          "matrix" : [
+            [
+            1.8806390024223463,
+            0.012942435485812207,
+            1.4705143498706941
+          ]
+          ]
+        }
+      },
+      "timestamp" : "2026-Jan-22 21:31:59"
+    }
+  },
+  "crc" : 3560476773
+}
