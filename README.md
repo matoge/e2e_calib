@@ -97,8 +97,8 @@ LiDAR Points (N × 3, [U, V, D])
 
 ```bash
 # 1) clone + LFS pull (チェックポイントは LFS でコミット済み)
-git clone git@github.com:matoge/e2e_calib.git
-cd e2e_calib
+git clone git@github-enterprise:tmc-autonomy/loom-calibration.git
+cd loom-calibration
 git lfs install
 git lfs pull --include "experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2/best_model.pt"
 #   --include を外せば全実験の best_model.pt を落とす (大きい)
