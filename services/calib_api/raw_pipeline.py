@@ -149,9 +149,11 @@ def solve_from_calib_frame(model, ds, cf: CalibFrame, *, ypr_target, t_target,
 
     moved = [t.to(ess.DEVICE) if torch.is_tensor(t) else t
              for t in collate_full(wins)]
+    # collate_full は 12 → 13 tuple 化済み (末尾 delta1_se3)。raw pipeline は
+    # split_pert OFF (δ1=0) で回すので末尾は捨てる。
     (imgs, _true_uvd, dist_uvd, pad_mask, vfp,
      bucket_uvd, bucket_valid, _,
-     pts_cam_orig, duv_orig, K_orig, cs_b) = moved
+     pts_cam_orig, duv_orig, K_orig, cs_b) = moved[:12]
     valid = ~pad_mask
     pad_full = ~valid
     B, _N = pts_cam_orig.shape[:2]

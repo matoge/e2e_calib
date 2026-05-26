@@ -33,11 +33,30 @@ from scripts.ba.ba_torch import (
     solve_kb_xyz_shared, make_info_from_sigma_rho, project_kb,
     _apply_extrinsic, _K_with_delta, _split_delta,
 )
+from scripts.serving.ckpt_resolver import resolve as resolve_ckpt
 
 CACHE = Path.home() / 'cache' / 'kamikado_v3_tiled'
-CKPT  = REPO / 'experiments' / 'km_wv_wm_dgx2_n4_img128_8gpu_HEAD' / 'best_model.pt'
-EXP_CFG_PATH = REPO / 'experiments' / 'km_wv_wm_dgx2_n4_img128_8gpu_HEAD' / 'config.py'
+# Module-level CKPT / EXP_CFG_PATH are the *current* resolved pair. They start
+# out pointing at the historical default exp dir but get overwritten by
+# `init_ckpt(arg)` (used by calib_api at boot, by main() from CLI). Anything
+# importing this module (eval_shared_256x800.CKPT etc.) sees the live values.
+DEFAULT_CKPT_NAME = 'km_wv_wm_dgx2_n4_img128_8gpu_HEAD'
+CKPT  = REPO / 'experiments' / DEFAULT_CKPT_NAME / 'best_model.pt'
+EXP_CFG_PATH = REPO / 'experiments' / DEFAULT_CKPT_NAME / 'config.py'
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def init_ckpt(arg: str | None = None) -> tuple[Path, Path]:
+    """Resolve `arg` (exp dir / .pt path / ClearML name / id) and update the
+    module-level CKPT and EXP_CFG_PATH so downstream importers (calib_api
+    server, _load_cfg, _build_model) pick it up. Returns the (bm, cfg) pair.
+    """
+    global CKPT, EXP_CFG_PATH
+    name = arg or DEFAULT_CKPT_NAME
+    bm, cfg = resolve_ckpt(name)
+    CKPT = bm
+    EXP_CFG_PATH = cfg
+    return bm, cfg
 
 DOFS = ['omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz']
 PRIOR_DIAG = torch.tensor(
@@ -190,9 +209,11 @@ def _solve_one(model, ds_imgs, *, target_idx, n_inst, cs, n_per_inst,
         f'[{label}] could not build batch ({len(wins)}/{target_b})'
 
     moved = [t.to(DEVICE) if torch.is_tensor(t) else t for t in collate_full(wins)]
+    # collate_full は 12 → 13 tuple 化済み (末尾 delta1_se3, split_pert OFF なら zeros)。
+    # BA eval は δ1=0 で回せばよいので末尾は捨てる。
     (imgs, true_uvd, dist_uvd, pad_mask, vfp,
      bucket_uvd, bucket_valid, _,
-     pts_cam_orig, duv_orig, K_orig, cs_b) = moved
+     pts_cam_orig, duv_orig, K_orig, cs_b) = moved[:12]
     valid = ~pad_mask
     pad_full = ~valid
     B, N = pts_cam_orig.shape[:2]
@@ -439,6 +460,10 @@ def _residual_str(delta, ypr_target, t_target):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument('--ckpt', default=None,
+                    help='exp dir, .pt path, ClearML task name, or task id '
+                         '(see scripts/serving/ckpt_resolver.py). '
+                         f'Default: {DEFAULT_CKPT_NAME}')
     ap.add_argument('--idx', type=int, default=17)
     ap.add_argument('--n-shared-512', type=int, default=200)
     ap.add_argument('--n-shared-256', type=int, default=200,
@@ -448,6 +473,7 @@ def main():
     ap.add_argument('--seed', type=int, default=7 + 1000)
     args = ap.parse_args()
 
+    init_ckpt(args.ckpt)
     cfg = _load_cfg()
     print(f'[256x800] idx={args.idx}  rot=±{args.rot_deg}°  '
           f't=±{args.t_m}m  seed={args.seed}')
