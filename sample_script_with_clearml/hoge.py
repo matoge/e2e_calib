@@ -15,9 +15,7 @@ from models.model_depth import CalibNetDepth
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 IMG_SIZE = 128
 # expect image_*.png and points_V_*.txt are under the folder.
-input_image_path = os.path.expanduser(
-    "./data/image_0.png"
-)
+input_image_path = os.path.expanduser("./data/image_0.png")
 TASK_ID = "80f946cadb1747e49b8f51603e2107da"
 CFG = dict(
     name="km_wv_wm_dgx1_n4_v4",
@@ -126,6 +124,7 @@ def build_model_input(points, image, relative_center_from_img_center):
 
 
 def main():
+    relative_center_from_img_center = (1100, 450)
     model = create_model()
     task = Task.get_task(task_id=TASK_ID)
     artifact = task.artifacts["best_model.pt"]
@@ -136,7 +135,6 @@ def main():
     model.load_state_dict(state_dict)
     model.eval()
     lidar_points_in_frame, undistorted_image, cameraMatrix = create_data(input_image_path)
-    relative_center_from_img_center = (-200, 400)
     imgs, point_in, pad_mask, vfp, bucket_uvd, bucket_valid = build_model_input(
         lidar_points_in_frame, undistorted_image, relative_center_from_img_center
     )
@@ -169,19 +167,21 @@ def main():
         img = imgs[0].cpu().numpy().transpose(1, 2, 0)
         img = (img * 255).astype(np.uint8)
         img_ori = img.copy()
-        x0 = int(center[0] - IMG_SIZE // 2) * 0
-        y0 = int(center[1] - IMG_SIZE // 2) * 0
         pred = params[0].cpu().numpy()
         pts = point_in[0].cpu().numpy()
+        depth = np.array([p[2] for p in pts])
+        d_max = depth.max()
+        d_min = depth.min()
         for p, r in zip(pts, pred):
-            u, v = p[0], p[1]
+            u, v, d = p[0], p[1], p[2]
             du, dv = r[0], r[1]
             u2 = u + du
             v2 = v + dv
             p1 = (int(u), int(v))
             p2 = (int(u2), int(v2))
-            cv2.circle(img_ori, p1, 2, (0, 0, 255), -1)
-            cv2.circle(img, p2, 2, (0, 255, 0), -1)
+            d = (d - d_min) / (d_max - d_min)
+            cv2.circle(img_ori, p1, 2, (0, 0, int(255 * d)), -1)
+            cv2.circle(img, p2, 2, (0, int(255 * d), 0), -1)
         img = cv2.resize(img, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST)
         img_ori = cv2.resize(img_ori, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST)
         img = cv2.vconcat([img_ori, img])

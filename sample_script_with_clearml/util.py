@@ -8,6 +8,7 @@ import numpy as np
 from sklearn.neighbors import KDTree
 import open3d as o3d
 
+
 class SE3:
     def __init__(self, R=None, T=None):
         """
@@ -216,14 +217,14 @@ def prepare_data(input_image_path, read_points=True):
     cameraMatrix = cameraMatrix.copy()
     distortion_model = GenericFisheyeDistortion(cameraMatrix, distortion_coefs)
     undistorted_image = distortion_model.rectify(image)
-    return undistorted_image, cameraMatrix, points_V, transform_VS, intensity    
-
+    return undistorted_image, cameraMatrix, points_V, transform_VS, intensity
 
 
 top_y = 1000
 bottom_y = 1600
 left_x = 0
 R_S0V0 = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
+
 
 def estimate_normals(points, k=20):
     pcd = o3d.geometry.PointCloud()
@@ -238,7 +239,7 @@ def make_lidar_img_original(points_S_gt, points_S_with_noize, K, H, W, intensity
     log_intensity = np.log1p(intensity)
     log_intensity = (log_intensity - log_intensity.min()) / (log_intensity.max() - log_intensity.min() + 1e-6)
     points = []
-    max_depth = 500.
+    max_depth = 500.0
     right_x = W - left_x
     for p_S, s in zip(points_S_with_noize, log_intensity):
         if p_S[2] <= 0 or p_S[2] > max_depth:
@@ -248,7 +249,7 @@ def make_lidar_img_original(points_S_gt, points_S_with_noize, K, H, W, intensity
         v = proj[1] / proj[2]
         if v < top_y or v > bottom_y or u < left_x or u > right_x:
             continue
-        depth = p_S[2]
+        depth = p_S[2] / 100.0
         points.append([u, v, depth, s])
     points = np.array(points, dtype=np.float32)
     return points
@@ -260,4 +261,3 @@ def create_data(input_image_path):
     points_S = (transform_VS.inverse().R @ points_V.T).T + transform_VS.inverse().T
     lidar_points_in_frame = make_lidar_img_original(points_S, points_S, cameraMatrix, H, W, intensity)
     return lidar_points_in_frame, undistorted_image, cameraMatrix
-
