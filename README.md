@@ -93,45 +93,121 @@ LiDAR Points (N × 3, [U, V, D])
 
 ## Quick start
 
-ルートにはアクティブなスクリプトだけを置いてる。残りは `scripts/` 配下。
-`models/ datasets/ configs/` はパッケージ化済みなので import は
-`from models.model_depth import CalibNetDepth` の形。
+### 0. セットアップ（clone → LFS pull）
+
+学習済みチェックポイント `experiments/<NAME>/best_model.pt` は **Git LFS で
+コミット済み**なので、clone 後に `git lfs pull` するだけで推論できます。
+ClearML は基本的に不要（学習中の scalar/vis を見るときだけ参照）。
 
 ```bash
-# デモサーバー (インタラクティブ WebUI)
-python app.py                       # http://localhost:5001
+git clone <this-repo>
+cd e2e_calib
+git lfs install            # 初回のみ
+git lfs pull               # experiments/*/best_model.pt を全部落とす
+                            # 重い場合は include で絞る↓
+git lfs pull --include "experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2/best_model.pt"
 
-# 合成 (fast prototyping)
-python train.py                     # 単一物体
-python train_multi.py               # 複数物体
-python train_grid_depth.py          # メイン: configs/grid_depth.py で実験設定
-
-# BA 解析 (active)
-python ba_singleframe.py            # 1 frame BA: 4px 誤差 → 0.8 px 補正
-python ba_multiframe.py             # N frame シェア 6DoF BA (scene 015 で t=2.1cm)
-python ba_kb_multiframe.py          # fx / KB 感度スイープ (→ docs/ba_report.html)
-
-# 実データ学習
-python scripts/training/train_pandaset.py
-python scripts/training/train_nuscenes.py
-python scripts/training/train_waymo.py
-python scripts/training/train_all_v2_mc.py      # ジョイント NS+PS+WM
-python scripts/training/train_deform_sweep.py   # deformable (SL / ML sweep)
-
-# 他の診断
-python scripts/ba/icp_scan_residual.py              # スキャン残差
-python scripts/visualization/vis_static_consistency.py
+pip install torch torchvision flask matplotlib numpy pyceres clearml
 ```
 
-### データ準備
+> **ClearML から取りたいときだけ** (LFS に載ってない実験など):
+> ```python
+> from clearml import Task
+> t = Task.get_task(task_id='7e6f442a118042188609a115f139f61d')
+> ckpt = t.artifacts['best_model.pt'].get_local_copy()   # → ローカル path
+> ```
+
+### 1. 推論 + 可視化（メイン）
+
+`scripts/inference/infer_pipeline.py` が**学習と byte-identical**な前処理で
+1サンプル推論し、red→green 可視化 PNG を吐く唯一の正しい入口です。
+全ての可視化・eval・BA スクリプトはこのモジュールを経由します。
 
 ```bash
-# マルチクロップキャッシュ (s64 = crop ≥ 64px)
-python scripts/data_preparation/build_all_mc_caches.py
+# 1サンプル可視化（idx 指定 + top100 低σ点だけ描画）
+PYTHONPATH=. python -m scripts.inference.infer_pipeline \
+    --exp   km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2 \
+    --cache data/woven_v3_tile \
+    --split val \
+    --idxs  17,100,1000 \
+    --top-k 100 \
+    --out   out/infer_smoke
+
+# ランダム N 枚
+PYTHONPATH=. python -m scripts.inference.infer_pipeline \
+    --exp <NAME> --cache <CACHE_DIR> --split val --n 8 --out out/foo
+
+# 全点描画（タイル単位 BA debug 向け）
+PYTHONPATH=. python -m scripts.inference.infer_pipeline ... --top-k -1
 ```
-出力先: `/mnt/nvme6t/e2e_calib_cache/{pandaset,nuscenes,waymo}_mc_s64_cache.pt`。
-データセット別に `build_ps_full.py` / `build_ns_full.py` / `build_waymo_full.py` もあり
-(全部 `scripts/data_preparation/` 下)。
+
+出力 PNG の凡例:
+- `red ○` = 摂動入力 hyp_uv
+- `green ○` = モデル予測 pred_uv (= hyp + Δ)
+- `yellow / magenta ✗` = GT
+- 黄/橙の矢印 = 補正 Δ
+- cyan/magenta 線 = 補正後の残差 (pred → GT)
+- lime 楕円 = per-point 2D σ
+
+タイトル例: `idx=17 top100 of 223 valid pts σ 1.46-1.82px |pred-GT| 2.93±0.39px err b→a: 11.60→2.71px`
+
+`b→a` が補正前→補正後の平均ピクセル誤差。下がっていれば成功。
+
+### 2. プログラム経由で叩く
+
+```python
+import numpy as np
+from scripts.inference.infer_calib    import load_calib_model
+from scripts.inference.infer_pipeline import make_ds, infer_one, render_red_to_green
+
+m      = load_calib_model('km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2')
+ds, c  = make_ds('km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2',
+                  'data/woven_v3_tile', split='val')
+res    = infer_one(m, ds, idx=100, seed=42)
+v      = res['valid']
+print(f"err  {np.linalg.norm(res['hyp_uv'][v]  - res['true_uv'][v], axis=1).mean():.2f}"
+      f" → {np.linalg.norm(res['pred_uv'][v] - res['true_uv'][v], axis=1).mean():.2f} px")
+render_red_to_green(res, 'idx100.png', top_k=100)
+```
+
+`load_calib_model` は `experiments/<exp>/config.py` の `CFG` から
+`frustum_dense / use_intensity / n_layers / img_size / deform_mode / use_pose_emb`
+等を全部読み取ってモデル形状を組むので、**load 時に何も指定しなくて良い**。
+ckpt と config がズレてれば `size mismatch` で落ちる。
+
+### 3. WebUI デモサーバー
+
+```bash
+PYTHONPATH=. python -m scripts.serving.caaas_app    # http://localhost:5002
+```
+
+`caaas_app` は推論ロード周りで `infer_calib.load_calib_model` を共有し、
+タイル単位の `infer_tiles(model_input_size=c['img_size'])` で sliding 推論する。
+
+### 4. 学習
+
+```bash
+# 実データ DDP 学習（最近の主流。configs/<NAME>.py が直接 CFG）
+PYTHONPATH=. torchrun --nproc_per_node 8 \
+    scripts/training/train_ps_v3_ddp.py --cfg <NAME>
+
+# 旧合成系 (sanity check 用)
+python scripts/training/train_64.py
+python scripts/training/train_sim3d.py
+```
+
+実験結果は `experiments/<name>/{best_model.pt, train.log, config.py, vis_ep*/}` に保存。
+
+### 5. データキャッシュを自分で作る場合
+
+```bash
+python scripts/data_preparation/build_ps_full.py     # PandaSet → v3 tiled cache
+python scripts/data_preparation/build_ns_full.py     # NuScenes
+python scripts/data_preparation/build_waymo_full.py  # Waymo
+```
+
+リポにコミットしてある `data/woven_v3_tile` だけで動く構成にしてあるので、
+推論を試すだけならキャッシュ構築は不要。
 
 ---
 
@@ -206,24 +282,31 @@ import は `from models.model_depth import CalibNetDepth` のように
 
 ## 注目の実験
 
+LFS でコミット済みなので `git lfs pull` すれば即推論できる主要モデル:
+
 | Path | 何 |
 |---|---|
-| `experiments/ps_v9_objsplit/` | PandaSet object-split ベストモデル (0.91 px) |
-| `experiments/all_v2_mc/` / `all_v3_mc/` | ジョイント NS+PS+WM マルチクロップ |
-| `experiments/all_v3_mc/ba_kb/` | 12 点 fx×KB スイープ、t=1.56 cm (k₂=+0.01) |
-| `experiments/vdef_{sl,ml}/` | Deformable cross-attn (val NLL 1.57) |
-| `experiments/ps_mc_overfit500/` | Overfit 500 サンプルでアーキ検証 |
-| `experiments/icp_residual/` | ICP スキャン残差の外部検証 |
-| `experiments/turn_projection/` | 旋回時の投影ズレ解析 |
+| `experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2/` | **メイン**: kamikado+woven+waymo joint, n=4 ML deformable + dense PE, 200ep on dgx2 |
+| `experiments/km_wv_wm_tss4_n4_img128_grid16_50ep_dgx3_16gpu_warm/` | 上記から TSS4 を 80% 入れて 50ep warm-start (TSS4 fisheye キャリブ問題対策) |
+| `experiments/tss4_iter1baked_n4_img128_30ep_os16_dgx2_16gpu_warm/` | TSS4 iter1 cache を baked 化 + os16 で warm-start |
+| `experiments/ps_full_n4_img128_parity_dgx4_100ep/` | PandaSet 単体 parity baseline (DGX4 100ep) |
+| `experiments/ps_v9_objsplit/` | (旧) PandaSet object-split ベストモデル (0.91 px) |
+| `experiments/all_v3_mc/ba_kb/` | (旧) 12 点 fx×KB スイープ、t=1.56 cm (k₂=+0.01) |
+| `experiments/vdef_{sl,ml}/` | (旧) Deformable cross-attn (val NLL 1.57) |
 
 ---
 
 ## 環境
 
-- PyTorch 2.x + CUDA (bfloat16 autocast + TF32 + `torch.compile(max-autotune)`)
-- RTX 5080 / 5090 でテスト
+- PyTorch 2.x + CUDA (fp16 autocast 必須 — bf16 だと sm_70 で fp32 emulated に
+  落ちて学習時の Δuv 分布とズレる。`infer_pipeline.infer_one` は fp16 固定)
+- RTX 5080 / 5090 / V100 / A100 / DGX2 でテスト
+- `git-lfs` (チェックポイント取り出しに必要)
 - `pyceres` (Python bindings for Ceres Solver) が BA に必要
+- `clearml` は学習中の scalar / vis を見るときと、LFS に載ってない実験を
+  artifact から取り出すときだけ
 
 ```bash
-pip install torch torchvision flask matplotlib numpy pyceres
+sudo apt install git-lfs
+pip install torch torchvision flask matplotlib numpy pyceres clearml
 ```
