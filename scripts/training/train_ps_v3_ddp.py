@@ -323,7 +323,26 @@ def main(cfg=None):
             ifp = Path('experiments') / init_from / 'best_model.pt'
         log(f"warm-start from: {ifp}")
         sd = torch.load(ifp, map_location='cpu', weights_only=True)
-        accel.unwrap_model(model).load_state_dict(sd, strict=False)
+        # strict=False tolerates missing/unexpected keys but NOT shape mismatch
+        # (e.g. img_size 128→256 changes pos_emb, grid_n 16→32 changes
+        # frustum_enc.cell_uv_embed). Drop any tensor whose shape disagrees so
+        # they fall back to fresh init while everything else (CNN backbone,
+        # attention QKV) is still warm-started.
+        cur_sd = accel.unwrap_model(model).state_dict()
+        skipped = []
+        filt = {}
+        for k, v in sd.items():
+            if k in cur_sd and tuple(cur_sd[k].shape) != tuple(v.shape):
+                skipped.append((k, tuple(v.shape), tuple(cur_sd[k].shape)))
+                continue
+            filt[k] = v
+        miss = accel.unwrap_model(model).load_state_dict(filt, strict=False)
+        log(f"warm-start: loaded {len(filt)}/{len(sd)} tensors  "
+            f"(skipped {len(skipped)} shape-mismatch, "
+            f"{len(miss.missing_keys)} missing, "
+            f"{len(miss.unexpected_keys)} unexpected)")
+        for k, src, dst in skipped[:8]:
+            log(f"  shape-skip {k}: ckpt{src} != model{dst}")
     t0        = time.time()
     history = {'ep': [], 'tr_nll': [], 'va_nll': [], 'tr_mse': [], 'va_mse': []}
 
@@ -566,6 +585,27 @@ def main(cfg=None):
                 # unwrap before state_dict so keys don't carry 'module.' prefix
                 accel.save(accel.unwrap_model(model).state_dict(), ckpt)
                 log(f"  ↳ saved (val_nll={best_val:.4f})")
+                # Push best.pt to ClearML as an OutputModel so the web UI Models
+                # tab carries it (and downstream eval/serve scripts can pull by
+                # task id instead of mounting the experiments dir).
+                if cml_logger is not None:
+                    try:
+                        from clearml import OutputModel as _OM, Task as _T
+                        _task = _T.current_task()
+                        if _task is not None:
+                            _om = _OM(task=_task, name=f"{cfg['name']}_best",
+                                      framework='PyTorch')
+                            _om.update_weights(str(ckpt), upload_uri=None,
+                                               iteration=epoch, auto_delete_file=False)
+                            # Also expose under the Artifacts tab so people who
+                            # navigate Task → Artifacts (not Models) still find
+                            # the weights. delete_after_upload=False keeps the
+                            # local file for warm-start.
+                            _task.upload_artifact(
+                                'best_model.pt', artifact_object=str(ckpt),
+                                delete_after_upload=False)
+                    except Exception as _e:
+                        log(f"  ↳ ClearML OutputModel upload skipped: {_e}")
             if cml_logger is not None:
                 try:
                     rs = cml_logger.report_scalar
