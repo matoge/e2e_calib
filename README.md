@@ -107,7 +107,20 @@ git lfs pull --include "experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2
 sudo apt install -y git-lfs
 pip install torch torchvision flask matplotlib numpy pyceres clearml
 
-# 3) 推論 + 可視化 ワンライナー (woven の val cache はリポにコミット済み)
+# 3) val cache を ClearML Dataset から取得 (woven_v3_tile, 圧縮 6.7 GiB)
+#    最初に ~/clearml.conf が必要 (社内 ClearML server に向ける)
+#      api_server   = http://172.16.200.185:8008
+#      web_server   = http://172.16.200.185:8082
+#      files_server = http://172.16.200.185:8081
+python -c "
+from clearml import Dataset
+p = Dataset.get(dataset_id='786a56a01d5a454a876352ecaf8c281f').get_local_copy()
+print(p)   # ~/.clearml/cache/storage_manager/datasets/...
+"
+#   → 表示された path を data/woven_v3_tile にシンボリックリンク
+ln -s "<上で表示された path>" data/woven_v3_tile
+
+# 4) 推論 + 可視化 ワンライナー
 PYTHONPATH=. python -m scripts.inference.infer_pipeline \
     --exp km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2 \
     --cache data/woven_v3_tile \
@@ -130,7 +143,19 @@ done → out/quickstart_demo
 出力されます。`hyp→true` が摂動入力の誤差 (px)、`pred→true` がモデル補正後の
 誤差。idx=17 の **11.60 → 2.33 px** が典型的な成功シグナル。
 
-> **ClearML から取りたいときだけ** (LFS に載ってない実験):
+### データキャッシュ (ClearML Dataset)
+
+| Dataset (project=`e2e_calib/datasets`) | id | 用途 |
+|---|---|---|
+| `woven_v3_tile_v1` | `786a56a01d5a454a876352ecaf8c281f` | TSS4 fisheye val (上記 Quick start で使用) |
+| `pandaset_v3_tiled` / `nuscenes_v3_tiled` / `waymo_v3_tiled` | (`scripts/preprocessing/upload_tile_caches.py` 参照) | joint 学習用 tile cache |
+
+`Dataset.get(dataset_id=...).get_local_copy()` は ClearML cache に展開して
+local path を返すだけなので、二度目以降はキャッシュヒットして即返る。
+キャッシュ実体を別の disk に置きたい場合は `~/clearml.conf` の
+`sdk.storage.cache.default_base_dir` を書き換える。
+
+> **学習済みモデルを ClearML から取りたいとき** (LFS に載ってない実験):
 > ```python
 > from clearml import Task
 > t = Task.get_task(task_id='7e6f442a118042188609a115f139f61d')
