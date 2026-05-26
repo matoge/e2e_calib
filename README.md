@@ -91,83 +91,97 @@ LiDAR Points (N × 3, [U, V, D])
 
 ---
 
-## Quick start
+## Quick start — clone から PNG まで 1 分
 
-### 0. セットアップ（clone → LFS pull）
-
-学習済みチェックポイント `experiments/<NAME>/best_model.pt` は **Git LFS で
-コミット済み**なので、clone 後に `git lfs pull` するだけで推論できます。
-ClearML は基本的に不要（学習中の scalar/vis を見るときだけ参照）。
+**実測のコピペ手順** (このリポでテスト済み):
 
 ```bash
-git clone <this-repo>
+# 1) clone + LFS pull (チェックポイントは LFS でコミット済み)
+git clone git@github.com:matoge/e2e_calib.git
 cd e2e_calib
-git lfs install            # 初回のみ
-git lfs pull               # experiments/*/best_model.pt を全部落とす
-                            # 重い場合は include で絞る↓
+git lfs install
 git lfs pull --include "experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2/best_model.pt"
+#   --include を外せば全実験の best_model.pt を落とす (大きい)
 
+# 2) 依存
+sudo apt install -y git-lfs
 pip install torch torchvision flask matplotlib numpy pyceres clearml
+
+# 3) 推論 + 可視化 ワンライナー (woven の val cache はリポにコミット済み)
+PYTHONPATH=. python -m scripts.inference.infer_pipeline \
+    --exp km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2 \
+    --cache data/woven_v3_tile \
+    --split val --idxs 17,100,1000 --top-k 100 \
+    --out out/quickstart_demo
 ```
 
-> **ClearML から取りたいときだけ** (LFS に載ってない実験など):
+これで以下が出ます (実測値):
+```
+load model: km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2
+build dataset: data/woven_v3_tile (val)
+  len(ds)=7840, img_size=128
+  idx=17:   N_valid=223  σ range 1.61-2.42px  err hyp→true=11.60  pred→true=2.33px
+  idx=100:  N_valid=231  σ range 3.49-6.10px  err hyp→true=11.20  pred→true=6.40px
+  idx=1000: N_valid=18   σ range 9.18-10.23px err hyp→true=17.71  pred→true=27.16px
+done → out/quickstart_demo
+```
+
+`out/quickstart_demo/idx{000017,000100,001000}.png` に red→green 可視化が
+出力されます。`hyp→true` が摂動入力の誤差 (px)、`pred→true` がモデル補正後の
+誤差。idx=17 の **11.60 → 2.33 px** が典型的な成功シグナル。
+
+> **ClearML から取りたいときだけ** (LFS に載ってない実験):
 > ```python
 > from clearml import Task
 > t = Task.get_task(task_id='7e6f442a118042188609a115f139f61d')
 > ckpt = t.artifacts['best_model.pt'].get_local_copy()   # → ローカル path
 > ```
 
-### 1. 推論 + 可視化（メイン）
+---
 
-`scripts/inference/infer_pipeline.py` が**学習と byte-identical**な前処理で
-1サンプル推論し、red→green 可視化 PNG を吐く唯一の正しい入口です。
-全ての可視化・eval・BA スクリプトはこのモジュールを経由します。
+### 推論 CLI のオプション
+
+`scripts/inference/infer_pipeline.py` が**学習と byte-identical** な前処理で
+推論し、red→green 可視化 PNG を吐く**唯一の正しい入口**です。全ての
+可視化・eval・BA スクリプトはこのモジュールを経由します。
 
 ```bash
-# 1サンプル可視化（idx 指定 + top100 低σ点だけ描画）
-PYTHONPATH=. python -m scripts.inference.infer_pipeline \
-    --exp   km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2 \
-    --cache data/woven_v3_tile \
-    --split val \
-    --idxs  17,100,1000 \
-    --top-k 100 \
-    --out   out/infer_smoke
-
 # ランダム N 枚
 PYTHONPATH=. python -m scripts.inference.infer_pipeline \
     --exp <NAME> --cache <CACHE_DIR> --split val --n 8 --out out/foo
 
-# 全点描画（タイル単位 BA debug 向け）
-PYTHONPATH=. python -m scripts.inference.infer_pipeline ... --top-k -1
+# 全点描画 (タイル単位 BA debug 向け)
+PYTHONPATH=. python -m scripts.inference.infer_pipeline \
+    --exp <NAME> --cache <CACHE_DIR> --split val --idxs 0 --top-k -1 --out out/all
 ```
 
 出力 PNG の凡例:
 - `red ○` = 摂動入力 hyp_uv
 - `green ○` = モデル予測 pred_uv (= hyp + Δ)
 - `yellow / magenta ✗` = GT
-- 黄/橙の矢印 = 補正 Δ
-- cyan/magenta 線 = 補正後の残差 (pred → GT)
+- 黄/橙の矢印 = 補正 Δ (red → green)
+- cyan/magenta 線 = 補正後の残差 (green → GT)
 - lime 楕円 = per-point 2D σ
 
 タイトル例: `idx=17 top100 of 223 valid pts σ 1.46-1.82px |pred-GT| 2.93±0.39px err b→a: 11.60→2.71px`
 
-`b→a` が補正前→補正後の平均ピクセル誤差。下がっていれば成功。
+`b→a` が補正前→補正後の平均ピクセル誤差。
 
-### 2. プログラム経由で叩く
+### プログラム経由で叩く
 
 ```python
 import numpy as np
 from scripts.inference.infer_calib    import load_calib_model
 from scripts.inference.infer_pipeline import make_ds, infer_one, render_red_to_green
 
-m      = load_calib_model('km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2')
-ds, c  = make_ds('km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2',
-                  'data/woven_v3_tile', split='val')
-res    = infer_one(m, ds, idx=100, seed=42)
-v      = res['valid']
-print(f"err  {np.linalg.norm(res['hyp_uv'][v]  - res['true_uv'][v], axis=1).mean():.2f}"
+EXP = 'km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2'
+m       = load_calib_model(EXP)
+ds, c   = make_ds(EXP, 'data/woven_v3_tile', split='val')
+res     = infer_one(m, ds, idx=17, seed=42)
+v       = res['valid']
+print(f"err {np.linalg.norm(res['hyp_uv'][v]  - res['true_uv'][v], axis=1).mean():.2f}"
       f" → {np.linalg.norm(res['pred_uv'][v] - res['true_uv'][v], axis=1).mean():.2f} px")
-render_red_to_green(res, 'idx100.png', top_k=100)
+render_red_to_green(res, 'idx17.png', top_k=100)
 ```
 
 `load_calib_model` は `experiments/<exp>/config.py` の `CFG` から
@@ -175,7 +189,7 @@ render_red_to_green(res, 'idx100.png', top_k=100)
 等を全部読み取ってモデル形状を組むので、**load 時に何も指定しなくて良い**。
 ckpt と config がズレてれば `size mismatch` で落ちる。
 
-### 3. WebUI デモサーバー
+### WebUI デモサーバー
 
 ```bash
 PYTHONPATH=. python -m scripts.serving.caaas_app    # http://localhost:5002
@@ -184,10 +198,10 @@ PYTHONPATH=. python -m scripts.serving.caaas_app    # http://localhost:5002
 `caaas_app` は推論ロード周りで `infer_calib.load_calib_model` を共有し、
 タイル単位の `infer_tiles(model_input_size=c['img_size'])` で sliding 推論する。
 
-### 4. 学習
+### 学習
 
 ```bash
-# 実データ DDP 学習（最近の主流。configs/<NAME>.py が直接 CFG）
+# 実データ DDP 学習 (最近の主流。configs/<NAME>.py が直接 CFG)
 PYTHONPATH=. torchrun --nproc_per_node 8 \
     scripts/training/train_ps_v3_ddp.py --cfg <NAME>
 
@@ -198,7 +212,7 @@ python scripts/training/train_sim3d.py
 
 実験結果は `experiments/<name>/{best_model.pt, train.log, config.py, vis_ep*/}` に保存。
 
-### 5. データキャッシュを自分で作る場合
+### データキャッシュを自分で作る場合
 
 ```bash
 python scripts/data_preparation/build_ps_full.py     # PandaSet → v3 tiled cache
@@ -207,7 +221,7 @@ python scripts/data_preparation/build_waymo_full.py  # Waymo
 ```
 
 リポにコミットしてある `data/woven_v3_tile` だけで動く構成にしてあるので、
-推論を試すだけならキャッシュ構築は不要。
+**推論を試すだけならキャッシュ構築は不要**。
 
 ---
 
