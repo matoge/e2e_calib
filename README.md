@@ -228,6 +228,83 @@ PYTHONPATH=. python -m scripts.serving.caaas_app    # http://localhost:5002
 `caaas_app` は推論ロード周りで `infer_calib.load_calib_model` を共有し、
 タイル単位の `infer_tiles(model_input_size=c['img_size'])` で sliding 推論する。
 
+### kamikado raw 1 frame をローカルだけで δ̂ まで回す
+
+社内 calib API (`http://172.16.200.185:8082/calibrate/frame`) と等価な処理を、
+HTTP サーバを介さずローカルで実行する。`scripts/_debug/infer_raw_frame.py` が
+正規 CLI で、kamikado raw scene dir の `image_<f>.png + points_V_<f>.txt + calib.calib`
+を直接食ってタイル化推論 → BA → 6DoF δ̂ + σ をテキスト出力する。
+
+```bash
+# 1) raw scene zip を dgx2 から落として展開 (例: 1 シーン ~900MB)
+mkdir -p data/kamikado_raw
+scp dgx2:/home/hfunaya/cache/kamikado/points_ip664_D_20260226_224648_d005_3000_3020.zip data/kamikado_raw/
+unzip -q data/kamikado_raw/points_ip664_D_20260226_224648_d005_3000_3020.zip -d data/kamikado_raw/
+#   展開後: data/kamikado_raw/<scene>/{calib.calib, image_N.png, points_V_N.txt} × N frames
+
+# 2) 1 frame 走らせる
+PYTHONPATH=. python scripts/_debug/infer_raw_frame.py \
+    --scene data/kamikado_raw/points_ip664_D_20260226_224648_d005_3000_3020 \
+    --frame 0 \
+    --exp km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2
+```
+
+実測出力 (このリポでテスト済み):
+
+```
+== adapter: data/kamikado_raw/...d005_3000_3020  frame=0 ==
+  CalibFrame(scene='...d005_3000_3020' frame=0 cam='fcm' 3840x2160px fisheye=True N_pts=54979)
+== tile_cutter ==
+  35 tiles
+== infer_tiles + solve_dofs ==
+  BA pool N=10520
+
+== 6-DoF δ_pred ==
+DoF             δ_pred          σ
+------------------------------------
+omega_x     +0.9220     0.0048
+omega_y     +0.1408     0.0042
+omega_z     +0.0231     0.0032
+tx          +0.0058     0.0010
+ty          +0.1510     0.0006
+tz          -0.0266     0.0007
+```
+
+データ flow (`scripts/_debug/infer_raw_frame.py:1-90`):
+
+```
+image_<f>.png + points_V_<f>.txt + calib.calib
+   │  scripts/data/adapters/kamikado.load_frame
+   ↓
+CalibFrame(img, pts(N,4), uv_full, z_cam, K, dist, T_SV, ...)
+   │  scripts/data/tile_cutter.frame_to_tiles(**TILE_LAYOUT, min_pts=8)
+   ↓
+list[tile_inst]  (tile_size=384, stride=320, max_pts=256)
+   │  scripts/ba/ba_multicam_corr.infer_tiles  (1 forward, B=n_tiles, fp16)
+   ↓
+(uv_full[N,2], par[N,5]=Δuv+σuv+ρ, z_cam[N])  ← BA pool
+   │  scripts/ba/ba_multicam_corr.solve_dofs(_DOF_PRESETS['6dof_ext'])
+   ↓
+δ (6,) deg/m  +  cov[6,6]
+```
+
+`infer_raw_frame.py` のオプション:
+
+| flag | default | 何 |
+|---|---|---|
+| `--scene` | (必須) | kamikado raw scene dir |
+| `--frame` | (必須) | int |
+| `--exp`   | `km_wv_wm_dgx2_n2_img128_v2` | `experiments/<exp>/best_model.pt` |
+| `--tile-size` | 384 | 学習時の `max_crop_px` と一致させる |
+| `--tile-stride` | 320 | tile 間 ~64px overlap |
+| `--huber-k` | 0.0 | >0 で IRLS Huber on |
+| `--n-iter`  | 1   | IRLS 反復 |
+| `--sigma-max` | 0.0 | >0 で σ_pt > sigma_max を BA 前に drop |
+
+**ClearML や socket 一切なし**、ローカル disk + GPU だけで動く。サーバー側
+(`services/calib_api/server.py:671 calibrate_frame`) は同じ関数群を HTTP で
+ラップしているだけなので、レスポンスの δ̂ は本番と一致する。
+
 ### 学習
 
 ```bash
