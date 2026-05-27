@@ -254,7 +254,33 @@ Frame B image / point  ─→ 同 ─→     token (B 側は Δpose で type-1 �
 
 ---
 
-## 9. 再現
+## 9. 文献
+
+- **RoPE (Rotary Position Embedding)** — Su et al., *RoFormer: Enhanced
+  Transformer with Rotary Position Embedding*, 2021.
+  [arXiv:2104.09864](https://arxiv.org/abs/2104.09864). LLM 文脈での
+  オリジナル 1D / per-axis 2D 定式化。幾何とは無関係に発明されたが、
+  本ノートでは同じ代数作用 (paired 次元への block-diag 回転) を
+  type-1 chunk への SO(3) 作用として転用している。
+- **SE(3)-Transformer** — Fuchs et al., 2020.
+  [arXiv:2006.10503](https://arxiv.org/abs/2006.10503). type 分解
+  ((D_s scalar, K type-1 vectors)) と type-preserving な
+  W_q/W_k/W_v はここからの最小限の借用。
+- **Equiformer** — Liao & Smidt, 2022.
+  [arXiv:2206.11990](https://arxiv.org/abs/2206.11990). type-l 特徴量を
+  attention で扱う実用的な equivariant transformer。toy の (b) が
+  近似しているのは概ねこれ。
+- **RoPE-Mixed (2D)** — Heo et al., *Rotary Position Embedding for
+  Vision Transformer*, 2024.
+  [arXiv:2403.13298](https://arxiv.org/abs/2403.13298). ViT 用の 2D
+  RoPE。本ノートと同じ機構の 2D image-token 版。§7 脚注の通り、保留
+  ではなく必須側に倒す。
+- **Tensor Field Networks** — Thomas et al., 2018.
+  [arXiv:1802.08219](https://arxiv.org/abs/1802.08219). type-l 分解
+  による SO(3)-equivariant point network のオリジナル。(b) で使う
+  type-1 block-diag(R) はここに辿れる。
+
+## 10. 再現
 
 ```bash
 # Toy: train [0,30°], eval [0,180°]
@@ -267,5 +293,8 @@ Frame B image / point  ─→ 同 ─→     token (B 側は Δpose で type-1 �
 出力: `scripts/_debug/_outputs/rope_se3_decode.png` および
 `docs/assets/2026-05-26_se3_token_rotation/rope_se3_problem.png`。
 
-Code: `scripts/_debug/_rope_se3_toy.py`、
-`scripts/_debug/_rope_se3_problem_fig.py`。
+Code (commit `153d870`):
+
+- [scripts/_debug/_rope_se3_toy.py](https://github.com/tmc-autonomy/loom-calibration/blob/main/scripts/_debug/_rope_se3_toy.py)
+- [scripts/_debug/_rope_se3_problem_fig.py](https://github.com/tmc-autonomy/loom-calibration/blob/main/scripts/_debug/_rope_se3_problem_fig.py)
+- [docs/blog/2026-05-26_se3_token_rotation.md](https://github.com/tmc-autonomy/loom-calibration/blob/main/docs/blog/2026-05-26_se3_token_rotation.md)

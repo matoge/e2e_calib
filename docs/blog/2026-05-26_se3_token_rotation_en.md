@@ -280,7 +280,33 @@ Design calls:
 
 ---
 
-## 9. Reproduction
+## 9. References
+
+- **RoPE (Rotary Position Embedding)** — Su et al., *RoFormer: Enhanced
+  Transformer with Rotary Position Embedding*, 2021.
+  [arXiv:2104.09864](https://arxiv.org/abs/2104.09864). Original 1D /
+  per-axis 2D formulation in the LLM context. Geometry-agnostic; this
+  note repurposes the same algebraic action (block-diag rotation on
+  paired feature dims) to act SO(3) on the type-1 chunk.
+- **SE(3)-Transformer** — Fuchs et al., 2020.
+  [arXiv:2006.10503](https://arxiv.org/abs/2006.10503). The
+  type-decomposed feature ((D_s scalar, K type-1 vectors)) and
+  type-preserving W_q/W_k/W_v are taken from here, in a minimal form.
+- **Equiformer** — Liao & Smidt, 2022.
+  [arXiv:2206.11990](https://arxiv.org/abs/2206.11990). Practical
+  attention-based equivariant transformer with type-l features, very
+  close to what (b) approximates in the toy.
+- **RoPE-Mixed (2D)** — Heo et al., *Rotary Position Embedding for
+  Vision Transformer*, 2024.
+  [arXiv:2403.13298](https://arxiv.org/abs/2403.13298). 2D RoPE for ViT.
+  Same family of mechanism we use here, but in 2D image-token space.
+  Per §7 footnote we treat it as required, not optional.
+- **Tensor Field Networks** — Thomas et al., 2018.
+  [arXiv:1802.08219](https://arxiv.org/abs/1802.08219). The original
+  type-l decomposition for SO(3)-equivariant point networks; the type-1
+  block-diag(R) action used in (b) traces back here.
+
+## 10. Reproduction
 
 ```bash
 # Toy: train [0,30°], eval [0,180°]
@@ -293,5 +319,8 @@ Design calls:
 Outputs: `scripts/_debug/_outputs/rope_se3_decode.png` and
 `docs/assets/2026-05-26_se3_token_rotation/rope_se3_problem.png`.
 
-Code: `scripts/_debug/_rope_se3_toy.py`,
-`scripts/_debug/_rope_se3_problem_fig.py`.
+Code (commit `153d870`):
+
+- [scripts/_debug/_rope_se3_toy.py](https://github.com/tmc-autonomy/loom-calibration/blob/main/scripts/_debug/_rope_se3_toy.py)
+- [scripts/_debug/_rope_se3_problem_fig.py](https://github.com/tmc-autonomy/loom-calibration/blob/main/scripts/_debug/_rope_se3_problem_fig.py)
+- [docs/blog/2026-05-26_se3_token_rotation_en.md](https://github.com/tmc-autonomy/loom-calibration/blob/main/docs/blog/2026-05-26_se3_token_rotation_en.md)
