@@ -221,7 +221,7 @@ def prepare_data(input_image_path, read_points=True):
 
 
 top_y = 1000
-bottom_y = 1600
+bottom_y = 2000
 left_x = 0
 R_S0V0 = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
 
@@ -234,25 +234,47 @@ def estimate_normals(points, k=20):
     return normals
 
 
-def make_lidar_img_original(points_S_gt, points_S_with_noize, K, H, W, intensity):
-    # normals = estimate_normals(points_S_gt, k=10)
+def make_lidar_img_original(points_S_gt, points_S_with_noise, K, H, W, intensity):
+    normals = estimate_normals(points_S_gt, k=10)
     log_intensity = np.log1p(intensity)
-    log_intensity = (log_intensity - log_intensity.min()) / (log_intensity.max() - log_intensity.min() + 1e-6)
+    log_intensity = (log_intensity - log_intensity.min()) / (
+        log_intensity.max() - log_intensity.min() + 1e-6
+    )
+    max_depth = 50.0
     points = []
-    max_depth = 500.0
-    right_x = W - left_x
-    for p_S, s in zip(points_S_with_noize, log_intensity):
+    # small patch around each lidar point
+    if True:
+        patch = 0.0
+        step = 0.02
+        a = np.arange(-patch, patch + step, step)
+        b = np.arange(-patch, patch + step, step)
+        aa, bb = np.meshgrid(a, b)
+        offsets = np.stack([aa.ravel(), bb.ravel()], axis=1)  # (M,2)
+    for p_S, s, n_s in zip(points_S_with_noise, log_intensity, normals):
         if p_S[2] <= 0 or p_S[2] > max_depth:
             continue
-        proj = K @ p_S
-        u = proj[0] / proj[2]
-        v = proj[1] / proj[2]
-        if v < top_y or v > bottom_y or u < left_x or u > right_x:
-            continue
-        depth = p_S[2] / 100.0
-        points.append([u, v, depth, s])
-    points = np.array(points, dtype=np.float32)
-    return points
+        # normalize normal
+        n_s = n_s / (np.linalg.norm(n_s) + 1e-8)
+        # build local tangent frame
+        if abs(n_s[2]) < 0.9:
+            t1 = np.cross(n_s, [0, 0, 1])
+        else:
+            t1 = np.cross(n_s, [0, 1, 0])
+        t1 = t1 / (np.linalg.norm(t1) + 1e-8)
+        t2 = np.cross(n_s, t1)
+        # generate patch points
+        qs = p_S + offsets[:, 0:1] * t1 + offsets[:, 1:2] * t2  # (M,3)
+        # project to image
+        proj = (K @ qs.T).T
+        u = proj[:, 0] / proj[:, 2]
+        v = proj[:, 1] / proj[:, 2]
+        z = proj[:, 2]
+        for x, y, zz in zip(u, v, z):
+            if x < 0 or x >= W or y < 0 or y >= H:
+                continue
+            depth = zz / 50.
+            points.append([x, y, depth, s, n_s[0], n_s[1], n_s[2]])
+    return np.array(points, dtype=np.float32)
 
 
 def create_data(input_image_path):
