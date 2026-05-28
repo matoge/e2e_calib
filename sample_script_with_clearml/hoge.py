@@ -14,10 +14,7 @@ import numpy as np
 top_y = 1000
 bottom_y = 1600
 left_x = 0
-IMG_SIZE = 128
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-
-# expect image_*.png and points_V_*.txt are under the folder.
 input_image_path = os.path.expanduser("./data/image_0.png")
 
 
@@ -86,37 +83,6 @@ def build_model_input(points, image, relative_center_from_img_center, cameraMatr
     return imgs, point_in, pad_mask, vfp, bucket_uvd, bucket_valid
 
 
-def draw_points_in_window(img, points, x0, y0, size):
-    x1 = x0 + size
-    y1 = y0 + size
-    patch = img[y0:y1, x0:x1].copy()
-    patch_ori = patch.copy()
-    patch_lidar_only = patch.copy()
-    patch_lidar_only[:] = (255, 255, 255)
-    mask = (points[:, 0] >= x0) & (points[:, 0] < x1) & (points[:, 1] >= y0) & (points[:, 1] < y1)
-    pts = points[mask]
-    if pts.shape[0] == 0:
-        patch = cv2.hconcat([patch_ori, patch_lidar_only, patch])
-        return patch
-    depth = pts[:, 2]
-    d_max = depth.max()
-    d_min = depth.min()
-    point_size = 2
-    for p in pts:
-        x, y, d, intensity = p[0:4]
-        n_s = p[4:7]
-        if np.abs(n_s[1]) > 0.7:
-            continue
-        u = int(x - x0)
-        v = int(y - y0)
-        d = (d_max - d) / (d_max - d_min + 1e-6)
-        d1 = np.abs(n_s[1])
-        cv2.circle(patch, (u, v), point_size, (0, int(d1 * 255), int(255 * d)), -1)
-        cv2.circle(patch_lidar_only, (u, v), point_size, (0, int(d1 * 255), int(255 * d)), -1)
-    patch = cv2.hconcat([patch_ori, patch_lidar_only, patch])
-    return patch
-
-
 def plot(imgs, params, point_in):
     scale = 4
     right_x = W - left_x
@@ -165,6 +131,7 @@ def perform_association(
     model,
     lidar_points_in_frame,
     cameraMatrix,
+    image_size
 ):
     H, W = undistorted_image.shape[:2]
     right_x = W - left_x
@@ -172,10 +139,10 @@ def perform_association(
     point_ori = []
     point_moved = []
     ellip = []
-    for y0 in range(0, H - IMG_SIZE + 1, IMG_SIZE):
-        for x0 in range(0, W - IMG_SIZE + 1, IMG_SIZE):
-            cx = x0 + IMG_SIZE // 2
-            cy = y0 + IMG_SIZE // 2
+    for y0 in range(0, H - image_size + 1, image_size):
+        for x0 in range(0, W - image_size + 1, image_size):
+            cx = x0 + image_size // 2
+            cy = y0 + image_size // 2
             if cy < top_y or cy > bottom_y:
                 continue
             if cx < left_x or cx > right_x:
@@ -186,7 +153,7 @@ def perform_association(
                 undistorted_image,
                 relative_center_from_img_center,
                 cameraMatrix,
-                cut_img_size=IMG_SIZE,
+                cut_img_size=image_size,
             )
             if len(point_in[0]) < 5:
                 print("no point", len(point_in))
@@ -203,7 +170,8 @@ def perform_association(
                 )
             # plot(imgs, params, point_in)
             index += 1
-            print(index)
+            if index%10==0:
+                print(index)
             pred = params[0].cpu().numpy()
             pts = point_in[0].cpu().numpy()
             ellip += [r[2:5] for r in pred]
@@ -261,8 +229,7 @@ def plot_result(undistorted_image, point_ori, point_moved, ellip):
         cv2.imwrite(f"slide_{x:04d}_{y:04d}.png", vis)
 
 
-def create_model(config):
-    c = config
+def create_model(c):
     model = CalibNetDepth(
         img_size=c["img_size"],
         in_channels=c["in_channels"],
@@ -292,6 +259,8 @@ def get_model(task_id):
         scope = {}
         exec(content, scope)
         config = scope["CFG"]
+        for key in config.keys():
+            print(key, config[key])
     model = create_model(config)
     artifact = task.artifacts["best_model.pt"]
     ckpt_path = artifact.get_local_copy()
@@ -299,17 +268,18 @@ def get_model(task_id):
     state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model.load_state_dict(state_dict)
     model.eval()
-    return model
+    return model, config["img_size"]
 
 
 def main():
-    model = get_model(task_id="8b4795f69a6340f6b5c89c3991caa953")
+    model, image_size = get_model(task_id="5e04d790db524038b3970c754bbf5fe2")
     lidar_points_in_frame, undistorted_image, cameraMatrix = create_data(input_image_path)
     point_ori, point_moved, ellip = perform_association(
         undistorted_image,
         model,
         lidar_points_in_frame,
         cameraMatrix,
+        image_size
     )
     plot_result(undistorted_image, point_ori, point_moved, ellip)
 
