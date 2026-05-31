@@ -431,7 +431,11 @@ class CalibNet2(nn.Module):
         kv_B_flat, kv_B_shapes, kv_B_lsi = self._build_kv(
             image_B, bucket_uvd_B, bucket_valid_B)
 
-        # Q from A's LiDAR (PointMLP3) + intrinsic-only PoseEmb.
+        # Q from A's LiDAR (PointMLP3). NO entry-time pose_emb call: the
+        # state-space disentanglement (frame-token = world, pose_emb = ego
+        # motion) requires the A-frame block stack to see PURE A-frame token
+        # semantics, identical to legacy single-frame calib. Intrinsic info is
+        # already carried by the PointMLP3 input (uv normalized by img_size).
         uv_01 = distorted_uvd_A[..., :2] / self.img_size
         d3    = distorted_uvd_A[..., 2:3]
         if self.use_intensity:
@@ -439,13 +443,6 @@ class CalibNet2(nn.Module):
         else:
             q_in = torch.cat([uv_01, d3], dim=-1)
         q = self.point_mlp(q_in)                                    # (B, N_A, D)
-        if vfp_A is None:
-            vfp_in = torch.full((B,), float(self.img_size),
-                                 device=image_A.device, dtype=q.dtype)
-        else:
-            vfp_in = vfp_A.to(dtype=q.dtype)
-        log_vfp_A = torch.log(vfp_in.clamp(min=1.0))
-        q = self.pose_emb(q, dpose_R=None, log_vfp=log_vfp_A)
 
         # Stack: first half on KV_A, then RoPE(R_AB) once, then second half on KV_B.
         delta_cum = torch.zeros_like(q)
