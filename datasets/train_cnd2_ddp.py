@@ -35,6 +35,7 @@ from torch.utils.data import DataLoader, Subset, ConcatDataset, RandomSampler
 import random as _r
 
 from accelerate import Accelerator
+from accelerate import DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 # Local hack: repo has its own `datasets/` package (= datasets.pandaset_full).
 # Accelerate's prepare_data_loader does `from datasets import IterableDataset`
@@ -239,7 +240,12 @@ def main():
                         '(stored in ClearML task comment, free-form prose).')
     args = p.parse_args()
 
-    accel = Accelerator()
+    # find_unused_parameters=True: in pair_mode cross-frame path the legacy
+    # entry-time pose_emb / info_head / etc. don't see gradients in some
+    # batches; without this DDP raises a "reduction not finished" error.
+    accel = Accelerator(kwargs_handlers=[
+        DistributedDataParallelKwargs(find_unused_parameters=True),
+    ])
     set_seed(args.split_seed + accel.process_index)
 
     # ClearML init (rank-0 only, BEFORE main loop so cml_logger lookups work)
