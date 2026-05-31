@@ -98,6 +98,7 @@ def _unpack_lmdb_inst(blob: bytes, cubs_map: dict | None = None) -> dict:
         # only read these tensors, so the warning is noise.
         warnings.simplefilter('ignore', UserWarning)
         for k in ('K_full', 'cam_pos', 'R_gt', 'T_gt', 'distortion',
+                  'tangential_p',
                   'pts', 'uv_full', 'z_cam', 'is_obj', 'in_box', 'intensity'):
             if k in offsets:
                 inst[k] = torch.from_numpy(_arr(k))
@@ -126,17 +127,20 @@ except Exception:
 _MCU = 16
 
 
+if not _HAVE_TJ:
+    raise ImportError(
+        "TurboJPEG (PyTurboJPEG) is REQUIRED. PIL fallback was removed "
+        "(2026-05-29) — its full decode is 3× slower and silently kills SPS. "
+        "Install with `pip install PyTurboJPEG` (libjpeg-turbo lib must be "
+        "system-installed). The training docker image e2e-calib-train:np2 "
+        "already has it.")
+
+
 def decode_inst_img(inst: dict) -> torch.Tensor:
     """Return (3, H, W) uint8 torch tensor regardless of cache schema.
     New schema: inst['jpg_bytes'] + inst['IH']/['IW'].  Legacy: inst['img']."""
     if 'jpg_bytes' in inst:
-        if _HAVE_TJ:
-            arr = np.asarray(_TJ_INST.decode(inst['jpg_bytes'], pixel_format=_TJ_PF_RGB))
-        else:
-            import io
-            from PIL import Image as _PIL
-            arr = np.asarray(_PIL.open(io.BytesIO(inst['jpg_bytes'])).convert('RGB'),
-                             dtype=np.uint8)
+        arr = np.asarray(_TJ_INST.decode(inst['jpg_bytes'], pixel_format=_TJ_PF_RGB))
         return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
     return inst['img']
 
@@ -166,6 +170,37 @@ def _is_obj_per_point(pts_sel: np.ndarray, cuboids: list) -> np.ndarray:
     half  = (dims * 0.5)[:, None, :]                                              # (M,1,3)
     inside = np.all(np.abs(local) <= half, axis=-1)                               # (M,N)
     return inside.any(axis=0).astype(np.float32)                                  # (N,)
+
+
+def _photometric_jitter_tuple(tup, half_range: float):
+    """Apply per-channel brightness/contrast/saturation jitter to the
+    uint8 image in a build_window output tuple. Returns a new tuple with
+    the image replaced; all other tensors share storage.
+
+    half_range: each multiplier sampled uniformly from [1-h, 1+h]; hue
+    offset sampled from [-h/4, h/4] (kept smaller — hue rotates the
+    wheel and is destructive).
+    """
+    img = tup[0]                                            # uint8 (3, S, S)
+    if img.dtype != torch.uint8 or img.ndim != 3 or img.shape[0] != 3:
+        return tup
+    h = float(half_range)
+    rng = np.random
+    img_f = img.float() / 255.0
+    # brightness
+    img_f = img_f * float(rng.uniform(1.0 - h, 1.0 + h))
+    # contrast (scale around per-channel mean)
+    mean = img_f.mean(dim=(1, 2), keepdim=True)
+    img_f = (img_f - mean) * float(rng.uniform(1.0 - h, 1.0 + h)) + mean
+    # saturation (scale around per-pixel grayscale)
+    gray = (0.299 * img_f[0] + 0.587 * img_f[1] + 0.114 * img_f[2]).unsqueeze(0)
+    img_f = (img_f - gray) * float(rng.uniform(1.0 - h, 1.0 + h)) + gray
+    # additive per-channel tint (small)
+    tint = torch.tensor([rng.uniform(-h * 0.25, h * 0.25) for _ in range(3)],
+                        dtype=torch.float32).view(3, 1, 1)
+    img_f = img_f + tint
+    img_u8 = (img_f.clamp_(0.0, 1.0) * 255.0).to(torch.uint8)
+    return (img_u8,) + tuple(tup[1:])
 
 
 class PandaSetCalibDatasetFull(Dataset):
@@ -204,9 +239,12 @@ class PandaSetCalibDatasetFull(Dataset):
                  zoom_aug: bool = False,
                  rep_strategy: str = 'cell_center',
                  center_band: float = 0.0,
+                 u_band: float = 0.0,
                  fixed_center_crop: bool = False,
                  pair_mode: bool = False,
                  pair_stride: int = 1,
+                 same_frame_self_sup: bool = False,
+                 photometric_jitter: float = 0.25,
                  preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
@@ -297,6 +335,12 @@ class PandaSetCalibDatasetFull(Dataset):
         # with few lidar points, hard to interpret. Affects pivot pick only;
         # frustum context still uses every visible point.
         self.center_band = float(center_band)
+        # u_band: keep pivots in central horizontal band of width u_band*IW.
+        # 0 = disabled (full width); 0.8 = central 80% of cols (u ∈ [0.1IW,
+        # 0.9IW]). For TSS4: drop the outer 10% per side where calib residual
+        # is large after KB4 baked fit. Affects pivot pick only; frustum
+        # context still uses every visible point.
+        self.u_band = float(u_band)
         # When True, skip pivot/random-crop entirely and just take a cs=
         # max_crop_px square centred on (W/2, cy). Used by val/eval/demo
         # to look at "the middle of the image" instead of stratified bg
@@ -315,6 +359,18 @@ class PandaSetCalibDatasetFull(Dataset):
         # (scene, cam, frame) per inst.
         self.pair_mode   = bool(pair_mode)
         self.pair_stride = int(pair_stride)
+        # Self-supervised same-frame mode. Sets every pair (i, i): A and B
+        # come from the SAME inst, so POSE_GT_AB = identity. Δuv on B is
+        # whatever closed-form shift δ induces under the per-pivot lidar
+        # depth — exact (no NN matching needed). Photometric jitter is
+        # applied differently to A vs B so the network can't shortcut by
+        # pixel matching. Works on caches without ego-pose (kamikado tiles)
+        # since no T_AB needs to be recovered.
+        self.same_frame_self_sup = bool(same_frame_self_sup)
+        # ±half-range of brightness/contrast/saturation/hue jitter applied
+        # AFTER build_window (uint8 image is converted, jittered, clamped,
+        # cast back). 0 = disabled.
+        self.photometric_jitter = float(photometric_jitter)
         self.pair_index: list[tuple[int, int]] = []
         # Preload every inst .pt into RAM. The full PS cache is ~1 GB, and
         # torch.load per-sample shows up as ~3.8 ms in cProfile — roughly
@@ -323,13 +379,16 @@ class PandaSetCalibDatasetFull(Dataset):
         # via copy-on-write / fork semantics and each worker hits RAM directly
         # instead of unpickling from disk every call.
         self._cache = None
-        if preload and not self._use_lmdb:
-            # LMDB-backed caches are already an OS-mapped shared file; no point
-            # duplicating into Python objects per worker.
-            self._cache = [
-                torch.load(self.inst_dir / fn, weights_only=False)
-                for fn in self.fnames
-            ]
+        # HARD REQUIREMENT (2026-05-29): every cache MUST be LMDB-packed.
+        # The .pt-preload path duplicates ~150 KB/inst into every DataLoader
+        # worker; on a 1.6M-frame Waymo cache that's hundreds of GB and
+        # silently kills the job. If LMDB is missing, fail loudly so the
+        # pack step is run before training, not as an OOM mystery later.
+        if not self._use_lmdb:
+            raise RuntimeError(
+                f'Cache {self.cache_dir} has no data.lmdb. '
+                'Run scripts/preprocessing/convert_tile_cache_to_lmdb.py '
+                'first. The .pt preload path is disabled.')
         if self._use_lmdb and os.environ.get('E2E_PRELOAD_CUBS') == '1':
             # Preload deduped cuboid table once in the parent process. Forked
             # workers inherit it via CoW.
@@ -344,9 +403,14 @@ class PandaSetCalibDatasetFull(Dataset):
             self.pair_index = self._build_pair_index()
 
     def __len__(self):
+        # NEW (2026-05-29): one __getitem__ call returns `oversample` samples
+        # as a list, so len equals the number of frames (not inflated). The
+        # collate flattens the list-of-list back into a flat batch. This keeps
+        # all `oversample` crops of one frame inside one __getitem__ scope, so
+        # the worker can share the JPEG decode across them via _decode_cache.
         if self.pair_mode:
-            return len(self.pair_index) * self.oversample
-        return len(self.fnames) * self.oversample
+            return len(self.pair_index)
+        return len(self.fnames)
 
     # Process-wide LMDB env cache keyed by (pid, path). lmdb-py rejects a
     # second open() of the same path within one process, so multiple Dataset
@@ -433,7 +497,13 @@ class PandaSetCalibDatasetFull(Dataset):
           - LMDB: header contains 'scene' + 'frame'; cam encoded via filename.
           - .pt:  torch.load is required, but only happens once at __init__.
         Heavy fields (img/pts) are not retained — we only keep tuples.
+
+        same_frame_self_sup: every inst is paired with itself (A=B). No
+        need for adjacent frames — works on any cache including those
+        without ego-pose (kamikado tiles).
         """
+        if self.same_frame_self_sup:
+            return [(i, i) for i in range(len(self.fnames))]
         keys: list[tuple[str, str, int]] = []
         # Which cam an fname belongs to is encoded in the cache build script's
         # naming convention; full-frame mode uses gid_start = scene_idx * 200,
@@ -466,17 +536,25 @@ class PandaSetCalibDatasetFull(Dataset):
             if not scene or frame < 0:
                 continue
             groups.setdefault((scene, cam), {})[frame] = i
+        # `pair_stride` is now interpreted as the MAX |Δframe| in either
+        # direction. For each anchor frame f we emit one pair per non-zero
+        # offset δ ∈ [-S..-1, +1..+S] for which f+δ exists in the same
+        # (scene, cam). This gives cycle-consistency-friendly bidirectional
+        # data and 2*S× more pairs per scene.
         pairs: list[tuple[int, int]] = []
-        s = self.pair_stride
+        S = max(1, int(self.pair_stride))
         for fmap in groups.values():
             for f, ia in fmap.items():
-                ib = fmap.get(f + s)
-                if ib is not None:
-                    pairs.append((ia, ib))
+                for d in range(-S, S + 1):
+                    if d == 0:
+                        continue
+                    ib = fmap.get(f + d)
+                    if ib is not None:
+                        pairs.append((ia, ib))
         return pairs
 
     def _load_inst(self, idx: int) -> dict:
-        # idx is in [0, len_fnames * oversample); modulo to wrap to file index
+        # idx is now a FRAME index (after 2026-05-29 oversample-list redesign).
         i = idx % len(self.fnames)
         if self._cache is not None:
             return self._cache[i]
@@ -489,19 +567,31 @@ class PandaSetCalibDatasetFull(Dataset):
         return torch.load(self.inst_dir / self.fnames[i], weights_only=False)
 
     def __getitem__(self, idx: int):
-        # Iterative re-roll on failure. The inner `_build_one_window` returns
-        # None when the chosen idx has no valid window after self.max_tries
-        # bucket samples. Previously this fallback was a *recursive* call
-        # `return self[random.randint(...)]`, which blew the Python stack
-        # (~978 deep RecursionError) when many indices in a row were bad.
+        # NEW (2026-05-29): idx is a FRAME index. Load the inst ONCE and pass
+        # it via _inst_override so all `oversample` builds share the SAME
+        # `inst['jpg_bytes']` object. The decode-cache (id-keyed) inside
+        # build_window then hits and the JPEG is decoded ONCE per frame.
+        # collate_full flattens the list-of-list back into a flat batch.
         N = len(self)
         seen = {idx}
-        builder = self._build_one_pair if self.pair_mode else self._build_one_window
+        os_n = max(1, int(self.oversample))
+        is_pair = self.pair_mode
         for _ in range(1024):
-            built = builder(idx)
-            if built is not None:
-                return built
-            # re-roll an unseen idx
+            inst = self._load_inst(idx) if not is_pair else None
+            samples = []
+            ok = True
+            for _ in range(os_n):
+                if is_pair:
+                    built = self._build_one_pair(idx)
+                else:
+                    built = self._build_one_window(idx, _inst_override=inst)
+                if built is None:
+                    ok = False
+                    break
+                samples.append(built)
+            if ok:
+                return samples
+            # re-roll an unseen FRAME idx
             for _ in range(128):
                 j = random.randint(0, N - 1)
                 if j not in seen:
@@ -516,8 +606,12 @@ class PandaSetCalibDatasetFull(Dataset):
             f"pair_mode={self.pair_mode}"
         )
 
-    def _build_one_window(self, idx: int):
-        inst = self._load_inst(idx)
+    def _build_one_window(self, idx: int, _inst_override: dict = None):
+        # _inst_override: when __getitem__ wants to call build N times for the
+        # same frame (oversample list), it loads inst once and threads the
+        # SAME dict in. _build_window then sees the SAME inst['jpg_bytes']
+        # object → _decode_cache hits and the JPEG is decoded only once.
+        inst = _inst_override if _inst_override is not None else self._load_inst(idx)
         # New cache stores jpg_bytes; old cache stored decoded uint8 'img'
         if 'jpg_bytes' in inst:
             IH, IW = int(inst['IH']), int(inst['IW'])
@@ -596,6 +690,22 @@ class PandaSetCalibDatasetFull(Dataset):
             v_hi = min(float(IH), cy + half)
             in_band = (uv_full[:, 1] >= v_lo) & (uv_full[:, 1] < v_hi)
             valid_in_image = valid_in_image & in_band
+        # u_band: drop pivots in the outer (1-u_band)/2 columns on each side.
+        # 0 → full width. 0.8 → keep central 80% of cols only.
+        # u_lo/u_hi are also used as GT mask in build_window to prevent
+        # out-of-band points from contributing to the regression loss.
+        u_lo = 0.0
+        u_hi = float(IW)
+        if self.u_band > 0.0:
+            try:
+                cx = float(K[0, 2]) - float(tile_u0)
+            except Exception:
+                cx = 0.5 * IW
+            half_u = 0.5 * self.u_band * IW
+            u_lo = max(0.0, cx - half_u)
+            u_hi = min(float(IW), cx + half_u)
+            in_uband = (uv_full[:, 0] >= u_lo) & (uv_full[:, 0] < u_hi)
+            valid_in_image = valid_in_image & in_uband
         # Pivots: must be valid AND in_box. Frustum context still uses all pts.
         obj_idxs = np.where(is_obj_full & valid_in_image & in_box)[0]
         bg_mask  = (~is_obj_full) & valid_in_image & in_box
@@ -657,11 +767,16 @@ class PandaSetCalibDatasetFull(Dataset):
                 cap = 1.0 + t * (scale_max - 1.0)
                 scale = float(np.random.uniform(1.0, max(1.0, scale_max)))
                 cs = max(self.min_crop_px // 4, int(cs / scale))
-            u0 = int(np.clip(pu - cs/2, 0, IW - cs))
-            v0 = int(np.clip(pv - cs/2, 0, IH - cs))
+            u0 = int(pu - cs / 2)
+            v0 = int(np.clip(pv - cs / 2, 0, IH - cs))
 
-            # Pre-filter to crop+10% padding using cached uv_full → cap to n_full
-            pad_px = int(cs * 0.10)
+            # Pre-filter to crop + Δ_uv_max padding using cached uv_full.
+            # Padding must be wide enough to contain pts that are OUTSIDE the
+            # GT crop but get pushed INTO it by perturbation (otherwise these
+            # are dropped here and unrecoverable downstream → systematic gap
+            # on the perturbation-edge of the crop). 25% is a safe upper
+            # bound for default rot_deg=1.5 / t_m=0.20.
+            pad_px = max(64, int(cs * 0.25))
             in_pad = ((uv_full[:, 0] >= u0 - pad_px) & (uv_full[:, 0] < u0 + cs + pad_px) &
                       (uv_full[:, 1] >= v0 - pad_px) & (uv_full[:, 1] < v0 + cs + pad_px) &
                       (z > 0.5))
@@ -773,11 +888,18 @@ class PandaSetCalibDatasetFull(Dataset):
             # SE3=0, i.e. legacy calib mode).
             delta1_se3 = np.array([t_delta1[0], t_delta1[1], t_delta1[2],
                                     ypr1[0], ypr1[1], ypr1[2]], dtype=np.float32)
+            # u_band GT filter: if u_band is set, only points whose GT u
+            # falls within [u_lo, u_hi] are used as regression targets.
+            # Points outside u_band are still kept in the frustum pool but
+            # their GT label is masked out (set to match dist_uvd → zero loss).
+            gt_u_lo = u_lo if self.u_band > 0.0 else None
+            gt_u_hi = u_hi if self.u_band > 0.0 else None
             built = self.build_window(
                 inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
                 u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
                 tile_u0, tile_v0, img_full, IW, IH,
                 R_pre=R_pre, cp_pre=cp_pre, delta1_se3=delta1_se3,
+                gt_u_lo=gt_u_lo, gt_u_hi=gt_u_hi,
             )
             if built is None:
                 continue
@@ -790,13 +912,29 @@ class PandaSetCalibDatasetFull(Dataset):
         # bg_cells, ~978 deep RecursionError).
         return None
 
-    # ─── Pair builder (cross-frame supervision, v1) ───────────────────────
-    # For pair_idx in [0, len(pair_index) * oversample), look up (i_A, i_B)
-    # and build:
-    #   * frame_A: same path as _build_one_window (full δ_A SE3, pivot picked
-    #              from A's in-image lidar that ALSO projects into B's tile).
-    #   * frame_B: cs_B = cs_A (VFP-identity), δ_B = 0, crop_B centred on
-    #              uv_B = T_gt_B-projection of the SAME world pivot.
+    # ─── Pair builder (cross-frame supervision, v2) ───────────────────────
+    # Single perturbation δ on the B side, A side is clean (= IMU-perfect).
+    # The deployment regime we're matching: at inference time you have ONE
+    # IMU/odom estimate Δ̂_IMU of the relative pose A→B, and pivots / Q-tokens
+    # are placed using that estimate. The image content carries the residual.
+    #
+    # Mapping into build_window's split_pert plumbing:
+    #   R_off_B / cp_off_B = POSE_GT_B  ⊖ δ     # the "IMU-estimated pose"
+    #                                            # (= dist_uvd projection)
+    #   R_pre_B / cp_pre_B = POSE_GT_B           # the true pose
+    #                                            # (= true_uvd / target projection)
+    #   delta1_se3_B       = (POSE_GT_AB ⊖ δ)    # PoseEmb input = the relative
+    #                        as a 6-vec           # pose estimate the model sees
+    #
+    # The network's regression target becomes
+    #   true_uvd − dist_uvd = uv_GT_B − uv_pivot_B = δ-induced image shift,
+    # exactly matching what deployment will demand from it.
+    #
+    # A side is built with no perturbation (R_off_A = R_gt_A) — its only role
+    # is to provide co-visible image+pts context. PoseEmb on A receives the
+    # SAME pivot-pose 6-vec (i.e. PoseEmb is a SHARED relative-pose embedding
+    # across A and B for this pair).
+    #
     # Returns (A12-tuple, B12-tuple, dpose_AB_6vec) or None on re-roll.
     def _build_one_pair(self, idx: int):
         N_pairs = len(self.pair_index)
@@ -838,45 +976,58 @@ class PandaSetCalibDatasetFull(Dataset):
         if tile_u0_A or tile_v0_A:
             uv_full_A = uv_full_A - np.array([tile_u0_A, tile_v0_A], dtype=np.float32)
 
-        # Project pts_A into B's GT camera so we know which pivots also land
-        # inside the B tile. Used as the VALIDITY mask for pivot selection.
-        T_gt_B = inst_B.get('T_gt')
-        if T_gt_B is not None:
-            T_gt_B = T_gt_B.numpy()
-        else:
-            T_gt_B = np.eye(4, dtype=np.float32)
-            T_gt_B[:3, :3] = R_gt_B.T
-            T_gt_B[:3, 3]  = -R_gt_B.T @ cp_B
+        # ── Sample δ FIRST. At deploy time we only have POSE_HAT, so the
+        # B-side crop position MUST be derived from a HAT projection too —
+        # never from POSE_GT (otherwise crop offset itself leaks GT and the
+        # network can shortcut). δ is fixed for the whole pair-call so the
+        # pivot retry loop sees one consistent perturbation.
+        t_delta  = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+        ypr_delta = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+        R_delta  = Rotation.from_euler('zyx', ypr_delta, degrees=True).as_matrix()
+
+        # B-side absolute camera pose under HAT ("vcam_B at POSE_HAT").
+        # Same lift used by build_window for B below: HAT rel-pose B←A
+        # = (R_gt_B^T R_gt_A) @ R_delta on the rotation side, t shifted by
+        # t_delta (pre-rotated by R_gt_B). So:
+        R_off_B  = R_gt_B @ R_delta
+        cp_off_B = cp_B + R_gt_B @ t_delta
+
+        # Project pts_A into vcam_B = HAT camera. Used both for VALIDITY and
+        # for crop-center selection on B (deploy-equivalent).
+        T_off_B = np.eye(4, dtype=np.float32)
+        T_off_B[:3, :3] = R_off_B.T
+        T_off_B[:3, 3]  = -R_off_B.T @ cp_off_B
         homo_A = np.column_stack([pts_A, np.ones(len(pts_A))])
-        pts_cam_B_pre = (T_gt_B @ homo_A.T)[:3].T
-        z_B_pre = pts_cam_B_pre[:, 2].astype(np.float32)
-        uv_Bproj_full = ((K_B @ pts_cam_B_pre.T)[:2]
-                         / np.maximum(pts_cam_B_pre[:, 2:].T, 1e-6)).T.astype(np.float32)
+        pts_cam_B_hat = (T_off_B @ homo_A.T)[:3].T
+        z_B_hat = pts_cam_B_hat[:, 2].astype(np.float32)
+        uv_Bproj_hat = ((K_B @ pts_cam_B_hat.T)[:2]
+                        / np.maximum(pts_cam_B_hat[:, 2:].T, 1e-6)).T.astype(np.float32)
         tile_u0_B = int(inst_B.get('tile_u0', 0))
         tile_v0_B = int(inst_B.get('tile_v0', 0))
         if tile_u0_B or tile_v0_B:
-            uv_Bproj_full = uv_Bproj_full - np.array([tile_u0_B, tile_v0_B], dtype=np.float32)
+            uv_Bproj_hat = uv_Bproj_hat - np.array([tile_u0_B, tile_v0_B], dtype=np.float32)
         in_box_A = inst_A['in_box'].numpy().astype(bool) if 'in_box' in inst_A \
                    else np.ones(len(uv_full_A), dtype=bool)
         valid_A = ((z_A > 0.5) &
                    (uv_full_A[:, 0] >= 0) & (uv_full_A[:, 0] < IW_A) &
                    (uv_full_A[:, 1] >= 0) & (uv_full_A[:, 1] < IH_A) &
                    in_box_A)
-        valid_in_B = ((z_B_pre > 0.5) &
-                      (uv_Bproj_full[:, 0] >= 0) & (uv_Bproj_full[:, 0] < IW_B) &
-                      (uv_Bproj_full[:, 1] >= 0) & (uv_Bproj_full[:, 1] < IH_B))
+        valid_in_B = ((z_B_hat > 0.5) &
+                      (uv_Bproj_hat[:, 0] >= 0) & (uv_Bproj_hat[:, 0] < IW_B) &
+                      (uv_Bproj_hat[:, 1] >= 0) & (uv_Bproj_hat[:, 1] < IH_B))
         valid_pivot = valid_A & valid_in_B
         obj_idxs   = np.where(is_obj_A & valid_pivot)[0]
         bg_idxs    = np.where((~is_obj_A) & valid_pivot)[0]
 
         for _ in range(self.max_tries):
-            # ── Pick pivot from A (preferring obj) that ALSO projects into B.
+            # ── Pick pivot from A (preferring obj) that ALSO projects into B
+            # under HAT. Crop center on B = pivot's HAT projection (deploy).
             if len(obj_idxs) > 0 and (len(bg_idxs) == 0 or np.random.rand() < 0.5):
                 i = obj_idxs[np.random.randint(len(obj_idxs))]
             elif len(bg_idxs) > 0:
                 i = bg_idxs[np.random.randint(len(bg_idxs))]
             else:
-                return None  # this pair has no co-visible pivot — re-roll idx
+                return None  # this pair has no co-visible pivot under HAT
 
             pu_A, pv_A = float(uv_full_A[i, 0]), float(uv_full_A[i, 1])
             piv_z = float(z_A[i])
@@ -891,18 +1042,44 @@ class PandaSetCalibDatasetFull(Dataset):
             cs = int(np.random.randint(cs_lo, cs_hi + 1))
             cs = min(cs, IW_A, IH_A, IW_B, IH_B)
 
-            u0_A = int(np.clip(pu_A - cs / 2, 0, IW_A - cs))
-            v0_A = int(np.clip(pv_A - cs / 2, 0, IH_A - cs))
-            pu_B, pv_B = float(uv_Bproj_full[i, 0]), float(uv_Bproj_full[i, 1])
-            u0_B = int(np.clip(pu_B - cs / 2, 0, IW_B - cs))
-            v0_B = int(np.clip(pv_B - cs / 2, 0, IH_B - cs))
+            # Reject pivots near image edge: a clip(...) here would push the
+            # crop center off-pivot so the pivot no longer lands at (S/2,S/2),
+            # breaking the network's anchored-sampling assumption. Just
+            # re-roll.
+            u0_A_f = pu_A - cs / 2
+            v0_A_f = pv_A - cs / 2
+            if u0_A_f < 0 or v0_A_f < 0 or u0_A_f + cs > IW_A or v0_A_f + cs > IH_A:
+                continue
+            u0_A = int(round(u0_A_f))
+            v0_A = int(round(v0_A_f))
+            # Crop center on B = pivot under POSE_HAT (NOT GT). Same edge-reject.
+            pu_B, pv_B = float(uv_Bproj_hat[i, 0]), float(uv_Bproj_hat[i, 1])
+            u0_B_f = pu_B - cs / 2
+            v0_B_f = pv_B - cs / 2
+            if u0_B_f < 0 or v0_B_f < 0 or u0_B_f + cs > IW_B or v0_B_f + cs > IH_B:
+                continue
+            u0_B = int(round(u0_B_f))
+            v0_B = int(round(v0_B_f))
 
-            # ── frame_A: full δ_A SE3 in 'orig' frame (legacy calib).
-            t_delta_A = (np.random.rand(3) * 2 - 1) * self.max_offset_m
-            ypr_A     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
-            R_off_A = R_gt_A @ Rotation.from_euler('zyx', ypr_A, degrees=True).as_matrix()
-            cp_off_A = cp_A + t_delta_A
-            K_pert_A = K_A.copy()
+            # ── Δpose_AB GT = T_cam_B ← T_cam_A in B's original-camera frame.
+            R_AB = R_gt_B.T @ R_gt_A
+            t_AB = R_gt_B.T @ (cp_A - cp_B)
+            ypr_AB = Rotation.from_matrix(R_AB).as_euler('zyx', degrees=True)
+            dpose_AB_gt = np.array([t_AB[0], t_AB[1], t_AB[2],
+                                    ypr_AB[0], ypr_AB[1], ypr_AB[2]],
+                                   dtype=np.float32)
+            # POSE_HAT = POSE_GT_AB ⊕ δ — the "IMU-estimated" relative pose.
+            R_hat = R_AB @ R_delta
+            t_hat = t_AB + t_delta
+            ypr_hat = Rotation.from_matrix(R_hat).as_euler('zyx', degrees=True)
+            pose_hat_se3 = np.array([t_hat[0], t_hat[1], t_hat[2],
+                                     ypr_hat[0], ypr_hat[1], ypr_hat[2]],
+                                    dtype=np.float32)
+
+            # ── frame_A: clean (no calib drift). Q_A's role is to provide
+            # co-visible image+lidar context. PoseEmb on A receives POSE_HAT
+            # so calib-net sees a consistent "this is the relative pose I think
+            # I have" signal across A and B tokens.
             pad_px_A = int(cs * 0.10)
             in_pad_A = ((uv_full_A[:, 0] >= u0_A - pad_px_A) &
                         (uv_full_A[:, 0] <  u0_A + cs + pad_px_A) &
@@ -917,96 +1094,113 @@ class PandaSetCalibDatasetFull(Dataset):
             pts_c_A = pts_A[cand_idx_A]
             intens_c_A = intensity_A[cand_idx_A]
             uv_gt_c_A  = uv_full_A[cand_idx_A]
-            pert_vec_A = np.array([t_delta_A[0], t_delta_A[1], t_delta_A[2],
-                                   ypr_A[0], ypr_A[1], ypr_A[2], 0.0, 0.0],
-                                  dtype=np.float32)
+            pert_vec_A = np.zeros(8, dtype=np.float32)
             built_A = self.build_window(
                 inst_A, pts_c_A, intens_c_A, uv_gt_c_A, cand_idx_A, is_obj_A,
-                u0_A, v0_A, cs, K_A, R_off_A, cp_off_A, K_pert_A, cp_A,
+                u0_A, v0_A, cs, K_A, R_gt_A, cp_A, K_A.copy(), cp_A,
                 pert_vec_A, tile_u0_A, tile_v0_A,
                 None if 'jpg_bytes' in inst_A else inst_A['img'], IW_A, IH_A,
+                R_pre=None, cp_pre=None, delta1_se3=pose_hat_se3,
             )
             if built_A is None:
                 continue
             self._last_pair_A = dict(self._last_crop,
                                      pivot_uv=(pu_A, pv_A),
-                                     R_off=R_off_A.copy(),
-                                     cp_off=cp_off_A.copy(),
-                                     K_pert=K_pert_A.copy(),
-                                     pert_vec=pert_vec_A.copy())
+                                     R_off=R_gt_A.copy(),
+                                     cp_off=cp_A.copy(),
+                                     pose_hat=pose_hat_se3.copy())
 
-            # ── frame_B: δ_B = 0, crop centred on uv_B.
-            pts_B = inst_B['pts'].numpy()
-            intensity_B = np.clip(inst_B['intensity'].numpy().astype(np.float32),
-                                  0.0, 1.0) if 'intensity' in inst_B \
-                                  else np.zeros(len(pts_B), dtype=np.float32)
-            is_obj_B = inst_B['is_obj'].numpy().astype(bool) if 'is_obj' in inst_B \
-                       else _is_obj_per_point(pts_B, inst_B.get('cuboids', [])).astype(bool)
-            if 'uv_full' in inst_B and 'z_cam' in inst_B:
-                uv_full_B = inst_B['uv_full'].numpy()
-                z_B = inst_B['z_cam'].numpy()
+            # ── frame_B: pivot pose = POSE_HAT (= GT ⊕ δ) → dist_uvd projection;
+            # target = GT projection (uv_pre via R_pre = R_gt_B). Network's
+            # regression target = (R_gt_B uv) − (R_off_B uv) = δ-induced shift.
+            #
+            # In same_frame_self_sup mode (A == B frame), force B to share A's
+            # exact point set / cand_idx. build_window's downstream lexsort is
+            # deterministic on (cand_idx, uv_off, in_crop_off), so same point
+            # set + same crop ⇒ same sub_idx ⇒ A and B emit pts at IDENTICAL
+            # tuple positions. That makes pair_vis's same-index correspondence
+            # lines correct without any 3-D matching hack.
+            if self.same_frame_self_sup:
+                pts_B       = pts_A
+                intensity_B = intensity_A
+                is_obj_B    = is_obj_A
+                uv_full_B   = uv_full_A
+                z_B         = z_A
+                cand_idx_B  = cand_idx_A
+                pts_c_B     = pts_c_A
+                intens_c_B  = intens_c_A
+                uv_gt_c_B   = uv_gt_c_A
             else:
-                homo = np.column_stack([pts_B, np.ones(len(pts_B))])
-                pts_cam_gt = (T_gt_B @ homo.T)[:3].T
-                z_B = pts_cam_gt[:, 2].astype(np.float32)
-                uv_full_B = ((K_B @ pts_cam_gt.T)[:2]
-                             / np.maximum(pts_cam_gt[:, 2:].T, 1e-6)).T.astype(np.float32)
-            if tile_u0_B or tile_v0_B:
-                uv_full_B = uv_full_B - np.array([tile_u0_B, tile_v0_B], dtype=np.float32)
-            pad_px_B = int(cs * 0.10)
-            in_pad_B = ((uv_full_B[:, 0] >= u0_B - pad_px_B) &
-                        (uv_full_B[:, 0] <  u0_B + cs + pad_px_B) &
-                        (uv_full_B[:, 1] >= v0_B - pad_px_B) &
-                        (uv_full_B[:, 1] <  v0_B + cs + pad_px_B) &
-                        (z_B > 0.5))
-            cand_idx_B = np.where(in_pad_B)[0]
-            if len(cand_idx_B) < self.min_pts:
-                continue
-            if len(cand_idx_B) > self.n_full:
-                cand_idx_B = np.random.choice(cand_idx_B, size=self.n_full, replace=False)
-            pts_c_B = pts_B[cand_idx_B]
-            intens_c_B = intensity_B[cand_idx_B]
-            uv_gt_c_B  = uv_full_B[cand_idx_B]
-            # δ_AB: independent perturbation on the relative pose Δpose_AB.
-            # Compose with calib-drift δ_local so Q_B sees BOTH errors.
-            t_delta_AB = (np.random.rand(3) * 2 - 1) * self.max_offset_m
-            ypr_AB_pert = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
-            R_dAB = Rotation.from_euler('zyx', ypr_AB_pert, degrees=True).as_matrix()
-            R_local = R_gt_A.T @ R_off_A
-            t_local = R_gt_A.T @ (cp_off_A - cp_A)
-            R_off_B_drift = R_gt_B @ R_dAB @ R_local
-            cp_off_B_drift = cp_B + R_gt_B @ (t_local + t_delta_AB)
-            pert_vec_B = np.array([t_local[0] + t_delta_AB[0],
-                                   t_local[1] + t_delta_AB[1],
-                                   t_local[2] + t_delta_AB[2],
-                                   ypr_A[0] + ypr_AB_pert[0],
-                                   ypr_A[1] + ypr_AB_pert[1],
-                                   ypr_A[2] + ypr_AB_pert[2],
+                pts_B = inst_B['pts'].numpy()
+                intensity_B = np.clip(inst_B['intensity'].numpy().astype(np.float32),
+                                      0.0, 1.0) if 'intensity' in inst_B \
+                                      else np.zeros(len(pts_B), dtype=np.float32)
+                is_obj_B = inst_B['is_obj'].numpy().astype(bool) if 'is_obj' in inst_B \
+                           else _is_obj_per_point(pts_B, inst_B.get('cuboids', [])).astype(bool)
+                if 'uv_full' in inst_B and 'z_cam' in inst_B:
+                    uv_full_B = inst_B['uv_full'].numpy()
+                    z_B = inst_B['z_cam'].numpy()
+                else:
+                    T_gt_B = np.eye(4, dtype=np.float32)
+                    T_gt_B[:3, :3] = R_gt_B.T
+                    T_gt_B[:3, 3]  = -R_gt_B.T @ cp_B
+                    homo = np.column_stack([pts_B, np.ones(len(pts_B))])
+                    pts_cam_gt = (T_gt_B @ homo.T)[:3].T
+                    z_B = pts_cam_gt[:, 2].astype(np.float32)
+                    uv_full_B = ((K_B @ pts_cam_gt.T)[:2]
+                                 / np.maximum(pts_cam_gt[:, 2:].T, 1e-6)).T.astype(np.float32)
+                if tile_u0_B or tile_v0_B:
+                    uv_full_B = uv_full_B - np.array([tile_u0_B, tile_v0_B], dtype=np.float32)
+                pad_px_B = int(cs * 0.10)
+                in_pad_B = ((uv_full_B[:, 0] >= u0_B - pad_px_B) &
+                            (uv_full_B[:, 0] <  u0_B + cs + pad_px_B) &
+                            (uv_full_B[:, 1] >= v0_B - pad_px_B) &
+                            (uv_full_B[:, 1] <  v0_B + cs + pad_px_B) &
+                            (z_B > 0.5))
+                cand_idx_B = np.where(in_pad_B)[0]
+                if len(cand_idx_B) < self.min_pts:
+                    continue
+                if len(cand_idx_B) > self.n_full:
+                    cand_idx_B = np.random.choice(cand_idx_B, size=self.n_full, replace=False)
+                pts_c_B = pts_B[cand_idx_B]
+                intens_c_B = intensity_B[cand_idx_B]
+                uv_gt_c_B  = uv_full_B[cand_idx_B]
+            pert_vec_B = np.array([t_delta[0], t_delta[1], t_delta[2],
+                                   ypr_delta[0], ypr_delta[1], ypr_delta[2],
                                    0.0, 0.0], dtype=np.float32)
+            # build_window with R_pre=R_gt_B / cp_pre=cp_B → uv_pre = GT
+            # projection (= true_uvd target). R_off_B / cp_off_B → uv_off
+            # (= dist_uvd, the pivot-pose projection). delta1_se3 = POSE_HAT
+            # 6-vec → PoseEmb input on B.
             built_B = self.build_window(
                 inst_B, pts_c_B, intens_c_B, uv_gt_c_B, cand_idx_B, is_obj_B,
-                u0_B, v0_B, cs, K_B, R_off_B_drift, cp_off_B_drift, K_B.copy(), cp_B,
+                u0_B, v0_B, cs, K_B, R_off_B, cp_off_B, K_B.copy(), cp_B,
                 pert_vec_B, tile_u0_B, tile_v0_B,
                 None if 'jpg_bytes' in inst_B else inst_B['img'], IW_B, IH_B,
+                R_pre=R_gt_B, cp_pre=cp_B, delta1_se3=pose_hat_se3,
             )
             if built_B is None:
                 continue
             self._last_pair_B = dict(self._last_crop,
                                      pivot_uv=(pu_B, pv_B),
                                      pivot_world_idx=int(i),
-                                     R_off=R_off_B_drift.copy(),
-                                     cp_off=cp_off_B_drift.copy(),
-                                     dpose_pert_t=t_delta_AB.copy(),
-                                     dpose_pert_ypr=ypr_AB_pert.copy())
+                                     R_off=R_off_B.copy(),
+                                     cp_off=cp_off_B.copy(),
+                                     pose_hat=pose_hat_se3.copy(),
+                                     delta_t=t_delta.copy(),
+                                     delta_ypr=ypr_delta.copy())
 
-            # ── Δpose_AB = T_cam_B ← T_cam_A in original-camera frame.
-            R_AB = R_gt_B.T @ R_gt_A
-            t_AB = R_gt_B.T @ (cp_A - cp_B)
-            ypr_AB = Rotation.from_matrix(R_AB).as_euler('zyx', degrees=True)
-            dpose_AB = np.array([t_AB[0], t_AB[1], t_AB[2],
-                                 ypr_AB[0], ypr_AB[1], ypr_AB[2]],
-                                dtype=np.float32)
-            return (built_A, built_B, torch.from_numpy(dpose_AB))
+            # ── Optional photometric jitter (only when same_frame_self_sup
+            # is on, otherwise A and B come from genuinely different frames
+            # so leaving raw pixels alone is correct). Applied independently
+            # to A and B so the network can't pixel-match — has to use lidar
+            # geometry. Jitter is brightness × contrast × saturation × hue
+            # offset, all uniform within ±photometric_jitter half-range.
+            if self.same_frame_self_sup and self.photometric_jitter > 0.0:
+                built_A = _photometric_jitter_tuple(built_A, self.photometric_jitter)
+                built_B = _photometric_jitter_tuple(built_B, self.photometric_jitter)
+
+            return (built_A, built_B, torch.from_numpy(dpose_AB_gt))
 
         return None  # exhausted max_tries on this pair
 
@@ -1098,7 +1292,8 @@ class PandaSetCalibDatasetFull(Dataset):
     def build_window(self, inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
                        u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
                        tile_u0, tile_v0, img_full, IW, IH,
-                       R_pre=None, cp_pre=None, delta1_se3=None):
+                       R_pre=None, cp_pre=None, delta1_se3=None,
+                       gt_u_lo=None, gt_u_hi=None):
         """Apply a given perturbation+crop to an inst → DataLoader sample tuple.
         Returns None when the crop ends up with < self.min_pts in-view points;
         caller decides whether to retry (training) or report failure (demo).
@@ -1200,16 +1395,23 @@ class PandaSetCalibDatasetFull(Dataset):
             if tile_u0 or tile_v0:
                 uv_pre_c = uv_pre_c - np.array([tile_u0, tile_v0], dtype=np.float32)
 
+        # Crop membership: pts whose uv_off (perturbed projection) lands in
+        # the crop. cand_idx is already padded by `pad_px` around the crop in
+        # uv_gt (see line ~767), so pts pushed INTO the crop by δ are still
+        # in the pool here.
         in_crop_off = ((uv_off_c[:, 0] >= u0) & (uv_off_c[:, 0] < u0 + cs) &
                        (uv_off_c[:, 1] >= v0) & (uv_off_c[:, 1] < v0 + cs) &
                        (z_off > 0.5))
         if in_crop_off.sum() < self.min_pts:
             return None
 
-        # 16x16 sub-grid representative selection — fully vectorized
+        # 16x16 sub-grid representative selection — fully vectorized.
+        # Cell assignment uses uv_GT (so the grid is regular regardless of
+        # perturbation). Without this, the grid drifts in the perturbation
+        # direction and corner cells go empty.
         scale = S / cs
-        uv_local = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
-                             (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1)
+        uv_local = np.stack([(uv_gt_c[in_crop_off, 0] - u0) * scale,
+                             (uv_gt_c[in_crop_off, 1] - v0) * scale], axis=1)
         grid_n = self.grid_n
         cell_S = float(S) / grid_n
         ci_u = np.clip((uv_local[:, 0] / cell_S).astype(int), 0, grid_n - 1)
@@ -1246,6 +1448,17 @@ class PandaSetCalibDatasetFull(Dataset):
         dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
         is_obj = is_obj_full[cand_idx[sub_idx]].astype(np.float32)
 
+        # u_band GT mask: points outside [gt_u_lo, gt_u_hi] in full-image coords
+        # should not contribute to the regression loss. Set their target = dist
+        # (= zero residual) so the loss for those points is exactly 0.
+        # The points still participate in the frustum/bucket KV — only the
+        # supervision label is masked.
+        if gt_u_lo is not None and gt_u_hi is not None:
+            outside_band = (uv_gt_sel[:, 0] < gt_u_lo) | (uv_gt_sel[:, 0] >= gt_u_hi)
+            if outside_band.any():
+                uv_target_loc = uv_target_loc.copy()
+                uv_target_loc[outside_band] = uv_off_loc[outside_band]
+
         # (N, 5): [u, v, d, is_obj, intensity]
         # idx 0-3 stay for backward compat; intensity is the new 5th channel.
         # uv_target_loc == uv_gt_loc when split_pert is off (legacy calib),
@@ -1272,29 +1485,50 @@ class PandaSetCalibDatasetFull(Dataset):
         K_orig = K.astype(np.float32)
 
         if img_full is None:
-            # TurboJPEG partial decode of just the crop region (~4.5ms for 384px MCU-aligned).
-            # DDAD stores PNG bytes in 'jpg_bytes' — TJ chokes on those, fall back to PIL.
+            # Worker-local 1-slot cache: if the previous __getitem__ in this
+            # worker decoded the same jpg_bytes, reuse the full numpy array
+            # and just slice the new crop region. This amortizes the ~10ms
+            # full TJ.decode over (oversample) crops within a frame.
+            # TJ.crop+decode would be ~6ms per crop and was the bottleneck
+            # measured by cProfile (2026-05-29).
             blob = inst['jpg_bytes']
-            is_jpeg = (len(blob) > 2 and blob[0] == 0xff and blob[1] == 0xd8)
-            ju0 = (u0 // _MCU) * _MCU
-            jv0 = (v0 // _MCU) * _MCU
-            ju1 = min(IW, ((u0 + cs + _MCU - 1) // _MCU) * _MCU)
-            jv1 = min(IH, ((v0 + cs + _MCU - 1) // _MCU) * _MCU)
-            jw, jh = ju1 - ju0, jv1 - jv0
-            if _HAVE_TJ and is_jpeg:
-                cropped = _TJ_INST.crop(blob, ju0, jv0, jw, jh, preserve=False)
-                arr = np.asarray(_TJ_INST.decode(cropped, pixel_format=_TJ_PF_RGB))[:jh, :jw]
+            if not (len(blob) > 2 and blob[0] == 0xff and blob[1] == 0xd8):
+                raise ValueError(
+                    f"jpg_bytes is not a JPEG (magic {blob[:2].hex()}). "
+                    "PNG/other formats not supported — rebuild cache with JPEG.")
+            cache = getattr(self, '_decode_cache', None)
+            if cache is not None and cache[0] is blob:
+                full_rgb = cache[1]
             else:
-                import io
-                from PIL import Image as _PILImage
-                full = np.asarray(_PILImage.open(io.BytesIO(blob)).convert('RGB'),
-                                  dtype=np.uint8)
-                arr = full[jv0:jv1, ju0:ju1]
-            # Slice to exact (cs, cs) inside the MCU-padded region
-            arr = arr[v0 - jv0:v0 - jv0 + cs, u0 - ju0:u0 - ju0 + cs]
+                full_rgb = np.asarray(_TJ_INST.decode(blob, pixel_format=_TJ_PF_RGB))
+                # Hold a strong ref to blob (id-keyed) so cache hit checks
+                # against the identity, not the contents.
+                self._decode_cache = (blob, full_rgb)
+            # Crop with black padding for out-of-bounds (B-plan: pivot may be
+            # near the edge so u0<0 or u0+cs>IW). Valid region copied, rest 0.
+            IH_f, IW_f = full_rgb.shape[:2]
+            if u0 >= 0 and v0 >= 0 and u0 + cs <= IW_f and v0 + cs <= IH_f:
+                arr = full_rgb[v0:v0 + cs, u0:u0 + cs]
+            else:
+                arr = np.zeros((cs, cs, 3), dtype=full_rgb.dtype)
+                su0 = max(0, u0); su1 = min(IW_f, u0 + cs)
+                sv0 = max(0, v0); sv1 = min(IH_f, v0 + cs)
+                if su1 > su0 and sv1 > sv0:
+                    arr[sv0 - v0:sv1 - v0, su0 - u0:su1 - u0] = \
+                        full_rgb[sv0:sv1, su0:su1]
             img_crop = torch.from_numpy(arr.copy()).permute(2, 0, 1).contiguous().float().unsqueeze(0)
         else:
-            img_crop = img_full[:, v0:v0+cs, u0:u0+cs].float().unsqueeze(0)
+            # img_full path: also handle padding
+            C, IH_f, IW_f = img_full.shape
+            if u0 >= 0 and v0 >= 0 and u0 + cs <= IW_f and v0 + cs <= IH_f:
+                img_crop = img_full[:, v0:v0+cs, u0:u0+cs].float().unsqueeze(0)
+            else:
+                img_crop = torch.zeros(1, C, cs, cs, dtype=torch.float32)
+                su0 = max(0, u0); su1 = min(IW_f, u0 + cs)
+                sv0 = max(0, v0); sv1 = min(IH_f, v0 + cs)
+                if su1 > su0 and sv1 > sv0:
+                    img_crop[0, :, sv0-v0:sv1-v0, su0-u0:su1-u0] = \
+                        img_full[:, sv0:sv1, su0:su1].float()
         img_crop = F.interpolate(img_crop, size=(S, S), mode='bilinear',
                                   align_corners=False).squeeze(0)
         # uint8 で渡す → IPC 4x 軽量化、GPU 側で .float()/255.0 する
@@ -1360,9 +1594,16 @@ class PandaSetCalibDatasetFull(Dataset):
 
 def collate_full(batch):
     """Stack img/vfp + (G², K, 3) bucketed lidar grid + per-sample pert vec.
-    Per-batch ragged padding only on the per-pivot true/dist tensors; the
-    lidar bucket is fixed-size. pert_vec is per-sample (B, N_DOF) — 6-DoF SE3
-    perturbation + (when N_DOF=8) Δfx_pct, Δfy_pct for the CLS frame-pose head."""
+
+    NEW (2026-05-29): __getitem__ now returns a list of `oversample` samples
+    (all from the same frame, share decode). Flatten list-of-list into a
+    flat sample list before stacking.
+    """
+    if batch and isinstance(batch[0], list):
+        flat = []
+        for sub in batch:
+            flat.extend(sub)
+        batch = flat
     # Tolerate older 6-tuple samples (no pert) for backward compat — pad with zeros.
     imgs    = torch.stack([s[0] for s in batch])
     trues   = [s[1] for s in batch]
@@ -1428,7 +1669,16 @@ def collate_pair(batch):
                   'dpose_AB': (B, 6) float32}.
     Using a dict (not a flat tuple) so trainers can route A and B through the
     existing single-frame collate-tuple unpacking unchanged.
+
+    NEW: __getitem__ in pair_mode also returns a list of `oversample` samples
+    (each itself a (A, B, dpose) tuple). Flatten list-of-list before splitting
+    into A/B/dpose subbatches. Mirrors collate_full's flatten path.
     """
+    if batch and isinstance(batch[0], list):
+        flat = []
+        for sub in batch:
+            flat.extend(sub)
+        batch = flat
     A_batch = [s[0] for s in batch]
     B_batch = [s[1] for s in batch]
     dpose   = torch.stack([s[2] for s in batch])  # (B, 6)

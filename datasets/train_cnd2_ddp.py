@@ -226,6 +226,11 @@ def main():
                    help='comma-separated <cache_path>:<int> per-cache oversample '
                         'overrides. Falls back to --oversample. Example: '
                         '"/home/hfunaya/cache_v5/kamikado_v3_full:8"')
+    p.add_argument('--pair-stride', type=int, default=10,
+                   help='In pair-mode, max |Δframe| sampled per anchor. The '
+                        'dataset emits all (i_A, i_A+δ) pairs with δ ∈ '
+                        '[-S..-1, +1..+S] within the same (scene, cam). '
+                        'Default 10 (= ±1 sec at 10 Hz).')
     p.add_argument('--pair-mode', action='store_true',
                    help='cross-frame pair training. Dataset emits (A, B, '
                         'dpose_AB) tuples; trainer calls '
@@ -291,7 +296,8 @@ def main():
                  min_crop_px=args.min_crop_px, max_crop_px=args.max_crop_px,
                  grid_n=args.grid_n, oversample=args.oversample,
                  split_pert=False,
-                 pair_mode=bool(args.pair_mode))
+                 pair_mode=bool(args.pair_mode),
+                 pair_stride=int(args.pair_stride))
     cache_paths = [s.strip() for s in args.cache.split(',') if s.strip()]
     # Per-cache u_band override
     ub_map = {}
