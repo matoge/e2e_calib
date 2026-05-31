@@ -298,8 +298,32 @@ class CalibNet2(nn.Module):
     # ------------------------------------------------------------------
     def forward(self, image: torch.Tensor, distorted_uvd: torch.Tensor, *,
                 dpose_R: torch.Tensor = None, vfp: torch.Tensor = None,
-                bucket_uvd: torch.Tensor, bucket_valid: torch.Tensor,
-                key_padding_mask=None):
+                bucket_uvd: torch.Tensor = None,
+                bucket_valid: torch.Tensor = None,
+                key_padding_mask=None,
+                mode: str = 'calib',
+                image_B: torch.Tensor = None,
+                R_AB: torch.Tensor = None,
+                vfp_B: torch.Tensor = None,
+                bucket_uvd_B: torch.Tensor = None,
+                bucket_valid_B: torch.Tensor = None):
+        """Dispatch entry. mode='calib' (default) → legacy single-frame path
+        (image, distorted_uvd, dpose_R, vfp, bucket_uvd, bucket_valid).
+        mode='cross' → cross-frame path with KV switching A→B mid-stack;
+        in that case image is image_A, distorted_uvd is uvd_A, and the
+        B-side tensors come in via image_B / bucket_uvd_B / bucket_valid_B
+        / vfp_B / R_AB. Routing through .forward (not a separate method) so
+        DDP's grad-sync hook fires correctly.
+        """
+        if mode == 'cross':
+            return self.forward_cross_frame(
+                image, distorted_uvd, image_B, R_AB,
+                vfp_A=vfp, vfp_B=vfp_B,
+                bucket_uvd_A=bucket_uvd, bucket_valid_A=bucket_valid,
+                bucket_uvd_B=bucket_uvd_B, bucket_valid_B=bucket_valid_B,
+                key_padding_mask_A=key_padding_mask,
+            )
+        # legacy calib path
         """
         image           : (B, C, H, W)
         distorted_uvd   : (B, N, 3 or 4)  [U, V, D_norm, (intensity)]

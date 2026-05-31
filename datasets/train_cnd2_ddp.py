@@ -108,12 +108,15 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
         # CalibNet2 input on Q: A's [u, v, d, intensity] (drop is_obj col 3).
         point_in_A = torch.cat([distA[..., :3], distA[..., 4:5]], dim=-1)
 
-        out = model.forward_cross_frame(
-            imgs_A, point_in_A, imgs_B, R_AB,
-            vfp_A=vfpA, vfp_B=vfpB,
-            bucket_uvd_A=buA, bucket_valid_A=bvA,
+        # Dispatch through model.forward(...) so DDP's grad-sync hook fires.
+        # CalibNet2.forward routes to forward_cross_frame when mode='cross'.
+        out = model(
+            imgs_A, point_in_A,
+            mode='cross', image_B=imgs_B, R_AB=R_AB,
+            vfp=vfpA, vfp_B=vfpB,
+            bucket_uvd=buA, bucket_valid=bvA,
             bucket_uvd_B=buB, bucket_valid_B=bvB,
-            key_padding_mask_A=padA,
+            key_padding_mask=padA,
         )
         per_pt = out[0] if isinstance(out, tuple) else out
 
