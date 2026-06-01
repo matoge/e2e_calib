@@ -69,8 +69,81 @@ def _R_from_zyx_deg(ypr_deg: torch.Tensor) -> torch.Tensor:
     return Rz @ Ry @ Rx
 
 
+def render_pair_debug_samples(cap: dict, ep: int, n_samples: int = 6,
+                              out_dir: Path = None) -> list[Path]:
+    """Render N pair samples (A image | B image) from the captured batch.
+    Each panel: lidar uv overlays —
+      A panel:  true_uvd_A (lime, GT projection in A image)
+                — dist_uvd_A overlaps since A has no calib pert.
+      B panel:  true_uvd_B (lime, GT)
+                dist_uvd_B (red, HAT projection)
+                pred_uvd_B (cyan, dist_B + per_pt[..., :2])
+                yellow lines connect dist→true (target shift).
+    Saves PNG per sample, returns list of paths. rank-0 caller only.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as _np
+    out_dir = Path(out_dir) if out_dir is not None else Path('/tmp/cnd2_dbg')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    imgs_A = cap['imgs_A']; imgs_B = cap['imgs_B']
+    trueA  = cap['_trueA']; distA = cap['distA']
+    trueB  = cap['trueB'];  distB = cap['distB']
+    per_pt = cap['per_pt']
+    padA   = cap['padA'];   padB  = cap['padB']
+    pert_B = cap['pert_B']; dpose = cap['dpose']
+    split  = cap.get('split', 'train')
+    B = imgs_A.shape[0]
+    N = min(n_samples, B)
+    paths = []
+    for i in range(N):
+        img_A = imgs_A[i].permute(1, 2, 0).numpy()
+        img_B = imgs_B[i].permute(1, 2, 0).numpy()
+        # imgs were divided by 255 in epoch loop → bring back to 0-255 uint8.
+        img_A = _np.clip(img_A * 255.0, 0, 255).astype(_np.uint8)
+        img_B = _np.clip(img_B * 255.0, 0, 255).astype(_np.uint8)
+        vA = ~padA[i].bool(); vB = ~padB[i].bool()
+        tA = trueA[i].numpy(); dA = distA[i].numpy()
+        tB = trueB[i].numpy(); dB = distB[i].numpy()
+        pp = per_pt[i].numpy()  # (N,5) [duv_x, duv_y, log_sx, log_sy, rho]
+        pred_B = dB[:, :2] + pp[:, :2]  # dist_B + duv = predicted GT uv in B
+        fig, ax = plt.subplots(1, 2, figsize=(11, 5.5))
+        ax[0].imshow(img_A); ax[0].axis('off')
+        ax[0].scatter(tA[vA, 0], tA[vA, 1], s=4, c='lime', label='true_A')
+        ax[0].scatter(dA[vA, 0], dA[vA, 1], s=4, c='red', alpha=0.4,
+                       label='dist_A (= true_A, no calib pert)')
+        ax[0].set_title(f'A  N={int(vA.sum())}', fontsize=9)
+        ax[0].legend(loc='upper right', fontsize=7)
+
+        ax[1].imshow(img_B); ax[1].axis('off')
+        idxB = _np.where(vB.numpy())[0]
+        for j in idxB:
+            ax[1].plot([dB[j, 0], tB[j, 0]], [dB[j, 1], tB[j, 1]],
+                       '-', color='yellow', lw=0.4, alpha=0.5)
+        ax[1].scatter(tB[vB, 0], tB[vB, 1], s=4, c='lime', label='true_B (GT)')
+        ax[1].scatter(dB[vB, 0], dB[vB, 1], s=4, c='red', alpha=0.6,
+                       label='dist_B (HAT, model input)')
+        ax[1].scatter(pred_B[vB.numpy(), 0], pred_B[vB.numpy(), 1],
+                       s=4, c='cyan', alpha=0.7, label='pred_B (dist + Δ)')
+        pB = pert_B[i].numpy(); dp = dpose[i].numpy()
+        title = (f"B  N={int(vB.sum())}  "
+                 f"ε_pose t=({pB[0]:+.2f},{pB[1]:+.2f},{pB[2]:+.2f})m "
+                 f"ypr=({pB[3]:+.2f},{pB[4]:+.2f},{pB[5]:+.2f})°\n"
+                 f"dpose_AB GT t=({dp[0]:+.2f},{dp[1]:+.2f},{dp[2]:+.2f})m "
+                 f"ypr=({dp[3]:+.2f},{dp[4]:+.2f},{dp[5]:+.2f})°")
+        ax[1].set_title(title, fontsize=8)
+        ax[1].legend(loc='upper right', fontsize=7)
+        fig.suptitle(f'CND2 pair ep{ep} {split} sample {i}', fontsize=10)
+        fig.tight_layout()
+        p = out_dir / f'ep{ep:03d}_{split}_{i}.png'
+        fig.savefig(p, dpi=110, bbox_inches='tight'); plt.close(fig)
+        paths.append(p)
+    return paths
+
+
 def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
-                    img_size: int):
+                    img_size: int, vis_capture: dict | None = None):
     """Cross-frame pair epoch.
 
     For each batch (dict from collate_pair): forward A's LiDAR Q through the
@@ -78,6 +151,8 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
     KV_B. Loss = NLL of predicted Δ vs (true_uv_in_B - dist_uv_in_B), where:
       - dist_uv = HAT projection of A's points in B image (= dist_uvd_B)
       - true_uv = GT projection of A's points in B image (= true_uvd_B)
+    If `vis_capture` is given (dict, rank-0 only), the LAST batch's tensors
+    are stashed into it for downstream report_image; nothing else changes.
     Both come from the dataset's pair builder which already aligns A↔B
     indices when same_frame_self_sup=True. For genuine cross-frame pairs we
     rely on the same-coordinate alignment that build_window emits.
@@ -145,6 +220,22 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
             err = (per_pt_c[valid][..., :2].float() - gt[valid]).norm(dim=-1)
             total_mse += err.mean().item()
         total_nll += loss.item(); n += 1
+        # Stash the most recent batch (rank-0 only) for end-of-epoch
+        # debug-sample rendering. Detach + cpu so we don't pin GPU memory.
+        if vis_capture is not None and accel.is_main_process:
+            with torch.no_grad():
+                vis_capture['imgs_A']  = imgs_A.detach().cpu()
+                vis_capture['imgs_B']  = imgs_B.detach().cpu()
+                vis_capture['trueB']   = trueB[:, :Nmin].detach().cpu()
+                vis_capture['distB']   = distB[:, :Nmin].detach().cpu()
+                vis_capture['_trueA']  = _trueA[:, :Nmin].detach().cpu()
+                vis_capture['distA']   = distA[:, :Nmin].detach().cpu()
+                vis_capture['padA']    = padA[:, :Nmin].detach().cpu()
+                vis_capture['padB']    = padB[:, :Nmin].detach().cpu()
+                vis_capture['per_pt']  = per_pt_c.detach().float().cpu()
+                vis_capture['pert_B']  = pertB.detach().cpu()
+                vis_capture['dpose']   = dpose_AB.detach().cpu()
+                vis_capture['split']   = 'train' if train else 'val'
         if train and accel.is_main_process and (n - _last_log_step >= 25):
             _dt = time.time() - _t_start
             sps_per  = n * imgs_A.shape[0] / _dt if _dt > 0 else 0
@@ -404,13 +495,26 @@ def main():
             log(f"[clearml] logger init failed: {_e}")
 
     _epoch_fn = epoch_loop_pair if args.pair_mode else epoch_loop
+    # Vis stash — populated by epoch_loop_pair on the last batch when not None.
+    vis_cap_train: dict | None = {} if (args.pair_mode and accel.is_main_process) else None
+    vis_cap_val:   dict | None = {} if (args.pair_mode and accel.is_main_process) else None
+    vis_dir = exp_dir / 'debug_samples'
+    vis_dir.mkdir(parents=True, exist_ok=True) if accel.is_main_process else None
     for ep in range(epochs):
         ep_t = time.time()
-        tr_nll, tr_mse = _epoch_fn(model, train_loader, optimizer, accel, True,
-                                    args.img_size)
-        with torch.no_grad():
-            va_nll, va_mse = _epoch_fn(model, val_loader, optimizer, accel, False,
+        if args.pair_mode:
+            tr_nll, tr_mse = _epoch_fn(model, train_loader, optimizer, accel, True,
+                                        args.img_size, vis_capture=vis_cap_train)
+        else:
+            tr_nll, tr_mse = _epoch_fn(model, train_loader, optimizer, accel, True,
                                         args.img_size)
+        with torch.no_grad():
+            if args.pair_mode:
+                va_nll, va_mse = _epoch_fn(model, val_loader, optimizer, accel, False,
+                                            args.img_size, vis_capture=vis_cap_val)
+            else:
+                va_nll, va_mse = _epoch_fn(model, val_loader, optimizer, accel, False,
+                                            args.img_size)
         scheduler.step()
         if accel.is_main_process:
             elapsed = time.time() - t0
@@ -427,6 +531,23 @@ def main():
                 rs(title='loss/mse', series='val',   value=va_mse, iteration=ep+1)
                 rs(title='lr', series='lr',
                    value=scheduler.get_last_lr()[0], iteration=ep+1)
+            # Pair-mode debug samples: render last batch, upload to ClearML
+            # Debug Samples panel.
+            if args.pair_mode and accel.is_main_process:
+                try:
+                    for cap in (vis_cap_train, vis_cap_val):
+                        if not cap:
+                            continue
+                        paths = render_pair_debug_samples(
+                            cap, ep + 1, n_samples=6, out_dir=vis_dir)
+                        if cml_logger is not None:
+                            for p in paths:
+                                cml_logger.report_image(
+                                    title=f"pair_debug_{cap.get('split','?')}",
+                                    series=p.stem,
+                                    iteration=ep + 1, local_path=str(p))
+                except Exception as _e:
+                    log(f"  ↳ pair debug-sample render skipped: {_e}")
             if va_nll < best_val:
                 best_val = va_nll
                 accel.save(accel.unwrap_model(model).state_dict(), ckpt)
