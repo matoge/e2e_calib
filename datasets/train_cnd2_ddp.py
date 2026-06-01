@@ -70,71 +70,130 @@ def _R_from_zyx_deg(ypr_deg: torch.Tensor) -> torch.Tensor:
 
 
 def render_pair_debug_samples(cap: dict, ep: int, n_samples: int = 6,
-                              out_dir: Path = None) -> list[Path]:
-    """Render N pair samples (A image | B image) from the captured batch.
-    Each panel: lidar uv overlays —
-      A panel:  true_uvd_A (lime, GT projection in A image)
-                — dist_uvd_A overlaps since A has no calib pert.
-      B panel:  true_uvd_B (lime, GT)
-                dist_uvd_B (red, HAT projection)
-                pred_uvd_B (cyan, dist_B + per_pt[..., :2])
-                yellow lines connect dist→true (target shift).
-    Saves PNG per sample, returns list of paths. rank-0 caller only.
+                              out_dir: Path = None,
+                              k_show: int = 12) -> list[Path]:
+    """Numbered-correspondence pair vis (port of _cnd2_pair_hero.py).
+
+    For each captured (A, B) sample, draws a 2-panel figure:
+      A panel: numbered circles at uv_A_local (= dist_A), one per selected
+               LiDAR query, colour = tab10[k%10].
+      B panel: same coloured per-point glyphs at:
+               * x  = HAT projection (dist_B, model input)
+               * o (large) = GT (true_B, target)
+               * o (small) = pred = dist_B + Δuv from per_pt
+               * 2σ ellipse around pred from log_sx/log_sy/rho.
+      Cross-panel ConnectionPatch (dotted) links A circle ↔ B GT circle so
+      the same world point is visible across the two cameras.
+
+    Title shows hyp (= dist_B vs true_B) and pred (= pred_B vs true_B) px err.
     """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib import cm
+    from matplotlib.patches import Ellipse, ConnectionPatch
     import numpy as _np
     out_dir = Path(out_dir) if out_dir is not None else Path('/tmp/cnd2_dbg')
     out_dir.mkdir(parents=True, exist_ok=True)
     imgs_A = cap['imgs_A']; imgs_B = cap['imgs_B']
-    trueA  = cap['_trueA']; distA = cap['distA']
-    trueB  = cap['trueB'];  distB = cap['distB']
+    distA = cap['distA']
+    trueB = cap['trueB']; distB = cap['distB']
     per_pt = cap['per_pt']
-    padA   = cap['padA'];   padB  = cap['padB']
+    padA = cap['padA']; padB = cap['padB']
     pert_B = cap['pert_B']; dpose = cap['dpose']
-    split  = cap.get('split', 'train')
+    split = cap.get('split', 'train')
     B = imgs_A.shape[0]
     N = min(n_samples, B)
     paths = []
+
+    def _cov_ellipse_axes(sx, sy, rho):
+        cxx, cyy, cxy = sx * sx, sy * sy, rho * sx * sy
+        cov = _np.array([[cxx, cxy], [cxy, cyy]])
+        w, v = _np.linalg.eigh(cov)
+        w = _np.maximum(w, 1e-9)
+        order = w.argsort()[::-1]
+        w = w[order]; v = v[:, order]
+        ang = float(_np.degrees(_np.arctan2(v[1, 0], v[0, 0])))
+        return float(2 * _np.sqrt(w[0])), float(2 * _np.sqrt(w[1])), ang
+
     for i in range(N):
         img_A = imgs_A[i].permute(1, 2, 0).numpy()
         img_B = imgs_B[i].permute(1, 2, 0).numpy()
-        # imgs were divided by 255 in epoch loop → bring back to 0-255 uint8.
         img_A = _np.clip(img_A * 255.0, 0, 255).astype(_np.uint8)
         img_B = _np.clip(img_B * 255.0, 0, 255).astype(_np.uint8)
-        vA = ~padA[i].bool(); vB = ~padB[i].bool()
-        tA = trueA[i].numpy(); dA = distA[i].numpy()
-        tB = trueB[i].numpy(); dB = distB[i].numpy()
-        pp = per_pt[i].numpy()  # (N,5) [duv_x, duv_y, log_sx, log_sy, rho]
-        pred_B = dB[:, :2] + pp[:, :2]  # dist_B + duv = predicted GT uv in B
-        fig, ax = plt.subplots(1, 2, figsize=(11, 5.5))
-        ax[0].imshow(img_A); ax[0].axis('off')
-        ax[0].scatter(tA[vA, 0], tA[vA, 1], s=4, c='lime', label='true_A')
-        ax[0].scatter(dA[vA, 0], dA[vA, 1], s=4, c='red', alpha=0.4,
-                       label='dist_A (= true_A, no calib pert)')
-        ax[0].set_title(f'A  N={int(vA.sum())}', fontsize=9)
-        ax[0].legend(loc='upper right', fontsize=7)
+        IMG_SIZE = img_A.shape[0]
+        valid = (~padA[i].bool().numpy()) & (~padB[i].bool().numpy())
+        uv_A_local = distA[i].numpy()[:, :2]
+        uv_B_hat   = distB[i].numpy()[:, :2]
+        uv_B_gt    = trueB[i].numpy()[:, :2]
+        pp = per_pt[i].numpy()
+        mu = pp[:, :2]; sx = _np.exp(pp[:, 2]); sy = _np.exp(pp[:, 3]); rho = pp[:, 4]
+        uv_B_pred = uv_B_hat + mu
 
-        ax[1].imshow(img_B); ax[1].axis('off')
-        idxB = _np.where(vB.numpy())[0]
-        for j in idxB:
-            ax[1].plot([dB[j, 0], tB[j, 0]], [dB[j, 1], tB[j, 1]],
-                       '-', color='yellow', lw=0.4, alpha=0.5)
-        ax[1].scatter(tB[vB, 0], tB[vB, 1], s=4, c='lime', label='true_B (GT)')
-        ax[1].scatter(dB[vB, 0], dB[vB, 1], s=4, c='red', alpha=0.6,
-                       label='dist_B (HAT, model input)')
-        ax[1].scatter(pred_B[vB.numpy(), 0], pred_B[vB.numpy(), 1],
-                       s=4, c='cyan', alpha=0.7, label='pred_B (dist + Δ)')
+        in_A = ((uv_A_local[:, 0] >= 0) & (uv_A_local[:, 0] < IMG_SIZE) &
+                (uv_A_local[:, 1] >= 0) & (uv_A_local[:, 1] < IMG_SIZE))
+        in_B = ((uv_B_hat[:, 0] >= 0) & (uv_B_hat[:, 0] < IMG_SIZE) &
+                (uv_B_hat[:, 1] >= 0) & (uv_B_hat[:, 1] < IMG_SIZE) &
+                (uv_B_gt[:, 0]  >= 0) & (uv_B_gt[:, 0]  < IMG_SIZE) &
+                (uv_B_gt[:, 1]  >= 0) & (uv_B_gt[:, 1]  < IMG_SIZE))
+        ok = valid & in_A & in_B
+        n_ok = int(ok.sum())
+        if n_ok < 4:
+            continue
+        err_hyp = float(_np.linalg.norm(uv_B_hat[ok] - uv_B_gt[ok], axis=-1).mean())
+        err_pred = float(_np.linalg.norm(uv_B_pred[ok] - uv_B_gt[ok], axis=-1).mean())
+
+        cand = _np.where(ok)[0]
+        step = max(1, len(cand) // k_show)
+        sel = cand[::step][:k_show]
+
+        fig, (ax_A, ax_B) = plt.subplots(1, 2, figsize=(11, 5.5))
+        ax_A.imshow(img_A); ax_A.set_xticks([]); ax_A.set_yticks([])
+        ax_B.imshow(img_B); ax_B.set_xticks([]); ax_B.set_yticks([])
+        cmap = cm.get_cmap('tab10')
+        for k, idx in enumerate(sel):
+            c = cmap(k % 10)
+            uA = uv_A_local[idx]; uH = uv_B_hat[idx]
+            uG = uv_B_gt[idx];    uP = uv_B_pred[idx]
+            ax_A.plot(uA[0], uA[1], 'o', color=c, markersize=10,
+                       markeredgecolor='white', mew=1.2, zorder=5)
+            ax_A.annotate(str(k), (uA[0], uA[1]), ha='center', va='center',
+                           fontsize=7, color='black', weight='bold', zorder=6)
+            w, h, ang = _cov_ellipse_axes(sx[idx], sy[idx], rho[idx])
+            ax_B.plot(uH[0], uH[1], 'x', color=c, markersize=7, mew=1.2,
+                       alpha=0.7, zorder=4)
+            ax_B.plot(uG[0], uG[1], 'o', color=c, markersize=5,
+                       markeredgecolor='white', mew=0.8, zorder=5)
+            ax_B.plot(uP[0], uP[1], 'o', color=c, markersize=3,
+                       markeredgecolor='white', mew=0.5, zorder=6)
+            ax_B.add_patch(Ellipse((uP[0], uP[1]), width=w, height=h, angle=ang,
+                                    facecolor=c, edgecolor='none',
+                                    alpha=0.30, zorder=7))
+            ax_B.add_patch(Ellipse((uP[0], uP[1]), width=w, height=h, angle=ang,
+                                    facecolor='none', edgecolor=c,
+                                    alpha=1.0, lw=1.5, zorder=8))
+            fig.add_artist(ConnectionPatch(
+                xyA=(uA[0], uA[1]), xyB=(uG[0], uG[1]),
+                coordsA='data', coordsB='data',
+                axesA=ax_A, axesB=ax_B,
+                color=c, lw=0.6, ls=':', alpha=0.6, zorder=3))
+        ax_B.text(2, IMG_SIZE - 4,
+                   'x  HAT (model input)\n'
+                   'o (large)  GT\n'
+                   'o (small) + ellipse  pred ± 2σ',
+                   fontsize=6, color='white', va='bottom',
+                   bbox=dict(facecolor='black', alpha=0.55, pad=2, edgecolor='none'))
+        ax_A.set_title(f'A frame  N_ok={n_ok}', fontsize=9, loc='left')
+        ax_B.set_title(f'B frame  hyp {err_hyp:.1f} → pred {err_pred:.2f} px',
+                        fontsize=9, loc='left')
         pB = pert_B[i].numpy(); dp = dpose[i].numpy()
-        title = (f"B  N={int(vB.sum())}  "
-                 f"ε_pose t=({pB[0]:+.2f},{pB[1]:+.2f},{pB[2]:+.2f})m "
-                 f"ypr=({pB[3]:+.2f},{pB[4]:+.2f},{pB[5]:+.2f})°\n"
-                 f"dpose_AB GT t=({dp[0]:+.2f},{dp[1]:+.2f},{dp[2]:+.2f})m "
-                 f"ypr=({dp[3]:+.2f},{dp[4]:+.2f},{dp[5]:+.2f})°")
-        ax[1].set_title(title, fontsize=8)
-        ax[1].legend(loc='upper right', fontsize=7)
-        fig.suptitle(f'CND2 pair ep{ep} {split} sample {i}', fontsize=10)
+        fig.suptitle(
+            f'CND2 pair ep{ep} {split} #{i}  '
+            f'ε_pose t=({pB[0]:+.2f},{pB[1]:+.2f},{pB[2]:+.2f})m '
+            f'ypr=({pB[3]:+.2f},{pB[4]:+.2f},{pB[5]:+.2f})°  '
+            f'dpose_AB GT t=({dp[0]:+.2f},{dp[1]:+.2f},{dp[2]:+.2f})m '
+            f'ypr=({dp[3]:+.2f},{dp[4]:+.2f},{dp[5]:+.2f})°',
+            fontsize=8)
         fig.tight_layout()
         p = out_dir / f'ep{ep:03d}_{split}_{i}.png'
         fig.savefig(p, dpi=110, bbox_inches='tight'); plt.close(fig)
