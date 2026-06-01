@@ -372,9 +372,13 @@ class CalibNet2(nn.Module):
         else:
             q_in = torch.cat([uv_01, d3], dim=-1)
         q = self.point_mlp(q_in)                                     # (B, N, D)
-        # add per-query frustum context (3×3 cell neighbors → mini cross-attn)
+        # add per-query frustum context (3×3 cell neighbors → mini cross-attn).
+        # FrustumLocalEncoder.forward subtracts query_uvd from gathered bucket
+        # candidates (cands - query_uvd), so query_uvd and bucket_uvd MUST share
+        # last-dim C. Production caches store bucket as 4-col [u,v,d,intensity]
+        # — pass query_uvd at the SAME 4-col layout, NOT distorted_uvd[..., :3].
         q = q + self.frustum_enc(
-            query_uvd=distorted_uvd[..., :3],
+            query_uvd=distorted_uvd[..., :bucket_uvd.shape[-1]],
             bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
             query_token=q, query_pad_mask=key_padding_mask,
             img_size=self.img_size)
@@ -484,9 +488,12 @@ class CalibNet2(nn.Module):
         else:
             q_in = torch.cat([uv_01, d3], dim=-1)
         q = self.point_mlp(q_in)                                    # (B, N_A, D)
-        # add per-query frustum context (uses A's bucket; KV_A's geometry)
+        # add per-query frustum context (uses A's bucket; KV_A's geometry).
+        # query_uvd / bucket_uvd MUST share last-dim C — bucket is 4-col
+        # [u,v,d,intensity], so query_uvd 4-col matches and rel = cands - q
+        # produces (Δu, Δv, Δd, Δintensity) for the local-neighbour MLP.
         q = q + self.frustum_enc(
-            query_uvd=distorted_uvd_A[..., :3],
+            query_uvd=distorted_uvd_A[..., :bucket_uvd_A.shape[-1]],
             bucket_uvd=bucket_uvd_A, bucket_valid=bucket_valid_A,
             query_token=q, query_pad_mask=key_padding_mask_A,
             img_size=self.img_size)
