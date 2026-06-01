@@ -342,7 +342,11 @@ class CalibNet2(nn.Module):
         kv_flat, spatial_shapes, level_start_index = self._build_kv(
             image, bucket_uvd, bucket_valid)
 
-        # --- Q (PointMLP3) ---
+        # --- Q (PointMLP3 + Frustum per-query 3×3 neighborhood). Calib mode
+        # has NO PoseEmb anywhere: there's no ego motion to inject (R = I
+        # always) and frame-token learns lidar↔image alignment without hint.
+        # Frustum encoder provides per-query local 3D context (same as
+        # CalibNetDepth use_frustum=True path).
         uv_01 = distorted_uvd[..., :2] / self.img_size
         d3    = distorted_uvd[..., 2:3]
         if self.use_intensity:
@@ -350,20 +354,14 @@ class CalibNet2(nn.Module):
         else:
             q_in = torch.cat([uv_01, d3], dim=-1)
         q = self.point_mlp(q_in)                                     # (B, N, D)
+        # add per-query frustum context (3×3 cell neighbors → mini cross-attn)
+        q = q + self.frustum_enc(
+            query_uvd=distorted_uvd[..., :3],
+            bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
+            query_token=q, query_pad_mask=key_padding_mask,
+            img_size=self.img_size)
 
-        # --- RoPE PoseEmb (entry-only) ---
-        if vfp is None:
-            vfp_in = torch.full((B,), float(self.img_size),
-                                 device=image.device, dtype=q.dtype)
-        else:
-            vfp_in = vfp.to(dtype=q.dtype)
-        log_vfp = torch.log(vfp_in.clamp(min=1.0))
-        q = self.pose_emb(q, dpose_R=dpose_R, log_vfp=log_vfp)
-
-        # --- Stacked shared block, pure feature-space refinement ---
-        # q is the next-state token; delta is what each block ADDED.  The
-        # final head reads Σ delta (= q_final − q_0), NOT q itself, to gate
-        # abs-PE leakage from PointMLP3.
+        # --- Stacked shared block, frame-internal refinement only ---
         delta_cum = torch.zeros_like(q)
         for _ in range(self.n_iter):
             q, delta_i = self.block(q, kv_flat, spatial_shapes,
@@ -467,6 +465,12 @@ class CalibNet2(nn.Module):
         else:
             q_in = torch.cat([uv_01, d3], dim=-1)
         q = self.point_mlp(q_in)                                    # (B, N_A, D)
+        # add per-query frustum context (uses A's bucket; KV_A's geometry)
+        q = q + self.frustum_enc(
+            query_uvd=distorted_uvd_A[..., :3],
+            bucket_uvd=bucket_uvd_A, bucket_valid=bucket_valid_A,
+            query_token=q, query_pad_mask=key_padding_mask_A,
+            img_size=self.img_size)
 
         # Stack: first half on KV_A, then RoPE(R_AB) once, then second half on KV_B.
         delta_cum = torch.zeros_like(q)
