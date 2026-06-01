@@ -500,6 +500,68 @@ def main():
     vis_cap_val:   dict | None = {} if (args.pair_mode and accel.is_main_process) else None
     vis_dir = exp_dir / 'debug_samples'
     vis_dir.mkdir(parents=True, exist_ok=True) if accel.is_main_process else None
+
+    # ── PRE-FLIGHT debug samples (rank-0): render N samples directly from
+    # the train DataLoader BEFORE training starts so we can sanity-check
+    # dataset emissions without waiting for an epoch. Pred panel uses the
+    # untrained model (zero-init head → pred ≈ dist + bias).
+    if args.pair_mode and accel.is_main_process:
+        try:
+            log("preflight: rendering pair debug samples from first batch")
+            it = iter(train_loader)
+            pf_batch = next(it)
+            A = pf_batch['A']; B = pf_batch['B']
+            dpose_AB_pf = pf_batch['dpose_AB']
+            imgs_A_pf, _trueA_pf, distA_pf, padA_pf, vfpA_pf, buA_pf, bvA_pf = A[:7]
+            imgs_B_pf, trueB_pf,  distB_pf, padB_pf, vfpB_pf, buB_pf, bvB_pf = B[:7]
+            pertB_pf = B[7]
+            imgs_A_n = imgs_A_pf.float().div(255.0)
+            imgs_B_n = imgs_B_pf.float().div(255.0)
+            ypr_GT  = dpose_AB_pf[..., 3:6]
+            ypr_eps = pertB_pf[..., 3:6].to(ypr_GT)
+            R_AB_pf = _R_from_zyx_deg(ypr_GT + ypr_eps).to(imgs_A_n.device,
+                                                           dtype=imgs_A_n.dtype)
+            t_HAT_pf = (dpose_AB_pf[..., 0:3] + pertB_pf[..., 0:3].to(dpose_AB_pf)
+                        ).to(imgs_A_n.device, dtype=imgs_A_n.dtype)
+            point_in_A_pf = torch.cat([distA_pf[..., :3], distA_pf[..., 4:5]], dim=-1)
+            with torch.no_grad():
+                accel.unwrap_model(model).eval()
+                out_pf = model(imgs_A_n, point_in_A_pf,
+                               mode='cross', image_B=imgs_B_n, R_AB=R_AB_pf, t_AB=t_HAT_pf,
+                               vfp=vfpA_pf, vfp_B=vfpB_pf,
+                               bucket_uvd=buA_pf, bucket_valid=bvA_pf,
+                               bucket_uvd_B=buB_pf, bucket_valid_B=bvB_pf,
+                               key_padding_mask=padA_pf)
+                accel.unwrap_model(model).train()
+            per_pt_pf = out_pf[0] if isinstance(out_pf, tuple) else out_pf
+            Nmin_pf = min(per_pt_pf.shape[1], trueB_pf.shape[1])
+            cap_pre = dict(
+                imgs_A=imgs_A_n.detach().cpu(),
+                imgs_B=imgs_B_n.detach().cpu(),
+                trueB=trueB_pf[:, :Nmin_pf].detach().cpu(),
+                distB=distB_pf[:, :Nmin_pf].detach().cpu(),
+                _trueA=_trueA_pf[:, :Nmin_pf].detach().cpu(),
+                distA=distA_pf[:, :Nmin_pf].detach().cpu(),
+                padA=padA_pf[:, :Nmin_pf].detach().cpu(),
+                padB=padB_pf[:, :Nmin_pf].detach().cpu(),
+                per_pt=per_pt_pf[:, :Nmin_pf].detach().float().cpu(),
+                pert_B=pertB_pf.detach().cpu(),
+                dpose=dpose_AB_pf.detach().cpu(),
+                split='preflight',
+            )
+            paths = render_pair_debug_samples(cap_pre, ep=0, n_samples=6,
+                                              out_dir=vis_dir)
+            for p in paths:
+                log(f"  preflight vis: {p}")
+            if cml_logger is not None:
+                for p in paths:
+                    cml_logger.report_image(
+                        title='pair_debug_preflight', series=p.stem,
+                        iteration=0, local_path=str(p))
+            del it
+        except Exception as _e:
+            log(f"  ↳ preflight pair debug-sample skipped: {_e}")
+    accel.wait_for_everyone()
     for ep in range(epochs):
         ep_t = time.time()
         if args.pair_mode:
