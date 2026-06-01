@@ -105,6 +105,12 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
         ypr_eps = pertB[..., 3:6].to(ypr_GT)
         ypr_HAT = ypr_GT + ypr_eps
         R_AB = _R_from_zyx_deg(ypr_HAT).to(imgs_A.device, dtype=imgs_A.dtype)
+        # Translation hat: GT t_AB ⊕ ε (small-additive composition, matches
+        # rotation HAT recipe). Routed to RoPEPoseEmb's translation_mlp (type-0
+        # scalar chunk) so the block stack sees the full SE(3) hat, not just R.
+        t_GT  = dpose_AB[..., 0:3]
+        t_eps = pertB[..., 0:3].to(t_GT)
+        t_HAT = (t_GT + t_eps).to(imgs_A.device, dtype=imgs_A.dtype)
 
         # CalibNet2 input on Q: A's [u, v, d, intensity] (drop is_obj col 3).
         point_in_A = torch.cat([distA[..., :3], distA[..., 4:5]], dim=-1)
@@ -113,7 +119,7 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
         # CalibNet2.forward routes to forward_cross_frame when mode='cross'.
         out = model(
             imgs_A, point_in_A,
-            mode='cross', image_B=imgs_B, R_AB=R_AB,
+            mode='cross', image_B=imgs_B, R_AB=R_AB, t_AB=t_HAT,
             vfp=vfpA, vfp_B=vfpB,
             bucket_uvd=buA, bucket_valid=bvA,
             bucket_uvd_B=buB, bucket_valid_B=bvB,

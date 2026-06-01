@@ -83,13 +83,27 @@ class RoPEPoseEmb(nn.Module):
         # Zero-init final layer so PoseEmb(log_vfp) ≈ 0 at start (legacy calib).
         nn.init.zeros_(self.intrinsic_mlp[-1].weight)
         nn.init.zeros_(self.intrinsic_mlp[-1].bias)
+        # Translation bias on type-0: 3D t (in scene units, e.g. metres) →
+        # d_scalar. Separated from rotation (which acts on type-1) — block stack
+        # downstream mixes the two chunks anyway, so keeping t in the scalar
+        # path avoids physical-unit-vs-token-scale mismatch on type-1.
+        self.translation_mlp = nn.Sequential(
+            nn.Linear(3, max(d_scalar, 16)), nn.GELU(),
+            nn.Linear(max(d_scalar, 16), d_scalar),
+        )
+        # Zero-init: PoseEmb(t) = 0 at start → SO(3)-only behaviour preserved
+        # (existing kick #1 ckpts load-compatible).
+        nn.init.zeros_(self.translation_mlp[-1].weight)
+        nn.init.zeros_(self.translation_mlp[-1].bias)
 
     def forward(self, q: torch.Tensor, *,
                 dpose_R: torch.Tensor = None,
+                dpose_t: torch.Tensor = None,
                 log_vfp: torch.Tensor = None) -> torch.Tensor:
         """
         q       : (B, N, D)
         dpose_R : (B, 3, 3) or None  — None ↔ identity (no rotation)
+        dpose_t : (B, 3) or None     — None ↔ no translation bias
         log_vfp : (B,) or (B, 1) or None — None ↔ no intrinsic bias
 
         Returns (B, N, D).
@@ -105,8 +119,10 @@ class RoPEPoseEmb(nn.Module):
         if log_vfp is not None:
             if log_vfp.dim() == 1:
                 log_vfp = log_vfp.unsqueeze(-1)             # (B, 1)
-            bias_s = self.intrinsic_mlp(log_vfp)            # (B, Ds)
-            q_s = q_s + bias_s.unsqueeze(1)                 # (B, N, Ds)
+            q_s = q_s + self.intrinsic_mlp(log_vfp).unsqueeze(1)
+
+        if dpose_t is not None:
+            q_s = q_s + self.translation_mlp(dpose_t).unsqueeze(1)
 
         q_out = torch.cat([q_s, q_v.reshape(B, N, K * 3)], dim=-1)
         return q_out
@@ -304,6 +320,7 @@ class CalibNet2(nn.Module):
                 mode: str = 'calib',
                 image_B: torch.Tensor = None,
                 R_AB: torch.Tensor = None,
+                t_AB: torch.Tensor = None,
                 vfp_B: torch.Tensor = None,
                 bucket_uvd_B: torch.Tensor = None,
                 bucket_valid_B: torch.Tensor = None):
@@ -312,12 +329,13 @@ class CalibNet2(nn.Module):
         mode='cross' → cross-frame path with KV switching A→B mid-stack;
         in that case image is image_A, distorted_uvd is uvd_A, and the
         B-side tensors come in via image_B / bucket_uvd_B / bucket_valid_B
-        / vfp_B / R_AB. Routing through .forward (not a separate method) so
-        DDP's grad-sync hook fires correctly.
+        / vfp_B / R_AB / t_AB. Routing through .forward (not a separate
+        method) so DDP's grad-sync hook fires correctly.
         """
         if mode == 'cross':
             return self.forward_cross_frame(
                 image, distorted_uvd, image_B, R_AB,
+                t_AB=t_AB,
                 vfp_A=vfp, vfp_B=vfp_B,
                 bucket_uvd_A=bucket_uvd, bucket_valid_A=bucket_valid,
                 bucket_uvd_B=bucket_uvd_B, bucket_valid_B=bucket_valid_B,
@@ -424,6 +442,7 @@ class CalibNet2(nn.Module):
                               distorted_uvd_A: torch.Tensor,
                               image_B: torch.Tensor,
                               R_AB: torch.Tensor,
+                              t_AB: torch.Tensor = None,
                               vfp_A: torch.Tensor = None,
                               vfp_B: torch.Tensor = None,
                               bucket_uvd_A=None, bucket_valid_A=None,
@@ -480,8 +499,12 @@ class CalibNet2(nn.Module):
                                      key_padding_mask=key_padding_mask_A)
             delta_cum = delta_cum + delta_i
 
-        # RoPE(R_AB) on Q only (no intrinsic — log_vfp=None skips that path).
-        q = self.pose_emb(q, dpose_R=R_AB, log_vfp=None)
+        # SE(3) PoseEmb on Q at the stack midpoint:
+        #   type-1 chunk (40 vec×3): block-diag(R_AB) action
+        #   type-0 chunk (8 scalar): translation_mlp(t_AB) added (zero-init →
+        #                            no-op when ckpt is from kick #1)
+        # log_vfp=None skips intrinsic injection.
+        q = self.pose_emb(q, dpose_R=R_AB, dpose_t=t_AB, log_vfp=None)
 
         for _ in range(self.n_iter - n_half):
             q, delta_i = self.block(q, kv_B_flat, kv_B_shapes, kv_B_lsi,
