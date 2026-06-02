@@ -1465,6 +1465,19 @@ class PandaSetCalibDatasetFull(Dataset):
                 uv_target_loc = uv_target_loc.copy()
                 uv_target_loc[outside_band] = uv_off_loc[outside_band]
 
+        # GT mask for points behind the perturbed camera (z_off <= 0.5). After
+        # the perspective-divide guard `np.maximum(z, 1e-6)` such points emit
+        # uv ~ K · X / 1e-6 ≈ 1e8-1e9 px, which dominates gaussian2d_nll and
+        # blows the loss to 1e12 by step 50 (cf. task c0ef24f9). 100-sample
+        # sweep showed 3 / 100 PandaSet pairs hit this with dpose_AB.tz ~ -10m.
+        # Force target=dist on bad-z points so their per-point residual is zero;
+        # tokens still flow through Q/KV but they don't supervise.
+        z_off_sel = z_off[sub_idx]
+        bad_z = z_off_sel <= 0.5
+        if bad_z.any():
+            uv_target_loc = uv_target_loc.copy()
+            uv_target_loc[bad_z] = uv_off_loc[bad_z]
+
         # (N, 5): [u, v, d, is_obj, intensity]
         # idx 0-3 stay for backward compat; intensity is the new 5th channel.
         # uv_target_loc == uv_gt_loc when split_pert is off (legacy calib),
