@@ -584,14 +584,19 @@ def main():
                         ).to(imgs_A_n.device, dtype=imgs_A_n.dtype)
             point_in_A_pf = torch.cat([distA_pf[..., :3], distA_pf[..., 4:5]], dim=-1)
             with torch.no_grad():
-                accel.unwrap_model(model).eval()
-                out_pf = model(imgs_A_n, point_in_A_pf,
-                               mode='cross', image_B=imgs_B_n, R_AB=R_AB_pf, t_AB=t_HAT_pf,
-                               vfp=vfpA_pf, vfp_B=vfpB_pf,
-                               bucket_uvd=buA_pf, bucket_valid=bvA_pf,
-                               bucket_uvd_B=buB_pf, bucket_valid_B=bvB_pf,
-                               key_padding_mask=padA_pf)
-                accel.unwrap_model(model).train()
+                # IMPORTANT: call the unwrapped model directly. Calling the
+                # DDP-wrapped model from rank 0 alone triggers a collective
+                # the other ranks aren't issuing → 10-min NCCL watchdog timeout
+                # kills the run before ep1.
+                _m = accel.unwrap_model(model)
+                _m.eval()
+                out_pf = _m(imgs_A_n, point_in_A_pf,
+                             mode='cross', image_B=imgs_B_n, R_AB=R_AB_pf, t_AB=t_HAT_pf,
+                             vfp=vfpA_pf, vfp_B=vfpB_pf,
+                             bucket_uvd=buA_pf, bucket_valid=bvA_pf,
+                             bucket_uvd_B=buB_pf, bucket_valid_B=bvB_pf,
+                             key_padding_mask=padA_pf)
+                _m.train()
             per_pt_pf = out_pf[0] if isinstance(out_pf, tuple) else out_pf
             Nmin_pf = min(per_pt_pf.shape[1], trueB_pf.shape[1])
             cap_pre = dict(
