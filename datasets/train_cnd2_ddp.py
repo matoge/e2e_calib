@@ -214,7 +214,7 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
     are stashed into it for downstream report_image; nothing else changes.
     Both come from the dataset's pair builder which already aligns A↔B
     indices when same_frame_self_sup=True. For genuine cross-frame pairs we
-    rely on the same-coordinate alignment that build_window emits.
+    rely on the same-coordinate alignment that build_crop emits.
     """
     model.train(train)
     total_nll, total_mse, n = 0.0, 0.0, 0
@@ -262,7 +262,7 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
         per_pt = out[0] if isinstance(out, tuple) else out
 
         # Target = δ between POSE_GT and POSE_HAT B-projection of A's points.
-        # build_window emits A and B in lex-deterministic sub_idx order; in
+        # build_crop emits A and B in lex-deterministic sub_idx order; in
         # same_frame_self_sup mode the leading min(N_A, N_B) tokens describe
         # the same world points.  Crop to that prefix; mask via padA up to it.
         Nmin = min(per_pt.shape[1], trueB.shape[1])
@@ -617,6 +617,35 @@ def main():
                     cml_logger.report_image(
                         title='pair_debug_preflight', series=p.stem,
                         iteration=0, local_path=str(p))
+            # vis_check: dataset-emission only (no model output) so the
+            # ε_pose / ε_calib / A↔B-correspondence sanity is visible from
+            # the same training task. Batch tensors are already collated;
+            # split per-sample for render_one_pair.
+            try:
+                from scripts.vis_check._pair_render import render_one_pair
+                n_check = min(6, imgs_A_pf.shape[0])
+                for i in range(n_check):
+                    built_A_i = (imgs_A_pf[i], _trueA_pf[i], distA_pf[i],
+                                 vfpA_pf[i], buA_pf[i], bvA_pf[i],
+                                 # collate-pre slot [6] is pert_vec; A side
+                                 # has zeros (no calib pert) so synthesise.
+                                 torch.zeros(8))
+                    built_B_i = (imgs_B_pf[i], trueB_pf[i], distB_pf[i],
+                                 vfpB_pf[i], buB_pf[i], bvB_pf[i],
+                                 pertB_pf[i])
+                    out_p = vis_dir / f'vis_check_pair_{i:02d}.png'
+                    res = render_one_pair(built_A_i, built_B_i, dpose_AB_pf[i],
+                                            out_path=out_p,
+                                            img_size=args.img_size,
+                                            k_show=12,
+                                            suptitle_prefix=f'vis_check #{i}  ')
+                    if res and cml_logger is not None:
+                        cml_logger.report_image(
+                            title='vis_check_pair_getitem',
+                            series=f'sample_{i:02d}',
+                            iteration=0, local_path=str(res[0]))
+            except Exception as _e:
+                log(f"  ↳ preflight vis_check skipped: {_e}")
             del it
         except Exception as _e:
             log(f"  ↳ preflight pair debug-sample skipped: {_e}")

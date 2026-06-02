@@ -174,7 +174,7 @@ def _is_obj_per_point(pts_sel: np.ndarray, cuboids: list) -> np.ndarray:
 
 def _photometric_jitter_tuple(tup, half_range: float):
     """Apply per-channel brightness/contrast/saturation jitter to the
-    uint8 image in a build_window output tuple. Returns a new tuple with
+    uint8 image in a build_crop output tuple. Returns a new tuple with
     the image replaced; all other tensors share storage.
 
     half_range: each multiplier sampled uniformly from [1-h, 1+h]; hue
@@ -368,7 +368,7 @@ class PandaSetCalibDatasetFull(Dataset):
         # since no T_AB needs to be recovered.
         self.same_frame_self_sup = bool(same_frame_self_sup)
         # ±half-range of brightness/contrast/saturation/hue jitter applied
-        # AFTER build_window (uint8 image is converted, jittered, clamped,
+        # AFTER build_crop (uint8 image is converted, jittered, clamped,
         # cast back). 0 = disabled.
         self.photometric_jitter = float(photometric_jitter)
         self.pair_index: list[tuple[int, int]] = []
@@ -490,7 +490,7 @@ class PandaSetCalibDatasetFull(Dataset):
     def _build_pair_index(self) -> list[tuple[int, int]]:
         """Group fnames by (scene, cam) and emit (i_A, i_B) idx pairs where
         frame_B = frame_A + pair_stride. Both i_A and i_B are positions into
-        self.fnames so __getitem__'s _build_one_pair can reload them via
+        self.fnames so __getitem__'s build_pair can reload them via
         _load_inst (= same backend the rest of the dataset uses).
 
         Reads (scene, cam, frame) per inst via a light path:
@@ -570,7 +570,7 @@ class PandaSetCalibDatasetFull(Dataset):
         # NEW (2026-05-29): idx is a FRAME index. Load the inst ONCE and pass
         # it via _inst_override so all `oversample` builds share the SAME
         # `inst['jpg_bytes']` object. The decode-cache (id-keyed) inside
-        # build_window then hits and the JPEG is decoded ONCE per frame.
+        # build_crop then hits and the JPEG is decoded ONCE per frame.
         # collate_full flattens the list-of-list back into a flat batch.
         N = len(self)
         seen = {idx}
@@ -582,7 +582,7 @@ class PandaSetCalibDatasetFull(Dataset):
             ok = True
             for _ in range(os_n):
                 if is_pair:
-                    built = self._build_one_pair(idx)
+                    built = self.build_pair(idx)
                 else:
                     built = self._build_one_window(idx, _inst_override=inst)
                 if built is None:
@@ -609,7 +609,7 @@ class PandaSetCalibDatasetFull(Dataset):
     def _build_one_window(self, idx: int, _inst_override: dict = None):
         # _inst_override: when __getitem__ wants to call build N times for the
         # same frame (oversample list), it loads inst once and threads the
-        # SAME dict in. _build_window then sees the SAME inst['jpg_bytes']
+        # SAME dict in. _build_crop then sees the SAME inst['jpg_bytes']
         # object → _decode_cache hits and the JPEG is decoded only once.
         inst = _inst_override if _inst_override is not None else self._load_inst(idx)
         # New cache stores jpg_bytes; old cache stored decoded uint8 'img'
@@ -692,7 +692,7 @@ class PandaSetCalibDatasetFull(Dataset):
             valid_in_image = valid_in_image & in_band
         # u_band: drop pivots in the outer (1-u_band)/2 columns on each side.
         # 0 → full width. 0.8 → keep central 80% of cols only.
-        # u_lo/u_hi are also used as GT mask in build_window to prevent
+        # u_lo/u_hi are also used as GT mask in build_crop to prevent
         # out-of-band points from contributing to the regression loss.
         u_lo = 0.0
         u_hi = float(IW)
@@ -894,7 +894,7 @@ class PandaSetCalibDatasetFull(Dataset):
             # their GT label is masked out (set to match dist_uvd → zero loss).
             gt_u_lo = u_lo if self.u_band > 0.0 else None
             gt_u_hi = u_hi if self.u_band > 0.0 else None
-            built = self.build_window(
+            built = self.build_crop(
                 inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
                 u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
                 tile_u0, tile_v0, img_full, IW, IH,
@@ -918,7 +918,7 @@ class PandaSetCalibDatasetFull(Dataset):
     # IMU/odom estimate Δ̂_IMU of the relative pose A→B, and pivots / Q-tokens
     # are placed using that estimate. The image content carries the residual.
     #
-    # Mapping into build_window's split_pert plumbing:
+    # Mapping into build_crop's split_pert plumbing:
     #   R_off_B / cp_off_B = POSE_GT_B  ⊖ δ     # the "IMU-estimated pose"
     #                                            # (= dist_uvd projection)
     #   R_pre_B / cp_pre_B = POSE_GT_B           # the true pose
@@ -936,7 +936,7 @@ class PandaSetCalibDatasetFull(Dataset):
     # across A and B for this pair).
     #
     # Returns (A12-tuple, B12-tuple, dpose_AB_6vec) or None on re-roll.
-    def _build_one_pair(self, idx: int):
+    def build_pair(self, idx: int):
         N_pairs = len(self.pair_index)
         if N_pairs == 0:
             raise RuntimeError("pair_mode=True but pair_index is empty")
@@ -986,7 +986,7 @@ class PandaSetCalibDatasetFull(Dataset):
         R_delta  = Rotation.from_euler('zyx', ypr_delta, degrees=True).as_matrix()
 
         # B-side absolute camera pose under HAT ("vcam_B at POSE_HAT").
-        # Same lift used by build_window for B below: HAT rel-pose B←A
+        # Same lift used by build_crop for B below: HAT rel-pose B←A
         # = (R_gt_B^T R_gt_A) @ R_delta on the rotation side, t shifted by
         # t_delta (pre-rotated by R_gt_B). So:
         R_off_B  = R_gt_B @ R_delta
@@ -1095,7 +1095,7 @@ class PandaSetCalibDatasetFull(Dataset):
             intens_c_A = intensity_A[cand_idx_A]
             uv_gt_c_A  = uv_full_A[cand_idx_A]
             pert_vec_A = np.zeros(8, dtype=np.float32)
-            built_A = self.build_window(
+            built_A = self.build_crop(
                 inst_A, pts_c_A, intens_c_A, uv_gt_c_A, cand_idx_A, is_obj_A,
                 u0_A, v0_A, cs, K_A, R_gt_A, cp_A, K_A.copy(), cp_A,
                 pert_vec_A, tile_u0_A, tile_v0_A,
@@ -1104,6 +1104,10 @@ class PandaSetCalibDatasetFull(Dataset):
             )
             if built_A is None:
                 continue
+            # built_A[12] = sub_idx_A — indices into cand_idx_A that the A grid
+            # lexsort kept. We force the B side to use the SAME sub_idx so the
+            # per-token correspondence built_A[i] ↔ built_B[i] holds.
+            sub_idx_A = built_A[12].numpy()
             self._last_pair_A = dict(self._last_crop,
                                      pivot_uv=(pu_A, pv_A),
                                      R_off=R_gt_A.copy(),
@@ -1115,7 +1119,7 @@ class PandaSetCalibDatasetFull(Dataset):
             # regression target = (R_gt_B uv) − (R_off_B uv) = δ-induced shift.
             #
             # In same_frame_self_sup mode (A == B frame), force B to share A's
-            # exact point set / cand_idx. build_window's downstream lexsort is
+            # exact point set / cand_idx. build_crop's downstream lexsort is
             # deterministic on (cand_idx, uv_off, in_crop_off), so same point
             # set + same crop ⇒ same sub_idx ⇒ A and B emit pts at IDENTICAL
             # tuple positions. That makes pair_vis's same-index correspondence
@@ -1127,7 +1131,7 @@ class PandaSetCalibDatasetFull(Dataset):
             # per-point Δuv loss makes sense.
             #
             # KV_B's image features come from inst_B['img']; KV_B's dense LiDAR
-            # bucket is built inside build_window from uv_gt_c. Passing pts_A
+            # bucket is built inside build_crop from uv_gt_c. Passing pts_A
             # (B-projected) here means KV_B's bucket also uses pts_A geometry —
             # acceptable because the world is shared (pts_A and pts_B differ only
             # by ego motion + dynamics; for static scenes B-projection of pts_A
@@ -1161,16 +1165,17 @@ class PandaSetCalibDatasetFull(Dataset):
             pert_vec_B = np.array([t_delta[0], t_delta[1], t_delta[2],
                                    ypr_delta[0], ypr_delta[1], ypr_delta[2],
                                    0.0, 0.0], dtype=np.float32)
-            # build_window with R_pre=R_gt_B / cp_pre=cp_B → uv_pre = GT
+            # build_crop with R_pre=R_gt_B / cp_pre=cp_B → uv_pre = GT
             # projection (= true_uvd target). R_off_B / cp_off_B → uv_off
             # (= dist_uvd, the pivot-pose projection). delta1_se3 = POSE_HAT
             # 6-vec → PoseEmb input on B.
-            built_B = self.build_window(
+            built_B = self.build_crop(
                 inst_B, pts_c_B, intens_c_B, uv_gt_c_B, cand_idx_B, is_obj_B,
                 u0_B, v0_B, cs, K_B, R_off_B, cp_off_B, K_B.copy(), cp_B,
                 pert_vec_B, tile_u0_B, tile_v0_B,
                 None if 'jpg_bytes' in inst_B else inst_B['img'], IW_B, IH_B,
                 R_pre=R_gt_B, cp_pre=cp_B, delta1_se3=pose_hat_se3,
+                force_sub_idx=sub_idx_A,
             )
             if built_B is None:
                 continue
@@ -1270,7 +1275,7 @@ class PandaSetCalibDatasetFull(Dataset):
         pert_vec = np.array([t[0], t[1], t[2], ypr[0], ypr[1], ypr[2],
                               dfx_pct, dfy_pct], dtype=np.float32)
         delta1_se3 = np.zeros(6, dtype=np.float32)
-        return self.build_window(
+        return self.build_crop(
             inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
             u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
             tile_u0, tile_v0, img_full, IW, IH,
@@ -1282,11 +1287,12 @@ class PandaSetCalibDatasetFull(Dataset):
     # ─── __getitem__ used to inline-build. Keeping this on the class so the
     # ─── browser demo can call it directly without duplicating projection /
     # ─── bucket-bin / rep-selection logic.
-    def build_window(self, inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
+    def build_crop(self, inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
                        u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
                        tile_u0, tile_v0, img_full, IW, IH,
                        R_pre=None, cp_pre=None, delta1_se3=None,
-                       gt_u_lo=None, gt_u_hi=None):
+                       gt_u_lo=None, gt_u_hi=None,
+                       force_sub_idx=None):
         """Apply a given perturbation+crop to an inst → DataLoader sample tuple.
         Returns None when the crop ends up with < self.min_pts in-view points;
         caller decides whether to retry (training) or report failure (demo).
@@ -1420,10 +1426,17 @@ class PandaSetCalibDatasetFull(Dataset):
             cu_c = (ci_u + 0.5) * cell_S
             cv_c = (ci_v + 0.5) * cell_S
             score = (uv_local[:, 0] - cu_c) ** 2 + (uv_local[:, 1] - cv_c) ** 2
-        order = np.lexsort((score, cell_id))           # primary cell_id, secondary score
-        _, first_pos = np.unique(cell_id[order], return_index=True)
-        sel = order[first_pos]                        # one rep per occupied cell
-        sub_idx = np.where(in_crop_off)[0][sel]      # idx into cand_idx
+        if force_sub_idx is not None:
+            # Cross-frame B side: use the sub_idx already chosen by the A side
+            # so built_A[i] and built_B[i] index the SAME pts_A[cand_idx[i]].
+            # The grid lexsort would otherwise pick a different cell rep on
+            # the B image because point UVs differ between cameras.
+            sub_idx = np.asarray(force_sub_idx, dtype=np.int64)
+        else:
+            order = np.lexsort((score, cell_id))           # primary cell_id, secondary score
+            _, first_pos = np.unique(cell_id[order], return_index=True)
+            sel = order[first_pos]                        # one rep per occupied cell
+            sub_idx = np.where(in_crop_off)[0][sel]      # idx into cand_idx
         pts_sel = pts_c[sub_idx]                     # (Nrep, 3)
         intens_sel = intens_c[sub_idx].astype(np.float32)  # (Nrep,)
         uv_gt_sel  = uv_gt_c[sub_idx]
@@ -1467,7 +1480,7 @@ class PandaSetCalibDatasetFull(Dataset):
         #   K_orig       : original intrinsics (3, 3). The solver uses fx_orig etc.
         #                  so J's pixel-side stays in original-camera px.
         # Network input (img/dist_uvd/vfp) stays local 128px; the solver path is a
-        # parallel exit from build_window. The W (or Σ_uv) the network predicts in
+        # parallel exit from build_crop. The W (or Σ_uv) the network predicts in
         # local px is converted to original-camera px via (cs/S)² downstream.
         pts_cam_orig = pts_sel.astype(np.float32)                      # (Nrep, 3) m
         duv_orig     = (uv_gt_sel - uv_off_sel).astype(np.float32)     # (Nrep, 2) px (orig)
@@ -1582,7 +1595,8 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.from_numpy(duv_orig),
                 torch.from_numpy(K_orig),
                 torch.tensor(float(cs), dtype=torch.float32),
-                torch.from_numpy(delta1_se3))
+                torch.from_numpy(delta1_se3),
+                torch.from_numpy(sub_idx.astype(np.int64)))
 
 
 def collate_full(batch):
