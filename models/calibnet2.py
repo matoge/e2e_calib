@@ -402,45 +402,6 @@ class CalibNet2(nn.Module):
         return per_pt
 
     # ------------------------------------------------------------------
-    def forward_pair(self,
-                     image_A: torch.Tensor, distorted_uvd_A: torch.Tensor,
-                     image_B: torch.Tensor, distorted_uvd_B: torch.Tensor,
-                     R_AB: torch.Tensor,
-                     vfp_A: torch.Tensor = None, vfp_B: torch.Tensor = None,
-                     bucket_uvd_A=None, bucket_valid_A=None,
-                     bucket_uvd_B=None, bucket_valid_B=None,
-                     key_padding_mask_A=None, key_padding_mask_B=None):
-        """KV always own (A's image+lidar). Cross-frame transport via Q-rotation.
-
-        Returns:
-            pred_A      : forward(A, R=I)               — A's calib
-            pred_B      : forward(B, R=I)               — B's calib (sanity)
-            pred_A_to_B : forward(A, R=R_AB)            — A's Q rotated by R_AB
-                          against A's own KV.  Trainer compares against
-                          A_pts under T_gt_B projected into B's image px
-                          (= where the same world points should land in B).
-        """
-        pred_A = self.forward(
-            image_A, distorted_uvd_A,
-            dpose_R=None, vfp=vfp_A,
-            bucket_uvd=bucket_uvd_A, bucket_valid=bucket_valid_A,
-            key_padding_mask=key_padding_mask_A,
-        )
-        pred_B = self.forward(
-            image_B, distorted_uvd_B,
-            dpose_R=None, vfp=vfp_B,
-            bucket_uvd=bucket_uvd_B, bucket_valid=bucket_valid_B,
-            key_padding_mask=key_padding_mask_B,
-        )
-        pred_A_to_B = self.forward(
-            image_A, distorted_uvd_A,
-            dpose_R=R_AB, vfp=vfp_A,
-            bucket_uvd=bucket_uvd_A, bucket_valid=bucket_valid_A,
-            key_padding_mask=key_padding_mask_A,
-        )
-        return pred_A, pred_B, pred_A_to_B
-
-    # ------------------------------------------------------------------
     def forward_cross_frame(self,
                               image_A: torch.Tensor,
                               distorted_uvd_A: torch.Tensor,

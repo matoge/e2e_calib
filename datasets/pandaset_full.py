@@ -1120,51 +1120,44 @@ class PandaSetCalibDatasetFull(Dataset):
             # set + same crop ⇒ same sub_idx ⇒ A and B emit pts at IDENTICAL
             # tuple positions. That makes pair_vis's same-index correspondence
             # lines correct without any 3-D matching hack.
+            # Cross-frame target: project pts_A (NOT pts_B) into B's GT camera so
+            # built_B's true_uvd / dist_uvd describe the same world point as
+            # built_A's tokens at IDENTICAL list index. The network's Q is
+            # pts_A-derived; aligning target to pts_A is the only way the
+            # per-point Δuv loss makes sense.
+            #
+            # KV_B's image features come from inst_B['img']; KV_B's dense LiDAR
+            # bucket is built inside build_window from uv_gt_c. Passing pts_A
+            # (B-projected) here means KV_B's bucket also uses pts_A geometry —
+            # acceptable because the world is shared (pts_A and pts_B differ only
+            # by ego motion + dynamics; for static scenes B-projection of pts_A
+            # ≈ pts_B's B-projection).
             if self.same_frame_self_sup:
-                pts_B       = pts_A
-                intensity_B = intensity_A
-                is_obj_B    = is_obj_A
-                uv_full_B   = uv_full_A
-                z_B         = z_A
-                cand_idx_B  = cand_idx_A
-                pts_c_B     = pts_c_A
-                intens_c_B  = intens_c_A
-                uv_gt_c_B   = uv_gt_c_A
+                cand_idx_B = cand_idx_A
+                pts_c_B    = pts_c_A
+                intens_c_B = intens_c_A
+                uv_gt_c_B  = uv_gt_c_A
+                is_obj_B   = is_obj_A
             else:
-                pts_B = inst_B['pts'].numpy()
-                intensity_B = np.clip(inst_B['intensity'].numpy().astype(np.float32),
-                                      0.0, 1.0) if 'intensity' in inst_B \
-                                      else np.zeros(len(pts_B), dtype=np.float32)
-                is_obj_B = inst_B['is_obj'].numpy().astype(bool) if 'is_obj' in inst_B \
-                           else _is_obj_per_point(pts_B, inst_B.get('cuboids', [])).astype(bool)
-                if 'uv_full' in inst_B and 'z_cam' in inst_B:
-                    uv_full_B = inst_B['uv_full'].numpy()
-                    z_B = inst_B['z_cam'].numpy()
-                else:
-                    T_gt_B = np.eye(4, dtype=np.float32)
-                    T_gt_B[:3, :3] = R_gt_B.T
-                    T_gt_B[:3, 3]  = -R_gt_B.T @ cp_B
-                    homo = np.column_stack([pts_B, np.ones(len(pts_B))])
-                    pts_cam_gt = (T_gt_B @ homo.T)[:3].T
-                    z_B = pts_cam_gt[:, 2].astype(np.float32)
-                    uv_full_B = ((K_B @ pts_cam_gt.T)[:2]
-                                 / np.maximum(pts_cam_gt[:, 2:].T, 1e-6)).T.astype(np.float32)
+                # Project pts_A into B's GT camera.
+                T_gt_B = np.eye(4, dtype=np.float32)
+                T_gt_B[:3, :3] = R_gt_B.T
+                T_gt_B[:3, 3]  = -R_gt_B.T @ cp_B
+                homo_A = np.column_stack([pts_A, np.ones(len(pts_A))])
+                pts_cam_B_gt = (T_gt_B @ homo_A.T)[:3].T
+                z_B_pts_A = pts_cam_B_gt[:, 2].astype(np.float32)
+                uv_full_B_from_A = ((K_B @ pts_cam_B_gt.T)[:2]
+                                     / np.maximum(pts_cam_B_gt[:, 2:].T, 1e-6)).T.astype(np.float32)
                 if tile_u0_B or tile_v0_B:
-                    uv_full_B = uv_full_B - np.array([tile_u0_B, tile_v0_B], dtype=np.float32)
-                pad_px_B = int(cs * 0.10)
-                in_pad_B = ((uv_full_B[:, 0] >= u0_B - pad_px_B) &
-                            (uv_full_B[:, 0] <  u0_B + cs + pad_px_B) &
-                            (uv_full_B[:, 1] >= v0_B - pad_px_B) &
-                            (uv_full_B[:, 1] <  v0_B + cs + pad_px_B) &
-                            (z_B > 0.5))
-                cand_idx_B = np.where(in_pad_B)[0]
-                if len(cand_idx_B) < self.min_pts:
-                    continue
-                if len(cand_idx_B) > self.n_full:
-                    cand_idx_B = np.random.choice(cand_idx_B, size=self.n_full, replace=False)
-                pts_c_B = pts_B[cand_idx_B]
-                intens_c_B = intensity_B[cand_idx_B]
-                uv_gt_c_B  = uv_full_B[cand_idx_B]
+                    uv_full_B_from_A = uv_full_B_from_A - np.array(
+                        [tile_u0_B, tile_v0_B], dtype=np.float32)
+                # Use the SAME cand_idx_A — this guarantees built_A[i] and
+                # built_B[i] correspond to pts_A[cand_idx_A[i]] in both panels.
+                cand_idx_B = cand_idx_A
+                pts_c_B    = pts_A[cand_idx_A]                 # 3D points (world)
+                intens_c_B = intensity_A[cand_idx_A]
+                uv_gt_c_B  = uv_full_B_from_A[cand_idx_A]      # B-cam GT uv
+                is_obj_B   = is_obj_A
             pert_vec_B = np.array([t_delta[0], t_delta[1], t_delta[2],
                                    ypr_delta[0], ypr_delta[1], ypr_delta[2],
                                    0.0, 0.0], dtype=np.float32)
