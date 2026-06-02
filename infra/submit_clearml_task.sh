@@ -95,7 +95,7 @@ echo "       entry: $ENTRY"
 echo "[info] bash_setup_script:"
 sed 's/^/    /' "$BASH_SETUP"
 
-clearml-task \
+/home/hfunaya/.pyenv/versions/3.10.4/bin/clearml-task \
   --project     "$PROJECT" \
   --name        "$NAME" \
   --queue       "$QUEUE" \

@@ -571,29 +571,30 @@ def main():
     # 4adad157, 2026-06-02). The same render is uploaded to title
     # vis_check_pair_getitem so the training task surfaces the A↔B
     # correspondence sanity directly.
+    # CRITICAL: pull samples directly from the underlying train_ds (CPU
+    # Subset/ConcatDataset), NOT from the prepared train_loader. Going via
+    # train_loader (a) advances the DistributedSampler so other ranks see
+    # shifted batches, and (b) accelerate's send_to_device hook moves
+    # tensors onto cuda:0, breaking .numpy() inside render_one_pair.
     if args.pair_mode and accel.is_main_process:
         try:
             log("preflight: vis_check pair_getitem (dataset emission only)")
             from scripts.vis_check._pair_render import render_one_pair
-            it = iter(train_loader)
-            pf_batch = next(it)
-            A = pf_batch['A']; B = pf_batch['B']
-            dpose_AB_pf = pf_batch['dpose_AB']
-            imgs_A_pf, _trueA_pf, distA_pf, padA_pf, vfpA_pf, buA_pf, bvA_pf = A[:7]
-            imgs_B_pf, trueB_pf,  distB_pf, padB_pf, vfpB_pf, buB_pf, bvB_pf = B[:7]
-            pertB_pf = B[7]
-            n_check = min(6, imgs_A_pf.shape[0])
+            n_check = 6
             for i in range(n_check):
-                built_A_i = (imgs_A_pf[i], _trueA_pf[i], distA_pf[i],
-                             vfpA_pf[i], buA_pf[i], bvA_pf[i],
-                             # collate-pre slot [6] is pert_vec; A side has no
-                             # calib pert in the current dataset so synthesise.
+                sample = train_ds[i % len(train_ds)]
+                if isinstance(sample, list):
+                    if not sample:
+                        continue
+                    sample = sample[0]
+                built_A_t, built_B_t, dpose_AB_t = sample
+                # collate-pre tuple slot [6] is pert_vec.
+                built_A_i = (built_A_t[0], built_A_t[1], built_A_t[2],
+                             built_A_t[3], built_A_t[4], built_A_t[5],
                              torch.zeros(8))
-                built_B_i = (imgs_B_pf[i], trueB_pf[i], distB_pf[i],
-                             vfpB_pf[i], buB_pf[i], bvB_pf[i],
-                             pertB_pf[i])
+                built_B_i = built_B_t[:7]
                 out_p = vis_dir / f'vis_check_pair_{i:02d}.png'
-                res = render_one_pair(built_A_i, built_B_i, dpose_AB_pf[i],
+                res = render_one_pair(built_A_i, built_B_i, dpose_AB_t,
                                        out_path=out_p,
                                        img_size=args.img_size,
                                        k_show=12,
@@ -606,7 +607,6 @@ def main():
                 if res:
                     log(f"  vis_check {res[0]}  N_ok={res[1]['n_ok']}  "
                         f"HAT→GT={res[1]['err_hyp']:.1f}px")
-            del it
         except Exception as _e:
             log(f"  ↳ preflight vis_check skipped: {_e}")
     accel.wait_for_everyone()
