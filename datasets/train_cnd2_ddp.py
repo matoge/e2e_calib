@@ -581,32 +581,34 @@ def main():
             log("preflight: vis_check pair_getitem (dataset emission only)")
             from scripts.vis_check._pair_render import render_one_pair
             n_check = 6
-            for i in range(n_check):
-                sample = train_ds[i % len(train_ds)]
-                if isinstance(sample, list):
-                    if not sample:
-                        continue
-                    sample = sample[0]
-                built_A_t, built_B_t, dpose_AB_t = sample
-                # collate-pre tuple slot [6] is pert_vec.
-                built_A_i = (built_A_t[0], built_A_t[1], built_A_t[2],
-                             built_A_t[3], built_A_t[4], built_A_t[5],
-                             torch.zeros(8))
-                built_B_i = built_B_t[:7]
-                out_p = vis_dir / f'vis_check_pair_{i:02d}.png'
-                res = render_one_pair(built_A_i, built_B_i, dpose_AB_t,
-                                       out_path=out_p,
-                                       img_size=args.img_size,
-                                       k_show=12,
-                                       suptitle_prefix=f'vis_check #{i}  ')
-                if res and cml_logger is not None:
-                    cml_logger.report_image(
-                        title='vis_check_pair_getitem',
-                        series=f'sample_{i:02d}',
-                        iteration=0, local_path=str(res[0]))
-                if res:
-                    log(f"  vis_check {res[0]}  N_ok={res[1]['n_ok']}  "
-                        f"HAT→GT={res[1]['err_hyp']:.1f}px")
+            for ds_label, ds in (('train', train_ds), ('val', val_ds)):
+                for i in range(n_check):
+                    sample = ds[i % len(ds)]
+                    if isinstance(sample, list):
+                        if not sample:
+                            continue
+                        sample = sample[0]
+                    built_A_t, built_B_t, dpose_AB_t = sample
+                    # collate-pre tuple slot [6] is pert_vec.
+                    built_A_i = (built_A_t[0], built_A_t[1], built_A_t[2],
+                                 built_A_t[3], built_A_t[4], built_A_t[5],
+                                 torch.zeros(8))
+                    built_B_i = built_B_t[:7]
+                    out_p = vis_dir / f'vis_check_pair_{ds_label}_{i:02d}.png'
+                    res = render_one_pair(built_A_i, built_B_i, dpose_AB_t,
+                                           out_path=out_p,
+                                           img_size=args.img_size,
+                                           k_show=12,
+                                           suptitle_prefix=f'vis_check {ds_label} #{i}  ')
+                    if res and cml_logger is not None:
+                        cml_logger.report_image(
+                            title=f'vis_check_pair_getitem_{ds_label}',
+                            series=f'sample_{i:02d}',
+                            iteration=0, local_path=str(res[0]))
+                    if res:
+                        log(f"  vis_check[{ds_label}] {res[0]}  "
+                            f"N_ok={res[1]['n_ok']}  "
+                            f"HAT→GT={res[1]['err_hyp']:.1f}px")
         except Exception as _e:
             log(f"  ↳ preflight vis_check skipped: {_e}")
     accel.wait_for_everyone()
