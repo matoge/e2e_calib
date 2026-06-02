@@ -643,21 +643,77 @@ def main():
                 rs(title='loss/mse', series='val',   value=va_mse, iteration=ep+1)
                 rs(title='lr', series='lr',
                    value=scheduler.get_last_lr()[0], iteration=ep+1)
-            # Pair-mode debug samples: render last batch, upload to ClearML
-            # Debug Samples panel.
+            # Pair-mode debug samples: render the SAME 16 fixed samples each
+            # epoch (8 train + 8 val) so a person can watch convergence on
+            # consistent panels instead of a random new batch every time.
+            # train_ds[i] / val_ds[i] CPU-direct → manual collate-of-1 → model
+            # forward (rank 0 unwrapped, no DDP allreduce) → render with pred.
             if args.pair_mode and accel.is_main_process:
                 try:
-                    for cap in (vis_cap_train, vis_cap_val):
-                        if not cap:
-                            continue
-                        paths = render_pair_debug_samples(
-                            cap, ep + 1, n_samples=6, out_dir=vis_dir)
-                        if cml_logger is not None:
-                            for p in paths:
+                    from scripts.vis_check._pair_render import render_one_pair
+                    n_per_split = 8
+                    _m = accel.unwrap_model(model)
+                    was_train = _m.training
+                    _m.eval()
+                    for ds_label, ds in (('train', train_ds), ('val', val_ds)):
+                        for i in range(n_per_split):
+                            try:
+                                sample = ds[i % len(ds)]
+                            except Exception:
+                                continue
+                            if isinstance(sample, list):
+                                if not sample: continue
+                                sample = sample[0]
+                            built_A_t, built_B_t, dpose_AB_t = sample
+                            # Forward 1-batch through model on rank-0 only.
+                            dev = accel.device
+                            img_A_b = built_A_t[0].unsqueeze(0).float().div(255.0).to(dev)
+                            img_B_b = built_B_t[0].unsqueeze(0).float().div(255.0).to(dev)
+                            distA_b = built_A_t[2].unsqueeze(0).to(dev)
+                            buA_b   = built_A_t[4].unsqueeze(0).to(dev)
+                            bvA_b   = built_A_t[5].unsqueeze(0).to(dev)
+                            buB_b   = built_B_t[4].unsqueeze(0).to(dev)
+                            bvB_b   = built_B_t[5].unsqueeze(0).to(dev)
+                            vfpA_b  = built_A_t[3].unsqueeze(0).to(dev)
+                            vfpB_b  = built_B_t[3].unsqueeze(0).to(dev)
+                            pertB_b = built_B_t[6].unsqueeze(0)
+                            dpose_b = dpose_AB_t.unsqueeze(0)
+                            ypr_HAT = (dpose_b[..., 3:6] + pertB_b[..., 3:6]).to(dev,
+                                          dtype=img_A_b.dtype)
+                            R_AB_b = _R_from_zyx_deg(ypr_HAT)
+                            t_HAT_b = (dpose_b[..., 0:3]
+                                        + pertB_b[..., 0:3]).to(dev, dtype=img_A_b.dtype)
+                            point_in_A_b = torch.cat(
+                                [distA_b[..., :3], distA_b[..., 4:5]], dim=-1)
+                            with torch.no_grad():
+                                out_b = _m(img_A_b, point_in_A_b,
+                                           mode='cross', image_B=img_B_b,
+                                           R_AB=R_AB_b, t_AB=t_HAT_b,
+                                           vfp=vfpA_b, vfp_B=vfpB_b,
+                                           bucket_uvd=buA_b, bucket_valid=bvA_b,
+                                           bucket_uvd_B=buB_b, bucket_valid_B=bvB_b,
+                                           key_padding_mask=None)
+                            per_pt_b = (out_b[0] if isinstance(out_b, tuple) else out_b)
+                            per_pt_np = per_pt_b[0].detach().float().cpu().numpy()
+
+                            built_A_i = (built_A_t[0], built_A_t[1], built_A_t[2],
+                                         built_A_t[3], built_A_t[4], built_A_t[5],
+                                         torch.zeros(8))
+                            built_B_i = built_B_t[:7]
+                            out_p = vis_dir / f'pair_debug_{ds_label}_ep{ep+1:03d}_{i:02d}.png'
+                            res = render_one_pair(
+                                built_A_i, built_B_i, dpose_AB_t,
+                                out_path=out_p, img_size=args.img_size,
+                                k_show=12,
+                                suptitle_prefix=f'ep{ep+1} {ds_label} #{i}  ',
+                                pred_per_pt=per_pt_np)
+                            if res and cml_logger is not None:
                                 cml_logger.report_image(
-                                    title=f"pair_debug_{cap.get('split','?')}",
-                                    series=p.stem,
-                                    iteration=ep + 1, local_path=str(p))
+                                    title=f'pair_debug_{ds_label}',
+                                    series=f'sample_{i:02d}',
+                                    iteration=ep + 1, local_path=str(res[0]))
+                    if was_train:
+                        _m.train()
                 except Exception as _e:
                     log(f"  ↳ pair debug-sample render skipped: {_e}")
             if va_nll < best_val:

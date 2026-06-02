@@ -27,18 +27,25 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib import cm
-from matplotlib.patches import ConnectionPatch
+from matplotlib.patches import ConnectionPatch, Ellipse
 
 
 def render_one_pair(built_A, built_B, dpose_AB,
                      out_path: Path, *,
                      img_size: int = 128,
                      k_show: int = 12,
-                     suptitle_prefix: str = '') -> tuple[Path, dict] | None:
+                     suptitle_prefix: str = '',
+                     pred_per_pt: 'np.ndarray | None' = None
+                     ) -> tuple[Path, dict] | None:
     """Render one (A, B, dpose_AB) sample. Returns (path, stats) or None
     when the sample has too few in-image points.
 
     Tensors are accepted as torch.Tensor or numpy.ndarray.
+
+    pred_per_pt (optional): (N, 5) [duv_x, duv_y, log_sx, log_sy, rho] — if
+    given, draws ○pred = dist + duv plus a 2σ ellipse on the B panel and
+    reports err_pred in the title. Trainer per-epoch hook passes this; the
+    pure dataset-emission preflight passes None.
     """
     def _np(x):
         return x.numpy() if hasattr(x, 'numpy') else np.asarray(x)
@@ -51,6 +58,7 @@ def render_one_pair(built_A, built_B, dpose_AB,
     dist_uvd_B = _np(built_B[2])
     pert_B     = _np(built_B[6])  # collate-pre layout: [6] is pert_vec
     dpose      = _np(dpose_AB)
+    pp_np = _np(pred_per_pt) if pred_per_pt is not None else None
 
     Nmin = min(true_uvd_A.shape[0], true_uvd_B.shape[0])
     in_A = ((true_uvd_A[:Nmin, 0] >= 0) & (true_uvd_A[:Nmin, 0] < img_size) &
@@ -118,6 +126,26 @@ def render_one_pair(built_A, built_B, dpose_AB,
                        fontsize=7, color='black', weight='bold', zorder=6)
         ax_B.plot(uH[0], uH[1], 'x', color=c, markersize=8, mew=1.5,
                    alpha=0.85, zorder=4)
+        if pp_np is not None:
+            mu = pp_np[i, :2]
+            uP = uH + mu  # pred = HAT + Δuv
+            sx = float(np.exp(pp_np[i, 2])); sy = float(np.exp(pp_np[i, 3]))
+            rho = float(pp_np[i, 4])
+            cxx, cyy, cxy = sx * sx, sy * sy, rho * sx * sy
+            cov = np.array([[cxx, cxy], [cxy, cyy]])
+            w_, v_ = np.linalg.eigh(cov)
+            w_ = np.maximum(w_, 1e-9)
+            order = w_.argsort()[::-1]
+            w_ = w_[order]; v_ = v_[:, order]
+            ang = float(np.degrees(np.arctan2(v_[1, 0], v_[0, 0])))
+            ax_B.plot(uP[0], uP[1], 'o', color=c, markersize=4,
+                       markeredgecolor='white', mew=0.6, zorder=7)
+            ax_B.add_patch(Ellipse((uP[0], uP[1]),
+                                    width=float(2 * np.sqrt(w_[0])),
+                                    height=float(2 * np.sqrt(w_[1])),
+                                    angle=ang,
+                                    facecolor='none', edgecolor=c,
+                                    lw=1.2, alpha=0.9, zorder=8))
         fig.add_artist(ConnectionPatch(
             xyA=(uA_gt[0], uA_gt[1]), xyB=(uG[0], uG[1]),
             coordsA='data', coordsB='data',
@@ -129,15 +157,26 @@ def render_one_pair(built_A, built_B, dpose_AB,
                fontsize=6, color='white', va='bottom',
                bbox=dict(facecolor='black', alpha=0.55, pad=2,
                           edgecolor='none'))
-    ax_B.text(2, img_size - 4,
-               'o (large)  POSE_GT_AB           (pose target = true_uvd_B)\n'
-               'x  POSE_GT_AB + ε_pose          (pose HAT = dist_uvd_B)',
+    legend_B = ('o (large)  POSE_GT_AB           (pose target = true_uvd_B)\n'
+                'x  POSE_GT_AB + ε_pose          (pose HAT = dist_uvd_B)')
+    if pp_np is not None:
+        legend_B += '\no (small) + ellipse  pred = HAT + Δuv ± 2σ'
+    ax_B.text(2, img_size - 4, legend_B,
                fontsize=6, color='white', va='bottom',
                bbox=dict(facecolor='black', alpha=0.55, pad=2,
                           edgecolor='none'))
     ax_A.set_title(f'A frame  N_ok={n_ok}', fontsize=9, loc='left')
-    ax_B.set_title(f'B frame  HAT→GT shift {err_hyp:.1f} px',
-                    fontsize=9, loc='left')
+    if pp_np is not None:
+        pred_uv = dist_uvd_B[:Nmin, :2] + pp_np[:Nmin, :2]
+        err_pred = float(np.linalg.norm(true_uvd_B[:Nmin][ok, :2]
+                                         - pred_uv[ok], axis=-1).mean())
+        ax_B.set_title(
+            f'B frame  HAT→GT {err_hyp:.1f} px → pred {err_pred:.2f} px',
+            fontsize=9, loc='left')
+    else:
+        err_pred = None
+        ax_B.set_title(f'B frame  HAT→GT shift {err_hyp:.1f} px',
+                        fontsize=9, loc='left')
     fig.suptitle(
         f'{suptitle_prefix}'
         f'ε_pose t=({pert_B[0]:+.2f},{pert_B[1]:+.2f},{pert_B[2]:+.2f})m '
@@ -148,4 +187,7 @@ def render_one_pair(built_A, built_B, dpose_AB,
     fig.tight_layout()
     fig.savefig(out_path, dpi=110, bbox_inches='tight')
     plt.close(fig)
-    return out_path, dict(n_ok=n_ok, err_hyp=err_hyp)
+    stats = dict(n_ok=n_ok, err_hyp=err_hyp)
+    if err_pred is not None:
+        stats['err_pred'] = err_pred
+    return out_path, stats
