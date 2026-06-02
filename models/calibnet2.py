@@ -280,6 +280,101 @@ class CalibNet2(nn.Module):
             self.info_head = None
 
     # ------------------------------------------------------------------
+    def _build_Q(self, distorted_uvd: torch.Tensor,
+                  bucket_uvd: torch.Tensor,
+                  bucket_valid: torch.Tensor,
+                  key_padding_mask=None) -> torch.Tensor:
+        """Per-point token Q for one frame.
+
+        PointMLP3([u/img_size, v/img_size, d, intensity?]) → (B, N, D), then
+        add per-query frustum-local context. Used by BOTH calib path and
+        cross-frame path (the cross-frame variant simply runs this once on
+        the A side; B has no Q).
+        """
+        uv_01 = distorted_uvd[..., :2] / self.img_size
+        d3    = distorted_uvd[..., 2:3]
+        if self.use_intensity:
+            q_in = torch.cat([uv_01, d3, distorted_uvd[..., 3:4]], dim=-1)
+        else:
+            q_in = torch.cat([uv_01, d3], dim=-1)
+        q = self.point_mlp(q_in)
+        # frustum_enc.forward subtracts query_uvd from cands (cands - query_uvd).
+        # Bucket is 4-col [u,v,d,intensity]; pass query at the same width so the
+        # subtract produces (Δu, Δv, Δd, Δintensity).
+        q = q + self.frustum_enc(
+            query_uvd=distorted_uvd[..., :bucket_uvd.shape[-1]],
+            bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
+            query_token=q, query_pad_mask=key_padding_mask,
+            img_size=self.img_size)
+        return q
+
+    def _run_blocks(self, q: torch.Tensor,
+                     kv_flat: torch.Tensor,
+                     spatial_shapes: torch.Tensor,
+                     level_start_index: torch.Tensor,
+                     n_iters: int,
+                     delta_cum: torch.Tensor = None,
+                     key_padding_mask=None):
+        """Apply the shared block n_iters times against a single KV bundle.
+
+        Returns (q_out, delta_cum) where delta_cum is the running residual
+        sum used by the final head. Caller passes in delta_cum if continuing
+        from a previous half (cross-frame, after PoseEmb).
+        """
+        if delta_cum is None:
+            delta_cum = torch.zeros_like(q)
+        for _ in range(n_iters):
+            q, delta_i = self.block(q, kv_flat, spatial_shapes,
+                                     level_start_index,
+                                     key_padding_mask=key_padding_mask)
+            delta_cum = delta_cum + delta_i
+        return q, delta_cum
+
+    def _readout(self, delta_cum: torch.Tensor):
+        """Δ_cum → (per_pt[..., :5], W?). Single final head; abs-PE leak gate
+        comes from feeding Δ_cum, not q itself.
+        """
+        from models.model_cov import clamp_params
+        raw = self.final_head(delta_cum)
+        per_pt = clamp_params(raw, self.img_size)
+        if self.info_head is not None:
+            W = self.info_head(delta_cum)
+            return per_pt, W
+        return per_pt
+
+    def forward_frame(self,
+                       image: torch.Tensor,
+                       distorted_uvd: torch.Tensor,
+                       bucket_uvd: torch.Tensor,
+                       bucket_valid: torch.Tensor,
+                       n_iters: int,
+                       *,
+                       q: torch.Tensor = None,
+                       delta_cum: torch.Tensor = None,
+                       key_padding_mask=None):
+        """One frame of work — KV (own image+lidar), Q (per-point), block stack.
+
+        Used by both calib and cross-frame paths:
+          * calib: call ONCE with n_iters=self.n_iter, q=None.
+          * cross-frame A side: call with n_iters=n_half, q=None.
+          * cross-frame B side: call with q=<post-PoseEmb token>,
+                                 delta_cum=<from A side>, n_iters=n_iter-n_half.
+        If `q` is None it is rebuilt from distorted_uvd; if given (cross-frame
+        B side), distorted_uvd may be None and we just run blocks against KV_B.
+        delta_cum chains across A→B so the final readout sees the full A→B
+        residual, not just the B-side increment.
+        """
+        kv_flat, sh, lsi = self._build_kv(image, bucket_uvd, bucket_valid)
+        if q is None:
+            assert distorted_uvd is not None, \
+                "forward_frame: distorted_uvd required when q is not provided"
+            q = self._build_Q(distorted_uvd, bucket_uvd, bucket_valid,
+                               key_padding_mask=key_padding_mask)
+        return self._run_blocks(q, kv_flat, sh, lsi, n_iters=n_iters,
+                                 delta_cum=delta_cum,
+                                 key_padding_mask=key_padding_mask)
+
+    # ------------------------------------------------------------------
     def _build_kv(self, image: torch.Tensor,
                    bucket_uvd: torch.Tensor,
                    bucket_valid: torch.Tensor):
@@ -355,51 +450,13 @@ class CalibNet2(nn.Module):
             per_pt: (B, N, 5)  cumulative (duv_x, duv_y, log_sx, log_sy, rho)
             W:     (B, N, 2, 2)  — only when use_info_head=True
         """
-        B = image.size(0)
-        # --- KV (own-frame: image + dense lidar) — built ONCE, reused. ---
-        kv_flat, spatial_shapes, level_start_index = self._build_kv(
-            image, bucket_uvd, bucket_valid)
-
-        # --- Q (PointMLP3 + Frustum per-query 3×3 neighborhood). Calib mode
-        # has NO PoseEmb anywhere: there's no ego motion to inject (R = I
-        # always) and frame-token learns lidar↔image alignment without hint.
-        # Frustum encoder provides per-query local 3D context (same as
-        # CalibNetDepth use_frustum=True path).
-        uv_01 = distorted_uvd[..., :2] / self.img_size
-        d3    = distorted_uvd[..., 2:3]
-        if self.use_intensity:
-            q_in = torch.cat([uv_01, d3, distorted_uvd[..., 3:4]], dim=-1)
-        else:
-            q_in = torch.cat([uv_01, d3], dim=-1)
-        q = self.point_mlp(q_in)                                     # (B, N, D)
-        # add per-query frustum context (3×3 cell neighbors → mini cross-attn).
-        # FrustumLocalEncoder.forward subtracts query_uvd from gathered bucket
-        # candidates (cands - query_uvd), so query_uvd and bucket_uvd MUST share
-        # last-dim C. Production caches store bucket as 4-col [u,v,d,intensity]
-        # — pass query_uvd at the SAME 4-col layout, NOT distorted_uvd[..., :3].
-        q = q + self.frustum_enc(
-            query_uvd=distorted_uvd[..., :bucket_uvd.shape[-1]],
-            bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
-            query_token=q, query_pad_mask=key_padding_mask,
-            img_size=self.img_size)
-
-        # --- Stacked shared block, frame-internal refinement only ---
-        delta_cum = torch.zeros_like(q)
-        for _ in range(self.n_iter):
-            q, delta_i = self.block(q, kv_flat, spatial_shapes,
-                                    level_start_index,
-                                    key_padding_mask=key_padding_mask)
-            delta_cum = delta_cum + delta_i
-
-        # --- Single final readout: Δ_cum → (duv, log σ, ρ) ---
-        raw = self.final_head(delta_cum)                             # (B, N, 5)
-        from models.model_cov import clamp_params
-        per_pt = clamp_params(raw, self.img_size)                    # (B, N, 5)
-
-        if self.info_head is not None:
-            W = self.info_head(delta_cum)                            # (B, N, 2, 2)
-            return per_pt, W
-        return per_pt
+        # Calib = single forward_frame call. No PoseEmb: there's no ego motion
+        # to inject (R=I implicit) and frame-token learns lidar↔image alignment
+        # without a hint.
+        q, delta_cum = self.forward_frame(
+            image, distorted_uvd, bucket_uvd, bucket_valid,
+            n_iters=self.n_iter, key_padding_mask=key_padding_mask)
+        return self._readout(delta_cum)
 
     # ------------------------------------------------------------------
     def forward_cross_frame(self,
@@ -430,59 +487,21 @@ class CalibNet2(nn.Module):
             per_pt: (B, N_A, 5)  cumulative Δ_AtoB readout
             W:     (B, N_A, 2, 2)  — only when use_info_head=True
         """
-        B = image_A.size(0)
-        # KV for both frames (same _build_kv, different image/bucket).
-        kv_A_flat, kv_A_shapes, kv_A_lsi = self._build_kv(
-            image_A, bucket_uvd_A, bucket_valid_A)
-        kv_B_flat, kv_B_shapes, kv_B_lsi = self._build_kv(
-            image_B, bucket_uvd_B, bucket_valid_B)
-
-        # Q from A's LiDAR (PointMLP3). NO entry-time pose_emb call: the
-        # state-space disentanglement (frame-token = world, pose_emb = ego
-        # motion) requires the A-frame block stack to see PURE A-frame token
-        # semantics, identical to legacy single-frame calib. Intrinsic info is
-        # already carried by the PointMLP3 input (uv normalized by img_size).
-        uv_01 = distorted_uvd_A[..., :2] / self.img_size
-        d3    = distorted_uvd_A[..., 2:3]
-        if self.use_intensity:
-            q_in = torch.cat([uv_01, d3, distorted_uvd_A[..., 3:4]], dim=-1)
-        else:
-            q_in = torch.cat([uv_01, d3], dim=-1)
-        q = self.point_mlp(q_in)                                    # (B, N_A, D)
-        # add per-query frustum context (uses A's bucket; KV_A's geometry).
-        # query_uvd / bucket_uvd MUST share last-dim C — bucket is 4-col
-        # [u,v,d,intensity], so query_uvd 4-col matches and rel = cands - q
-        # produces (Δu, Δv, Δd, Δintensity) for the local-neighbour MLP.
-        q = q + self.frustum_enc(
-            query_uvd=distorted_uvd_A[..., :bucket_uvd_A.shape[-1]],
-            bucket_uvd=bucket_uvd_A, bucket_valid=bucket_valid_A,
-            query_token=q, query_pad_mask=key_padding_mask_A,
-            img_size=self.img_size)
-
-        # Stack: first half on KV_A, then RoPE(R_AB) once, then second half on KV_B.
-        delta_cum = torch.zeros_like(q)
+        # Cross-frame = forward_frame(A) → SE(3) PoseEmb on Q → forward_frame(B,
+        # q=carry, delta_cum=carry). Two forward_frame calls share the same
+        # block stack; only the KV bundle and the iteration count differ.
         n_half = self.n_iter // 2
-        for _ in range(n_half):
-            q, delta_i = self.block(q, kv_A_flat, kv_A_shapes, kv_A_lsi,
-                                     key_padding_mask=key_padding_mask_A)
-            delta_cum = delta_cum + delta_i
-
+        q, delta_cum = self.forward_frame(
+            image_A, distorted_uvd_A, bucket_uvd_A, bucket_valid_A,
+            n_iters=n_half, key_padding_mask=key_padding_mask_A)
         # SE(3) PoseEmb on Q at the stack midpoint:
         #   type-1 chunk (40 vec×3): block-diag(R_AB) action
         #   type-0 chunk (8 scalar): translation_mlp(t_AB) added (zero-init →
-        #                            no-op when ckpt is from kick #1)
-        # log_vfp=None skips intrinsic injection.
+        #                            no-op when ckpt predates SE(3) extension)
         q = self.pose_emb(q, dpose_R=R_AB, dpose_t=t_AB, log_vfp=None)
-
-        for _ in range(self.n_iter - n_half):
-            q, delta_i = self.block(q, kv_B_flat, kv_B_shapes, kv_B_lsi,
-                                     key_padding_mask=key_padding_mask_A)
-            delta_cum = delta_cum + delta_i
-
-        raw = self.final_head(delta_cum)
-        from models.model_cov import clamp_params
-        per_pt = clamp_params(raw, self.img_size)
-        if self.info_head is not None:
-            W = self.info_head(delta_cum)
-            return per_pt, W
-        return per_pt
+        q, delta_cum = self.forward_frame(
+            image_B, None, bucket_uvd_B, bucket_valid_B,
+            n_iters=self.n_iter - n_half,
+            q=q, delta_cum=delta_cum,
+            key_padding_mask=key_padding_mask_A)
+        return self._readout(delta_cum)
