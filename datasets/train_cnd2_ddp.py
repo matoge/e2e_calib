@@ -375,6 +375,15 @@ def main():
                         'L2:fine+lidar np=4, L3:super_fine+lidar np=8 '
                         '(layer-specific weights, A/B共有). '
                         'Empty = legacy shared-block 3-level stack.')
+    # Fourier-feature head (NeRF / Tancik 2020). Lifts MLP NTK out of its
+    # low-frequency regime — useful when sub-pixel residuals are not
+    # being expressed by the plain Linear(d, 5) head. n_freq=0 disables.
+    p.add_argument('--fourier-head-n-freq', type=int, default=0,
+                   help='Fourier features prepended to final_head input '
+                        '(0 = disabled, NeRF default ~16).')
+    p.add_argument('--fourier-head-scale', type=float, default=10.0,
+                   help='σ of the random B matrix in Fourier features '
+                        '(NeRF default ~10).')
     p.add_argument('--val-fraction', type=float, default=0.1)
     p.add_argument('--split-seed', type=int, default=42)
     p.add_argument('--use-info-head', action='store_true',
@@ -540,6 +549,8 @@ def main():
                       n_iter=args.n_iter, n_heads=args.n_heads,
                       d_scalar=8, n_type1=40,
                       kv_schedule=kv_schedule,
+                      fourier_head_n_freq=int(args.fourier_head_n_freq),
+                      fourier_head_scale=float(args.fourier_head_scale),
                       use_info_head=args.use_info_head)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 

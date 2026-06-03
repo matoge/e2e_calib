@@ -249,7 +249,9 @@ class CalibNet2(nn.Module):
                  d_scalar: int = 8, n_type1: int = 40,
                  convnext_n_blocks: int = 2,
                  use_info_head: bool = True,
-                 kv_schedule: list[dict] | None = None):
+                 kv_schedule: list[dict] | None = None,
+                 fourier_head_n_freq: int = 0,
+                 fourier_head_scale: float = 10.0):
         super().__init__()
         self.img_size  = img_size
         self.cnn = ConvNeXtBackbone(d, in_channels=in_channels,
@@ -308,7 +310,21 @@ class CalibNet2(nn.Module):
         # Final readout — Δ_cum → (duv_x, duv_y, log_sx, log_sy, rho).
         # Zero-init weights so initial output is bias only; bias log_s = log(2)
         # matches legacy clamp_params expectation.
-        self.final_head = nn.Linear(d, 5)
+        # Optionally prepend a Fourier-feature lift to delta_cum before the
+        # head: γ(δ) = [sin(B δ), cos(B δ)] with B ~ N(0, σ²) frozen at init
+        # (NeRF / Tancik 2020). Lifts MLP NTK out of its low-frequency regime
+        # so the head can express sub-pixel-grain corrections that a plain
+        # Linear(d, 5) tends to smooth out. Zero cost at inference (one matmul
+        # + sin/cos), and γ(0) = 0 so the lift is a no-op at init — safe to
+        # warm-start ckpts that didn't have it.
+        self.fourier_head_n_freq = int(fourier_head_n_freq)
+        if self.fourier_head_n_freq > 0:
+            B = torch.randn(self.fourier_head_n_freq, d) * float(fourier_head_scale)
+            self.register_buffer('fourier_B', B, persistent=True)
+            head_in = d + 2 * self.fourier_head_n_freq
+        else:
+            head_in = d
+        self.final_head = nn.Linear(head_in, 5)
         nn.init.zeros_(self.final_head.weight)
         nn.init.zeros_(self.final_head.bias)
         with torch.no_grad():
@@ -426,9 +442,19 @@ class CalibNet2(nn.Module):
         comes from feeding Δ_cum, not q itself.
         """
         from models.model_cov import clamp_params
-        raw = self.final_head(delta_cum)
+        if self.fourier_head_n_freq > 0:
+            # γ(δ) = [sin(B δ), cos(B δ)], B is registered buffer.
+            proj = delta_cum @ self.fourier_B.t()       # (B, N, n_freq)
+            gamma = torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
+            head_in = torch.cat([delta_cum, gamma], dim=-1)
+        else:
+            head_in = delta_cum
+        raw = self.final_head(head_in)
         per_pt = clamp_params(raw, self.img_size)
         if self.info_head is not None:
+            # info_head still consumes raw delta_cum; it's a separate predictor
+            # for the 2x2 information matrix and benefits from the smoother
+            # representation (it does not have to chase sub-pixel residuals).
             W = self.info_head(delta_cum)
             return per_pt, W
         return per_pt
