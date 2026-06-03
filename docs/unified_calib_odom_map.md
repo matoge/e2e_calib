@@ -182,6 +182,41 @@ LLM の KV-cache と同じ機構で実装できる:
 
 ---
 
+## 8.5 SplatAD との関係 — 「scene-specific 3DGS」 vs 「generic token map」
+
+SplatAD は **1 シーンごとに 3DGS を 30k iter で当てる scene-specific 手法**
+であり、calib (camera_opt) も同時に refine する。出力は scene 専用 Gaussian 集合。
+このアーキは:
+
+| | SplatAD (scene-specific) | このアーキ (generic) |
+|---|---|---|
+| 学習対象 | Gaussian 集合そのもの | transformer の重み |
+| 1 シーン当たりコスト | 数時間 × 1 GPU | 推論のみ (秒) |
+| 新シーン | フル再学習 (30k iter) | zero-shot (重み固定) |
+| Calib | camera_opt で joint refine (scene 内のみ) | 学習中に汎化、推論で per-frame 補正 |
+| 出力 | rasterized image / depth | per-query (Δu, Δv, σ, d) |
+| densification | 公式 split/clone (gradient-based) | attention match_score < τ |
+| token / Gaussian の中身 | (μ, Σ, SH color, α) | (xyz, σ, feature, w) |
+
+つまり SplatAD は **このアーキの教師生成器** として使う:
+
+1. SplatAD で 1 シーン (PandaSet 001 等) の 3DGS map を作る
+2. 各画素 ray に対して nearest Gaussian center 距離 = `d_target`
+3. その Gaussian の `σ_world` = `σ_target`
+4. (u, v) 全画素 × N フレーム分の `(d_target, σ_target)` を抽出
+5. これを stage 2 以降の curriculum に投入
+
+**学習が終われば SplatAD は不要**。推論時は transformer 単独で、新シーン上で
+calib + odom + map (token buffer) を online で実行する。
+SplatAD = 「scene-specific 重く explicit」、このアーキ = 「generic 軽く explicit」
+で出力形式 (token ≡ Gaussian) は同じ。**explicit map 経由で蒸留する**
+イメージが一番近い。
+
+副次的効果: SplatAD の camera_opt がどの程度 PandaSet の元 pose を補正したか
+を測れば、PandaSet 元 pose の正確さも逆評価できる (今の検証ジョブの主目的の 1 つ)。
+
+---
+
 ## 9. 新規性のサーフェス
 
 | 手法 | スコープ | 限界 |
