@@ -248,10 +248,10 @@ class CalibNet2(nn.Module):
                  n_iter: int = 3, n_heads: int = 4, n_points: int = 4,
                  d_scalar: int = 8, n_type1: int = 40,
                  convnext_n_blocks: int = 2,
-                 use_info_head: bool = True):
+                 use_info_head: bool = True,
+                 kv_schedule: list[dict] | None = None):
         super().__init__()
         self.img_size  = img_size
-        self.n_iter    = n_iter
         self.cnn = ConvNeXtBackbone(d, in_channels=in_channels,
                                      n_blocks=convnext_n_blocks)
         self.use_intensity = bool(use_intensity)
@@ -259,10 +259,52 @@ class CalibNet2(nn.Module):
         self.frustum_enc = FrustumLocalEncoder(
             d, r_uv_cells=r_uv_cells, r_d=r_d, k=k_nb, grid_n=frustum_grid_n)
         self.pose_emb = RoPEPoseEmb(d, d_scalar=d_scalar, n_type1=n_type1)
-        # ONE shared block, applied n_iter times.
-        self.block = Block(d=d, n_heads=n_heads, n_levels=3, n_points=n_points)
-        self.level_embed = nn.Parameter(torch.zeros(3, d))
-        nn.init.normal_(self.level_embed, std=0.02)
+        # --- block stack ---------------------------------------------------
+        # Two regimes:
+        #  * kv_schedule=None (legacy / kick #1, #2): ONE shared block, KV
+        #    is a fixed 3-level pyramid [coarse, fine, lidar], n_levels=3.
+        #  * kv_schedule given (kick #3): per-layer blocks (own weights),
+        #    each with its own (image_scale, lidar?, n_points) config.
+        #    A/B共有 is enforced at the call site by replaying the same
+        #    ModuleList on both KV_A and KV_B. Example:
+        #      [
+        #       {"image": "coarse",     "lidar": True, "n_points": 4},
+        #       {"image": "coarse",     "lidar": True, "n_points": 4},
+        #       {"image": "fine",       "lidar": True, "n_points": 4},
+        #       {"image": "super_fine", "lidar": True, "n_points": 8},
+        #      ]
+        #    "super_fine" = stem output (img/4 = 32x32 for img=128).
+        self.kv_schedule = kv_schedule
+        if self.kv_schedule is None:
+            self.n_iter = n_iter
+            self.block = Block(d=d, n_heads=n_heads, n_levels=3, n_points=n_points)
+            self.level_embed = nn.Parameter(torch.zeros(3, d))
+            nn.init.normal_(self.level_embed, std=0.02)
+        else:
+            # Validate schedule.
+            for li, cfg in enumerate(self.kv_schedule):
+                assert cfg.get("image") in ("coarse", "fine", "super_fine", None), \
+                    f"kv_schedule[{li}].image must be one of coarse/fine/super_fine/None"
+                n_lvl = (1 if cfg.get("image") is not None else 0) + \
+                        (1 if cfg.get("lidar", True) else 0)
+                assert n_lvl >= 1, f"kv_schedule[{li}] has no levels"
+                assert int(cfg.get("n_points", 4)) >= 1
+            self.n_iter = len(self.kv_schedule)
+            self.blocks = nn.ModuleList()
+            for li, cfg in enumerate(self.kv_schedule):
+                n_lvl = (1 if cfg.get("image") is not None else 0) + \
+                        (1 if cfg.get("lidar", True) else 0)
+                np_l = int(cfg.get("n_points", n_points))
+                self.blocks.append(
+                    Block(d=d, n_heads=n_heads, n_levels=n_lvl, n_points=np_l))
+            # Per-layer level_embed sized to that layer's n_levels.
+            self.level_embeds = nn.ParameterList()
+            for cfg in self.kv_schedule:
+                n_lvl = (1 if cfg.get("image") is not None else 0) + \
+                        (1 if cfg.get("lidar", True) else 0)
+                pe = nn.Parameter(torch.zeros(n_lvl, d))
+                nn.init.normal_(pe, std=0.02)
+                self.level_embeds.append(pe)
         # Final readout — Δ_cum → (duv_x, duv_y, log_sx, log_sy, rho).
         # Zero-init weights so initial output is bias only; bias log_s = log(2)
         # matches legacy clamp_params expectation.
@@ -316,6 +358,7 @@ class CalibNet2(nn.Module):
                      delta_cum: torch.Tensor = None,
                      key_padding_mask=None):
         """Apply the shared block n_iters times against a single KV bundle.
+        (Legacy path; only called when kv_schedule is None.)
 
         Returns (q_out, delta_cum) where delta_cum is the running residual
         sum used by the final head. Caller passes in delta_cum if continuing
@@ -327,6 +370,54 @@ class CalibNet2(nn.Module):
             q, delta_i = self.block(q, kv_flat, spatial_shapes,
                                      level_start_index,
                                      key_padding_mask=key_padding_mask)
+            delta_cum = delta_cum + delta_i
+        return q, delta_cum
+
+    def _run_blocks_per_layer(self, q: torch.Tensor,
+                                feats: dict,
+                                lidar_2d: torch.Tensor,
+                                layer_indices: list[int],
+                                delta_cum: torch.Tensor = None,
+                                key_padding_mask=None):
+        """Per-layer block stack with kv_schedule.
+
+        feats : dict {"coarse": (B,D,Hc,Wc), "fine": (B,D,Hf,Wf),
+                       "super_fine": (B,D,Hs,Ws)}  -- some entries may be None
+                       if no layer in `layer_indices` needs them.
+        lidar_2d : (B, D, gn, gn)  -- always built; layers can opt out via
+                                      kv_schedule[li].lidar = False.
+        layer_indices : which schedule entries to run, in order.
+        """
+        device = q.device
+        B = q.size(0)
+        if delta_cum is None:
+            delta_cum = torch.zeros_like(q)
+        for li in layer_indices:
+            cfg = self.kv_schedule[li]
+            kvs, shapes, cum = [], [], [0]
+            lvl = 0
+            img_kind = cfg.get("image")
+            if img_kind is not None:
+                feat = feats[img_kind]
+                _, _, H, W = feat.shape
+                kv_l = feat.flatten(2).permute(0, 2, 1) \
+                       + self.level_embeds[li][lvl][None, None, :]
+                kvs.append(kv_l); shapes.append([H, W])
+                cum.append(cum[-1] + H * W)
+                lvl += 1
+            if cfg.get("lidar", True):
+                _, _, H, W = lidar_2d.shape
+                kv_l = lidar_2d.flatten(2).permute(0, 2, 1) \
+                       + self.level_embeds[li][lvl][None, None, :]
+                kvs.append(kv_l); shapes.append([H, W])
+                cum.append(cum[-1] + H * W)
+                lvl += 1
+            kv_flat = torch.cat(kvs, dim=1)
+            spatial_shapes    = torch.as_tensor(shapes,   dtype=torch.long, device=device)
+            level_start_index = torch.as_tensor(cum[:-1], dtype=torch.long, device=device)
+            q, delta_i = self.blocks[li](q, kv_flat, spatial_shapes,
+                                          level_start_index,
+                                          key_padding_mask=key_padding_mask)
             delta_cum = delta_cum + delta_i
         return q, delta_cum
 
@@ -351,7 +442,8 @@ class CalibNet2(nn.Module):
                        *,
                        q: torch.Tensor = None,
                        delta_cum: torch.Tensor = None,
-                       key_padding_mask=None):
+                       key_padding_mask=None,
+                       layer_indices: list[int] | None = None):
         """One frame of work — KV (own image+lidar), Q (per-point), block stack.
 
         Used by both calib and cross-frame paths:
@@ -363,16 +455,44 @@ class CalibNet2(nn.Module):
         B side), distorted_uvd may be None and we just run blocks against KV_B.
         delta_cum chains across A→B so the final readout sees the full A→B
         residual, not just the B-side increment.
+
+        kv_schedule mode (kick #3+): pass `layer_indices=[li, li+1, ...]`
+        instead of `n_iters`; the per-layer KV pyramid + per-layer Block
+        weights are dispatched accordingly. n_iters is ignored.
         """
-        kv_flat, sh, lsi = self._build_kv(image, bucket_uvd, bucket_valid)
         if q is None:
             assert distorted_uvd is not None, \
                 "forward_frame: distorted_uvd required when q is not provided"
             q = self._build_Q(distorted_uvd, bucket_uvd, bucket_valid,
                                key_padding_mask=key_padding_mask)
+        if self.kv_schedule is not None:
+            assert layer_indices is not None, \
+                "kv_schedule mode: forward_frame requires layer_indices"
+            feats = self._build_feats(image)
+            lidar_2d = self._build_lidar_2d(bucket_uvd, bucket_valid)
+            return self._run_blocks_per_layer(
+                q, feats, lidar_2d, layer_indices=layer_indices,
+                delta_cum=delta_cum, key_padding_mask=key_padding_mask)
+        kv_flat, sh, lsi = self._build_kv(image, bucket_uvd, bucket_valid)
         return self._run_blocks(q, kv_flat, sh, lsi, n_iters=n_iters,
                                  delta_cum=delta_cum,
                                  key_padding_mask=key_padding_mask)
+
+    # ------------------------------------------------------------------
+    def _build_feats(self, image: torch.Tensor) -> dict:
+        """Backbone forward → {coarse, fine, super_fine}. Only the scales
+        that the kv_schedule actually uses are computed (super_fine is the
+        cheap stem projection — always available)."""
+        coarse, fine, super_fine = self.cnn(image, return_super_fine=True)
+        return {"coarse": coarse, "fine": fine, "super_fine": super_fine}
+
+    def _build_lidar_2d(self, bucket_uvd, bucket_valid):
+        lidar_dense = self.frustum_enc.forward_dense(
+            bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
+            img_size=self.img_size)
+        B = lidar_dense.size(0)
+        gn = int(round(lidar_dense.size(1) ** 0.5))
+        return lidar_dense.permute(0, 2, 1).reshape(B, -1, gn, gn).contiguous()
 
     # ------------------------------------------------------------------
     def _build_kv(self, image: torch.Tensor,
@@ -453,9 +573,16 @@ class CalibNet2(nn.Module):
         # Calib = single forward_frame call. No PoseEmb: there's no ego motion
         # to inject (R=I implicit) and frame-token learns lidar↔image alignment
         # without a hint.
-        q, delta_cum = self.forward_frame(
-            image, distorted_uvd, bucket_uvd, bucket_valid,
-            n_iters=self.n_iter, key_padding_mask=key_padding_mask)
+        if self.kv_schedule is not None:
+            # In kv_schedule mode the entire schedule runs on the single frame.
+            q, delta_cum = self.forward_frame(
+                image, distorted_uvd, bucket_uvd, bucket_valid,
+                n_iters=0, key_padding_mask=key_padding_mask,
+                layer_indices=list(range(self.n_iter)))
+        else:
+            q, delta_cum = self.forward_frame(
+                image, distorted_uvd, bucket_uvd, bucket_valid,
+                n_iters=self.n_iter, key_padding_mask=key_padding_mask)
         return self._readout(delta_cum)
 
     # ------------------------------------------------------------------
@@ -491,17 +618,33 @@ class CalibNet2(nn.Module):
         # q=carry, delta_cum=carry). Two forward_frame calls share the same
         # block stack; only the KV bundle and the iteration count differ.
         n_half = self.n_iter // 2
-        q, delta_cum = self.forward_frame(
-            image_A, distorted_uvd_A, bucket_uvd_A, bucket_valid_A,
-            n_iters=n_half, key_padding_mask=key_padding_mask_A)
+        if self.kv_schedule is not None:
+            a_layers = list(range(0, n_half))
+            b_layers = list(range(n_half, self.n_iter))
+            q, delta_cum = self.forward_frame(
+                image_A, distorted_uvd_A, bucket_uvd_A, bucket_valid_A,
+                n_iters=0, key_padding_mask=key_padding_mask_A,
+                layer_indices=a_layers)
+        else:
+            q, delta_cum = self.forward_frame(
+                image_A, distorted_uvd_A, bucket_uvd_A, bucket_valid_A,
+                n_iters=n_half, key_padding_mask=key_padding_mask_A)
         # SE(3) PoseEmb on Q at the stack midpoint:
         #   type-1 chunk (40 vec×3): block-diag(R_AB) action
         #   type-0 chunk (8 scalar): translation_mlp(t_AB) added (zero-init →
         #                            no-op when ckpt predates SE(3) extension)
         q = self.pose_emb(q, dpose_R=R_AB, dpose_t=t_AB, log_vfp=None)
-        q, delta_cum = self.forward_frame(
-            image_B, None, bucket_uvd_B, bucket_valid_B,
-            n_iters=self.n_iter - n_half,
-            q=q, delta_cum=delta_cum,
-            key_padding_mask=key_padding_mask_A)
+        if self.kv_schedule is not None:
+            q, delta_cum = self.forward_frame(
+                image_B, None, bucket_uvd_B, bucket_valid_B,
+                n_iters=0,
+                q=q, delta_cum=delta_cum,
+                key_padding_mask=key_padding_mask_A,
+                layer_indices=b_layers)
+        else:
+            q, delta_cum = self.forward_frame(
+                image_B, None, bucket_uvd_B, bucket_valid_B,
+                n_iters=self.n_iter - n_half,
+                q=q, delta_cum=delta_cum,
+                key_padding_mask=key_padding_mask_A)
         return self._readout(delta_cum)

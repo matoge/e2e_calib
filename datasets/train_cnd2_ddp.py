@@ -365,6 +365,16 @@ def main():
     p.add_argument('--prefetch', type=int, default=4)
     p.add_argument('--n-iter', type=int, default=3)
     p.add_argument('--n-heads', type=int, default=4)
+    # kick #3: per-layer KV schedule. Named presets only for now; arbitrary
+    # config could be loaded from a yaml later. None = legacy 3-level shared-
+    # block stack (kick #1, #2 default).
+    p.add_argument('--kv-schedule', type=str, default='',
+                   choices=['', 'kick3'],
+                   help='Per-layer KV pyramid schedule. "kick3" = '
+                        'L0:coarse+lidar np=4, L1:coarse+lidar np=4, '
+                        'L2:fine+lidar np=4, L3:super_fine+lidar np=8 '
+                        '(layer-specific weights, A/B共有). '
+                        'Empty = legacy shared-block 3-level stack.')
     p.add_argument('--val-fraction', type=float, default=0.1)
     p.add_argument('--split-seed', type=int, default=42)
     p.add_argument('--use-info-head', action='store_true',
@@ -516,10 +526,20 @@ def main():
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, **val_kw)
 
     # --- model ---
+    KV_SCHEDULES = {
+        'kick3': [
+            {'image': 'coarse',     'lidar': True, 'n_points': 4},
+            {'image': 'coarse',     'lidar': True, 'n_points': 4},
+            {'image': 'fine',       'lidar': True, 'n_points': 4},
+            {'image': 'super_fine', 'lidar': True, 'n_points': 8},
+        ],
+    }
+    kv_schedule = KV_SCHEDULES.get(args.kv_schedule) if args.kv_schedule else None
     model = CalibNet2(d=128, img_size=args.img_size, in_channels=3,
                       use_intensity=True, frustum_grid_n=args.grid_n,
                       n_iter=args.n_iter, n_heads=args.n_heads,
                       d_scalar=8, n_type1=40,
+                      kv_schedule=kv_schedule,
                       use_info_head=args.use_info_head)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 

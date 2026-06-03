@@ -130,12 +130,21 @@ class ConvNeXtBackbone(nn.Module):
         self.coarse_blocks = nn.Sequential(*[_ConvNeXtBlock(d) for _ in range(n_blocks)])
         self.pe_fine   = PosEnc2D(d)
         self.pe_coarse = PosEnc2D(d)
+        # super-fine = stem output (img/4 = 32x32 for img_size=128) projected
+        # to decoder dim. Used by CalibNet2's last-layer high-resolution KV
+        # only. Cheap (1x1 conv on 32x32) — mostly free.
+        self.super_fine_proj = nn.Conv2d(stem_d, d, 1)
+        self.pe_super_fine = PosEnc2D(d)
 
-    def forward(self, x):
+    def forward(self, x, return_super_fine: bool = False):
         s      = self.stem(x)
         fine   = self.fine_blocks(torch.relu(self.fine_norm(self.fine_down(s))))
         coarse = self.coarse_blocks(torch.relu(self.coarse_norm(self.coarse_down(fine))))
         fine_out = self.fine_proj(fine)
+        if return_super_fine:
+            super_fine_out = self.pe_super_fine(self.super_fine_proj(s))
+            return (self.pe_coarse(coarse), self.pe_fine(fine_out),
+                    super_fine_out)
         return self.pe_coarse(coarse), self.pe_fine(fine_out)
 
 
