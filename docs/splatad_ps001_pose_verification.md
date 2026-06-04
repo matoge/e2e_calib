@@ -110,6 +110,60 @@ SO3xR3 後の残差 (< 0.06° avg) では sub-pixel に圧縮、信号機が「2
 3. **`camera_optimizer.mode=SO3xR3` ON** で pose を per-frame per-sensor で学習させると、遠方ぼけが定量的に改善 (信号機 crop +3.65 dB / sharpness 63→79%)
 4. **論文 demo クオリティ (PSNR 30+)** にはまだ届いてないが、これは Gaussian cap (5M) や iter 数の問題で、pose の効果は明確に切り分けられた
 
+## 5.5 Refined pose の commit
+
+per-frame の `pose_adjustment` (cam + lidar) と元の PS pose を同梱したファイル:
+
+- [`assets/splatad_ps001/refined_poses_ps001.json`](assets/splatad_ps001/refined_poses_ps001.json) (50KB)
+
+構造:
+```json
+{
+  "scene": "001",
+  "source": "SplatAD camera_optimizer.mode=SO3xR3 (front_cam + lidar), step 30000",
+  "summary": {
+    "vehicle_drift_trans_mm_mean": 6.93,
+    "vehicle_drift_trans_mm_max": 24.91,
+    "vehicle_drift_rot_deg_mean": 0.0568,
+    "vehicle_drift_rot_deg_max": 0.1081,
+    "cam_lidar_extrinsic_static_bias_mm": [0.22, 1.66, 10.26],
+    "cam_lidar_extrinsic_static_bias_deg": [-0.002, -0.058, 0.010]
+  },
+  "frames": {
+    "0": {
+      "cam_delta_trans_m": [tx, ty, tz],
+      "cam_delta_axisangle_rad": [rx, ry, rz],
+      "lidar_delta_trans_m": [...],
+      "lidar_delta_axisangle_rad": [...],
+      "original_cam_pose": { ... PandaSet format ... },
+      "original_lidar_pose": { ... }
+    },
+    ...
+  }
+}
+```
+
+使い方:
+```python
+import json
+d = json.load(open("docs/assets/splatad_ps001/refined_poses_ps001.json"))
+for fi, frame in d["frames"].items():
+    cam_orig = frame["original_cam_pose"]  # PS pose dict
+    delta = frame["cam_delta_trans_m"]  # 3-vec
+    rot_delta = frame["cam_delta_axisangle_rad"]  # 3-vec
+    # apply delta to original pose → refined pose
+    refined_cam_position = [
+        cam_orig["position"]["x"] + delta[0],
+        cam_orig["position"]["y"] + delta[1],
+        cam_orig["position"]["z"] + delta[2],
+    ]
+    # rotation: axisangle delta ⊕ original quaternion
+```
+
+これを cross_frame の supervision で「公開 PS pose」じゃなく「SplatAD-refined」を使うことで、訓練 GT が cm 精度向上。
+
+---
+
 ## 6. 含意 (cross_frame net への接続)
 
 - SplatAD は「**地図作成側**」ではなく「**pose refinement + 高精度教師生成器**」として使う用途で有効
