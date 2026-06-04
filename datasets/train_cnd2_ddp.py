@@ -411,6 +411,13 @@ def main():
                         'dpose_AB) tuples; trainer calls '
                         'CalibNet2.forward_cross_frame(A, B, R_AB) and '
                         'targets the GT projection of A points in B image.')
+    p.add_argument('--pair-bidir', action='store_true',
+                   help='in pair-mode, also emit B->A swapped sample for the '
+                        'same frame pair (doubles dataset throughput).')
+    p.add_argument('--point-mlp-fourier-n-freq', type=int, default=0,
+                   help='NeRF-style Fourier feature lift on PointMLP3 input '
+                        '(uvd). 0 = off (default), 8/10 typical for sub-pixel '
+                        'frequency capacity.')
     p.add_argument('--clearml', action='store_true',
                    help='register a ClearML Task with cfg + why + git context')
     p.add_argument('--clearml-project', type=str, default='e2e_calib/calib',
@@ -472,7 +479,8 @@ def main():
                  grid_n=args.grid_n, oversample=args.oversample,
                  split_pert=False,
                  pair_mode=bool(args.pair_mode),
-                 pair_stride=int(args.pair_stride))
+                 pair_stride=int(args.pair_stride),
+                 pair_bidir=bool(args.pair_bidir))
     cache_paths = [s.strip() for s in args.cache.split(',') if s.strip()]
     # Per-cache u_band override
     ub_map = {}
@@ -551,6 +559,7 @@ def main():
                       kv_schedule=kv_schedule,
                       fourier_head_n_freq=int(args.fourier_head_n_freq),
                       fourier_head_scale=float(args.fourier_head_scale),
+                      point_mlp_fourier_n_freq=int(args.point_mlp_fourier_n_freq),
                       use_info_head=args.use_info_head)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 

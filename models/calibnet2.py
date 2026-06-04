@@ -251,13 +251,16 @@ class CalibNet2(nn.Module):
                  use_info_head: bool = True,
                  kv_schedule: list[dict] | None = None,
                  fourier_head_n_freq: int = 0,
-                 fourier_head_scale: float = 10.0):
+                 fourier_head_scale: float = 10.0,
+                 point_mlp_fourier_n_freq: int = 0):
         super().__init__()
         self.img_size  = img_size
         self.cnn = ConvNeXtBackbone(d, in_channels=in_channels,
                                      n_blocks=convnext_n_blocks)
         self.use_intensity = bool(use_intensity)
-        self.point_mlp = PointMLP3(d, in_channels=4 if self.use_intensity else 3)
+        self.point_mlp = PointMLP3(d,
+                                    in_channels=4 if self.use_intensity else 3,
+                                    fourier_n_freq=int(point_mlp_fourier_n_freq))
         self.frustum_enc = FrustumLocalEncoder(
             d, r_uv_cells=r_uv_cells, r_d=r_d, k=k_nb, grid_n=frustum_grid_n)
         self.pose_emb = RoPEPoseEmb(d, d_scalar=d_scalar, n_type1=n_type1)

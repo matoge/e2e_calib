@@ -243,6 +243,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  fixed_center_crop: bool = False,
                  pair_mode: bool = False,
                  pair_stride: int = 1,
+                 pair_bidir: bool = False,
                  same_frame_self_sup: bool = False,
                  photometric_jitter: float = 0.25,
                  preload: bool = True):
@@ -359,6 +360,7 @@ class PandaSetCalibDatasetFull(Dataset):
         # (scene, cam, frame) per inst.
         self.pair_mode   = bool(pair_mode)
         self.pair_stride = int(pair_stride)
+        self.pair_bidir  = bool(pair_bidir)
         # Self-supervised same-frame mode. Sets every pair (i, i): A and B
         # come from the SAME inst, so POSE_GT_AB = identity. Δuv on B is
         # whatever closed-form shift δ induces under the per-pivot lidar
@@ -583,12 +585,24 @@ class PandaSetCalibDatasetFull(Dataset):
             for _ in range(os_n):
                 if is_pair:
                     built = self.build_pair(idx)
+                    if built is None:
+                        ok = False
+                        break
+                    samples.append(built)
+                    # Bidirectional augmentation: emit the B->A swapped pair
+                    # as an additional sample (same frame pair, role swap).
+                    # Doubles dataset throughput per frame at minor extra
+                    # cost (inst already in RAM cache, only re-pivot+lexsort).
+                    if self.pair_bidir:
+                        built_rev = self.build_pair(idx, swap_AB=True)
+                        if built_rev is not None:
+                            samples.append(built_rev)
                 else:
                     built = self._build_one_window(idx, _inst_override=inst)
-                if built is None:
-                    ok = False
-                    break
-                samples.append(built)
+                    if built is None:
+                        ok = False
+                        break
+                    samples.append(built)
             if ok:
                 return samples
             # re-roll an unseen FRAME idx
@@ -936,11 +950,16 @@ class PandaSetCalibDatasetFull(Dataset):
     # across A and B for this pair).
     #
     # Returns (A12-tuple, B12-tuple, dpose_AB_6vec) or None on re-roll.
-    def build_pair(self, idx: int):
+    def build_pair(self, idx: int, swap_AB: bool = False):
         N_pairs = len(self.pair_index)
         if N_pairs == 0:
             raise RuntimeError("pair_mode=True but pair_index is empty")
         i_A, i_B = self.pair_index[idx % N_pairs]
+        if swap_AB:
+            # Generate the reverse-direction sample (B->A) from the same frame
+            # pair so the model gets per-frame supervision in both directions.
+            # Forward path is identical, only the role assignment swaps.
+            i_A, i_B = i_B, i_A
         inst_A = self._load_inst(i_A)
         inst_B = self._load_inst(i_B)
 

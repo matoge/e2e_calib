@@ -16,21 +16,60 @@ from models.model_cov import CrossAttentionBlockCov, TransformerDecoderBlock, cl
 class PointMLP3(nn.Module):
     """Point MLP for (U, V, D_norm, [intensity]) input.
 
-    in_channels is 3 for legacy caches (no intensity) or 4 for V3-i caches
-    (with per-point intensity). The downstream code is unchanged — only the
-    first linear layer's input dim shifts.
+    in_channels is 3 (legacy uvd) or 4 (uvd + intensity).
+
+    NeRF-style Fourier feature lift (fourier_n_freq > 0):
+    spatial coords (uv01, d) are encoded as
+        γ(x) = [x, sin(π·2⁰x), cos(π·2⁰x), ...,
+                   sin(π·2^(L-1) x), cos(π·2^(L-1) x)]
+    before the first Linear. Intensity (when present) passes through raw.
+    Rationale: low-frequency NTK bias on continuous-coord MLPs prevents
+    sub-pixel-grain functions of (u, v, d). A fixed Fourier basis lifts the
+    bias ceiling; image side already uses Fourier (PosEnc2D), this brings
+    the 3D / Q side to parity.
     """
-    def __init__(self, d: int = D_DIM, in_channels: int = 3):
+    def __init__(self, d: int = D_DIM, in_channels: int = 3,
+                 fourier_n_freq: int = 0):
         super().__init__()
+        import math
         self.in_channels = int(in_channels)
+        self.fourier_n_freq = int(fourier_n_freq)
+        # Spatial coords = first 3 channels (u, v, d). With intensity
+        # (in_channels=4) we lift only those 3 and pass the 4th through raw.
+        self.n_spatial = 3
+        if self.fourier_n_freq > 0:
+            lifted_dim = self.n_spatial * (1 + 2 * self.fourier_n_freq)
+            n_extra = max(0, self.in_channels - self.n_spatial)
+            in_dim = lifted_dim + n_extra
+            freqs = (2.0 ** torch.arange(self.fourier_n_freq).float()) * math.pi
+            self.register_buffer('fourier_freqs', freqs, persistent=True)
+        else:
+            in_dim = self.in_channels
         self.net = nn.Sequential(
-            nn.Linear(self.in_channels, 64), nn.GELU(),
+            nn.Linear(in_dim, 64), nn.GELU(),
             nn.Linear(64, d),  nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(d, d),
         )
 
+    def _fourier_lift(self, x_spatial: torch.Tensor) -> torch.Tensor:
+        # x_spatial: (..., 3). Return (..., 3 + 3*2L) flattened.
+        L = self.fourier_n_freq
+        scaled = x_spatial.unsqueeze(-1) * self.fourier_freqs   # (..., 3, L)
+        sin_term = torch.sin(scaled)
+        cos_term = torch.cos(scaled)
+        sincos = torch.stack([sin_term, cos_term], dim=-1)       # (..., 3, L, 2)
+        sincos = sincos.reshape(*x_spatial.shape, 2 * L)          # (..., 3, 2L)
+        lifted = torch.cat([x_spatial.unsqueeze(-1), sincos], dim=-1)  # (..., 3, 1+2L)
+        return lifted.reshape(*x_spatial.shape[:-1], -1)
+
     def forward(self, uvd: torch.Tensor) -> torch.Tensor:
+        if self.fourier_n_freq > 0:
+            spatial = uvd[..., :self.n_spatial]
+            extras  = uvd[..., self.n_spatial:]
+            lifted = self._fourier_lift(spatial)
+            x = torch.cat([lifted, extras], dim=-1) if extras.numel() else lifted
+            return self.net(x)
         return self.net(uvd)
 
 
