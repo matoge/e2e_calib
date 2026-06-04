@@ -52,6 +52,20 @@ rot:    ry = -0.058° (yaw 0.06° ズレ), 他 ≈ 0
 
 → progressive drift ではなく、frame ごとの jitter + 一部 systematic 成分 (yaw rz、cam-LiDAR tz)。
 
+### 2.5 3D 軌跡 (interactive)
+
+![3D trajectory](assets/splatad_ps001/path_3d_preview.png)
+
+interactive 版 (回転・拡大可): [`path_3d.html`](assets/splatad_ps001/path_3d.html) を browser で開く。
+
+- 🔵 cam ORIGINAL (PS)
+- 🟦 cam REFINED (SplatAD)
+- 🔴 lidar ORIGINAL (PS)
+- 🟠 lidar REFINED (SplatAD)
+- ⚫ delta lines (each frame: original → refined、real mm scale 誇張なし)
+
+軌跡そのものは 40 frame × ~14m/s で進んでて長さ ~30m、delta は mm スケールなので **マクロ視点だと重なって見える** ── plotly でズームすると 1 cm 単位の per-frame ズレが見える。
+
 ---
 
 ## 3. Render 品質比較 (frame 01)
