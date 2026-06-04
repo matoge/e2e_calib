@@ -2,11 +2,26 @@
 
 ## 0. なぜこれをやるか (motivation)
 
-cross_frame net で frame_A → frame_B の residual を学習させると、**1 秒程度の短い baseline ではほぼ完璧に収束** する。ただし **8 秒程度の long baseline** になると、結果に **小さな回転誤差** が残るのが観察されてきた。これは:
+### 0.1 cross_frame net の現状の限界
+
+cross_frame net で frame_A → frame_B の residual を学習させると、**1 秒程度の短い baseline ではほぼ完璧に収束** する。ただし **8 秒程度の long baseline** になると、結果に **小さな回転誤差** が残るのが観察されてきた:
 
 - frame i での pose 誤差は数 mm / 0.05° クラスで、単フレームでは問題にならない
-- しかし frame 間で累積 → 8 秒 × 14 m/s ≒ 110 m スパンで回転誤差が 0.1° 残ると遠方 px shift が visible
+- しかし frame 間で累積 → 8 秒 × 14 m/s ≒ 110 m スパンで回転誤差 0.1° 残ると遠方 px shift が visible
 - 遠方信号機・看板・標識のような小物体は、この残差で **画素上消失**
+
+### 0.2 「公開データの pose ですら腐ってる」── 本検証の核
+
+**致命的なポイント**: cross_frame net の supervision に使ってる **PandaSet 公開 GT pose 自体に cm + 0.1° スケールのズレが含まれている**。これを検証なしで GT として学習させると:
+
+- **ネットが「PS pose のズレ」を residual の一部として学習** してしまう
+- = real な (Δu, Δv, σ) パターンに **PS pose 由来のアーティファクト** が混入
+- = 結果として cross_frame net 自体が **公開 pose の精度限界に縛られる**
+- = どれだけ学習させても 8 秒 baseline の残差を消せない
+
+つまり「**公開データの GT を素直に信じて学習すると、公開データの誤差が学習データに焼き込まれる**」 ── これが long baseline で残差が消えない真の理由ではないか、というのが本検証の問題提起。
+
+### 0.3 提案 ── GS で pose を refine してから cross_frame に投げる
 
 この残差を **net 側で頑張って学習する** のはデータが要りすぎる。代わりに:
 
@@ -18,21 +33,90 @@ cross_frame net で frame_A → frame_B の residual を学習させると、**1
 3. 「**遠方が crispy に render できるか**」が pose 微調整が機能してるかの直接的な物理指標
 4. refine 後の pose は **GS が render 可能な解の上にある** ので、これを **cross_frame の supervision** に再投入できる (閉ループ)
 
-このドキュメントは PandaSet 001 で上記をやってみた verification log。
+このドキュメントは PandaSet 001 で上記をやってみた verification log。**主結果は「遠方信号機の PSNR が +3.65 dB 改善した = pose 補正が物理的に機能している」**。
 
 ---
 
-## 1. セットアップ
+## 1. セットアップ (再現手順)
+
+### 1.1 Dataset + hardware
 
 | 項目 | 値 |
 |---|---|
-| Dataset | PandaSet 001 (SF downtown 交差点シーン、8 秒 80 frames) |
-| Hardware | Y0 RTX 3090 24GB |
-| Software | neurad-studio + splatad fork (CVPR 2025) |
-| Iterations | 30000 |
-| Method | `ns-train splatad pandaset-data` |
+| Dataset | PandaSet 001 (SF downtown 交差点シーン、8 秒 80 frames、cam 1920×1080) |
+| Hardware | Y0 RTX 3090 24GB, host 32GB RAM |
+| 訓練時間 | 約 1.5h / run |
 
-2 通り走らせて比較:
+### 1.2 GS フレームワーク
+
+- [**neurad-studio**](https://github.com/georghess/neurad-studio) (Zenseact) ── nerfstudio fork、autonomous driving 用拡張
+- [**splatad fork of gsplat**](https://github.com/carlinds/splatad) ── rolling shutter + lidar rendering + per-point timestamp 対応の gsplat 改造
+- どちらも CVPR 2025 paper "**SplatAD**" の公式実装
+
+### 1.3 Docker (Y0 で動かす場合)
+
+```bash
+git clone https://github.com/georghess/neurad-studio.git
+cd neurad-studio
+docker build -t neurad-studio:latest .
+# Dockerfile は CUDA 11.8 base、tinycudann + splatad gsplat 込み
+# 注意: ホスト CUDA 12.x でも 11.8 で動く (Ampere までは)
+# Blackwell (sm_120) は別途 CUDA 13 base 必要、別 build
+```
+
+### 1.4 PandaSet データ準備
+
+公式 PandaSet は `.pkl` (uncompressed) で配布されることが多いが、**pandaset python package が `_data_file_extension = "pkl.gz"` 固定で glob してる** ため `.pkl` のままだと `lidar.data` が空になる。事前に全 LiDAR pickle を gzip 必須:
+
+```bash
+find /path/to/pandaset/ -name "*.pkl" -print0 | xargs -0 -P 16 -n 50 gzip
+# 8240 lidar + 8240 cuboids = 16480 ファイル、20 分程度
+```
+
+詳細は memo: [`reference_pandaset_pkl_gz`](../.claude/projects/-home-hiro-git-e2e-calib/memory/reference_pandaset_pkl_gz.md)
+
+### 1.5 訓練 CLI
+
+**default モード** (pose 凍結、baseline):
+```bash
+docker run --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=0 \
+  -v /path/to/pandaset:/data/pandaset:ro \
+  -v /path/to/outputs:/workspace/outputs \
+  neurad-studio:latest \
+  ns-train splatad \
+    --output-dir /workspace/outputs \
+    --experiment-name ps001_default \
+    --max-num-iterations 30001 \
+    --vis tensorboard \
+    pandaset-data \
+    --data /data/pandaset \
+    --sequence 001 \
+    --cameras all
+```
+
+**SO3xR3 モード** (pose 学習 ON、本検証):
+```bash
+docker run --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=0 \
+  -v /path/to/pandaset:/data/pandaset:ro \
+  -v /path/to/outputs:/workspace/outputs \
+  neurad-studio:latest \
+  ns-train splatad \
+    --output-dir /workspace/outputs \
+    --experiment-name ps001_front_so3xr3 \
+    --max-num-iterations 30001 \
+    --vis tensorboard \
+    --pipeline.model.camera-optimizer.mode SO3xR3 \  # ← ココが核
+    pandaset-data \
+    --data /data/pandaset \
+    --sequence 001 \
+    --cameras front
+```
+
+差分は **2 行**:
+1. `--pipeline.model.camera-optimizer.mode SO3xR3` で per-sensor-per-frame の 6dof delta 学習を ON にする (L2 正則化付き)
+2. `--cameras front` で 1 cam に絞る (L2 reg の attribution bias を 6:1 → 2:1 に圧縮、vehicle drift と extrinsic bias の分離精度が上がる)
+
+### 1.6 比較する 2 run のサマリ
 
 | run | `camera_optimizer.mode` | cameras | 役割 |
 |---|---|---|---|
@@ -40,6 +124,26 @@ cross_frame net で frame_A → frame_B の residual を学習させると、**1
 | `ps001_front_so3xr3` | **`SO3xR3` ON** (pose 学習) | front_only | 検証 = 「GS で pose 微調整した場合」 |
 
 (`SO3xR3` = per-sensor-per-frame で 6dof delta を学習。L2 正則化で大きく動けない、cm 単位の微調整に向く)
+
+### 1.7 解析スクリプト
+
+訓練後の checkpoint から pose_adjustment を抜き出して vehicle drift / cam-LiDAR ext bias 分解:
+
+```python
+import torch, glob, numpy as np
+ck = torch.load(sorted(glob.glob("outputs/.../step-*.ckpt"))[-1],
+                map_location="cpu", weights_only=False)
+pa = ck["pipeline"]["_model.camera_optimizer.pose_adjustment"].numpy()
+# shape = (N_sensor × N_frame, 6) = (cam_first N_frame行, lidar_next N_frame行)
+cam_adj = pa[:40]   # front cam, 40 train frames
+lid_adj = pa[40:]   # lidar, 40 train frames
+
+# vehicle 軌跡 drift (cam+lidar 共通成分)
+vehicle_drift = (cam_adj + lid_adj) / 2
+
+# cam-LiDAR 静的 extrinsic bias (frame 全体平均)
+ext_bias = (lid_adj - cam_adj).mean(axis=0)
+```
 
 ---
 
@@ -107,7 +211,8 @@ interactive 版 (回転・拡大可): [`path_3d.html`](assets/splatad_ps001/path
 - 🟠 lidar REFINED (SplatAD)
 - ⚫ delta lines (each frame: original → refined、**real mm scale 誇張なし**)
 
-注意: **PandaSet world frame は Z 軸が DOWN** (NED 系) なので、図中 z=+1.8m の cam は物理的には lidar より **下** (windshield mount)。LiDAR は z≈0 で屋根付近。delta は cm 単位なので、マクロ視点だと点が重なる。プロットを zoom すれば 1 cm 単位の per-frame ズレが見える。
+表示の都合: PandaSet world frame は **Z 軸が DOWN** (NED 系) だが、図では **z を反転して物理的な up に揃えて表示**。なので lidar 軌跡が「上」(屋根 mount)、cam 軌跡が「下」(windshield) で physical 直感と合う。
+delta は cm 単位なので、マクロ視点だと点が重なる。プロットを zoom すれば 1 cm 単位の per-frame ズレが見える。
 
 ---
 
