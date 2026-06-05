@@ -244,6 +244,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  pair_mode: bool = False,
                  pair_stride: int = 1,
                  pair_bidir: bool = False,
+                 calib_pert: bool = False,
                  same_frame_self_sup: bool = False,
                  photometric_jitter: float = 0.25,
                  preload: bool = True):
@@ -361,6 +362,7 @@ class PandaSetCalibDatasetFull(Dataset):
         self.pair_mode   = bool(pair_mode)
         self.pair_stride = int(pair_stride)
         self.pair_bidir  = bool(pair_bidir)
+        self.calib_pert  = bool(calib_pert)
         # Self-supervised same-frame mode. Sets every pair (i, i): A and B
         # come from the SAME inst, so POSE_GT_AB = identity. Δuv on B is
         # whatever closed-form shift δ induces under the per-pivot lidar
@@ -1113,10 +1115,35 @@ class PandaSetCalibDatasetFull(Dataset):
             pts_c_A = pts_A[cand_idx_A]
             intens_c_A = intensity_A[cand_idx_A]
             uv_gt_c_A  = uv_full_A[cand_idx_A]
-            pert_vec_A = np.zeros(8, dtype=np.float32)
+            # frame_A side ε_calib (extrinsic + intrinsic perturbation), drawn
+            # independently from ε_pose (which lives on B). Mirrors calib-mode
+            # _build_one_window's pose_frame='orig' branch. self.calib_pert
+            # (default False) controls whether this is enabled — when off, A
+            # stays clean (the historical pair_mode behaviour).
+            if self.calib_pert:
+                t_delta_A = (np.random.rand(3) * 2 - 1) * self.max_offset_m
+                ypr_A     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
+                R_off_A   = R_gt_A @ Rotation.from_euler(
+                    'zyx', ypr_A, degrees=True).as_matrix()
+                cp_off_A  = cp_A + t_delta_A
+                dfx_A = float(np.random.uniform(-self.max_fx_pct, self.max_fx_pct)) \
+                            if self.max_fx_pct > 0 else 0.0
+                dfy_A = float(np.random.uniform(-self.max_fy_pct, self.max_fy_pct)) \
+                            if self.max_fy_pct > 0 else 0.0
+                K_pert_A = K_A.copy()
+                if dfx_A != 0.0: K_pert_A[0, 0] = K_A[0, 0] * (1.0 + dfx_A)
+                if dfy_A != 0.0: K_pert_A[1, 1] = K_A[1, 1] * (1.0 + dfy_A)
+                pert_vec_A = np.array([t_delta_A[0], t_delta_A[1], t_delta_A[2],
+                                       ypr_A[0], ypr_A[1], ypr_A[2],
+                                       dfx_A, dfy_A], dtype=np.float32)
+            else:
+                R_off_A   = R_gt_A
+                cp_off_A  = cp_A
+                K_pert_A  = K_A.copy()
+                pert_vec_A = np.zeros(8, dtype=np.float32)
             built_A = self.build_crop(
                 inst_A, pts_c_A, intens_c_A, uv_gt_c_A, cand_idx_A, is_obj_A,
-                u0_A, v0_A, cs, K_A, R_gt_A, cp_A, K_A.copy(), cp_A,
+                u0_A, v0_A, cs, K_A, R_off_A, cp_off_A, K_pert_A, cp_A,
                 pert_vec_A, tile_u0_A, tile_v0_A,
                 None if 'jpg_bytes' in inst_A else inst_A['img'], IW_A, IH_A,
                 R_pre=None, cp_pre=None, delta1_se3=pose_hat_se3,

@@ -646,34 +646,51 @@ class CalibNet2(nn.Module):
         # Cross-frame = forward_frame(A) → SE(3) PoseEmb on Q → forward_frame(B,
         # q=carry, delta_cum=carry). Two forward_frame calls share the same
         # block stack; only the KV bundle and the iteration count differ.
+        # q_frametoken is the per-A-point frame token: it carries the
+        # accumulated Δuv prediction (via delta_cum) AND the contextualised
+        # representation built by A-block cross-attn. After A blocks finish,
+        # pose_emb rotates the token by R_AB → q_frametoken_pose_AB, which is
+        # then fed to B blocks as Q. Same token, different observation frame.
         n_half = self.n_iter // 2
         if self.kv_schedule is not None:
             a_layers = list(range(0, n_half))
             b_layers = list(range(n_half, self.n_iter))
-            q, delta_cum = self.forward_frame(
+            q_frametoken, delta_cum = self.forward_frame(
                 image_A, distorted_uvd_A, bucket_uvd_A, bucket_valid_A,
                 n_iters=0, key_padding_mask=key_padding_mask_A,
                 layer_indices=a_layers)
         else:
-            q, delta_cum = self.forward_frame(
+            q_frametoken, delta_cum = self.forward_frame(
                 image_A, distorted_uvd_A, bucket_uvd_A, bucket_valid_A,
                 n_iters=n_half, key_padding_mask=key_padding_mask_A)
-        # SE(3) PoseEmb on Q at the stack midpoint:
+        # Mid-stack readout for A-side calib supervision: same head, just
+        # called on Δ_cum at the boundary between A blocks and pose_emb.
+        # When the dataset puts ε_calib on the A inputs, the trainer can
+        # then ask "did A blocks produce the right Δuv on the A image?".
+        pred_A = self._readout(delta_cum)
+        # SE(3) PoseEmb on q_frametoken at the stack midpoint:
         #   type-1 chunk (40 vec×3): block-diag(R_AB) action
         #   type-0 chunk (8 scalar): translation_mlp(t_AB) added (zero-init →
         #                            no-op when ckpt predates SE(3) extension)
-        q = self.pose_emb(q, dpose_R=R_AB, dpose_t=t_AB, log_vfp=None)
+        q_frametoken_pose_AB = self.pose_emb(
+            q_frametoken, dpose_R=R_AB, dpose_t=t_AB, log_vfp=None)
         if self.kv_schedule is not None:
-            q, delta_cum = self.forward_frame(
+            q_frametoken, delta_cum = self.forward_frame(
                 image_B, None, bucket_uvd_B, bucket_valid_B,
                 n_iters=0,
-                q=q, delta_cum=delta_cum,
+                q=q_frametoken_pose_AB, delta_cum=delta_cum,
                 key_padding_mask=key_padding_mask_A,
                 layer_indices=b_layers)
         else:
-            q, delta_cum = self.forward_frame(
+            q_frametoken, delta_cum = self.forward_frame(
                 image_B, None, bucket_uvd_B, bucket_valid_B,
                 n_iters=self.n_iter - n_half,
-                q=q, delta_cum=delta_cum,
+                q=q_frametoken_pose_AB, delta_cum=delta_cum,
                 key_padding_mask=key_padding_mask_A)
-        return self._readout(delta_cum)
+        pred_B = self._readout(delta_cum)
+        # Cross-frame returns (pred_A, pred_B) so the trainer can apply two
+        # losses (calib + pose) on the same forward pass. pred_A may be
+        # ignored when ε_calib is not enabled on the A side (legacy behaviour).
+        # Both follow the same _readout shape conventions (per_pt or
+        # (per_pt, W) depending on use_info_head).
+        return pred_A, pred_B

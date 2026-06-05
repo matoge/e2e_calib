@@ -218,6 +218,7 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
     """
     model.train(train)
     total_nll, total_mse, n = 0.0, 0.0, 0
+    total_nll_calib, total_mse_calib, n_calib = 0.0, 0.0, 0
     _t_start = time.time()
     _last_log_step = 0
     for batch in loader:
@@ -250,7 +251,8 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
         point_in_A = torch.cat([distA[..., :3], distA[..., 4:5]], dim=-1)
 
         # Dispatch through model.forward(...) so DDP's grad-sync hook fires.
-        # CalibNet2.forward routes to forward_cross_frame when mode='cross'.
+        # CalibNet2.forward routes to forward_cross_frame when mode='cross'
+        # and now returns (out_A, out_B) where each is per_pt or (per_pt, W).
         out = model(
             imgs_A, point_in_A,
             mode='cross', image_B=imgs_B, R_AB=R_AB, t_AB=t_HAT,
@@ -259,26 +261,58 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
             bucket_uvd_B=buB, bucket_valid_B=bvB,
             key_padding_mask=padA,
         )
-        per_pt = out[0] if isinstance(out, tuple) else out
+        # forward_cross_frame returns (out_A, out_B). out_X is per_pt OR
+        # (per_pt, W) when use_info_head=True. Older legacy single-frame
+        # path returned just per_pt or (per_pt, W); guard both.
+        if isinstance(out, tuple) and len(out) == 2 and (
+                isinstance(out[0], tuple) or
+                (torch.is_tensor(out[0]) and out[0].dim() == 3)):
+            out_A, out_B = out
+            per_pt_A = out_A[0] if isinstance(out_A, tuple) else out_A
+            per_pt_B = out_B[0] if isinstance(out_B, tuple) else out_B
+        else:
+            per_pt_A = None
+            per_pt_B = out[0] if isinstance(out, tuple) else out
 
-        # Target = δ between POSE_GT and POSE_HAT B-projection of A's points.
+        # Target B = δ between POSE_GT and POSE_HAT B-projection of A's points.
         # build_crop emits A and B in lex-deterministic sub_idx order; in
         # same_frame_self_sup mode the leading min(N_A, N_B) tokens describe
         # the same world points.  Crop to that prefix; mask via padA up to it.
-        Nmin = min(per_pt.shape[1], trueB.shape[1])
-        per_pt_c = per_pt[:, :Nmin]
+        Nmin = min(per_pt_B.shape[1], trueB.shape[1])
+        per_pt_c = per_pt_B[:, :Nmin]
         gt = trueB[:, :Nmin, :2] - distB[:, :Nmin, :2]
         valid = ~(padA[:, :Nmin] | padB[:, :Nmin])
-        loss = gaussian2d_nll(per_pt_c[valid], gt[valid])
+        loss_pose = gaussian2d_nll(per_pt_c[valid], gt[valid])
+        # Calib head loss: A-side ε_calib supervision when calib_pert is on.
+        # gt_A = trueA - distA (= δ_calib-induced A-image shift). The mid-stack
+        # readout already produced per_pt_A from Δ_cum after A blocks only.
+        w_calib = float(getattr(epoch_loop_pair, '_w_calib', 0.0))
+        w_pose  = float(getattr(epoch_loop_pair, '_w_pose',  1.0))
+        if per_pt_A is not None and w_calib > 0.0:
+            per_pt_A_c = per_pt_A[:, :Nmin]
+            gt_A = _trueA[:, :Nmin, :2] - distA[:, :Nmin, :2]
+            valid_A = ~padA[:, :Nmin]
+            loss_calib = gaussian2d_nll(per_pt_A_c[valid_A], gt_A[valid_A])
+            loss = w_pose * loss_pose + w_calib * loss_calib
+        else:
+            loss_calib = None
+            loss = w_pose * loss_pose
         if train:
             optimizer.zero_grad(set_to_none=True)
             accel.backward(loss)
             accel.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+        # pose-side metrics (always)
         with torch.no_grad():
             err = (per_pt_c[valid][..., :2].float() - gt[valid]).norm(dim=-1)
             total_mse += err.mean().item()
-        total_nll += loss.item(); n += 1
+        total_nll += loss_pose.item(); n += 1
+        # calib-side metrics (only when ε_calib_A is enabled and pred_A exists)
+        if loss_calib is not None:
+            with torch.no_grad():
+                err_A = (per_pt_A_c[valid_A][..., :2].float() - gt_A[valid_A]).norm(dim=-1)
+                total_mse_calib += err_A.mean().item()
+            total_nll_calib += loss_calib.item(); n_calib += 1
         # Stash the most recent batch (rank-0 only) for end-of-epoch
         # debug-sample rendering. Detach + cpu so we don't pin GPU memory.
         if vis_capture is not None and accel.is_main_process:
@@ -292,6 +326,11 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
                 vis_capture['padA']    = padA[:, :Nmin].detach().cpu()
                 vis_capture['padB']    = padB[:, :Nmin].detach().cpu()
                 vis_capture['per_pt']  = per_pt_c.detach().float().cpu()
+                vis_capture['per_pt_B'] = per_pt_c.detach().float().cpu()
+                if per_pt_A is not None:
+                    vis_capture['per_pt_A'] = per_pt_A[:, :Nmin].detach().float().cpu()
+                else:
+                    vis_capture['per_pt_A'] = None
                 vis_capture['pert_B']  = pertB.detach().cpu()
                 vis_capture['dpose']   = dpose_AB.detach().cpu()
                 vis_capture['split']   = 'train' if train else 'val'
@@ -299,10 +338,17 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
             _dt = time.time() - _t_start
             sps_per  = n * imgs_A.shape[0] / _dt if _dt > 0 else 0
             sps_glob = sps_per * accel.num_processes
-            print(f"  step {n}  loss={loss.item():+.3f}  "
+            calib_str = (f"  calib={loss_calib.item():+.3f}"
+                         if loss_calib is not None else "")
+            print(f"  step {n}  pose={loss_pose.item():+.3f}{calib_str}  "
                   f"sps/rank={sps_per:.0f}  sps(global)={sps_glob:.0f}", flush=True)
             _last_log_step = n
-    return (total_nll / max(n, 1), total_mse / max(n, 1))
+    pose_metrics = (total_nll / max(n, 1), total_mse / max(n, 1))
+    if n_calib > 0:
+        calib_metrics = (total_nll_calib / n_calib, total_mse_calib / n_calib)
+    else:
+        calib_metrics = (float('nan'), float('nan'))
+    return pose_metrics + calib_metrics  # (nll, mse, nll_calib, mse_calib)
 
 
 def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
@@ -418,6 +464,19 @@ def main():
                    help='NeRF-style Fourier feature lift on PointMLP3 input '
                         '(uvd). 0 = off (default), 8/10 typical for sub-pixel '
                         'frequency capacity.')
+    p.add_argument('--calib-pert', action='store_true',
+                   help='enable ε_calib on frame_A inputs (build_pair side). '
+                        'Activates the multi-task head: A blocks supervised '
+                        'with calib NLL via mid-stack readout, B blocks '
+                        'supervised with pose NLL as before. ε_calib_A is '
+                        'sampled INDEPENDENTLY per frame (no leakage to B).')
+    p.add_argument('--w-calib', type=float, default=1.0,
+                   help='weight on the A-side calib NLL when --calib-pert is '
+                        'on. 0 disables the head; ignored when --calib-pert '
+                        'is off (loss_calib stays None).')
+    p.add_argument('--w-pose', type=float, default=1.0,
+                   help='weight on the B-side pose NLL.  Default 1.0; tune '
+                        'with --w-calib for multi-task balance.')
     p.add_argument('--clearml', action='store_true',
                    help='register a ClearML Task with cfg + why + git context')
     p.add_argument('--clearml-project', type=str, default='e2e_calib/calib',
@@ -480,7 +539,8 @@ def main():
                  split_pert=False,
                  pair_mode=bool(args.pair_mode),
                  pair_stride=int(args.pair_stride),
-                 pair_bidir=bool(args.pair_bidir))
+                 pair_bidir=bool(args.pair_bidir),
+                 calib_pert=bool(args.calib_pert))
     cache_paths = [s.strip() for s in args.cache.split(',') if s.strip()]
     # Per-cache u_band override
     ub_map = {}
@@ -594,6 +654,11 @@ def main():
             log(f"[clearml] logger init failed: {_e}")
 
     _epoch_fn = epoch_loop_pair if args.pair_mode else epoch_loop
+    # Stash multi-task weights on the function object so epoch_loop_pair
+    # can read them without threading another arg through every call site.
+    # When --calib-pert is off, w_calib is forced to 0 so the head is dead.
+    epoch_loop_pair._w_calib = float(args.w_calib) if args.calib_pert else 0.0
+    epoch_loop_pair._w_pose  = float(args.w_pose)
     # Vis stash — populated by epoch_loop_pair on the last batch when not None.
     vis_cap_train: dict | None = {} if (args.pair_mode and accel.is_main_process) else None
     vis_cap_val:   dict | None = {} if (args.pair_mode and accel.is_main_process) else None
@@ -629,10 +694,9 @@ def main():
                             continue
                         sample = sample[0]
                     built_A_t, built_B_t, dpose_AB_t = sample
-                    # collate-pre tuple slot [6] is pert_vec.
-                    built_A_i = (built_A_t[0], built_A_t[1], built_A_t[2],
-                                 built_A_t[3], built_A_t[4], built_A_t[5],
-                                 torch.zeros(8))
+                    # Preserve the dataset's pert_vec_A (slot 6); zero when
+                    # --calib-pert is off, ε_calib_A when on.
+                    built_A_i = built_A_t[:7]
                     built_B_i = built_B_t[:7]
                     out_p = vis_dir / f'vis_check_pair_{ds_label}_{i:02d}.png'
                     res = render_one_pair(built_A_i, built_B_i, dpose_AB_t,
@@ -654,25 +718,38 @@ def main():
     accel.wait_for_everyone()
     for ep in range(epochs):
         ep_t = time.time()
+        # epoch_loop_pair returns 4-tuple (nll, mse, nll_calib, mse_calib);
+        # epoch_loop returns 2-tuple. Unpack with a length guard so this runs
+        # in both modes without changing the legacy single-frame epoch_loop.
         if args.pair_mode:
-            tr_nll, tr_mse = _epoch_fn(model, train_loader, optimizer, accel, True,
-                                        args.img_size, vis_capture=vis_cap_train)
+            tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
+                                args.img_size, vis_capture=vis_cap_train)
         else:
-            tr_nll, tr_mse = _epoch_fn(model, train_loader, optimizer, accel, True,
-                                        args.img_size)
+            tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
+                                args.img_size)
         with torch.no_grad():
             if args.pair_mode:
-                va_nll, va_mse = _epoch_fn(model, val_loader, optimizer, accel, False,
-                                            args.img_size, vis_capture=vis_cap_val)
+                va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
+                                    args.img_size, vis_capture=vis_cap_val)
             else:
-                va_nll, va_mse = _epoch_fn(model, val_loader, optimizer, accel, False,
-                                            args.img_size)
+                va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
+                                    args.img_size)
+        if len(tr_out) == 4:
+            tr_nll, tr_mse, tr_nll_cal, tr_mse_cal = tr_out
+            va_nll, va_mse, va_nll_cal, va_mse_cal = va_out
+        else:
+            tr_nll, tr_mse = tr_out; va_nll, va_mse = va_out
+            tr_nll_cal = tr_mse_cal = va_nll_cal = va_mse_cal = float('nan')
         scheduler.step()
         if accel.is_main_process:
             elapsed = time.time() - t0
+            calib_str = ""
+            if tr_nll_cal == tr_nll_cal:    # not NaN
+                calib_str = (f"  tr_calib_nll={tr_nll_cal:.4f} tr_calib_mse={tr_mse_cal:.3f}"
+                             f"  va_calib_nll={va_nll_cal:.4f} va_calib_mse={va_mse_cal:.3f}")
             log(f"ep{ep+1:03d}/{epochs}  "
                 f"tr_nll={tr_nll:.4f} tr_mse={tr_mse:.3f}  "
-                f"va_nll={va_nll:.4f} va_mse={va_mse:.3f}  "
+                f"va_nll={va_nll:.4f} va_mse={va_mse:.3f}{calib_str}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
                 f"ep_t={time.time()-ep_t:.1f}s  total={elapsed/60:.1f}min")
             if cml_logger is not None:
@@ -683,6 +760,11 @@ def main():
                 rs(title='loss/mse', series='val',   value=va_mse, iteration=ep+1)
                 rs(title='lr', series='lr',
                    value=scheduler.get_last_lr()[0], iteration=ep+1)
+                if tr_nll_cal == tr_nll_cal:
+                    rs(title='loss/nll_calib', series='train', value=tr_nll_cal, iteration=ep+1)
+                    rs(title='loss/nll_calib', series='val',   value=va_nll_cal, iteration=ep+1)
+                    rs(title='loss/mse_calib', series='train', value=tr_mse_cal, iteration=ep+1)
+                    rs(title='loss/mse_calib', series='val',   value=va_mse_cal, iteration=ep+1)
             # Pair-mode debug samples: render the SAME 16 fixed samples each
             # epoch (8 train + 8 val) so a person can watch convergence on
             # consistent panels instead of a random new batch every time.
@@ -733,12 +815,26 @@ def main():
                                            bucket_uvd=buA_b, bucket_valid=bvA_b,
                                            bucket_uvd_B=buB_b, bucket_valid_B=bvB_b,
                                            key_padding_mask=None)
-                            per_pt_b = (out_b[0] if isinstance(out_b, tuple) else out_b)
-                            per_pt_np = per_pt_b[0].detach().float().cpu().numpy()
-
-                            built_A_i = (built_A_t[0], built_A_t[1], built_A_t[2],
-                                         built_A_t[3], built_A_t[4], built_A_t[5],
-                                         torch.zeros(8))
+                            # forward_cross_frame returns (out_A, out_B); each
+                            # is per_pt or (per_pt, W) when use_info_head=True.
+                            if (isinstance(out_b, tuple) and len(out_b) == 2 and
+                                    (isinstance(out_b[0], tuple) or
+                                     (torch.is_tensor(out_b[0])
+                                      and out_b[0].dim() == 3))):
+                                out_b_A, out_b_B = out_b
+                                pp_b_A = out_b_A[0] if isinstance(out_b_A, tuple) else out_b_A
+                                pp_b_B = out_b_B[0] if isinstance(out_b_B, tuple) else out_b_B
+                            else:
+                                pp_b_A = None
+                                pp_b_B = out_b[0] if isinstance(out_b, tuple) else out_b
+                            per_pt_np   = pp_b_B[0].detach().float().cpu().numpy()
+                            per_pt_np_A = (pp_b_A[0].detach().float().cpu().numpy()
+                                            if pp_b_A is not None else None)
+                            # built_A_i preserves the dataset's pert_vec_A
+                            # (zeros when --calib-pert is off, ε_calib when on);
+                            # the renderer uses it to label ε_calib in the
+                            # suptitle when nonzero.
+                            built_A_i = built_A_t[:7]
                             built_B_i = built_B_t[:7]
                             out_p = vis_dir / f'pair_debug_{ds_label}_ep{ep+1:03d}_{i:02d}.png'
                             res = render_one_pair(
@@ -746,7 +842,8 @@ def main():
                                 out_path=out_p, img_size=args.img_size,
                                 k_show=12,
                                 suptitle_prefix=f'ep{ep+1} {ds_label} #{i}  ',
-                                pred_per_pt=per_pt_np)
+                                pred_per_pt=per_pt_np,
+                                pred_per_pt_A=per_pt_np_A)
                             if res and cml_logger is not None:
                                 cml_logger.report_image(
                                     title=f'pair_debug_{ds_label}',
