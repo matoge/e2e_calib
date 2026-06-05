@@ -641,11 +641,12 @@ class PandaSetCalibDatasetFull(Dataset):
         # Intensity is REQUIRED in V3-i caches. Caches built before 2026-05-13
         # do not have this key; rebuild via scripts/preprocessing/build_*_v3.py.
         if 'intensity' not in inst:
-            raise KeyError(
-                f"inst['intensity'] missing in cache {self.cache_dir.name}. "
-                "Rebuild cache with intensity-aware build_*_v3.py."
-            )
-        intensity = inst['intensity'].numpy() if hasattr(inst['intensity'], 'numpy') else np.asarray(inst['intensity'])
+            # cross-sensor intensity scale mismatch (Hesai vs Velodyne vs TOPS)
+            # would leak dataset-ID; zero-fill so all caches share contract.
+            n_pts = inst['pts'].shape[0]
+            intensity = np.zeros(n_pts, dtype=np.float32)
+        else:
+            intensity = inst['intensity'].numpy() if hasattr(inst['intensity'], 'numpy') else np.asarray(inst['intensity'])
         # Cache contract: intensity is already normalised to [0,1] by
         # scripts/data/migrate_intensity_norm.py. Reader is dataset-agnostic.
         intensity = np.asarray(intensity, dtype=np.float32)

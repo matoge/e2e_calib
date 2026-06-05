@@ -352,13 +352,24 @@ def epoch_loop_pair(model, loader, optimizer, accel: Accelerator, train: bool,
 
 
 def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
-               img_size: int):
+               img_size: int, vis_capture: dict | None = None):
+    """Single-frame calib epoch.
+
+    If `vis_capture` is given (dict, rank-0 only), the LAST batch's tensors
+    are stashed into it for downstream debug-sample rendering — parallels
+    the pair-mode `vis_capture` hook so calib runs also produce per-epoch
+    PNG samples under <exp>/debug_samples/.
+    """
     model.train(train)
     total_nll, total_mse, n = 0.0, 0.0, 0
     _t_start = time.time()
     _last_log_step = 0
     for batch in loader:
         imgs, true_uvd, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch[:7]
+        # last tuple slot from PandaSetCalibDatasetFull calib mode is
+        # pert_vec (8,); collate_full stacks to (B, 8). Optional — older
+        # caches may not emit it, so guard.
+        pert_vec_b = batch[7] if len(batch) > 7 else None
         imgs = imgs.float().div_(255.0)
         gt   = true_uvd[..., :2] - dist_uvd[..., :2]
         # CalibNet2.use_intensity is True by default; pass [u,v,d,intensity].
@@ -381,6 +392,18 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             err = (per_pt[valid][..., :2].float() - gt[valid]).norm(dim=-1)
             total_mse += err.mean().item()
         total_nll += loss.item(); n += 1
+        # Stash last batch (rank-0 only) for end-of-epoch render. Same
+        # contract as epoch_loop_pair.vis_capture but with calib fields.
+        if vis_capture is not None and accel.is_main_process:
+            with torch.no_grad():
+                vis_capture['imgs']     = imgs.detach().cpu()
+                vis_capture['true_uvd'] = true_uvd.detach().cpu()
+                vis_capture['dist_uvd'] = dist_uvd.detach().cpu()
+                vis_capture['pad_mask'] = pad_mask.detach().cpu()
+                vis_capture['per_pt']   = per_pt.detach().float().cpu()
+                if pert_vec_b is not None:
+                    vis_capture['pert_vec'] = pert_vec_b.detach().cpu()
+                vis_capture['split']    = 'train' if train else 'val'
         if train and accel.is_main_process and (n - _last_log_step >= 25):
             _dt = time.time() - _t_start
             sps_per  = n * imgs.shape[0] / _dt if _dt > 0 else 0
@@ -659,9 +682,11 @@ def main():
     # When --calib-pert is off, w_calib is forced to 0 so the head is dead.
     epoch_loop_pair._w_calib = float(args.w_calib) if args.calib_pert else 0.0
     epoch_loop_pair._w_pose  = float(args.w_pose)
-    # Vis stash — populated by epoch_loop_pair on the last batch when not None.
-    vis_cap_train: dict | None = {} if (args.pair_mode and accel.is_main_process) else None
-    vis_cap_val:   dict | None = {} if (args.pair_mode and accel.is_main_process) else None
+    # Vis stash — populated by epoch_loop_{pair,(calib)} on the last batch
+    # when not None. Allocated on rank-0 in either mode so debug samples
+    # land under <exp>/debug_samples/ for both pair and calib runs.
+    vis_cap_train: dict | None = {} if accel.is_main_process else None
+    vis_cap_val:   dict | None = {} if accel.is_main_process else None
     vis_dir = exp_dir / 'debug_samples'
     vis_dir.mkdir(parents=True, exist_ok=True) if accel.is_main_process else None
 
@@ -721,19 +746,13 @@ def main():
         # epoch_loop_pair returns 4-tuple (nll, mse, nll_calib, mse_calib);
         # epoch_loop returns 2-tuple. Unpack with a length guard so this runs
         # in both modes without changing the legacy single-frame epoch_loop.
-        if args.pair_mode:
-            tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
-                                args.img_size, vis_capture=vis_cap_train)
-        else:
-            tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
-                                args.img_size)
+        # vis_capture is passed in BOTH modes (525f130) so calib path also
+        # emits debug_samples/ on rank-0.
+        tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
+                            args.img_size, vis_capture=vis_cap_train)
         with torch.no_grad():
-            if args.pair_mode:
-                va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
-                                    args.img_size, vis_capture=vis_cap_val)
-            else:
-                va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
-                                    args.img_size)
+            va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
+                                args.img_size, vis_capture=vis_cap_val)
         if len(tr_out) == 4:
             tr_nll, tr_mse, tr_nll_cal, tr_mse_cal = tr_out
             va_nll, va_mse, va_nll_cal, va_mse_cal = va_out
@@ -853,6 +872,45 @@ def main():
                         _m.train()
                 except Exception as _e:
                     log(f"  ↳ pair debug-sample render skipped: {_e}")
+            # Calib-mode debug samples: take the last batch's stash and
+            # render N samples per split. Pure CPU; no model forward (the
+            # epoch_loop already produced per_pt).
+            if (not args.pair_mode) and accel.is_main_process:
+                try:
+                    from scripts.vis_check._calib_render import render_one_calib
+                    n_per_split = 8
+                    for cap, ds_label in ((vis_cap_train, 'train'),
+                                          (vis_cap_val,   'val')):
+                        if not cap or 'imgs' not in cap:
+                            continue
+                        imgs_b     = cap['imgs']
+                        true_uvd_b = cap['true_uvd']
+                        dist_uvd_b = cap['dist_uvd']
+                        per_pt_b   = cap['per_pt']
+                        pad_b      = cap['pad_mask']
+                        pert_b     = cap.get('pert_vec', None)
+                        B = imgs_b.shape[0]
+                        for i in range(min(n_per_split, B)):
+                            valid_i = ~pad_b[i]
+                            out_p = vis_dir / (
+                                f'calib_debug_{ds_label}_ep{ep+1:03d}_{i:02d}.png')
+                            res = render_one_calib(
+                                imgs_b[i] * 255.0,
+                                true_uvd_b[i][valid_i],
+                                dist_uvd_b[i][valid_i],
+                                per_pt_b[i][valid_i, :2],
+                                out_path=out_p,
+                                img_size=args.img_size,
+                                pert_vec=(pert_b[i] if pert_b is not None else None),
+                                title_prefix=f'ep{ep+1} {ds_label} #{i}',
+                            )
+                            if cml_logger is not None:
+                                cml_logger.report_image(
+                                    title=f'calib_debug_{ds_label}',
+                                    series=f'sample_{i:02d}',
+                                    iteration=ep + 1, local_path=str(out_p))
+                except Exception as _e:
+                    log(f"  ↳ calib debug-sample render skipped: {_e}")
             if va_nll < best_val:
                 best_val = va_nll
                 accel.save(accel.unwrap_model(model).state_dict(), ckpt)
