@@ -172,6 +172,10 @@ def main():
     ap.add_argument('--chunksize', type=int, default=32,
                     help='imap_unordered chunksize (samples per IPC).')
     ap.add_argument('--overwrite', action='store_true')
+    ap.add_argument('--resume', action='store_true',
+                    help='Open existing data.lmdb and skip already-written fnames')
+    ap.add_argument('--start-idx', type=int, default=0,
+                    help='Skip first N fnames in meta order (resume from known boundary)')
     args = ap.parse_args()
 
     cache_dir = Path(args.cache_dir)
@@ -182,13 +186,21 @@ def main():
     assert inst_dir.is_dir(),  f'inst dir not found: {inst_dir}'
     assert meta_path.is_file(), f'meta.pt not found: {meta_path}'
     if lmdb_path.exists():
-        if not args.overwrite:
-            raise SystemExit(f'output exists: {lmdb_path}  (pass --overwrite to nuke)')
-        import shutil; shutil.rmtree(lmdb_path)
+        if args.overwrite:
+            import shutil; shutil.rmtree(lmdb_path)
+        elif not args.resume:
+            raise SystemExit(f'output exists: {lmdb_path}  (pass --overwrite or --resume)')
 
     meta = torch.load(meta_path, weights_only=False)
     fnames_all = list(meta['train']) + list(meta['val'])
+    if args.start_idx > 0:
+        print(f'start-idx: skip first {args.start_idx} fnames in meta order',
+              flush=True)
+        fnames_all = fnames_all[args.start_idx:]
     N = len(fnames_all)
+    # Resume mode: use overwrite=False at put-time. LMDB's B+tree lookup is
+    # fast for existing-key check (= log N), so per-key skip is OK without
+    # upfront scan (which would touch all 735k pages on cold HDD = forever).
     print(f'cache:     {cache_dir}', flush=True)
     print(f'instances: {N}  (train={len(meta["train"])}, val={len(meta["val"])})', flush=True)
     print(f'output:    {lmdb_path}  (map_size={args.map_size_gb}GB)', flush=True)
@@ -210,10 +222,11 @@ def main():
         nonlocal nb, nb_cubs
         ck = (scene, frame)
         if ck not in seen_cubs_keys:
-            txn.put(f'{CUBS_KEY_PREFIX}{scene}/{frame}'.encode(), cubs_blob)
+            txn.put(f'{CUBS_KEY_PREFIX}{scene}/{frame}'.encode(), cubs_blob,
+                    overwrite=not args.resume)
             nb_cubs += len(cubs_blob)
             seen_cubs_keys.add(ck)
-        txn.put(fn.encode(), blob)
+        txn.put(fn.encode(), blob, overwrite=not args.resume)
         nb += len(blob)
 
     if args.workers > 1:

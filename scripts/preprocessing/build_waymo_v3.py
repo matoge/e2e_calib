@@ -141,10 +141,17 @@ def list_frame_timestamps(seg_name: str) -> list[int]:
 def process_seg(args_tuple):
     """Optimized: read each parquet ONCE per segment, loop frames in memory."""
     (seg_name, out_dir, max_frames, gid_start, cams_keep, stride,
-     tile_layout) = args_tuple
+     tile_layout, lmdb_direct) = args_tuple
     out_dir = Path(out_dir)
     inst_dir = out_dir / 'inst'
     inst_dir.mkdir(parents=True, exist_ok=True)
+    shard = None
+    if lmdb_direct:
+        from scripts.preprocessing.lmdb_writer import ShardWriter
+        shard_dir = out_dir / 'shards' / f'{seg_name}.lmdb'
+        shard_dir.parent.mkdir(parents=True, exist_ok=True)
+        # ~1000 frames × 5 cam × ~5MB = 25GB max per seg; budget 40G
+        shard = ShardWriter(shard_dir, map_size_gb=40, commit_every=1000)
 
     calib_per_cam = get_cam_calib(seg_name)            # cam_id → (K, T_c_v)
     boxes_by_ts   = read_boxes_by_ts(seg_name)          # ts → [box dicts]
@@ -230,7 +237,11 @@ def process_seg(args_tuple):
                     laser    = torch.from_numpy(laser),
                     intensity = torch.from_numpy(intensity),
                 ))
-                torch.save(inst, inst_dir / f'{gid:08d}.pt')
+                key = f'{gid:08d}.pt'
+                if shard is not None:
+                    shard.put_inst(key, inst)
+                else:
+                    torch.save(inst, inst_dir / key)
                 gid += 1
                 written += 1
             else:
@@ -246,6 +257,8 @@ def process_seg(args_tuple):
                     out_dir=inst_dir, gid_base=gid)
                 gid += 1
                 written += len(tile_files)
+    if shard is not None:
+        shard.close()
     done_flag.touch()
     return seg_name, written
 
@@ -266,6 +279,11 @@ def main():
     ap.add_argument('--tile-y-start', type=int, default=200,
                     help='Waymo front-cam 1280 tall — skip ~200 sky')
     ap.add_argument('--tile-jpg-q',   type=int, default=90)
+    ap.add_argument('--lmdb-direct',  action='store_true',
+                    help='Write directly to per-segment LMDB shards (avoids .pt intermediate). '
+                         'Master merges shards into data.lmdb at end.')
+    ap.add_argument('--map-size-gb',  type=int, default=800,
+                    help='Final merged data.lmdb map size in GB (lmdb-direct only).')
     args = ap.parse_args()
     tile_layout = None
     if args.tile:
@@ -285,7 +303,7 @@ def main():
     gid_stride = 5000   # ~200 frames × 5 cams = 1000 per seg, 5x buffer
 
     argv = [(seg, args.out, args.max_frames, i * gid_stride, cams_keep, args.stride,
-             tile_layout)
+             tile_layout, args.lmdb_direct)
             for i, seg in enumerate(segs)]
     t0 = time.time()
     written_total = 0
@@ -311,18 +329,44 @@ def main():
 
     # train/val split by segment (val = first 15%)
     out = Path(args.out)
-    fnames = sorted(p.name for p in (out / 'inst').glob('*.pt'))
     import random
     rng = random.Random(42)
     seg_list = list(set(s for s in segs)); seg_list.sort(); rng.shuffle(seg_list)
     n_val_segs = max(1, int(len(seg_list) * 0.15))
     val_segs = set(seg_list[:n_val_segs])
-    train_files, val_files = [], []
-    for f in fnames:
-        try: inst = torch.load(out / 'inst' / f, weights_only=False)
-        except Exception: continue
-        if inst.get('seg') in val_segs: val_files.append(f)
-        else: train_files.append(f)
+
+    if args.lmdb_direct:
+        # Merge per-segment shards → single data.lmdb
+        from scripts.preprocessing.lmdb_writer import merge_shards, CUBS_KEY_PREFIX
+        shard_dirs = sorted((out / 'shards').glob('*.lmdb'))
+        print(f'merging {len(shard_dirs)} shards → data.lmdb', flush=True)
+        t_m = time.time()
+        n_w, n_c = merge_shards(shard_dirs, out / 'data.lmdb', map_size_gb=args.map_size_gb)
+        print(f'merged: {n_w} insts + {n_c} cubs in {time.time()-t_m:.0f}s', flush=True)
+        # Read keys from final lmdb to build train/val split
+        import lmdb
+        env = lmdb.open(str(out / 'data.lmdb'), readonly=True, lock=False, subdir=True)
+        train_files, val_files = [], []
+        with env.begin() as txn:
+            cur = txn.cursor()
+            for k, v in cur:
+                if k.startswith(CUBS_KEY_PREFIX.encode()): continue
+                # Peek into header to get seg name
+                import struct, pickle
+                hdr_len = struct.unpack('<Q', v[:8])[0]
+                header = pickle.loads(v[8:8+hdr_len])
+                seg = header.get('scene', '')
+                key_str = k.decode()
+                (val_files if seg in val_segs else train_files).append(key_str)
+        env.close()
+    else:
+        fnames = sorted(p.name for p in (out / 'inst').glob('*.pt'))
+        train_files, val_files = [], []
+        for f in fnames:
+            try: inst = torch.load(out / 'inst' / f, weights_only=False)
+            except Exception: continue
+            if inst.get('seg') in val_segs: val_files.append(f)
+            else: train_files.append(f)
     torch.save({'train': train_files, 'val': val_files}, out / 'meta.pt')
     print(f'meta.pt: train={len(train_files)} val={len(val_files)}', flush=True)
 
