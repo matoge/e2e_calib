@@ -269,6 +269,10 @@ def main():
     ap.add_argument('--src',        default=None,
                     help='Waymo training/ root. Sets $WAYMO_DIR for child workers. '
                          'Required when default /mnt/nvme6t/waymo/training does not exist.')
+    ap.add_argument('--lcp-dir',    default=None,
+                    help='Waymo LCP (lidar-camera-projection) parquet cache root. '
+                         'Sets $WAYMO_LCP_DIR for child workers. Default tries '
+                         '/mnt/fsx/tmp/hfunaya/waymo_lcp (training/ subdir holds the files).')
     ap.add_argument('--workers',    type=int, default=4)
     ap.add_argument('--max-segs',   type=int, default=None)
     ap.add_argument('--max-frames', type=int, default=None)
@@ -288,18 +292,20 @@ def main():
     ap.add_argument('--map-size-gb',  type=int, default=800,
                     help='Final merged data.lmdb map size in GB (lmdb-direct only).')
     args = ap.parse_args()
-    # Override WAYMO_DIR before any worker imports it. Child processes spawned
-    # via ProcessPoolExecutor inherit os.environ, so setting it here propagates
-    # to the worker imports of `from datasets.waymo import WAYMO_DIR`.
+    # Override WAYMO_DIR + WAYMO_LCP_DIR before any worker imports them.
+    # Child processes spawned via ProcessPoolExecutor inherit os.environ, so
+    # setting them here propagates to the worker imports of
+    # `from datasets.waymo import WAYMO_DIR` and waymo_lcp.ensure_lcp.
     if args.src is not None:
         os.environ['WAYMO_DIR'] = str(Path(args.src).resolve())
-        # Re-import datasets.waymo so this process's WAYMO_DIR (already cached
-        # at import time at the top of this file) is also updated.
         import importlib, datasets.waymo as _w
         importlib.reload(_w)
         global WAYMO_DIR
         WAYMO_DIR = _w.WAYMO_DIR
         print(f'WAYMO_DIR set to {WAYMO_DIR}', flush=True)
+    if args.lcp_dir is not None:
+        os.environ['WAYMO_LCP_DIR'] = str(Path(args.lcp_dir).resolve())
+        print(f'WAYMO_LCP_DIR set to {os.environ["WAYMO_LCP_DIR"]}', flush=True)
     tile_layout = None
     if args.tile:
         tile_layout = (args.tile_w, args.tile_h, args.tile_stride,
