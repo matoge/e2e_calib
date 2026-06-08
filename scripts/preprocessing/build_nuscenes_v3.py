@@ -81,17 +81,18 @@ _OBJ_PREFIXES = ('vehicle.', 'human.', 'animal', 'static_object.bicycle_rack')
 
 
 def _ann_to_cuboid(ann) -> dict:
-    """nuScenes annotation → {center, size, yaw, label} in world frame.
-    Uses the same key names as PandaSet/Waymo cuboids so pack_cubs() works."""
-    center = np.array(ann['translation'], dtype=np.float32)     # (3,) world
+    """nuScenes annotation → {pos, dims, yaw, label} in world frame.
+    Matches PandaSet/Waymo: 'pos'/'dims' (not 'center'/'size') so that
+    _is_obj_per_point and pack_cubs both work."""
+    pos = np.array(ann['translation'], dtype=np.float32)        # (3,) world
     sz = np.array(ann['size'], dtype=np.float32)                # (w, l, h)
     # PandaSet dims convention is (length_x, width_y, height_z); nuScenes size
     # is (w, l, h) → swap to (l, w, h).
-    size = np.array([sz[1], sz[0], sz[2]], dtype=np.float32)
+    dims = np.array([sz[1], sz[0], sz[2]], dtype=np.float32)
     q = ann['rotation']  # [w, x, y, z]
     R = _quat_mat(q)
     yaw = float(np.arctan2(R[1, 0], R[0, 0]))
-    return dict(center=center, size=size, yaw=yaw, label='')
+    return dict(pos=pos, dims=dims, yaw=yaw, label='')
 
 
 def _convert_scene(args_tuple):
