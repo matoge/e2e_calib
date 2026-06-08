@@ -23,7 +23,7 @@ Usage:
   python build_waymo_v3.py --max-segs 5      # smoke
   python build_waymo_v3.py                   # full 798 segments
 """
-import argparse, sys, time, io
+import argparse, sys, time, io, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np, pandas as pd, pyarrow.parquet as pq
@@ -265,7 +265,10 @@ def process_seg(args_tuple):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--out',        default='/mnt/nvme6t/e2e_calib_cache/waymo_v3_full')
+    ap.add_argument('--out',        default='/raid/home/hfunaya/cache_v5/waymo_v3_full')
+    ap.add_argument('--src',        default=None,
+                    help='Waymo training/ root. Sets $WAYMO_DIR for child workers. '
+                         'Required when default /mnt/nvme6t/waymo/training does not exist.')
     ap.add_argument('--workers',    type=int, default=4)
     ap.add_argument('--max-segs',   type=int, default=None)
     ap.add_argument('--max-frames', type=int, default=None)
@@ -285,6 +288,18 @@ def main():
     ap.add_argument('--map-size-gb',  type=int, default=800,
                     help='Final merged data.lmdb map size in GB (lmdb-direct only).')
     args = ap.parse_args()
+    # Override WAYMO_DIR before any worker imports it. Child processes spawned
+    # via ProcessPoolExecutor inherit os.environ, so setting it here propagates
+    # to the worker imports of `from datasets.waymo import WAYMO_DIR`.
+    if args.src is not None:
+        os.environ['WAYMO_DIR'] = str(Path(args.src).resolve())
+        # Re-import datasets.waymo so this process's WAYMO_DIR (already cached
+        # at import time at the top of this file) is also updated.
+        import importlib, datasets.waymo as _w
+        importlib.reload(_w)
+        global WAYMO_DIR
+        WAYMO_DIR = _w.WAYMO_DIR
+        print(f'WAYMO_DIR set to {WAYMO_DIR}', flush=True)
     tile_layout = None
     if args.tile:
         tile_layout = (args.tile_w, args.tile_h, args.tile_stride,

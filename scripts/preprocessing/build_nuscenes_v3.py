@@ -95,12 +95,17 @@ def _ann_to_cuboid(ann) -> dict:
 
 def _convert_scene(args_tuple):
     (scene_token, out_dir, data_root, cams_keep, stride, max_frames, gid_start,
-     tile_layout) = args_tuple
+     tile_layout, lmdb_direct, shard_path) = args_tuple
     scene = _CTX['scenes'][scene_token]
     scene_name = scene['name']
     out_dir = Path(out_dir)
     inst_dir = out_dir / 'inst'
-    inst_dir.mkdir(parents=True, exist_ok=True)
+    sw = None
+    if lmdb_direct:
+        from scripts.preprocessing.lmdb_writer import ShardWriter
+        sw = ShardWriter(shard_path, map_size_gb=40)
+    else:
+        inst_dir.mkdir(parents=True, exist_ok=True)
 
     sample_tok = scene['first_sample_token']
     samples = []
@@ -231,7 +236,11 @@ def _convert_scene(args_tuple):
                     is_obj   = torch.from_numpy(is_obj_vis),
                     is_radar = torch.from_numpy(is_radar_v),
                 ))
-                torch.save(inst, inst_dir / f'{gid:08d}.pt')
+                fname = f'{gid:08d}.pt'
+                if sw is not None:
+                    sw.put_inst(fname, inst)
+                else:
+                    torch.save(inst, inst_dir / fname)
                 gid += 1
                 written += 1
             else:
@@ -248,7 +257,21 @@ def _convert_scene(args_tuple):
                 gid += 1
                 written += len(tile_files)
 
-    return scene_name, written
+    if sw is not None:
+        sw.close()
+    # Return scene_name + per-scene fname list so main() can build train/val
+    # split without re-reading inst/.pt files (which don't exist in lmdb-direct).
+    fnames_emitted = []
+    if lmdb_direct:
+        # Re-walk shard to get keys (cheap, single small lmdb).
+        import lmdb as _lmdb
+        env = _lmdb.open(shard_path, readonly=True, lock=False, subdir=True, max_dbs=0)
+        with env.begin() as txn:
+            for k, _ in txn.cursor():
+                if not k.startswith(b'__cubs__/'):
+                    fnames_emitted.append(k.decode())
+        env.close()
+    return scene_name, written, fnames_emitted
 
 
 def main():
@@ -271,6 +294,11 @@ def main():
     ap.add_argument('--tile-pad',     type=int, default=64)
     ap.add_argument('--tile-y-start', type=int, default=0,  help='NS images are 900 tall — keep 0')
     ap.add_argument('--tile-jpg-q',   type=int, default=90)
+    ap.add_argument('--lmdb-direct',  action='store_true',
+                    help='Write directly to per-scene LMDB shards via ShardWriter '
+                         '(no inst/.pt). Master merges shards into data.lmdb.')
+    ap.add_argument('--map-size-gb',  type=int, default=400,
+                    help='Final merged data.lmdb map size in GB (lmdb-direct only).')
     args = ap.parse_args()
 
     tile_layout = None
@@ -296,39 +324,62 @@ def main():
           f'workers={args.workers}  out={out_dir}', flush=True)
 
     gid_stride = 4000  # ~40 frames × 6 cams = 240 per scene, buffer
+    shard_dir = out_dir / '_shards'
+    if args.lmdb_direct:
+        shard_dir.mkdir(parents=True, exist_ok=True)
     argv = [(s['token'], str(out_dir), args.data_root, cams_keep, args.stride,
-             args.max_frames, i * gid_stride, tile_layout)
+             args.max_frames, i * gid_stride, tile_layout, args.lmdb_direct,
+             str(shard_dir / f'{s["name"]}.lmdb') if args.lmdb_direct else '')
             for i, s in enumerate(scenes_sorted)]
 
     t0 = time.time()
     written_total = 0
+    # scene_name → [fname,...] for lmdb-direct meta build
+    scene_fnames: dict[str, list[str]] = {}
     with ProcessPoolExecutor(max_workers=args.workers,
                               initializer=_worker_init,
                               initargs=(args.meta_dir,)) as ex:
         futs = {ex.submit(_convert_scene, a): a for a in argv}
         done = 0
         for fut in as_completed(futs):
-            name, n = fut.result()
+            name, n, fns = fut.result()
             written_total += n
+            scene_fnames[name] = fns
             done += 1
             print(f'[{done}/{len(argv)}] {name}: +{n}  total={written_total} '
                   f'({time.time()-t0:.0f}s)', flush=True)
 
-    # train/val split (object-level on scene name)
-    fnames = sorted(p.name for p in (out_dir / 'inst').glob('*.pt'))
+    # train/val split (scene-level)
     import random
     rng = random.Random(args.seed); rng.shuffle(scenes_sorted)
     n_val = max(1, int(len(scenes_sorted) * args.val_frac))
     val_scenes = set(s['name'] for s in scenes_sorted[:n_val])
 
-    train_files, val_files = [], []
-    for f in fnames:
-        # decode scene from inst on disk for accuracy
-        inst = torch.load(out_dir / 'inst' / f, weights_only=False)
-        if inst.get('scene') in val_scenes:
-            val_files.append(f)
-        else:
-            train_files.append(f)
+    if args.lmdb_direct:
+        # Merge shards into data.lmdb.
+        from scripts.preprocessing.lmdb_writer import merge_shards
+        shard_paths = sorted(p for p in shard_dir.glob('*.lmdb') if p.is_dir())
+        final_lmdb = out_dir / 'data.lmdb'
+        print(f'merging {len(shard_paths)} shards → {final_lmdb} ...', flush=True)
+        n_w, n_c = merge_shards(shard_paths, final_lmdb,
+                                 map_size_gb=args.map_size_gb)
+        print(f'merged: {n_w} insts + {n_c} cuboid keys', flush=True)
+        # Build meta from per-scene fname lists.
+        train_files: list[str] = []
+        val_files:   list[str] = []
+        for sname, fns in scene_fnames.items():
+            (val_files if sname in val_scenes else train_files).extend(fns)
+        train_files.sort(); val_files.sort()
+    else:
+        # Legacy inst/.pt walk.
+        fnames = sorted(p.name for p in (out_dir / 'inst').glob('*.pt'))
+        train_files, val_files = [], []
+        for f in fnames:
+            inst = torch.load(out_dir / 'inst' / f, weights_only=False)
+            if inst.get('scene') in val_scenes:
+                val_files.append(f)
+            else:
+                train_files.append(f)
     torch.save({'train': train_files, 'val': val_files}, out_dir / 'meta.pt')
     print(f'saved meta.pt: train={len(train_files)} val={len(val_files)}  → {out_dir}',
           flush=True)
