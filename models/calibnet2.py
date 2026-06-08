@@ -147,13 +147,14 @@ class Block(nn.Module):
     ONCE outside the n_iter loop and threaded in unchanged each iter.
     """
     def __init__(self, d: int = D_DIM, n_heads: int = 4, n_levels: int = 3,
-                 n_points: int = 4):
+                 n_points: int = 4, no_value_proj: bool = False):
         super().__init__()
         self.n_levels = n_levels
         self.norm_q   = nn.LayerNorm(d)
         self.norm_kv  = nn.LayerNorm(d)
         self.cross_attn = MSDeformAttn(d_model=d, n_levels=n_levels,
-                                        n_heads=n_heads, n_points=n_points)
+                                        n_heads=n_heads, n_points=n_points,
+                                        no_value_proj=no_value_proj)
         # Q → reference points (one ref per level).  Zero-init weight + zero
         # bias → ref = sigmoid(0) = 0.5 at start (image center).  The network
         # learns to anchor as Q acquires per-point u/v info from cross-attn.
@@ -252,7 +253,8 @@ class CalibNet2(nn.Module):
                  kv_schedule: list[dict] | None = None,
                  fourier_head_n_freq: int = 0,
                  fourier_head_scale: float = 10.0,
-                 point_mlp_fourier_n_freq: int = 0):
+                 point_mlp_fourier_n_freq: int = 0,
+                 no_value_proj: bool = False):
         super().__init__()
         self.img_size  = img_size
         self.cnn = ConvNeXtBackbone(d, in_channels=in_channels,
@@ -282,7 +284,8 @@ class CalibNet2(nn.Module):
         self.kv_schedule = kv_schedule
         if self.kv_schedule is None:
             self.n_iter = n_iter
-            self.block = Block(d=d, n_heads=n_heads, n_levels=3, n_points=n_points)
+            self.block = Block(d=d, n_heads=n_heads, n_levels=3, n_points=n_points,
+                               no_value_proj=no_value_proj)
             self.level_embed = nn.Parameter(torch.zeros(3, d))
             nn.init.normal_(self.level_embed, std=0.02)
         else:
@@ -301,7 +304,8 @@ class CalibNet2(nn.Module):
                         (1 if cfg.get("lidar", True) else 0)
                 np_l = int(cfg.get("n_points", n_points))
                 self.blocks.append(
-                    Block(d=d, n_heads=n_heads, n_levels=n_lvl, n_points=np_l))
+                    Block(d=d, n_heads=n_heads, n_levels=n_lvl, n_points=np_l,
+                          no_value_proj=no_value_proj))
             # Per-layer level_embed sized to that layer's n_levels.
             self.level_embeds = nn.ParameterList()
             for cfg in self.kv_schedule:

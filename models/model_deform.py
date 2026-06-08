@@ -74,7 +74,8 @@ class MSDeformAttn(nn.Module):
     reference_points (B, Lq, L, 2) — normalized (0..1) top-left origin, per level.
     input_flatten    (B, Σ HlWl, C) — feature maps concatenated, flattened along H*W.
     """
-    def __init__(self, d_model=64, n_levels=1, n_heads=4, n_points=4):
+    def __init__(self, d_model=64, n_levels=1, n_heads=4, n_points=4,
+                 no_value_proj: bool = False):
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model, self.n_levels, self.n_heads, self.n_points = \
@@ -89,7 +90,13 @@ class MSDeformAttn(nn.Module):
 
         self.sampling_offsets  = nn.Linear(d_model, n_heads * n_levels * n_points * 2)
         self.attention_weights = nn.Linear(d_model, n_heads * n_levels * n_points)
-        self.value_proj        = nn.Linear(d_model, d_model)
+        # value_proj: standard Deformable-DETR usage maps backbone-output space
+        # to attention-value space via Linear(d, d). When the upstream backbone
+        # already emits d-dim features that are usable as attention values
+        # (CalibNet2 / CND2 case: ConvNeXt out is d=128 with positional enc),
+        # this is redundant — the backbone subsumes the role. Toggle off via
+        # no_value_proj=True to skip ~76% of MSDeformAttn MACs.
+        self.value_proj        = nn.Identity() if no_value_proj else nn.Linear(d_model, d_model)
         self.output_proj       = nn.Linear(d_model, d_model)
         self._reset_parameters()
 
@@ -105,7 +112,8 @@ class MSDeformAttn(nn.Module):
         with torch.no_grad():
             self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
         constant_(self.attention_weights.weight.data, 0.); constant_(self.attention_weights.bias.data, 0.)
-        xavier_uniform_(self.value_proj.weight.data);     constant_(self.value_proj.bias.data, 0.)
+        if isinstance(self.value_proj, nn.Linear):
+            xavier_uniform_(self.value_proj.weight.data); constant_(self.value_proj.bias.data, 0.)
         xavier_uniform_(self.output_proj.weight.data);    constant_(self.output_proj.bias.data, 0.)
 
     def forward(self, query, reference_points, input_flatten,
