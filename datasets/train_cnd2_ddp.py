@@ -510,6 +510,10 @@ def main():
     p.add_argument('--cache', required=True,
                    help='comma-separated v3-tiled cache path(s)')
     p.add_argument('--epochs', type=int, default=50)
+    p.add_argument('--eval-every', type=int, default=10,
+                   help='Run validation + per-epoch debug-sample render only '
+                        'every N epochs. Always evals on ep1 and the last ep. '
+                        'Default 10 — matches CND1 cadence.')
     p.add_argument('--batch-size', type=int, default=64)
     p.add_argument('--img-size', type=int, default=128)
     p.add_argument('--lr', type=float, default=1e-3)
@@ -849,11 +853,23 @@ def main():
         # in both modes without changing the legacy single-frame epoch_loop.
         # vis_capture is passed in BOTH modes (525f130) so calib path also
         # emits debug_samples/ on rank-0.
+        # eval/vis stride: run validation + per-epoch debug-sample render
+        # only every N epochs (default 10). On other epochs, only training
+        # runs and val_* / *_calib metrics are reported as NaN. The legacy
+        # CND1 loop did the same — full eval is expensive (val loader pulls
+        # tiles + decodes JPEG every epoch) and 50ep × 10ep stride still
+        # gives 5 eval points per run.
+        eval_stride = int(getattr(args, 'eval_every', 10))
+        do_eval = (ep + 1) % eval_stride == 0 or (ep + 1) == epochs or ep == 0
         tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
-                            args.img_size, vis_capture=vis_cap_train)
-        with torch.no_grad():
-            va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
-                                args.img_size, vis_capture=vis_cap_val)
+                            args.img_size, vis_capture=vis_cap_train if do_eval else None)
+        if do_eval:
+            with torch.no_grad():
+                va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
+                                    args.img_size, vis_capture=vis_cap_val)
+        else:
+            # placeholder of matching arity — last seen va_out reused in log
+            va_out = (float('nan'),) * len(tr_out)
         if len(tr_out) == 4:
             tr_nll, tr_mse, tr_nll_cal, tr_mse_cal = tr_out
             va_nll, va_mse, va_nll_cal, va_mse_cal = va_out
@@ -875,22 +891,22 @@ def main():
             if cml_logger is not None:
                 rs = cml_logger.report_scalar
                 rs(title='loss/nll', series='train', value=tr_nll, iteration=ep+1)
-                rs(title='loss/nll', series='val',   value=va_nll, iteration=ep+1)
                 rs(title='loss/mse', series='train', value=tr_mse, iteration=ep+1)
-                rs(title='loss/mse', series='val',   value=va_mse, iteration=ep+1)
                 rs(title='lr', series='lr',
                    value=scheduler.get_last_lr()[0], iteration=ep+1)
+                if do_eval:
+                    rs(title='loss/nll', series='val',   value=va_nll, iteration=ep+1)
+                    rs(title='loss/mse', series='val',   value=va_mse, iteration=ep+1)
                 if tr_nll_cal == tr_nll_cal:
                     rs(title='loss/nll_calib', series='train', value=tr_nll_cal, iteration=ep+1)
-                    rs(title='loss/nll_calib', series='val',   value=va_nll_cal, iteration=ep+1)
                     rs(title='loss/mse_calib', series='train', value=tr_mse_cal, iteration=ep+1)
-                    rs(title='loss/mse_calib', series='val',   value=va_mse_cal, iteration=ep+1)
+                    if do_eval and va_nll_cal == va_nll_cal:
+                        rs(title='loss/nll_calib', series='val', value=va_nll_cal, iteration=ep+1)
+                        rs(title='loss/mse_calib', series='val', value=va_mse_cal, iteration=ep+1)
             # Pair-mode debug samples: render the SAME 16 fixed samples each
-            # epoch (8 train + 8 val) so a person can watch convergence on
-            # consistent panels instead of a random new batch every time.
-            # train_ds[i] / val_ds[i] CPU-direct → manual collate-of-1 → model
-            # forward (rank 0 unwrapped, no DDP allreduce) → render with pred.
-            if args.pair_mode and accel.is_main_process:
+            # eval epoch (8 train + 8 val) so a person can watch convergence
+            # on consistent panels. Only on do_eval epochs (every N).
+            if args.pair_mode and accel.is_main_process and do_eval:
                 try:
                     from scripts.vis_check._pair_render import render_one_pair
                     n_per_split = 8
