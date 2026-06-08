@@ -31,6 +31,85 @@ from datetime import datetime
 from datasets.pandaset_full import PandaSetCalibDatasetFull, collate_full, collate_pair
 from models.calibnet2 import CalibNet2
 from models.model_cov import gaussian2d_nll
+from scripts.ba.ba_torch import (
+    pinhole_jacobian, project_pinhole, gn_step, make_info_from_sigma_rho,
+    _apply_extrinsic,
+)
+
+
+def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3):
+    """BA-based pose loss for cnd2.
+
+    per_pt: (B, N, 5)  [du, dv, log_sx, log_sy, rho]
+    dist_uvd: (B, N, ≥3)  observation uv in tile-local coords
+    pad_mask: (B, N) bool, True = invalid
+    batch: full batch tuple (PS calib mode: 7=pert, 9=K, etc.)
+    Returns scalar loss + diagnostics dict.
+    """
+    pert_vec = batch[7]                              # (B, 8) [tx,ty,tz, ypr_deg, dfx, dfy]
+    K_orig = batch[10] if len(batch) > 10 else None
+    cs_t   = batch[11] if len(batch) > 11 else None
+    u0_t   = batch[13] if len(batch) > 13 else None
+    v0_t   = batch[14] if len(batch) > 14 else None
+    if K_orig is None or cs_t is None or u0_t is None:
+        return None, {}
+    B, N, _ = dist_uvd.shape
+    valid = ~pad_mask
+    # Build tile-local K from parent K + crop origin + crop size
+    # img_size = tile size used by model (default 128). Inferred from dist_uvd range.
+    img_size = 128.0
+    scale = img_size / cs_t                          # (B,)
+    fx_l = K_orig[..., 0, 0] * scale
+    fy_l = K_orig[..., 1, 1] * scale
+    cx_l = (K_orig[..., 0, 2] - u0_t) * scale
+    cy_l = (K_orig[..., 1, 2] - v0_t) * scale
+    K_local = torch.zeros_like(K_orig)
+    K_local[..., 0, 0] = fx_l; K_local[..., 1, 1] = fy_l
+    K_local[..., 0, 2] = cx_l; K_local[..., 1, 2] = cy_l
+    K_local[..., 2, 2] = 1.0
+    K = K_local
+    mu = per_pt[..., :2]
+    sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0)
+    sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0)
+    rho = torch.tanh(per_pt[..., 4]) * 0.95
+    W = make_info_from_sigma_rho(sx, sy, rho)
+    # 3D points from dist_uvd (tile-local u, v, d)
+    fx = K[..., 0, 0:1]; fy = K[..., 1, 1:2]
+    cx = K[..., 0, 2:3]; cy = K[..., 1, 2:3]
+    d = dist_uvd[..., 2] * 100.0                     # normalised → m
+    # Padded points have d=0 → divisions blow up. Replace invalid d with safe 10m
+    # (won't matter for loss since `valid` masks them out, but keeps Jacobian finite).
+    safe_d = torch.where(valid, d, torch.full_like(d, 10.0)).clamp(min=0.5)
+    u, v = dist_uvd[..., 0], dist_uvd[..., 1]
+    X = (u - cx) * safe_d / fx
+    Y = (v - cy) * safe_d / fy
+    pts_cam = torch.stack([X, Y, safe_d], dim=-1)
+    uv_target = dist_uvd[..., :2] + mu               # network corrected
+    dof_names = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
+    prior_diag = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09],
+                              device=dist_uvd.device, dtype=dist_uvd.dtype)
+    omega = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
+    t = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
+    for _ in range(ba_iter):
+        pts_t = _apply_extrinsic(pts_cam, omega, t)
+        uv_proj = project_pinhole(pts_t, K)
+        r = uv_target - uv_proj
+        Xp, Yp, Zp = pts_t.unbind(-1)
+        J = pinhole_jacobian(Xp, Yp, Zp, K, uv_proj.detach(), dof_names)
+        delta, _ = gn_step(J, W, r, valid=valid, damping=damping, prior_diag=prior_diag)
+        omega = omega + delta[:, :3]
+        t = t + delta[:, 3:]
+    delta_solved = torch.cat([omega, t], dim=-1)     # (B, 6)
+    # pert_vec layout: [tx, ty, tz, yaw, pitch, roll, dfx, dfy]
+    t_gt = pert_vec[:, :3]
+    ypr_gt = pert_vec[:, 3:6]
+    rot_loss = (omega - ypr_gt).pow(2).mean()
+    t_loss = (t - t_gt).pow(2).mean()
+    loss = rot_loss + 100.0 * t_loss
+    with torch.no_grad():
+        rot_err = (omega - ypr_gt).abs().mean()
+        t_err = (t - t_gt).abs().mean()
+    return loss, {'rot_err': rot_err.item(), 't_err': t_err.item()}
 from torch.utils.data import DataLoader, Subset, ConcatDataset, RandomSampler
 import random as _r
 
@@ -382,7 +461,18 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         # use_info_head=False here → out is per_pt only.
         per_pt = out[0] if isinstance(out, tuple) else out
         valid  = ~pad_mask
-        loss   = gaussian2d_nll(per_pt[valid], gt[valid])
+        nll_loss = gaussian2d_nll(per_pt[valid], gt[valid])
+        if getattr(accel, '_ba_loss_mode', False):
+            ba_l, ba_diag = _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch,
+                                          ba_iter=getattr(accel, '_ba_iter', 4),
+                                          damping=getattr(accel, '_ba_damping', 1e-3))
+            ba_weight = getattr(accel, '_ba_weight', 0.5)
+            if ba_l is None:
+                loss = nll_loss
+            else:
+                loss = (1.0 - ba_weight) * nll_loss + ba_weight * ba_l
+        else:
+            loss = nll_loss
         if train:
             optimizer.zero_grad(set_to_none=True)
             accel.backward(loss)
@@ -431,6 +521,12 @@ def main():
     p.add_argument('--max-crop-px', type=int, default=512)
     p.add_argument('--grid-n', type=int, default=16)
     p.add_argument('--workers', type=int, default=8)
+    p.add_argument('--ba-loss', action='store_true',
+                   help='Use BA-based pose loss instead of per-point gaussian2d_nll')
+    p.add_argument('--ba-iter', type=int, default=4)
+    p.add_argument('--ba-damping', type=float, default=1e-3)
+    p.add_argument('--ba-weight', type=float, default=0.5,
+                   help='weight of BA loss in mixture; (1-w) * nll + w * ba')
     p.add_argument('--prefetch', type=int, default=4)
     p.add_argument('--n-iter', type=int, default=3)
     p.add_argument('--n-heads', type=int, default=4)
@@ -516,6 +612,11 @@ def main():
         DistributedDataParallelKwargs(find_unused_parameters=True),
     ])
     set_seed(args.split_seed + accel.process_index)
+    # Stash BA flags on accel so epoch_loop can read without arg-thread
+    accel._ba_loss_mode = bool(args.ba_loss)
+    accel._ba_iter      = int(args.ba_iter)
+    accel._ba_damping   = float(args.ba_damping)
+    accel._ba_weight    = float(args.ba_weight)
 
     # ClearML init (rank-0 only, BEFORE main loop so cml_logger lookups work)
     if args.clearml and int(os.environ.get('RANK', '0')) == 0:
@@ -913,8 +1014,17 @@ def main():
                     log(f"  ↳ calib debug-sample render skipped: {_e}")
             if va_nll < best_val:
                 best_val = va_nll
-                accel.save(accel.unwrap_model(model).state_dict(), ckpt)
-                log(f"  ↳ best val_nll={best_val:.4f}  saved {ckpt}")
+                sd_cpu = {k: v.detach().cpu() for k, v in
+                          accel.unwrap_model(model).state_dict().items()}
+                accel.save(sd_cpu, ckpt)
+                # belt-and-braces: under some ClearML + accelerate combos
+                # accel.save was observed to silently no-op (file never
+                # appears on disk despite log line firing). Verify + fallback
+                # so we never lose a full training run to that interaction.
+                if (not ckpt.exists()) or ckpt.stat().st_size < 1024:
+                    torch.save(sd_cpu, ckpt)
+                log(f"  ↳ best val_nll={best_val:.4f}  saved {ckpt} "
+                    f"({ckpt.stat().st_size/1e6:.2f} MB)")
                 # Upload best.pt as ClearML OutputModel + pair config.py
                 if cml_task is not None:
                     try:

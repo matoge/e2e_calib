@@ -1656,7 +1656,9 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.from_numpy(K_orig),
                 torch.tensor(float(cs), dtype=torch.float32),
                 torch.from_numpy(delta1_se3),
-                torch.from_numpy(sub_idx.astype(np.int64)))
+                torch.from_numpy(sub_idx.astype(np.int64)),
+                torch.tensor(float(u0), dtype=torch.float32),
+                torch.tensor(float(v0), dtype=torch.float32))
 
 
 def collate_full(batch):
@@ -1726,8 +1728,16 @@ def collate_full(batch):
     else:
         delta1_se3 = torch.zeros(B, 6, dtype=torch.float32)
 
+    # tile crop origin (u0, v0) in PARENT image pixels (added 2026-06-08)
+    has_uv0 = len(batch[0]) >= 15
+    if has_uv0:
+        u0_t = torch.stack([s[13] for s in batch])                  # (B,)
+        v0_t = torch.stack([s[14] for s in batch])                  # (B,)
+    else:
+        u0_t = v0_t = None
+
     return (imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec,
-            pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3)
+            pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3, u0_t, v0_t)
 
 
 def collate_pair(batch):
