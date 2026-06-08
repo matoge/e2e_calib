@@ -35,14 +35,19 @@ RUN apt-get update && \
     qtbase5-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3.10 -m pip install --no-cache-dir --upgrade pip "setuptools<70.0" \
+RUN python3.10 -m pip install --no-cache-dir --upgrade pip "setuptools<70.0" wheel \
     pathtools promise pybind11
 SHELL ["/bin/bash", "-c"]
 RUN python3.10 -m pip install --no-cache-dir \
     torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
     --extra-index-url https://download.pytorch.org/whl/cu118
-RUN TCNN_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} python3.10 -m pip install --no-cache-dir \
-    git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bindings/torch
+# tinycudann: optional. SplatAD's gsplat path doesn't need it. The upstream
+# Dockerfile builds it for the NeurAD MLP-encoder method; skip on V100 to
+# dodge a setuptools 70 / pkg_resources removal incompatibility that kills
+# the tcnn `setup.py` import on cu118.
+RUN TCNN_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} python3.10 -m pip install --no-cache-dir --no-build-isolation \
+    git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bindings/torch || \
+    echo "tcnn install failed — skipped (SplatAD doesn't need tcnn)"
 
 # waymo dataset reader (used by neurad-studio)
 RUN python3.10 -m pip install --no-cache-dir waymo-open-dataset-tf-2-11-0==1.6.1
