@@ -27,7 +27,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFile
+
+# A handful of kamikado PNGs are truncated (uploader interrupted). Tolerate by
+# loading what we can; truncated frames usually still decode > 90% of pixels.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.preprocessing.lmdb_writer import ShardWriter, merge_shards  # noqa: E402
@@ -148,10 +152,15 @@ def worker_process(args_tuple):
     (worker_id, tasks, shard_path, jpg_q, shard_map_gb) = args_tuple
     sw = ShardWriter(shard_path, map_size_gb=shard_map_gb)
     written = 0
+    failed = 0
     fnames_local = []  # [(scene, fname)]
     for (scene_str, frame_idx, K, dist, T_SV, gid) in tasks:
-        inst = process_one_frame(Path(scene_str), int(frame_idx),
-                                  K, dist, T_SV, jpg_q)
+        try:
+            inst = process_one_frame(Path(scene_str), int(frame_idx),
+                                      K, dist, T_SV, jpg_q)
+        except Exception:
+            inst = None
+            failed += 1
         if inst is None:
             continue
         fname = f'{int(gid):08d}.pt'
@@ -159,7 +168,7 @@ def worker_process(args_tuple):
         fnames_local.append((str(inst['scene']), fname))
         written += 1
     sw.close()
-    return worker_id, written, fnames_local
+    return worker_id, written, failed, fnames_local
 
 
 def main():
@@ -224,18 +233,21 @@ def main():
 
     all_fnames: list[tuple[str, str]] = []
     if nw == 1:
-        wid, w, fns = worker_process(worker_args[0])
+        wid, w, f, fns = worker_process(worker_args[0])
         all_fnames.extend(fns)
-        print(f'  worker {wid}: wrote {w}', flush=True)
+        print(f'  worker {wid}: wrote {w} failed {f}', flush=True)
     else:
         with ProcessPoolExecutor(max_workers=nw) as ex:
             futs = {ex.submit(worker_process, wa): wa for wa in worker_args}
             done = 0
+            total_fail = 0
             for fut in as_completed(futs):
-                wid, w, fns = fut.result()
+                wid, w, f, fns = fut.result()
                 all_fnames.extend(fns)
+                total_fail += f
                 done += 1
-                print(f'  [{done}/{nw}] worker {wid}: wrote {w}', flush=True)
+                print(f'  [{done}/{nw}] worker {wid}: wrote {w} failed {f}', flush=True)
+            print(f'total failed frames: {total_fail}', flush=True)
 
     # Merge shards into final LMDB.
     final_lmdb = out / 'data.lmdb'
