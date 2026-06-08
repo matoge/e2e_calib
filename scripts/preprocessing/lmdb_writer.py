@@ -25,17 +25,23 @@ def _as_np(t):
 
 
 def pack_cubs(cubs):
-    """Pack cuboid list → bytes (per-frame shared key)."""
+    """Pack cuboid list → bytes (per-frame shared key).
+
+    Cuboid dict accepts either {'pos','dims',...} (PandaSet/Waymo native) or
+    {'center','size',...} aliases. _is_obj_per_point uses 'pos'/'dims', so
+    they're stored under those names in the packed blob.
+    """
     if cubs is None or len(cubs) == 0:
-        return pickle.dumps({'N': 0}, protocol=pickle.HIGHEST_PROTOCOL)
+        return pickle.dumps({'M': 0}, protocol=pickle.HIGHEST_PROTOCOL)
+    def _pos(c):  return c['pos']  if 'pos'  in c else c['center']
+    def _dims(c): return c['dims'] if 'dims' in c else c['size']
     M = len(cubs)
     return pickle.dumps({
-        'N': M,
-        'cls': np.asarray([str(c.get('label', '')) for c in cubs], dtype='O'),
-        'center': np.stack([np.asarray(c['center'], dtype=np.float32) for c in cubs]),
-        'size':   np.stack([np.asarray(c['size'],   dtype=np.float32) for c in cubs]),
-        'yaw':    np.fromiter((float(c['yaw']) for c in cubs),
-                              dtype=np.float32, count=M),
+        'M': M,
+        'pos':  np.stack([np.asarray(_pos(c),  dtype=np.float32) for c in cubs]),
+        'dims': np.stack([np.asarray(_dims(c), dtype=np.float32) for c in cubs]),
+        'yaw':  np.fromiter((float(c['yaw']) for c in cubs),
+                            dtype=np.float32, count=M),
     }, protocol=pickle.HIGHEST_PROTOCOL)
 
 
