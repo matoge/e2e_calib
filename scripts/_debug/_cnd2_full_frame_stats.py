@@ -220,9 +220,11 @@ def main():
             n_done += len(ck); continue
         moved = [t.to(DEVICE) if torch.is_tensor(t) else t
                  for t in collate_full(wins)]
+        # collate_full returns 13- or 15-tuple depending on dataset version;
+        # take the first 13 (we don't need u0_t / v0_t here).
         (imgs, true_uvd, dist_uvd, pad_mask, vfp,
          bucket_uvd, bucket_valid, _,
-         pts_cam_orig, duv_orig, K_orig, cs_b, _delta1) = moved
+         pts_cam_orig, duv_orig, K_orig, cs_b, _delta1) = moved[:13]
         valid = ~pad_mask
         if use_intensity:
             point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)

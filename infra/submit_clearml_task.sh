@@ -100,7 +100,7 @@ sed 's/^/    /' "$BASH_SETUP"
   --name        "$NAME" \
   --queue       "$QUEUE" \
   --docker      "$DOCKER_IMAGE" \
-  --docker_args "--shm-size=64g --network host -v /home/hfunaya/git/e2e_calib:/workspace -v /home/hfunaya:/home/hfunaya -v /mnt/fsx:/mnt/fsx -v /dev/shm:/dev/shm --ipc=host -e PYTHONPATH=/workspace" \
+  --docker_args "--shm-size=64g --network host -v /home/hfunaya/git/e2e_calib:/workspace -v /home/hfunaya:/home/hfunaya -v /mnt/fsx:/mnt/fsx -v /raid:/raid -v /dev/shm:/dev/shm --ipc=host -e PYTHONPATH=/workspace" \
   --docker_bash_setup_script "$BASH_SETUP" \
   --script      "$SCRIPT" \
   --skip-repo-detection \

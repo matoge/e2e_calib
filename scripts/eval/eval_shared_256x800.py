@@ -33,7 +33,21 @@ from scripts.ba.ba_torch import (
     solve_kb_xyz_shared, make_info_from_sigma_rho, project_kb,
     _apply_extrinsic, _K_with_delta, _split_delta,
 )
-from scripts.serving.ckpt_resolver import resolve as resolve_ckpt
+try:
+    from scripts.serving.ckpt_resolver import resolve as resolve_ckpt
+except ImportError:
+    # ckpt_resolver was removed; fall back to a no-op that just resolves the
+    # default exp_dir under experiments/. calib_api boot only needs the
+    # default ckpt, so this is sufficient for the serving path.
+    def resolve_ckpt(name: str):
+        from pathlib import Path as _P
+        repo = _P(__file__).resolve().parents[2]
+        d = repo / 'experiments' / name
+        bm = d / 'best_model.pt'
+        cfg = d / 'config.py'
+        if not bm.exists():
+            raise FileNotFoundError(f'ckpt not found: {bm}')
+        return bm, cfg
 
 CACHE = Path.home() / 'cache' / 'kamikado_v3_tiled'
 # Module-level CKPT / EXP_CFG_PATH are the *current* resolved pair. They start
@@ -159,7 +173,10 @@ def _build_subwin(ds, inst, t_delta, ypr_deg, *, u0, v0, cs):
     K_pert = K.copy()
     pert_vec = np.array([t[0], t[1], t[2], ypr[0], ypr[1], ypr[2], 0.0, 0.0],
                           dtype=np.float32)
-    return ds.build_window(
+    # build_window was renamed to build_crop (commit 945e033 era).
+    # Keep both: prefer build_crop if present, fall back to build_window.
+    fn = getattr(ds, 'build_crop', None) or getattr(ds, 'build_window')
+    return fn(
         inst, pts_c, intens_c, uv_gt_c, cand_idx, is_obj_full,
         u0, v0, cs, K, R_off, cp_off, K_pert, cp, pert_vec,
         tile_u0, tile_v0, img_full, IW, IH,
