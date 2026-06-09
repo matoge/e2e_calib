@@ -612,6 +612,16 @@ def main():
                    help='register a ClearML Task with cfg + why + git context')
     p.add_argument('--clearml-project', type=str, default='e2e_calib/calib',
                    help='ClearML project namespace')
+    p.add_argument('--resume-ckpt', type=str, default=None,
+                   help='Path to best_model.pt (or any state_dict). Loaded into '
+                        'model BEFORE training starts. Optimizer/scheduler are '
+                        '*not* restored — training restarts ep0 with fresh lr '
+                        'schedule, only weights are warm-started.')
+    p.add_argument('--start-epoch', type=int, default=0,
+                   help='Skip the first N epochs of the cosine LR schedule. '
+                        'Use with --resume-ckpt to continue from where a prior '
+                        'run left off (e.g. --resume-ckpt prev/best_model.pt '
+                        '--start-epoch 20).')
     p.add_argument('--why', type=str, default='',
                    help='WHY blob: rationale, hypothesis, expected outcome '
                         '(stored in ClearML task comment, free-form prose).')
@@ -914,8 +924,27 @@ def main():
                             f"HAT→GT={res[1]['err_hyp']:.1f}px")
         except Exception as _e:
             log(f"  ↳ preflight vis_check skipped: {_e}")
+    # Optional warm-start from a prior best_model.pt + scheduler fast-forward.
+    # The cosine schedule here is stateless (lr_lambda is a pure function of
+    # epoch index), so we just step() it start_epoch times before the loop.
+    if args.resume_ckpt:
+        ck = Path(args.resume_ckpt)
+        if not ck.exists():
+            raise FileNotFoundError(f'--resume-ckpt not found: {ck}')
+        sd = torch.load(ck, map_location='cpu', weights_only=False)
+        if isinstance(sd, dict) and 'state_dict' in sd:
+            sd = sd['state_dict']
+        # strip optional 'module.' prefix from accelerate-saved ckpts
+        sd = {k.removeprefix('module.'): v for k, v in sd.items()}
+        miss, unexp = accel.unwrap_model(model).load_state_dict(sd, strict=False)
+        log(f'resumed weights from {ck} (missing={len(miss)} unexpected={len(unexp)})')
+    if args.start_epoch > 0:
+        for _ in range(args.start_epoch):
+            scheduler.step()
+        log(f'fast-forwarded scheduler {args.start_epoch} epochs; '
+            f'current lr={scheduler.get_last_lr()[0]:.2e}')
     accel.wait_for_everyone()
-    for ep in range(epochs):
+    for ep in range(args.start_epoch, epochs):
         ep_t = time.time()
         # epoch_loop_pair returns 4-tuple (nll, mse, nll_calib, mse_calib);
         # epoch_loop returns 2-tuple. Unpack with a length guard so this runs

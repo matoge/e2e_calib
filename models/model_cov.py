@@ -262,29 +262,37 @@ def gaussian2d_nll(params: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     params : (B, N, 5)  [tx, ty, log_sx, log_sy, rho]
     target : (B, N, 2)  [gt_tx, gt_ty]
     Returns scalar mean NLL.
+
+    Computed in fp32 with autocast disabled. fp16 mixed precision overflows
+    here (`exp(log_sx)`, `(dx/sx)**2`, intermediate Mahalanobis) → NaN that
+    poisons the whole DDP step. The cost is small (one element-wise pass per
+    point), so we always run this block in fp32.
     """
-    tx, ty       = params[..., 0], params[..., 1]
-    log_sx, log_sy = params[..., 2], params[..., 3]
-    rho          = params[..., 4]
+    with torch.cuda.amp.autocast(enabled=False):
+        params = params.float()
+        target = target.float()
+        tx, ty       = params[..., 0], params[..., 1]
+        log_sx, log_sy = params[..., 2], params[..., 3]
+        rho          = params[..., 4]
 
-    dx = target[..., 0] - tx
-    dy = target[..., 1] - ty
-    sx = log_sx.exp()
-    sy = log_sy.exp()
+        dx = target[..., 0] - tx
+        dy = target[..., 1] - ty
+        sx = log_sx.exp()
+        sy = log_sy.exp()
 
-    # normalised residuals
-    zx = dx / sx
-    zy = dy / sy
-    r2 = 1.0 - rho**2
+        # normalised residuals
+        zx = dx / sx
+        zy = dy / sy
+        r2 = (1.0 - rho * rho).clamp(min=1e-6)
 
-    # log det of covariance = log(sx²·sy²·(1-ρ²)) = 2log_sx + 2log_sy + log(1-ρ²)
-    log_det = 2*log_sx + 2*log_sy + torch.log(r2.clamp(min=1e-6))
+        # log det of covariance = log(sx²·sy²·(1-ρ²))
+        log_det = 2.0 * log_sx + 2.0 * log_sy + torch.log(r2)
 
-    # Mahalanobis
-    maha = (zx**2 - 2*rho*zx*zy + zy**2) / r2.clamp(min=1e-6)
+        # Mahalanobis
+        maha = (zx * zx - 2.0 * rho * zx * zy + zy * zy) / r2
 
-    nll = 0.5 * (log_det + maha)  # + const (log 2π, ignored)
-    return nll.mean()
+        nll = 0.5 * (log_det + maha)  # + const (log 2π, ignored)
+        return nll.mean()
 
 
 def compute_calibnet_loss(model_out, gt_uv, valid_mask, *, pert_vec=None,
