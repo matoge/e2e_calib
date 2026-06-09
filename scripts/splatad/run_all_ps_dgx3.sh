@@ -1,4 +1,6 @@
 #!/bin/bash
+# Use the system clearml-agent venv as host-side python (has clearml installed).
+PY=${PY:-/home/hfunaya/venv_clearml/bin/python3}
 # SplatAD SO3xR3 sweep on DGX-3 (16 V100s):
 #   - Each scene = 1 GPU
 #   - 16M Gaussian cap; on OOM, automatic re-try with 10M
@@ -8,7 +10,7 @@
 # Usage:
 #   bash scripts/splatad/run_all_ps_dgx3.sh [SCENES...]
 #   (default: all 103 PandaSet scenes)
-set -euo pipefail
+set -eo pipefail
 PS_ROOT=${PS_ROOT:-/mnt/fsx/tmp/hfunaya/pandaset}
 OUT_ROOT=${OUT_ROOT:-/raid/home/hfunaya/splatad_ps_outputs_y1}
 IMAGE=${IMAGE:-splatad-v100:neurad}
@@ -33,8 +35,11 @@ run_scene() {
 
     echo "[gpu $gpu] === $scene cap=${cap}M ===" >&2
 
-    # ClearML task init + log streamer (host-side, follows train.log)
-    /home/hfunaya/.pyenv/versions/3.10.4/bin/python - "$exp" "$scene" "$log" "$cap" <<'PY' &
+    # ClearML task init + log streamer (host-side, follows train.log).
+    # `report_text` mirrors every line of train.log into the ClearML
+    # console tab; the same line is parsed for known iter/loss/psnr
+    # patterns and emitted as scalars.
+    "$PY" - "$exp" "$scene" "$log" "$cap" <<'PY' &
 import sys, time, re, os
 exp, scene, log_path, cap = sys.argv[1:5]
 from clearml import Task
@@ -44,22 +49,39 @@ t = Task.init(project_name='splatad/ps_so3xr3', task_name=exp,
 t.connect({'scene': scene, 'cap_M': int(cap), 'log_path': log_path})
 log = t.get_logger()
 while not os.path.exists(log_path): time.sleep(2)
-re_iter = re.compile(r'Step \(\s*(\d+)\)')
-re_kv = re.compile(r'(\w+)\s*=\s*([-\d\.eE+]+)')
+# Patterns: nerfstudio/splatad rich-console output.
+#   "Step (   1000) | ... | loss=... | psnr=... | main_loss=..."
+#   neurad-studio also emits lines like "Train Loss     N.NN"
+re_iter   = re.compile(r'Step \(\s*(\d+)\)')
+re_kv     = re.compile(r'(\w+)\s*=\s*([-\d\.eE+]+)')
+re_named  = re.compile(r'\b(Train Loss|Eval PSNR|Train Iter \(time\)|Vis Rays / Sec|ETA|Test PSNR|psnr|main_loss|num_gauss)\s*[\|│]?\s*([-\d\.eE+]+)')
+re_table  = re.compile(r'^\s*([A-Z][\w \(\)/]+?)\s+([-\d][\d\.eE+\-]*)\s*$')
+last_it = -1
 with open(log_path) as f:
-    f.seek(0, 2)
+    f.seek(0)  # stream from beginning so ClearML console has full log
     while True:
         line = f.readline()
         if not line:
             time.sleep(1); continue
-        m = re_iter.search(line)
+        # Strip ANSI escapes for cleaner console + regex matching.
+        clean = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line).rstrip('\n')
+        if clean.strip():
+            log.report_text(clean)
+        m = re_iter.search(clean)
         if m:
-            it = int(m.group(1))
-            for k, v in re_kv.findall(line):
+            last_it = int(m.group(1))
+        if last_it >= 0:
+            for k, v in re_kv.findall(clean):
                 if k == 'Step': continue
                 try: vf = float(v)
                 except ValueError: continue
-                log.report_scalar(title='train', series=k, value=vf, iteration=it)
+                log.report_scalar(title='train', series=k,
+                                   value=vf, iteration=last_it)
+            for k, v in re_named.findall(clean):
+                try: vf = float(v)
+                except ValueError: continue
+                log.report_scalar(title='train', series=k.strip(),
+                                   value=vf, iteration=last_it)
 PY
     local tailer_pid=$!
 
@@ -107,7 +129,7 @@ with open(r'\$CFG','w') as f: yaml.dump(cfg, f, sort_keys=False)
 
     if [ $rc -eq 0 ]; then
         # Build first/last vs GT compare image + post to ClearML
-        /home/hfunaya/.pyenv/versions/3.10.4/bin/python - "$exp" "$scene" "$OUT_ROOT" <<'PY'
+        "$PY" - "$exp" "$scene" "$OUT_ROOT" <<'PY'
 import sys, os
 from pathlib import Path
 exp, scene, out_root = sys.argv[1:4]
