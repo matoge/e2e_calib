@@ -570,6 +570,14 @@ def main():
                    help='comma-separated <cache_path>:<int> per-cache oversample '
                         'overrides. Falls back to --oversample. Example: '
                         '"/home/hfunaya/cache_v5/kamikado_v3_full:8"')
+    p.add_argument('--per-cache-mode', type=str, default='',
+                   help='comma-separated <cache_path>:<pair|calib> per-cache '
+                        'training mode. When set, OVERRIDES --pair-mode and '
+                        'turns the trainer into mixed mode: pair-mode caches '
+                        'feed forward_cross_frame, calib caches feed the '
+                        'single-frame head. Each step alternates one batch '
+                        'from each enabled mode. Example: '
+                        '"<ps>:pair,<ns>:pair,<wm>:pair,<kami>:calib,<woven>:calib,<tss4>:calib"')
     p.add_argument('--pair-stride', type=int, default=10,
                    help='In pair-mode, max |Δframe| sampled per anchor. The '
                         'dataset emits all (i_A, i_A+δ) pairs with δ ∈ '
@@ -660,16 +668,28 @@ def main():
         f"mixed_precision={accel.mixed_precision} device={accel.device}")
 
     # --- dataset(s) ---
+    # Note: pair_mode is set per-cache below (mixed mode), so it's NOT in
+    # the shared ds_kw. Each cache passes its own pair_mode via cp_kw.
     ds_kw = dict(img_size=args.img_size,
                  max_offset_m=args.t_m, max_rot_deg=args.rot_deg,
                  min_crop_px=args.min_crop_px, max_crop_px=args.max_crop_px,
                  grid_n=args.grid_n, oversample=args.oversample,
                  split_pert=False,
-                 pair_mode=bool(args.pair_mode),
                  pair_stride=int(args.pair_stride),
                  pair_bidir=bool(args.pair_bidir),
                  calib_pert=bool(args.calib_pert))
     cache_paths = [s.strip() for s in args.cache.split(',') if s.strip()]
+    # Per-cache mode override (mixed pair+calib training)
+    mode_map: dict[str, str] = {}
+    if getattr(args, 'per_cache_mode', ''):
+        for tok in args.per_cache_mode.split(','):
+            tok = tok.strip()
+            if not tok: continue
+            k, v = tok.rsplit(':', 1)
+            v = v.strip().lower()
+            assert v in ('pair', 'calib'), f"per-cache-mode must be pair|calib, got {v!r}"
+            mode_map[k.strip()] = v
+    mixed_mode = bool(mode_map)
     # Per-cache u_band override
     ub_map = {}
     if getattr(args, 'u_band', ''):
@@ -687,48 +707,85 @@ def main():
             k, v = tok.rsplit(':', 1)
             os_map[k.strip()] = int(v)
     tr_parts, va_parts = [], []
+    tr_modes:  list[str] = []
+    va_modes:  list[str] = []
     for cp in cache_paths:
         ub = ub_map.get(cp, 0.0)
         os_i = os_map.get(cp, args.oversample)
-        kw = {**ds_kw, 'oversample': os_i}
-        tr = PandaSetCalibDatasetFull(cp, split='train', u_band=ub, **kw)
+        # In mixed mode, override pair_mode per cache. Outside mixed mode,
+        # all caches share args.pair_mode (legacy behaviour).
+        if mixed_mode:
+            cp_mode = mode_map.get(cp, 'calib')
+            cp_pair = (cp_mode == 'pair')
+        else:
+            cp_mode = 'pair' if args.pair_mode else 'calib'
+            cp_pair = bool(args.pair_mode)
+        cp_kw = {**ds_kw, 'oversample': os_i, 'pair_mode': cp_pair}
+        tr = PandaSetCalibDatasetFull(cp, split='train', u_band=ub, **cp_kw)
         va = PandaSetCalibDatasetFull(cp, split='val',
-                                       center_band=0.5, u_band=ub, **kw)
-        log(f"  [{cp}] train={len(tr)} val={len(va)} (os={os_i}) u_band={ub}")
+                                       center_band=0.5, u_band=ub, **cp_kw)
+        log(f"  [{cp}] train={len(tr)} val={len(va)} (os={os_i}) u_band={ub} mode={cp_mode}")
         tr_parts.append(tr); va_parts.append(va)
-    tr_full = ConcatDataset(tr_parts) if len(tr_parts) > 1 else tr_parts[0]
-    va_full = ConcatDataset(va_parts) if len(va_parts) > 1 else va_parts[0]
-
-    full_ds = ConcatDataset([tr_full, va_full])
-    # __len__ now equals frame count (oversample handled inside __getitem__).
-    # Each idx = 1 frame → list of `oversample` samples in collate. Standard
-    # shuffle works at the frame level, so the worker decodes once per frame
-    # and slices `oversample` crops out of it.
-    idxs = list(range(len(full_ds)))
-    _r.Random(args.split_seed).shuffle(idxs)
-    n_val = int(len(idxs) * args.val_fraction)
-    val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
-    train_ds = Subset(full_ds, train_idxs)
-    val_ds   = Subset(full_ds, val_idxs)
-    log(f"frame-level split: train={len(train_ds)} val={len(val_ds)} frames")
+        tr_modes.append(cp_mode); va_modes.append(cp_mode)
+    if mixed_mode:
+        # Build separate ConcatDatasets / loaders per mode (pair vs calib)
+        # since their collate fns + tuple shapes differ. Each mode's loader
+        # serves one batch per step in the alternating epoch loop below.
+        pair_tr   = [tr for tr, m in zip(tr_parts, tr_modes) if m == 'pair']
+        calib_tr  = [tr for tr, m in zip(tr_parts, tr_modes) if m == 'calib']
+        pair_va   = [va for va, m in zip(va_parts, va_modes) if m == 'pair']
+        calib_va  = [va for va, m in zip(va_parts, va_modes) if m == 'calib']
+        log(f"mixed mode: pair caches={len(pair_tr)} calib caches={len(calib_tr)}")
+        tr_full   = (ConcatDataset(pair_tr)  if len(pair_tr)  > 1 else (pair_tr[0]  if pair_tr  else None))
+        tr_full_c = (ConcatDataset(calib_tr) if len(calib_tr) > 1 else (calib_tr[0] if calib_tr else None))
+        va_full   = (ConcatDataset(pair_va)  if len(pair_va)  > 1 else (pair_va[0]  if pair_va  else None))
+        va_full_c = (ConcatDataset(calib_va) if len(calib_va) > 1 else (calib_va[0] if calib_va else None))
+        # train_ds / val_ds keep the pair side (= primary loop driver).
+        # The calib side rides alongside via train_loader_calib / val_loader_calib.
+        train_ds = tr_full
+        val_ds   = va_full
+        train_ds_calib = tr_full_c
+        val_ds_calib   = va_full_c
+    else:
+        tr_full = ConcatDataset(tr_parts) if len(tr_parts) > 1 else tr_parts[0]
+        va_full = ConcatDataset(va_parts) if len(va_parts) > 1 else va_parts[0]
+        full_ds = ConcatDataset([tr_full, va_full])
+        # __len__ = frame count (oversample handled in __getitem__).
+        idxs = list(range(len(full_ds)))
+        _r.Random(args.split_seed).shuffle(idxs)
+        n_val = int(len(idxs) * args.val_fraction)
+        val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
+        train_ds = Subset(full_ds, train_idxs)
+        val_ds   = Subset(full_ds, val_idxs)
+        train_ds_calib = None
+        val_ds_calib   = None
+        log(f"frame-level split: train={len(train_ds)} val={len(val_ds)} frames")
 
     nw = args.workers
-    kw = dict(num_workers=nw, pin_memory=True,
-              persistent_workers=(nw > 0),
-              prefetch_factor=args.prefetch if nw > 0 else None,
-              collate_fn=collate_pair if args.pair_mode else collate_full,
-              multiprocessing_context='spawn' if nw > 0 else None)
     val_nw = min(4, nw)
-    val_kw = dict(num_workers=val_nw, pin_memory=True,
-                  persistent_workers=(val_nw > 0),
-                  prefetch_factor=args.prefetch if val_nw > 0 else None,
-                  collate_fn=collate_pair if args.pair_mode else collate_full,
-                  multiprocessing_context='spawn' if val_nw > 0 else None)
-    # batch_size here = number of FRAMES per batch; collate expands each
-    # frame to its `oversample` samples → effective batch = batch_size * os.
-    # When configuring --batch-size think in frames, not samples.
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **kw)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, **val_kw)
+    def _kw(coll):
+        return dict(num_workers=nw, pin_memory=True,
+                    persistent_workers=(nw > 0),
+                    prefetch_factor=args.prefetch if nw > 0 else None,
+                    collate_fn=coll,
+                    multiprocessing_context='spawn' if nw > 0 else None)
+    def _val_kw(coll):
+        return dict(num_workers=val_nw, pin_memory=True,
+                    persistent_workers=(val_nw > 0),
+                    prefetch_factor=args.prefetch if val_nw > 0 else None,
+                    collate_fn=coll,
+                    multiprocessing_context='spawn' if val_nw > 0 else None)
+    # primary (pair-mode if mixed_mode + has pair caches, else legacy single-mode)
+    primary_collate = collate_pair if (mixed_mode and train_ds is not None) or args.pair_mode else collate_full
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **_kw(primary_collate)) if train_ds is not None else None
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, **_val_kw(primary_collate)) if val_ds is not None else None
+    # secondary (calib side in mixed mode only)
+    train_loader_calib = None; val_loader_calib = None
+    if mixed_mode and train_ds_calib is not None:
+        train_loader_calib = DataLoader(train_ds_calib, batch_size=args.batch_size,
+                                         shuffle=True, **_kw(collate_full))
+        val_loader_calib   = DataLoader(val_ds_calib, batch_size=args.batch_size,
+                                         shuffle=False, **_val_kw(collate_full))
 
     # --- model ---
     KV_SCHEDULES = {
@@ -751,8 +808,14 @@ def main():
                       use_info_head=args.use_info_head)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 
-    model, optimizer, train_loader, val_loader = accel.prepare(
-        model, optimizer, train_loader, val_loader)
+    if mixed_mode and train_loader_calib is not None:
+        (model, optimizer, train_loader, val_loader,
+         train_loader_calib, val_loader_calib) = accel.prepare(
+            model, optimizer, train_loader, val_loader,
+            train_loader_calib, val_loader_calib)
+    else:
+        model, optimizer, train_loader, val_loader = accel.prepare(
+            model, optimizer, train_loader, val_loader)
 
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M  "
         f"(world_size={accel.num_processes}, bs/rank={args.batch_size}, "
@@ -781,7 +844,13 @@ def main():
         except Exception as _e:
             log(f"[clearml] logger init failed: {_e}")
 
-    _epoch_fn = epoch_loop_pair if args.pair_mode else epoch_loop
+    # Primary epoch fn: pair if mixed has pair caches, else legacy choice.
+    primary_is_pair = (mixed_mode and train_loader is not None) or args.pair_mode
+    _epoch_fn = epoch_loop_pair if primary_is_pair else epoch_loop
+    # Mixed-mode: secondary fn drives the calib-only caches with the
+    # single-frame `epoch_loop`, alternating with the pair loop. The model
+    # parameters are shared so both updates are accumulated on the same net.
+    _epoch_fn_calib = epoch_loop if mixed_mode and train_loader_calib is not None else None
     # Stash multi-task weights on the function object so epoch_loop_pair
     # can read them without threading another arg through every call site.
     # When --calib-pert is off, w_calib is forced to 0 so the head is dead.
@@ -863,12 +932,21 @@ def main():
         do_eval = (ep + 1) % eval_stride == 0 or (ep + 1) == epochs or ep == 0
         tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
                             args.img_size, vis_capture=vis_cap_train if do_eval else None)
+        # Mixed-mode: also run the calib-only secondary epoch (alternates
+        # parameter updates with the primary pair epoch, both share model).
+        tr_out_calib = None
+        va_out_calib = None
+        if _epoch_fn_calib is not None and train_loader_calib is not None:
+            tr_out_calib = _epoch_fn_calib(model, train_loader_calib, optimizer,
+                                            accel, True, args.img_size)
         if do_eval:
             with torch.no_grad():
                 va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
                                     args.img_size, vis_capture=vis_cap_val)
+                if _epoch_fn_calib is not None and val_loader_calib is not None:
+                    va_out_calib = _epoch_fn_calib(model, val_loader_calib, optimizer,
+                                                    accel, False, args.img_size)
         else:
-            # placeholder of matching arity — last seen va_out reused in log
             va_out = (float('nan'),) * len(tr_out)
         if len(tr_out) == 4:
             tr_nll, tr_mse, tr_nll_cal, tr_mse_cal = tr_out
@@ -883,9 +961,14 @@ def main():
             if tr_nll_cal == tr_nll_cal:    # not NaN
                 calib_str = (f"  tr_calib_nll={tr_nll_cal:.4f} tr_calib_mse={tr_mse_cal:.3f}"
                              f"  va_calib_nll={va_nll_cal:.4f} va_calib_mse={va_mse_cal:.3f}")
+            mixed_str = ""
+            if tr_out_calib is not None:
+                mixed_str = (f"  calibOnly tr_nll={tr_out_calib[0]:.3f} tr_mse={tr_out_calib[1]:.2f}")
+                if va_out_calib is not None:
+                    mixed_str += f"  va_nll={va_out_calib[0]:.3f} va_mse={va_out_calib[1]:.2f}"
             log(f"ep{ep+1:03d}/{epochs}  "
                 f"tr_nll={tr_nll:.4f} tr_mse={tr_mse:.3f}  "
-                f"va_nll={va_nll:.4f} va_mse={va_mse:.3f}{calib_str}  "
+                f"va_nll={va_nll:.4f} va_mse={va_mse:.3f}{calib_str}{mixed_str}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
                 f"ep_t={time.time()-ep_t:.1f}s  total={elapsed/60:.1f}min")
             if cml_logger is not None:
@@ -897,6 +980,19 @@ def main():
                 if do_eval:
                     rs(title='loss/nll', series='val',   value=va_nll, iteration=ep+1)
                     rs(title='loss/mse', series='val',   value=va_mse, iteration=ep+1)
+                # Mixed-mode: report calib-side scalars in their own series
+                # so the pair (pose) and calib-only sides are visible side
+                # by side in ClearML.
+                if tr_out_calib is not None:
+                    rs(title='loss/nll_calib_only', series='train',
+                        value=tr_out_calib[0], iteration=ep+1)
+                    rs(title='loss/mse_calib_only', series='train',
+                        value=tr_out_calib[1], iteration=ep+1)
+                if do_eval and va_out_calib is not None:
+                    rs(title='loss/nll_calib_only', series='val',
+                        value=va_out_calib[0], iteration=ep+1)
+                    rs(title='loss/mse_calib_only', series='val',
+                        value=va_out_calib[1], iteration=ep+1)
                 if tr_nll_cal == tr_nll_cal:
                     rs(title='loss/nll_calib', series='train', value=tr_nll_cal, iteration=ep+1)
                     rs(title='loss/mse_calib', series='train', value=tr_mse_cal, iteration=ep+1)
