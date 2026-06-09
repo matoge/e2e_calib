@@ -263,10 +263,9 @@ def gaussian2d_nll(params: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     target : (B, N, 2)  [gt_tx, gt_ty]
     Returns scalar mean NLL.
 
-    Computed in fp32 with autocast disabled. fp16 mixed precision overflows
-    here (`exp(log_sx)`, `(dx/sx)**2`, intermediate Mahalanobis) → NaN that
-    poisons the whole DDP step. The cost is small (one element-wise pass per
-    point), so we always run this block in fp32.
+    Computed in fp32 with autocast disabled. On non-finite detection, dump
+    diagnostic of the first offending element so we can pin-point what
+    blew up (target outlier? log_sx unclamped? rho ≈ ±1?).
     """
     with torch.cuda.amp.autocast(enabled=False):
         params = params.float()
@@ -280,18 +279,51 @@ def gaussian2d_nll(params: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         sx = log_sx.exp()
         sy = log_sy.exp()
 
-        # normalised residuals
         zx = dx / sx
         zy = dy / sy
         r2 = (1.0 - rho * rho).clamp(min=1e-6)
 
-        # log det of covariance = log(sx²·sy²·(1-ρ²))
         log_det = 2.0 * log_sx + 2.0 * log_sy + torch.log(r2)
-
-        # Mahalanobis
         maha = (zx * zx - 2.0 * rho * zx * zy + zy * zy) / r2
+        nll = 0.5 * (log_det + maha)
 
-        nll = 0.5 * (log_det + maha)  # + const (log 2π, ignored)
+        if not torch.isfinite(nll).all():
+            with torch.no_grad():
+                bad = ~torch.isfinite(nll)
+                idx = bad.nonzero(as_tuple=False)
+                if idx.numel():
+                    i0 = idx[0].tolist()
+                    sel = tuple(i0)
+                    print(
+                        f"[NaN-NLL] first non-finite at idx={i0}  "
+                        f"target=({target[..., 0][sel].item():.3e},"
+                        f"{target[..., 1][sel].item():.3e})  "
+                        f"mu=({tx[sel].item():.3e},{ty[sel].item():.3e})  "
+                        f"dx=({dx[sel].item():.3e},{dy[sel].item():.3e})  "
+                        f"log_s=({log_sx[sel].item():.3e},{log_sy[sel].item():.3e})  "
+                        f"rho={rho[sel].item():.3e}  "
+                        f"r2={r2[sel].item():.3e}  "
+                        f"zx={zx[sel].item():.3e} zy={zy[sel].item():.3e}  "
+                        f"maha={maha[sel].item():.3e}  log_det={log_det[sel].item():.3e}  "
+                        f"nll={nll[sel].item()}",
+                        flush=True,
+                    )
+                # also print global ranges
+                def _rng(t, name):
+                    f = torch.isfinite(t)
+                    if f.any():
+                        print(f"  [{name}] finite range=[{t[f].min().item():.3e},"
+                              f"{t[f].max().item():.3e}]  "
+                              f"non_finite_count={(~f).sum().item()}/{t.numel()}",
+                              flush=True)
+                    else:
+                        print(f"  [{name}] ALL non-finite", flush=True)
+                _rng(target, 'target'); _rng(tx, 'tx'); _rng(ty, 'ty')
+                _rng(log_sx, 'log_sx'); _rng(log_sy, 'log_sy'); _rng(rho, 'rho')
+                _rng(dx, 'dx'); _rng(dy, 'dy')
+                _rng(zx, 'zx'); _rng(zy, 'zy')
+                _rng(maha, 'maha'); _rng(log_det, 'log_det'); _rng(nll, 'nll')
+
         return nll.mean()
 
 

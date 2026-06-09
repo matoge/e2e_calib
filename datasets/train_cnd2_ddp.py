@@ -1183,6 +1183,22 @@ def main():
                     if was_train: _m.train()
                 except Exception as _e:
                     log(f"  ↳ calib debug-sample render skipped: {_e}")
+            # Always save last_model.pt every epoch (rank-0) for resume after
+            # a NaN blow-up — best_model only updates when val_nll improves,
+            # and val is gated by eval_stride so it could be many epochs old.
+            if accel.is_main_process:
+                last_ckpt = exp_dir / "last_model.pt"
+                sd_cpu_last = {k: v.detach().cpu() for k, v in
+                               accel.unwrap_model(model).state_dict().items()}
+                # finite check — refuse to overwrite last_model with NaN weights
+                any_nan = any(torch.isnan(v).any() or torch.isinf(v).any()
+                              for v in sd_cpu_last.values()
+                              if v.dtype.is_floating_point)
+                if any_nan:
+                    log(f"  ↳ ep{ep+1}: weights contain NaN/Inf, skipping "
+                        f"last_model.pt save")
+                else:
+                    torch.save(sd_cpu_last, last_ckpt)
             if va_nll < best_val:
                 best_val = va_nll
                 sd_cpu = {k: v.detach().cpu() for k, v in
