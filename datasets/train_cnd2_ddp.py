@@ -992,40 +992,70 @@ def main():
             # Calib-mode debug samples: take the last batch's stash and
             # render N samples per split. Pure CPU; no model forward (the
             # epoch_loop already produced per_pt).
-            if (not args.pair_mode) and accel.is_main_process:
+            if (not args.pair_mode) and accel.is_main_process and do_eval:
+                # Per-cache calib debug samples: pull 4 fixed samples from each
+                # tr_parts[k] / va_parts[k] (NOT from the shuffled ConcatDataset
+                # batch that vis_cap stashes — that mixes datasets and you
+                # can't tell which one is doing well). One forward per sample
+                # on rank-0 (CPU dataset → cuda:0 model).
                 try:
                     from scripts.vis_check._calib_render import render_one_calib
-                    n_per_split = 8
-                    for cap, ds_label in ((vis_cap_train, 'train'),
-                                          (vis_cap_val,   'val')):
-                        if not cap or 'imgs' not in cap:
-                            continue
-                        imgs_b     = cap['imgs']
-                        true_uvd_b = cap['true_uvd']
-                        dist_uvd_b = cap['dist_uvd']
-                        per_pt_b   = cap['per_pt']
-                        pad_b      = cap['pad_mask']
-                        pert_b     = cap.get('pert_vec', None)
-                        B = imgs_b.shape[0]
-                        for i in range(min(n_per_split, B)):
-                            valid_i = ~pad_b[i]
-                            out_p = vis_dir / (
-                                f'calib_debug_{ds_label}_ep{ep+1:03d}_{i:02d}.png')
-                            res = render_one_calib(
-                                imgs_b[i] * 255.0,
-                                true_uvd_b[i][valid_i],
-                                dist_uvd_b[i][valid_i],
-                                per_pt_b[i][valid_i, :2],
-                                out_path=out_p,
-                                img_size=args.img_size,
-                                pert_vec=(pert_b[i] if pert_b is not None else None),
-                                title_prefix=f'ep{ep+1} {ds_label} #{i}',
-                            )
-                            if cml_logger is not None:
-                                cml_logger.report_image(
-                                    title=f'calib_debug_{ds_label}',
-                                    series=f'sample_{i:02d}',
-                                    iteration=ep + 1, local_path=str(out_p))
+                    n_per_cache = 4
+                    _m = accel.unwrap_model(model); was_train = _m.training; _m.eval()
+                    for parts, ds_label in ((tr_parts, 'train'),
+                                              (va_parts, 'val')):
+                        for k, ds_k in enumerate(parts):
+                            cache_name = Path(cache_paths[k]).name
+                            for i in range(n_per_cache):
+                                try:
+                                    sample = ds_k[i % len(ds_k)]
+                                except Exception:
+                                    continue
+                                if isinstance(sample, list):
+                                    if not sample: continue
+                                    sample = sample[0]
+                                # legacy single-frame tuple layout (from collate_full):
+                                #   (img, true_uvd, dist_uvd, vfp, bucket_uvd,
+                                #    bucket_valid, pert_vec, ...)
+                                img_t      = sample[0].unsqueeze(0).float().div(255.0).to(accel.device)
+                                true_uvd_t = sample[1]
+                                dist_uvd_t = sample[2]
+                                vfp_t      = sample[3].unsqueeze(0).to(accel.device)
+                                bu_t       = sample[4].unsqueeze(0).to(accel.device)
+                                bv_t       = sample[5].unsqueeze(0).to(accel.device)
+                                pert_v     = sample[6] if len(sample) > 6 else None
+                                point_in   = torch.cat(
+                                    [dist_uvd_t[..., :3], dist_uvd_t[..., 4:5]], dim=-1
+                                ).unsqueeze(0).to(accel.device)
+                                pad_t      = torch.zeros(1, dist_uvd_t.shape[0],
+                                                          dtype=torch.bool,
+                                                          device=accel.device)
+                                with torch.no_grad():
+                                    out_t = _m(img_t, point_in,
+                                                dpose_R=None, vfp=vfp_t,
+                                                bucket_uvd=bu_t, bucket_valid=bv_t,
+                                                key_padding_mask=pad_t)
+                                per_pt = out_t[0] if isinstance(out_t, tuple) else out_t
+                                per_pt_np = per_pt[0].detach().float().cpu().numpy()
+                                out_p = vis_dir / (
+                                    f'calib_debug_{ds_label}_{cache_name}_'
+                                    f'ep{ep+1:03d}_{i:02d}.png')
+                                render_one_calib(
+                                    img_t[0].cpu() * 255.0,
+                                    true_uvd_t,
+                                    dist_uvd_t,
+                                    per_pt_np[:, :2] if per_pt_np.ndim > 1 else per_pt_np,
+                                    out_path=out_p,
+                                    img_size=args.img_size,
+                                    pert_vec=pert_v,
+                                    title_prefix=f'ep{ep+1} {ds_label} {cache_name} #{i}',
+                                )
+                                if cml_logger is not None:
+                                    cml_logger.report_image(
+                                        title=f'calib_debug_{cache_name}_{ds_label}',
+                                        series=f'sample_{i:02d}',
+                                        iteration=ep + 1, local_path=str(out_p))
+                    if was_train: _m.train()
                 except Exception as _e:
                     log(f"  ↳ calib debug-sample render skipped: {_e}")
             if va_nll < best_val:
