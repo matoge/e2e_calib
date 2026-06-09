@@ -456,6 +456,10 @@ def main():
     elif args.step == 'arrows':
         key = keys[args.frame]
         inst = _load_inst_raw(env, key)
+        # _build_model_and_ds opens the same LMDB via PandaSetCalibDatasetFull;
+        # close our standalone env first so they don't collide on the same
+        # environment handle (lmdb refuses two opens of the same dir in-proc).
+        env.close()
         cfg, ds, model, build_subwin, collate_full, device = _build_model_and_ds(
             args.ckpt_run, args.cache)
         # bypass ds._load_inst by injecting our raw inst into a fake idx:
@@ -476,6 +480,7 @@ def main():
                                      iteration=0, image=png)
             cml_task.upload_artifact('arrows_png', out_path)
     elif args.step == 'aggregate':
+        env.close()
         cfg, ds, model, build_subwin, collate_full, device = _build_model_and_ds(
             args.ckpt_run, args.cache)
         # gather all insts in seq
@@ -512,7 +517,10 @@ def main():
             cml_task.upload_artifact('aggregate_info', args.out / f'{args.name}_aggregate_info.png')
             cml_task.upload_artifact('aggregate_heat', args.out / f'{args.name}_aggregate_heat.png')
 
-    env.close()
+    try:
+        env.close()
+    except lmdb.Error:
+        pass  # already closed by step branch (arrows/aggregate)
     if cml_task is not None:
         cml_task.close()
 
