@@ -1,0 +1,44 @@
+# gsplat main (v1.5.3+, with `rays=` arg in rasterization for v_rays-based pose opt)
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ffmpeg libsm6 libxext6 libgl1 \
+        && rm -rf /var/lib/apt/lists/*
+
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6"
+
+RUN pip install --no-cache-dir ninja setuptools wheel
+RUN pip install --no-cache-dir --no-build-isolation \
+        "git+https://github.com/nerfstudio-project/gsplat.git@main"
+RUN pip install --no-cache-dir \
+        opencv-python-headless==4.10.0.84 \
+        scipy==1.13.1 \
+        numpy==1.26.4 \
+        pandas==2.2.2 \
+        clearml==1.16.4 \
+        pyarrow==17.0.0
+
+RUN pip install --no-cache-dir \
+        "git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e" \
+        "git+https://github.com/nerfstudio-project/nerfview@4538024fe0d15fd1a0e4d760f3695fc44ca72787" \
+        viser \
+        "imageio[ffmpeg]" \
+        scikit-learn \
+        tqdm \
+        "torchmetrics[image]" \
+        "tyro>=0.8.8" \
+        Pillow \
+        tensorboard \
+        tensorly \
+        pyyaml \
+        matplotlib \
+        plyfile \
+        splines
+
+RUN python -c "import gsplat; print('gsplat', gsplat.__version__); \
+                import inspect; from gsplat.rendering import rasterization; \
+                assert 'rays' in inspect.signature(rasterization).parameters, \
+                    'rays= arg missing'; print('rays= OK')"
+
+WORKDIR /workspace
