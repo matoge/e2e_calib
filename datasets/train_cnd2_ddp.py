@@ -513,25 +513,15 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
                 loss = (1.0 - ba_weight) * nll_loss + ba_weight * ba_l
         else:
             loss = nll_loss
-        # A val crop occasionally loses ALL its LiDAR (large HAT perturbation +
-        # center_band crop pushes every point out of frame) → valid.sum()==0 →
-        # gaussian2d_nll averages over an empty tensor → nan (no [NaN-NLL] dump
-        # since isfinite over 0 elements is vacuously True). That single batch
-        # then poisons va_nll/va_mse for the whole epoch. Guard it: skip non-
-        # finite batches from the metrics, and backprop a 0·params surrogate so
-        # DDP collectives stay in sync (never skip backward on one rank only).
-        loss_finite = bool(torch.isfinite(loss))
         if train:
             optimizer.zero_grad(set_to_none=True)
-            safe_loss = loss if loss_finite else (per_pt.sum() * 0.0)
-            accel.backward(safe_loss)
+            accel.backward(loss)
             accel.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-        if loss_finite and bool(valid.any()):
-            with torch.no_grad():
-                err = (per_pt[valid][..., :2].float() - gt[valid]).norm(dim=-1)
-                total_mse += err.mean().item()
-            total_nll += loss.item(); n += 1
+        with torch.no_grad():
+            err = (per_pt[valid][..., :2].float() - gt[valid]).norm(dim=-1)
+            total_mse += err.mean().item()
+        total_nll += loss.item(); n += 1
         # Stash last batch (rank-0 only) for end-of-epoch render. Same
         # contract as epoch_loop_pair.vis_capture but with calib fields.
         if vis_capture is not None and accel.is_main_process:
