@@ -37,13 +37,29 @@ from scripts.ba.ba_torch import (
 )
 
 
-def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3):
+def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
+                  loss_type='nll'):
     """BA-based pose loss for cnd2.
 
     per_pt: (B, N, 5)  [du, dv, log_sx, log_sy, rho]
     dist_uvd: (B, N, ≥3)  observation uv in tile-local coords
     pad_mask: (B, N) bool, True = invalid
     batch: full batch tuple (PS calib mode: 7=pert, 9=K, etc.)
+    loss_type: 'nll' (default) → Mahalanobis NLL of the GN pose error under
+               Σ_δ = H⁻¹ (the GN information matrix at the final lin. point);
+               'mse' → legacy scale-weighted squared error (rot + 100·t).
+
+    The 'nll' form is the unit-clean, degeneracy-safe objective:
+
+        e   = δ_solved − δ_gt                    (B, 6) [ω_deg, t_m]
+        NLL = ½ eᵀ H e − ½ logdet H              (+ const dropped)
+
+    H = Σᵢ Jᵢᵀ Wᵢ Jᵢ + diag(prior) is PD by construction (prior_diag floors
+    every eigenvalue), so −½logdet H stays bounded below: a degenerate frame
+    (rank-deficient JᵀWJ along an unobserved DOF) can no longer drive the
+    pose covariance — and hence the NLL — to ±∞. That floor is exactly what
+    the MSE form lacked, and why the pose loss "暴れた" before. Units mix deg
+    and m only through H, so no hand-tuned 100× weight is needed.
     Returns scalar loss + diagnostics dict.
     """
     pert_vec = batch[7]                              # (B, 8) [tx,ty,tz, ypr_deg, dfx, dfy]
@@ -90,26 +106,49 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3):
                               device=dist_uvd.device, dtype=dist_uvd.dtype)
     omega = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
     t = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
+    H_last = None
     for _ in range(ba_iter):
         pts_t = _apply_extrinsic(pts_cam, omega, t)
         uv_proj = project_pinhole(pts_t, K)
         r = uv_target - uv_proj
         Xp, Yp, Zp = pts_t.unbind(-1)
         J = pinhole_jacobian(Xp, Yp, Zp, K, uv_proj.detach(), dof_names)
-        delta, _ = gn_step(J, W, r, valid=valid, damping=damping, prior_diag=prior_diag)
+        delta, H_last = gn_step(J, W, r, valid=valid, damping=damping,
+                                prior_diag=prior_diag)
         omega = omega + delta[:, :3]
         t = t + delta[:, 3:]
-    delta_solved = torch.cat([omega, t], dim=-1)     # (B, 6)
+    delta_solved = torch.cat([omega, t], dim=-1)     # (B, 6) [ω_deg, t_m]
     # pert_vec layout: [tx, ty, tz, yaw, pitch, roll, dfx, dfy]
-    t_gt = pert_vec[:, :3]
+    t_gt   = pert_vec[:, :3]
     ypr_gt = pert_vec[:, 3:6]
-    rot_loss = (omega - ypr_gt).pow(2).mean()
-    t_loss = (t - t_gt).pow(2).mean()
-    loss = rot_loss + 100.0 * t_loss
+    delta_gt = torch.cat([ypr_gt, t_gt], dim=-1)     # (B, 6), same DOF order
+
+    if loss_type == 'mse':
+        rot_loss = (omega - ypr_gt).pow(2).mean()
+        t_loss   = (t - t_gt).pow(2).mean()
+        loss = rot_loss + 100.0 * t_loss
+    else:
+        # Mahalanobis NLL under Σ_δ = H⁻¹.  H ⪰ min(prior_diag)·I ≻ 0, so the
+        # Cholesky always succeeds and logdet H is finite — no degeneracy blowup.
+        # Compute in fp32 for a numerically safe factorisation under AMP.
+        e = (delta_solved - delta_gt).float()        # (B, 6)
+        H = H_last.float()                           # (B, 6, 6)
+        L = torch.linalg.cholesky(H)                 # H = L Lᵀ, L lower-tri
+        # eᵀ H e = ‖Lᵀ e‖² ;  Lᵀ e has components (Lᵀe)_i = Σ_j L[j,i] e[j]
+        Lte = torch.einsum('bji,bj->bi', L, e)
+        quad = (Lte * Lte).sum(-1)                   # (B,)
+        logdet = 2.0 * torch.log(
+            torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1)   # (B,)
+        nll = 0.5 * quad - 0.5 * logdet
+        loss = nll.mean()
     with torch.no_grad():
         rot_err = (omega - ypr_gt).abs().mean()
-        t_err = (t - t_gt).abs().mean()
-    return loss, {'rot_err': rot_err.item(), 't_err': t_err.item()}
+        t_err   = (t - t_gt).abs().mean()
+        diag = {'rot_err': rot_err.item(), 't_err': t_err.item()}
+        if loss_type != 'mse':
+            diag['logdet'] = logdet.mean().item()
+            diag['quad']   = quad.mean().item()
+    return loss, diag
 from torch.utils.data import DataLoader, Subset, ConcatDataset, RandomSampler
 import random as _r
 
@@ -465,7 +504,8 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         if getattr(accel, '_ba_loss_mode', False):
             ba_l, ba_diag = _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch,
                                           ba_iter=getattr(accel, '_ba_iter', 4),
-                                          damping=getattr(accel, '_ba_damping', 1e-3))
+                                          damping=getattr(accel, '_ba_damping', 1e-3),
+                                          loss_type=getattr(accel, '_ba_loss_type', 'nll'))
             ba_weight = getattr(accel, '_ba_weight', 0.5)
             if ba_l is None:
                 loss = nll_loss
@@ -531,6 +571,10 @@ def main():
     p.add_argument('--ba-damping', type=float, default=1e-3)
     p.add_argument('--ba-weight', type=float, default=0.5,
                    help='weight of BA loss in mixture; (1-w) * nll + w * ba')
+    p.add_argument('--ba-loss-type', type=str, default='nll',
+                   choices=['nll', 'mse'],
+                   help='BA pose objective: "nll" (Mahalanobis under Σ_δ=H⁻¹, '
+                        'degeneracy-safe, default) or "mse" (legacy rot+100·t).')
     p.add_argument('--prefetch', type=int, default=4)
     p.add_argument('--n-iter', type=int, default=3)
     p.add_argument('--n-heads', type=int, default=4)
@@ -639,6 +683,7 @@ def main():
     accel._ba_iter      = int(args.ba_iter)
     accel._ba_damping   = float(args.ba_damping)
     accel._ba_weight    = float(args.ba_weight)
+    accel._ba_loss_type = str(args.ba_loss_type)
 
     # ClearML init (rank-0 only, BEFORE main loop so cml_logger lookups work)
     if args.clearml and int(os.environ.get('RANK', '0')) == 0:
