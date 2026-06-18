@@ -500,6 +500,7 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         # use_info_head=False here → out is per_pt only.
         per_pt = out[0] if isinstance(out, tuple) else out
         valid  = ~pad_mask
+        ba_diag = None
         nll_loss = gaussian2d_nll(per_pt[valid], gt[valid])
         if getattr(accel, '_ba_loss_mode', False):
             ba_l, ba_diag = _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch,
@@ -538,7 +539,13 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             _dt = time.time() - _t_start
             sps_per  = n * imgs.shape[0] / _dt if _dt > 0 else 0
             sps_glob = sps_per * accel.num_processes
-            print(f"  step {n}  loss={loss.item():+.3f}  "
+            ba_str = ""
+            if ba_diag:
+                ba_str = (f"  rot_err={ba_diag.get('rot_err', float('nan')):.3f}°"
+                          f" t_err={ba_diag.get('t_err', float('nan')):.3f}m")
+                if 'logdet' in ba_diag:
+                    ba_str += f" logdetH={ba_diag['logdet']:.1f}"
+            print(f"  step {n}  loss={loss.item():+.3f}{ba_str}  "
                   f"sps/rank={sps_per:.0f}  sps(global)={sps_glob:.0f}", flush=True)
             _last_log_step = n
     return (total_nll / max(n, 1), total_mse / max(n, 1))
