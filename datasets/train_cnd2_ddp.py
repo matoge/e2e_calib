@@ -83,16 +83,24 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0) * s2o
     rho = torch.tanh(per_pt[..., 4]) * 0.95
     W = make_info_from_sigma_rho(sx, sy, rho)
-    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev, dtype=dt)
+    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev, dtype=torch.float64)
 
-    mu_in = mu_orig.detach() if detach_mu else mu_orig
-    delta_pred, H_last = solve_pose(P0, -mu_in, W, K_orig, valid=valid,
+    # FLOAT64 GN + NLL. fx_orig~930 → J~930 → H entries ~1e7 while prior floors
+    # at ~0.1 → condition number ~1e9. The fp32 forward is finite (loss≈288,
+    # rot_err 0.003°) but the cholesky/solve BACKWARD explodes to NaN at that
+    # conditioning (one tile's NaN grad → shared backbone → 99.9% params NaN).
+    # fp64 carries ~16 digits so the 1e9-conditioned factorisation + its grad
+    # stay clean; the .double() cast is autograd-transparent (grad casts back to
+    # the fp32 net). solve_pose only needs the float-precision bump here.
+    P0d = P0.double(); Kd = K_orig.double()
+    mu_in = (mu_orig.detach() if detach_mu else mu_orig).double()
+    delta_pred, H_last = solve_pose(P0d, -mu_in, W.double(), Kd, valid=valid,
                                     n_iter=ba_iter, damping=damping, prior_diag=prior)
     with torch.no_grad():
-        Wi = make_info_from_sigma_rho(torch.ones(B, N, device=dev, dtype=dt),
-                                      torch.ones(B, N, device=dev, dtype=dt),
-                                      torch.zeros(B, N, device=dev, dtype=dt))
-        delta_gt, _ = solve_pose(P0, -duv_orig, Wi, K_orig, valid=valid,
+        Wi = make_info_from_sigma_rho(torch.ones(B, N, device=dev, dtype=torch.float64),
+                                      torch.ones(B, N, device=dev, dtype=torch.float64),
+                                      torch.zeros(B, N, device=dev, dtype=torch.float64))
+        delta_gt, _ = solve_pose(P0d, -duv_orig.double(), Wi, Kd, valid=valid,
                                  n_iter=ba_iter, damping=damping, prior_diag=prior)
 
     if loss_type == 'mse':
@@ -100,25 +108,29 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
         t_loss   = (delta_pred[:, 3:] - delta_gt[:, 3:]).pow(2).mean()
         loss = rot_loss + 100.0 * t_loss
     else:
-        e = (delta_pred - delta_gt).float()          # (B, 6)
-        H = H_last.float()
+        e = (delta_pred - delta_gt)                  # (B, 6) fp64
+        H = H_last                                   # (B, 6, 6) fp64
         # A minority of single tiles are 6-DoF-underdetermined (too few pts /
         # flat geometry): the GN diverges and H_last is non-finite or not PD,
         # so Σ_δ=H⁻¹ / its NLL are meaningless there. Exclude THOSE tiles from
         # the POSE loss (cholesky_ex flags them) — pose is genuinely unobservable
         # in that crop. The per-point gaussian2d_nll still trains μ on all tiles;
         # we just don't supervise a pose where there isn't one. Not masking a
-        # bug — declining to fit an unobservable.
-        L, info = torch.linalg.cholesky_ex(H)
-        ok = (info == 0) & torch.isfinite(e).all(-1) & \
-             torch.isfinite(H).flatten(1).all(-1)
+        # bug — declining to fit an unobservable. Index H[ok]/e[ok] BEFORE the
+        # cholesky so the backward graph never touches a non-PD element (its
+        # cholesky backward is NaN even with zero upstream grad → contaminates
+        # the shared backbone).
+        finite = torch.isfinite(e).all(-1) & torch.isfinite(H).flatten(1).all(-1)
+        _, info = torch.linalg.cholesky_ex(H.detach())
+        ok = (info == 0) & finite
         if ok.any():
-            Lg = L[ok]; eg = e[ok]
+            Lg = torch.linalg.cholesky(H[ok])
+            eg = e[ok]
             Lte = torch.einsum('bji,bj->bi', Lg, eg)
             quad = (Lte * Lte).sum(-1)
             logdet = 2.0 * torch.log(torch.diagonal(Lg, dim1=-2, dim2=-1)).sum(-1)
             nll = 0.5 * quad - 0.5 * logdet
-            loss = nll.mean()
+            loss = nll.mean().to(per_pt.dtype)        # back to fp32 for the blend
         else:
             quad = logdet = None
             loss = per_pt.sum() * 0.0                 # zero-grad surrogate, keep DDP in sync
