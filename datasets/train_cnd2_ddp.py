@@ -39,140 +39,78 @@ from scripts.ba.ba_torch import (
 
 def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
                   loss_type='nll', detach_mu=False):
-    """BA-based pose loss for cnd2.
+    """BA pose loss for cnd2 — uses the canonical, self-tested GN module
+    (scripts/ba/gn_pose.solve_pose) on the dataset's ORIGINAL-camera solver
+    fields (pts_cam_orig / duv_orig / K_orig). NO range→Z / tile-local-K
+    reconstruction (that path conflated range-as-Z + tile-vs-world frame and
+    floored the pose). Everything here is parent-camera-frame and frame-safe.
 
-    per_pt: (B, N, 5)  [du, dv, log_sx, log_sy, rho]
-    dist_uvd: (B, N, ≥3)  observation uv in tile-local coords
-    pad_mask: (B, N) bool, True = invalid
-    batch: full batch tuple (PS calib mode: 7=pert, 9=K, etc.)
-    loss_type: 'nll' (default) → Mahalanobis NLL of the GN pose error under
-               Σ_δ = H⁻¹ (the GN information matrix at the final lin. point);
-               'mse' → legacy scale-weighted squared error (rot + 100·t).
+    Frame-safe target: both the prediction and the GT pose are produced by the
+    SAME solver in the SAME (parent-cam) frame, so no R_gt / world-frame
+    conversion is needed:
+        uv_off = project(P0,K) − duv_orig  (perturbed obs) = project(P0)+(−duv_orig)
+        δ_gt   = solve_pose(P0, −duv_orig, W=I)   ← exact GT perturbation (cam)
+        δ_pred = solve_pose(P0, −μ_orig,  W)      ← from the network correction
+    As μ→duv_orig the two coincide (gn_pose self-test: machine-ε roundtrip), so
+    loss→0 at a perfect calibrator and the gradient only sharpens μ / W.
 
-    The 'nll' form is the unit-clean, degeneracy-safe objective:
-
-        e   = δ_solved − δ_gt                    (B, 6) [ω_deg, t_m]
-        NLL = ½ eᵀ H e − ½ logdet H              (+ const dropped)
-
-    H = Σᵢ Jᵢᵀ Wᵢ Jᵢ + diag(prior) is PD by construction (prior_diag floors
-    every eigenvalue), so −½logdet H stays bounded below: a degenerate frame
-    (rank-deficient JᵀWJ along an unobserved DOF) can no longer drive the
-    pose covariance — and hence the NLL — to ±∞. That floor is exactly what
-    the MSE form lacked, and why the pose loss "暴れた" before. Units mix deg
-    and m only through H, so no hand-tuned 100× weight is needed.
-    Returns scalar loss + diagnostics dict.
+    NLL = ½ eᵀHe − ½logdet H with Σ_δ=H⁻¹; prior_diag floors H so degenerate
+    (few-point/flat) tiles can't drive it to ±∞. Returns (loss, diag).
     """
-    pert_vec = batch[7]                              # (B, 8) [tx,ty,tz, ypr_deg, dfx, dfy]
-    K_orig = batch[10] if len(batch) > 10 else None
-    cs_t   = batch[11] if len(batch) > 11 else None
-    u0_t   = batch[13] if len(batch) > 13 else None
-    v0_t   = batch[14] if len(batch) > 14 else None
-    if K_orig is None or cs_t is None or u0_t is None:
+    from scripts.ba.gn_pose import solve_pose
+    pts_cam_orig = batch[8]  if len(batch) > 8  else None     # (B,N,3) parent-cam XYZ (m)
+    duv_orig     = batch[9]  if len(batch) > 9  else None     # (B,N,2) GT Δuv (orig px)
+    K_orig       = batch[10] if len(batch) > 10 else None
+    cs_t         = batch[11] if len(batch) > 11 else None
+    if pts_cam_orig is None or duv_orig is None or K_orig is None or cs_t is None:
         return None, {}
     B, N, _ = dist_uvd.shape
-    valid = ~pad_mask
-    # Build tile-local K from parent K + crop origin + crop size
-    # img_size = tile size used by model (default 128). Inferred from dist_uvd range.
+    dev, dt = dist_uvd.device, dist_uvd.dtype
+    # valid = not-padded AND physical depth (Z>0.5 m); sanitize the rest so the
+    # projection is finite (valid excludes them from the reduction).
+    Zc = pts_cam_orig[..., 2]
+    valid = (~pad_mask) & (Zc > 0.5)
+    safe = torch.tensor([0., 0., 10.], device=dev, dtype=dt)
+    P0 = torch.where(valid.unsqueeze(-1), pts_cam_orig, safe)
+
+    # Network μ/σ are TILE-LOCAL px; scale to original-camera px by cs/S (the
+    # tile origin cancels in a Δ, only the S/cs zoom remains — so duv_orig =
+    # duv_local·cs/S EXACTLY, and σ scales the same way). S = model img_size.
     img_size = 128.0
-    scale = img_size / cs_t                          # (B,)
-    fx_l = K_orig[..., 0, 0] * scale
-    fy_l = K_orig[..., 1, 1] * scale
-    cx_l = (K_orig[..., 0, 2] - u0_t) * scale
-    cy_l = (K_orig[..., 1, 2] - v0_t) * scale
-    K_local = torch.zeros_like(K_orig)
-    K_local[..., 0, 0] = fx_l; K_local[..., 1, 1] = fy_l
-    K_local[..., 0, 2] = cx_l; K_local[..., 1, 2] = cy_l
-    K_local[..., 2, 2] = 1.0
-    K = K_local
-    mu = per_pt[..., :2]
-    sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0)
-    sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0)
+    s2o = (cs_t / img_size).view(B, 1)                        # (B,1)
+    mu_orig = per_pt[..., :2] * s2o.unsqueeze(-1)             # (B,N,2) orig px
+    sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0) * s2o
+    sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0) * s2o
     rho = torch.tanh(per_pt[..., 4]) * 0.95
     W = make_info_from_sigma_rho(sx, sy, rho)
-    # 3D points from dist_uvd (tile-local u, v, d)
-    fx = K[..., 0, 0:1]; fy = K[..., 1, 1:2]
-    cx = K[..., 0, 2:3]; cy = K[..., 1, 2:3]
-    # STRUCTURAL FIX: dist_uvd[...,2] is RANGE ‖P-cam‖/100 (datasets/pandaset_full
-    # build_crop: dist_m = norm(pts_sel - cp)/100), NOT forward depth Z. The old
-    # code used range AS Z in unprojection (X=(u-cx)·range/fx, Z=range), which
-    # over-places off-axis points (range = Z·√(1+(x²+y²)/f²) ≥ Z) → biased 3D →
-    # the GN pose error e is floored → the pose NLL gives up by inflating Σ (σ_px
-    # saturates at MAX_SIGMA, pose goes under-confident). Convert range → Z along
-    # each pixel ray so the reconstructed cam-frame points are geometrically exact.
-    d_range = dist_uvd[..., 2] * 100.0               # slant range (m)
-    safe_r = torch.where(valid, d_range, torch.full_like(d_range, 10.0)).clamp(min=0.5)
-    u, v = dist_uvd[..., 0], dist_uvd[..., 1]
-    rx = (u - cx) / fx                               # ray dir (un-normalised), z=1
-    ry = (v - cy) / fy
-    ray_norm = torch.sqrt(rx * rx + ry * ry + 1.0)   # ‖[rx,ry,1]‖
-    Z = safe_r / ray_norm                            # forward depth from range
-    X = rx * Z
-    Y = ry * Z
-    pts_cam = torch.stack([X, Y, Z], dim=-1)
-    # detach_mu: the pose loss should refine the per-point INFORMATION (W), not
-    # fight the per-point NLL over μ. Feeding μ.detach() into the GN residual
-    # makes the pose-NLL gradient flow ONLY into W (via H and the GN solution),
-    # never into μ. μ then stays sharp (trained solely by gaussian2d_nll) so it
-    # is NOT pulled off and the per-pt NLL has no μ-bias to cover by inflating σ
-    # — which is what saturated σ at MAX_SIGMA(30px) and broke calibration when
-    # μ was attached. This enforces the "only the variance changes" contract.
-    mu_pose = mu.detach() if detach_mu else mu
-    uv_target = dist_uvd[..., :2] + mu_pose          # network corrected
-    dof_names = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
-    prior_diag = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09],
-                              device=dist_uvd.device, dtype=dist_uvd.dtype)
-    omega = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
-    t = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
-    H_last = None
-    for _ in range(ba_iter):
-        pts_t = _apply_extrinsic(pts_cam, omega, t)
-        uv_proj = project_pinhole(pts_t, K)
-        r = uv_target - uv_proj
-        Xp, Yp, Zp = pts_t.unbind(-1)
-        J = pinhole_jacobian(Xp, Yp, Zp, K, uv_proj.detach(), dof_names)
-        delta, H_last = gn_step(J, W, r, valid=valid, damping=damping,
-                                prior_diag=prior_diag)
-        omega = omega + delta[:, :3]
-        t = t + delta[:, 3:]
-    delta_solved = torch.cat([omega, t], dim=-1)     # (B, 6) [ω_deg, t_m]
-    # pert_vec layout: [tx, ty, tz, yaw, pitch, roll, dfx, dfy]
-    t_gt   = pert_vec[:, :3]
-    ypr_gt = pert_vec[:, 3:6]                         # [yaw, pitch, roll]
-    # CONVENTION FIX: the GN solves an axis-angle rotation `omega`=[ωx,ωy,ωz]
-    # (Rodrigues, dof_names omega_x/y/z), but the GT rotation is built by the
-    # dataset as Rotation.from_euler('zyx', [yaw,pitch,roll]). The axis-angle
-    # of that matrix is [roll, pitch, yaw] (verified numerically: ypr=[1,0,0]→
-    # ω=[0,0,1]; ypr=[0,0,1]→ω=[1,0,0]) — i.e. yaw and roll are SWAPPED vs the
-    # naive [yaw,pitch,roll] order. Comparing ω to [yaw,pitch,roll] makes the
-    # pose target physically unsatisfiable on the yaw/roll axes, so the net
-    # distorts per-point μ to fake a swapped rotation (≈fx·1°≈6px error) and
-    # inflates σ to hide it — that was the mse 1.6→8.4 blow-up, NOT degeneracy.
-    # Reverse ypr → [roll,pitch,yaw] to match ω's axis order (exact to 1st
-    # order; residual cross-coupling <0.005° at ±1°, far below signal).
-    omega_gt = ypr_gt.flip(-1)                        # [roll, pitch, yaw] ≈ ω
-    delta_gt = torch.cat([omega_gt, t_gt], dim=-1)    # (B, 6), matches omega/t
+    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev, dtype=dt)
+
+    mu_in = mu_orig.detach() if detach_mu else mu_orig
+    delta_pred, H_last = solve_pose(P0, -mu_in, W, K_orig, valid=valid,
+                                    n_iter=ba_iter, damping=damping, prior_diag=prior)
+    with torch.no_grad():
+        Wi = make_info_from_sigma_rho(torch.ones(B, N, device=dev, dtype=dt),
+                                      torch.ones(B, N, device=dev, dtype=dt),
+                                      torch.zeros(B, N, device=dev, dtype=dt))
+        delta_gt, _ = solve_pose(P0, -duv_orig, Wi, K_orig, valid=valid,
+                                 n_iter=ba_iter, damping=damping, prior_diag=prior)
 
     if loss_type == 'mse':
-        rot_loss = (omega - omega_gt).pow(2).mean()
-        t_loss   = (t - t_gt).pow(2).mean()
+        rot_loss = (delta_pred[:, :3] - delta_gt[:, :3]).pow(2).mean()
+        t_loss   = (delta_pred[:, 3:] - delta_gt[:, 3:]).pow(2).mean()
         loss = rot_loss + 100.0 * t_loss
     else:
-        # Mahalanobis NLL under Σ_δ = H⁻¹.  H ⪰ min(prior_diag)·I ≻ 0, so the
-        # Cholesky always succeeds and logdet H is finite — no degeneracy blowup.
-        # Compute in fp32 for a numerically safe factorisation under AMP.
-        e = (delta_solved - delta_gt).float()        # (B, 6)
-        H = H_last.float()                           # (B, 6, 6)
-        L = torch.linalg.cholesky(H)                 # H = L Lᵀ, L lower-tri
-        # eᵀ H e = ‖Lᵀ e‖² ;  Lᵀ e has components (Lᵀe)_i = Σ_j L[j,i] e[j]
+        e = (delta_pred - delta_gt).float()          # (B, 6)
+        H = H_last.float()
+        L = torch.linalg.cholesky(H)
         Lte = torch.einsum('bji,bj->bi', L, e)
-        quad = (Lte * Lte).sum(-1)                   # (B,)
-        logdet = 2.0 * torch.log(
-            torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1)   # (B,)
+        quad = (Lte * Lte).sum(-1)
+        logdet = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1)
         nll = 0.5 * quad - 0.5 * logdet
         loss = nll.mean()
     with torch.no_grad():
-        rot_err = (omega - omega_gt).abs().mean()
-        t_err   = (t - t_gt).abs().mean()
+        rot_err = (delta_pred[:, :3] - delta_gt[:, :3]).abs().mean()
+        t_err   = (delta_pred[:, 3:] - delta_gt[:, 3:]).abs().mean()
         diag = {'rot_err': rot_err.item(), 't_err': t_err.item()}
         if loss_type != 'mse':
             diag['logdet'] = logdet.mean().item()
