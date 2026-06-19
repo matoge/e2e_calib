@@ -102,19 +102,39 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     else:
         e = (delta_pred - delta_gt).float()          # (B, 6)
         H = H_last.float()
-        L = torch.linalg.cholesky(H)
-        Lte = torch.einsum('bji,bj->bi', L, e)
-        quad = (Lte * Lte).sum(-1)
-        logdet = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1)
-        nll = 0.5 * quad - 0.5 * logdet
-        loss = nll.mean()
+        # A minority of single tiles are 6-DoF-underdetermined (too few pts /
+        # flat geometry): the GN diverges and H_last is non-finite or not PD,
+        # so Σ_δ=H⁻¹ / its NLL are meaningless there. Exclude THOSE tiles from
+        # the POSE loss (cholesky_ex flags them) — pose is genuinely unobservable
+        # in that crop. The per-point gaussian2d_nll still trains μ on all tiles;
+        # we just don't supervise a pose where there isn't one. Not masking a
+        # bug — declining to fit an unobservable.
+        L, info = torch.linalg.cholesky_ex(H)
+        ok = (info == 0) & torch.isfinite(e).all(-1) & \
+             torch.isfinite(H).flatten(1).all(-1)
+        if ok.any():
+            Lg = L[ok]; eg = e[ok]
+            Lte = torch.einsum('bji,bj->bi', Lg, eg)
+            quad = (Lte * Lte).sum(-1)
+            logdet = 2.0 * torch.log(torch.diagonal(Lg, dim1=-2, dim2=-1)).sum(-1)
+            nll = 0.5 * quad - 0.5 * logdet
+            loss = nll.mean()
+        else:
+            quad = logdet = None
+            loss = per_pt.sum() * 0.0                 # zero-grad surrogate, keep DDP in sync
     with torch.no_grad():
-        rot_err = (delta_pred[:, :3] - delta_gt[:, :3]).abs().mean()
-        t_err   = (delta_pred[:, 3:] - delta_gt[:, 3:]).abs().mean()
-        diag = {'rot_err': rot_err.item(), 't_err': t_err.item()}
         if loss_type != 'mse':
-            diag['logdet'] = logdet.mean().item()
-            diag['quad']   = quad.mean().item()
+            okm = ok                                  # well-conditioned tiles only
+            rot_err = (delta_pred[okm, :3] - delta_gt[okm, :3]).abs().mean() if okm.any() else torch.tensor(float('nan'))
+            t_err   = (delta_pred[okm, 3:] - delta_gt[okm, 3:]).abs().mean() if okm.any() else torch.tensor(float('nan'))
+            diag = {'rot_err': float(rot_err), 't_err': float(t_err),
+                    'frac_pd': float(ok.float().mean())}
+            if quad is not None:
+                diag['logdet'] = float(logdet.mean()); diag['quad'] = float(quad.mean())
+        else:
+            rot_err = (delta_pred[:, :3] - delta_gt[:, :3]).abs().mean()
+            t_err   = (delta_pred[:, 3:] - delta_gt[:, 3:]).abs().mean()
+            diag = {'rot_err': float(rot_err), 't_err': float(t_err)}
     return loss, diag
 from torch.utils.data import DataLoader, Subset, ConcatDataset, RandomSampler
 import random as _r
