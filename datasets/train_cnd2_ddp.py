@@ -38,7 +38,7 @@ from scripts.ba.ba_torch import (
 
 
 def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
-                  loss_type='nll', detach_mu=True):
+                  loss_type='nll', detach_mu=False):
     """BA-based pose loss for cnd2.
 
     per_pt: (B, N, 5)  [du, dv, log_sx, log_sy, rho]
@@ -92,14 +92,23 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     # 3D points from dist_uvd (tile-local u, v, d)
     fx = K[..., 0, 0:1]; fy = K[..., 1, 1:2]
     cx = K[..., 0, 2:3]; cy = K[..., 1, 2:3]
-    d = dist_uvd[..., 2] * 100.0                     # normalised → m
-    # Padded points have d=0 → divisions blow up. Replace invalid d with safe 10m
-    # (won't matter for loss since `valid` masks them out, but keeps Jacobian finite).
-    safe_d = torch.where(valid, d, torch.full_like(d, 10.0)).clamp(min=0.5)
+    # STRUCTURAL FIX: dist_uvd[...,2] is RANGE ‖P-cam‖/100 (datasets/pandaset_full
+    # build_crop: dist_m = norm(pts_sel - cp)/100), NOT forward depth Z. The old
+    # code used range AS Z in unprojection (X=(u-cx)·range/fx, Z=range), which
+    # over-places off-axis points (range = Z·√(1+(x²+y²)/f²) ≥ Z) → biased 3D →
+    # the GN pose error e is floored → the pose NLL gives up by inflating Σ (σ_px
+    # saturates at MAX_SIGMA, pose goes under-confident). Convert range → Z along
+    # each pixel ray so the reconstructed cam-frame points are geometrically exact.
+    d_range = dist_uvd[..., 2] * 100.0               # slant range (m)
+    safe_r = torch.where(valid, d_range, torch.full_like(d_range, 10.0)).clamp(min=0.5)
     u, v = dist_uvd[..., 0], dist_uvd[..., 1]
-    X = (u - cx) * safe_d / fx
-    Y = (v - cy) * safe_d / fy
-    pts_cam = torch.stack([X, Y, safe_d], dim=-1)
+    rx = (u - cx) / fx                               # ray dir (un-normalised), z=1
+    ry = (v - cy) / fy
+    ray_norm = torch.sqrt(rx * rx + ry * ry + 1.0)   # ‖[rx,ry,1]‖
+    Z = safe_r / ray_norm                            # forward depth from range
+    X = rx * Z
+    Y = ry * Z
+    pts_cam = torch.stack([X, Y, Z], dim=-1)
     # detach_mu: the pose loss should refine the per-point INFORMATION (W), not
     # fight the per-point NLL over μ. Feeding μ.detach() into the GN residual
     # makes the pose-NLL gradient flow ONLY into W (via H and the GN solution),
@@ -603,11 +612,11 @@ def main():
                    choices=['nll', 'mse'],
                    help='BA pose objective: "nll" (Mahalanobis under Σ_δ=H⁻¹, '
                         'degeneracy-safe, default) or "mse" (legacy rot+100·t).')
-    p.add_argument('--ba-attach-mu', action='store_true',
-                   help='Let the BA pose loss backprop into μ too (default: μ is '
-                        'detached so the pose loss trains only the per-point '
-                        'information W; μ stays sharp via gaussian2d_nll). Attaching '
-                        'μ caused σ to saturate at MAX_SIGMA and broke calibration.')
+    p.add_argument('--ba-detach-mu', action='store_true',
+                   help='Detach μ in the BA pose loss so it trains only W (default '
+                        'OFF = μ attached, natural E2E). Was a band-aid for the '
+                        'σ-saturation that the range→Z unprojection fix actually '
+                        'root-caused; kept for A/B only.')
     p.add_argument('--prefetch', type=int, default=4)
     p.add_argument('--n-iter', type=int, default=3)
     p.add_argument('--n-heads', type=int, default=4)
@@ -717,7 +726,7 @@ def main():
     accel._ba_damping   = float(args.ba_damping)
     accel._ba_weight    = float(args.ba_weight)
     accel._ba_loss_type = str(args.ba_loss_type)
-    accel._ba_detach_mu = (not bool(args.ba_attach_mu))
+    accel._ba_detach_mu = bool(args.ba_detach_mu)
 
     # ClearML init (rank-0 only, BEFORE main loop so cml_logger lookups work)
     if args.clearml and int(os.environ.get('RANK', '0')) == 0:
