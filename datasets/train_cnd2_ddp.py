@@ -38,7 +38,7 @@ from scripts.ba.ba_torch import (
 
 
 def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
-                  loss_type='nll'):
+                  loss_type='nll', detach_mu=True):
     """BA-based pose loss for cnd2.
 
     per_pt: (B, N, 5)  [du, dv, log_sx, log_sy, rho]
@@ -100,7 +100,15 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     X = (u - cx) * safe_d / fx
     Y = (v - cy) * safe_d / fy
     pts_cam = torch.stack([X, Y, safe_d], dim=-1)
-    uv_target = dist_uvd[..., :2] + mu               # network corrected
+    # detach_mu: the pose loss should refine the per-point INFORMATION (W), not
+    # fight the per-point NLL over μ. Feeding μ.detach() into the GN residual
+    # makes the pose-NLL gradient flow ONLY into W (via H and the GN solution),
+    # never into μ. μ then stays sharp (trained solely by gaussian2d_nll) so it
+    # is NOT pulled off and the per-pt NLL has no μ-bias to cover by inflating σ
+    # — which is what saturated σ at MAX_SIGMA(30px) and broke calibration when
+    # μ was attached. This enforces the "only the variance changes" contract.
+    mu_pose = mu.detach() if detach_mu else mu
+    uv_target = dist_uvd[..., :2] + mu_pose          # network corrected
     dof_names = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
     prior_diag = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09],
                               device=dist_uvd.device, dtype=dist_uvd.dtype)
@@ -518,7 +526,8 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             ba_l, ba_diag = _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch,
                                           ba_iter=getattr(accel, '_ba_iter', 4),
                                           damping=getattr(accel, '_ba_damping', 1e-3),
-                                          loss_type=getattr(accel, '_ba_loss_type', 'nll'))
+                                          loss_type=getattr(accel, '_ba_loss_type', 'nll'),
+                                          detach_mu=getattr(accel, '_ba_detach_mu', True))
             ba_weight = getattr(accel, '_ba_weight', 0.5)
             if ba_l is None:
                 loss = nll_loss
@@ -594,6 +603,11 @@ def main():
                    choices=['nll', 'mse'],
                    help='BA pose objective: "nll" (Mahalanobis under Σ_δ=H⁻¹, '
                         'degeneracy-safe, default) or "mse" (legacy rot+100·t).')
+    p.add_argument('--ba-attach-mu', action='store_true',
+                   help='Let the BA pose loss backprop into μ too (default: μ is '
+                        'detached so the pose loss trains only the per-point '
+                        'information W; μ stays sharp via gaussian2d_nll). Attaching '
+                        'μ caused σ to saturate at MAX_SIGMA and broke calibration.')
     p.add_argument('--prefetch', type=int, default=4)
     p.add_argument('--n-iter', type=int, default=3)
     p.add_argument('--n-heads', type=int, default=4)
@@ -703,6 +717,7 @@ def main():
     accel._ba_damping   = float(args.ba_damping)
     accel._ba_weight    = float(args.ba_weight)
     accel._ba_loss_type = str(args.ba_loss_type)
+    accel._ba_detach_mu = (not bool(args.ba_attach_mu))
 
     # ClearML init (rank-0 only, BEFORE main loop so cml_logger lookups work)
     if args.clearml and int(os.environ.get('RANK', '0')) == 0:
