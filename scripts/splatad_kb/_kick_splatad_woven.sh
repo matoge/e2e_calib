@@ -41,8 +41,13 @@ set -euo pipefail
 # 0) make output dir inside container (root can mkdir under $OUT_PARENT
 #    even if it is root-owned on the host).
 mkdir -p /out_parent/\$EXP_NAME
-# 0b) clearml is not in splatad-v100:neurad; install quietly.
-pip install --quiet --no-input clearml >/dev/null 2>&1 || pip install clearml
+# 0b) clearml is not in splatad-v100:neurad; install without deps so the
+#     pre-baked numpy/pandas/torch stack stays binary-compatible.
+pip install --quiet --no-deps --no-input clearml >/dev/null 2>&1 || pip install --no-deps clearml
+# clearml's runtime deps that are NOT already in the image:
+pip install --quiet --no-deps --no-input attrs furl jsonschema pathlib2 \
+    psutil pyjwt pyparsing python-dateutil orderedmultidict requests \
+    six urllib3 pillow >/dev/null 2>&1 || true
 # 1) inject WovenDataParserConfig into dataparser_configs.dataparsers
 python /host_woven/_register_woven_dataparser.py
 # 2) clearml auto-bind via tensorboard
