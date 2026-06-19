@@ -37,79 +37,117 @@ from scripts.ba.ba_torch import (
 )
 
 
-def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3):
-    """BA-based pose loss for cnd2.
+def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
+                  loss_type='nll', detach_mu=False):
+    """BA pose loss for cnd2 — uses the canonical, self-tested GN module
+    (scripts/ba/gn_pose.solve_pose) on the dataset's ORIGINAL-camera solver
+    fields (pts_cam_orig / duv_orig / K_orig). NO range→Z / tile-local-K
+    reconstruction (that path conflated range-as-Z + tile-vs-world frame and
+    floored the pose). Everything here is parent-camera-frame and frame-safe.
 
-    per_pt: (B, N, 5)  [du, dv, log_sx, log_sy, rho]
-    dist_uvd: (B, N, ≥3)  observation uv in tile-local coords
-    pad_mask: (B, N) bool, True = invalid
-    batch: full batch tuple (PS calib mode: 7=pert, 9=K, etc.)
-    Returns scalar loss + diagnostics dict.
+    Frame-safe target: both the prediction and the GT pose are produced by the
+    SAME solver in the SAME (parent-cam) frame, so no R_gt / world-frame
+    conversion is needed:
+        uv_off = project(P0,K) − duv_orig  (perturbed obs) = project(P0)+(−duv_orig)
+        δ_gt   = solve_pose(P0, −duv_orig, W=I)   ← exact GT perturbation (cam)
+        δ_pred = solve_pose(P0, −μ_orig,  W)      ← from the network correction
+    As μ→duv_orig the two coincide (gn_pose self-test: machine-ε roundtrip), so
+    loss→0 at a perfect calibrator and the gradient only sharpens μ / W.
+
+    NLL = ½ eᵀHe − ½logdet H with Σ_δ=H⁻¹; prior_diag floors H so degenerate
+    (few-point/flat) tiles can't drive it to ±∞. Returns (loss, diag).
     """
-    pert_vec = batch[7]                              # (B, 8) [tx,ty,tz, ypr_deg, dfx, dfy]
-    K_orig = batch[10] if len(batch) > 10 else None
-    cs_t   = batch[11] if len(batch) > 11 else None
-    u0_t   = batch[13] if len(batch) > 13 else None
-    v0_t   = batch[14] if len(batch) > 14 else None
-    if K_orig is None or cs_t is None or u0_t is None:
+    from scripts.ba.gn_pose import solve_pose
+    pts_cam_orig = batch[8]  if len(batch) > 8  else None     # (B,N,3) parent-cam XYZ (m)
+    duv_orig     = batch[9]  if len(batch) > 9  else None     # (B,N,2) GT Δuv (orig px)
+    K_orig       = batch[10] if len(batch) > 10 else None
+    cs_t         = batch[11] if len(batch) > 11 else None
+    if pts_cam_orig is None or duv_orig is None or K_orig is None or cs_t is None:
         return None, {}
     B, N, _ = dist_uvd.shape
-    valid = ~pad_mask
-    # Build tile-local K from parent K + crop origin + crop size
-    # img_size = tile size used by model (default 128). Inferred from dist_uvd range.
+    dev, dt = dist_uvd.device, dist_uvd.dtype
+    # valid = not-padded AND physical depth (Z>0.5 m); sanitize the rest so the
+    # projection is finite (valid excludes them from the reduction).
+    Zc = pts_cam_orig[..., 2]
+    valid = (~pad_mask) & (Zc > 0.5)
+    safe = torch.tensor([0., 0., 10.], device=dev, dtype=dt)
+    P0 = torch.where(valid.unsqueeze(-1), pts_cam_orig, safe)
+
+    # Network μ/σ are TILE-LOCAL px; scale to original-camera px by cs/S (the
+    # tile origin cancels in a Δ, only the S/cs zoom remains — so duv_orig =
+    # duv_local·cs/S EXACTLY, and σ scales the same way). S = model img_size.
     img_size = 128.0
-    scale = img_size / cs_t                          # (B,)
-    fx_l = K_orig[..., 0, 0] * scale
-    fy_l = K_orig[..., 1, 1] * scale
-    cx_l = (K_orig[..., 0, 2] - u0_t) * scale
-    cy_l = (K_orig[..., 1, 2] - v0_t) * scale
-    K_local = torch.zeros_like(K_orig)
-    K_local[..., 0, 0] = fx_l; K_local[..., 1, 1] = fy_l
-    K_local[..., 0, 2] = cx_l; K_local[..., 1, 2] = cy_l
-    K_local[..., 2, 2] = 1.0
-    K = K_local
-    mu = per_pt[..., :2]
-    sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0)
-    sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0)
+    s2o = (cs_t / img_size).view(B, 1)                        # (B,1)
+    mu_orig = per_pt[..., :2] * s2o.unsqueeze(-1)             # (B,N,2) orig px
+    sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0) * s2o
+    sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0) * s2o
     rho = torch.tanh(per_pt[..., 4]) * 0.95
     W = make_info_from_sigma_rho(sx, sy, rho)
-    # 3D points from dist_uvd (tile-local u, v, d)
-    fx = K[..., 0, 0:1]; fy = K[..., 1, 1:2]
-    cx = K[..., 0, 2:3]; cy = K[..., 1, 2:3]
-    d = dist_uvd[..., 2] * 100.0                     # normalised → m
-    # Padded points have d=0 → divisions blow up. Replace invalid d with safe 10m
-    # (won't matter for loss since `valid` masks them out, but keeps Jacobian finite).
-    safe_d = torch.where(valid, d, torch.full_like(d, 10.0)).clamp(min=0.5)
-    u, v = dist_uvd[..., 0], dist_uvd[..., 1]
-    X = (u - cx) * safe_d / fx
-    Y = (v - cy) * safe_d / fy
-    pts_cam = torch.stack([X, Y, safe_d], dim=-1)
-    uv_target = dist_uvd[..., :2] + mu               # network corrected
-    dof_names = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
-    prior_diag = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09],
-                              device=dist_uvd.device, dtype=dist_uvd.dtype)
-    omega = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
-    t = torch.zeros(B, 3, device=dist_uvd.device, dtype=dist_uvd.dtype)
-    for _ in range(ba_iter):
-        pts_t = _apply_extrinsic(pts_cam, omega, t)
-        uv_proj = project_pinhole(pts_t, K)
-        r = uv_target - uv_proj
-        Xp, Yp, Zp = pts_t.unbind(-1)
-        J = pinhole_jacobian(Xp, Yp, Zp, K, uv_proj.detach(), dof_names)
-        delta, _ = gn_step(J, W, r, valid=valid, damping=damping, prior_diag=prior_diag)
-        omega = omega + delta[:, :3]
-        t = t + delta[:, 3:]
-    delta_solved = torch.cat([omega, t], dim=-1)     # (B, 6)
-    # pert_vec layout: [tx, ty, tz, yaw, pitch, roll, dfx, dfy]
-    t_gt = pert_vec[:, :3]
-    ypr_gt = pert_vec[:, 3:6]
-    rot_loss = (omega - ypr_gt).pow(2).mean()
-    t_loss = (t - t_gt).pow(2).mean()
-    loss = rot_loss + 100.0 * t_loss
+    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev, dtype=torch.float64)
+
+    # FLOAT64 GN + NLL. fx_orig~930 → J~930 → H entries ~1e7 while prior floors
+    # at ~0.1 → condition number ~1e9. The fp32 forward is finite (loss≈288,
+    # rot_err 0.003°) but the cholesky/solve BACKWARD explodes to NaN at that
+    # conditioning (one tile's NaN grad → shared backbone → 99.9% params NaN).
+    # fp64 carries ~16 digits so the 1e9-conditioned factorisation + its grad
+    # stay clean; the .double() cast is autograd-transparent (grad casts back to
+    # the fp32 net). solve_pose only needs the float-precision bump here.
+    P0d = P0.double(); Kd = K_orig.double()
+    mu_in = (mu_orig.detach() if detach_mu else mu_orig).double()
+    delta_pred, H_last = solve_pose(P0d, -mu_in, W.double(), Kd, valid=valid,
+                                    n_iter=ba_iter, damping=damping, prior_diag=prior)
     with torch.no_grad():
-        rot_err = (omega - ypr_gt).abs().mean()
-        t_err = (t - t_gt).abs().mean()
-    return loss, {'rot_err': rot_err.item(), 't_err': t_err.item()}
+        Wi = make_info_from_sigma_rho(torch.ones(B, N, device=dev, dtype=torch.float64),
+                                      torch.ones(B, N, device=dev, dtype=torch.float64),
+                                      torch.zeros(B, N, device=dev, dtype=torch.float64))
+        delta_gt, _ = solve_pose(P0d, -duv_orig.double(), Wi, Kd, valid=valid,
+                                 n_iter=ba_iter, damping=damping, prior_diag=prior)
+
+    if loss_type == 'mse':
+        rot_loss = (delta_pred[:, :3] - delta_gt[:, :3]).pow(2).mean()
+        t_loss   = (delta_pred[:, 3:] - delta_gt[:, 3:]).pow(2).mean()
+        loss = rot_loss + 100.0 * t_loss
+    else:
+        e = (delta_pred - delta_gt)                  # (B, 6) fp64
+        H = H_last                                   # (B, 6, 6) fp64
+        # A minority of single tiles are 6-DoF-underdetermined (too few pts /
+        # flat geometry): the GN diverges and H_last is non-finite or not PD,
+        # so Σ_δ=H⁻¹ / its NLL are meaningless there. Exclude THOSE tiles from
+        # the POSE loss (cholesky_ex flags them) — pose is genuinely unobservable
+        # in that crop. The per-point gaussian2d_nll still trains μ on all tiles;
+        # we just don't supervise a pose where there isn't one. Not masking a
+        # bug — declining to fit an unobservable. Index H[ok]/e[ok] BEFORE the
+        # cholesky so the backward graph never touches a non-PD element (its
+        # cholesky backward is NaN even with zero upstream grad → contaminates
+        # the shared backbone).
+        finite = torch.isfinite(e).all(-1) & torch.isfinite(H).flatten(1).all(-1)
+        _, info = torch.linalg.cholesky_ex(H.detach())
+        ok = (info == 0) & finite
+        if ok.any():
+            Lg = torch.linalg.cholesky(H[ok])
+            eg = e[ok]
+            Lte = torch.einsum('bji,bj->bi', Lg, eg)
+            quad = (Lte * Lte).sum(-1)
+            logdet = 2.0 * torch.log(torch.diagonal(Lg, dim1=-2, dim2=-1)).sum(-1)
+            nll = 0.5 * quad - 0.5 * logdet
+            loss = nll.mean().to(per_pt.dtype)        # back to fp32 for the blend
+        else:
+            quad = logdet = None
+            loss = per_pt.sum() * 0.0                 # zero-grad surrogate, keep DDP in sync
+    with torch.no_grad():
+        if loss_type != 'mse':
+            okm = ok                                  # well-conditioned tiles only
+            rot_err = (delta_pred[okm, :3] - delta_gt[okm, :3]).abs().mean() if okm.any() else torch.tensor(float('nan'))
+            t_err   = (delta_pred[okm, 3:] - delta_gt[okm, 3:]).abs().mean() if okm.any() else torch.tensor(float('nan'))
+            diag = {'rot_err': float(rot_err), 't_err': float(t_err),
+                    'frac_pd': float(ok.float().mean())}
+            if quad is not None:
+                diag['logdet'] = float(logdet.mean()); diag['quad'] = float(quad.mean())
+        else:
+            rot_err = (delta_pred[:, :3] - delta_gt[:, :3]).abs().mean()
+            t_err   = (delta_pred[:, 3:] - delta_gt[:, 3:]).abs().mean()
+            diag = {'rot_err': float(rot_err), 't_err': float(t_err)}
+    return loss, diag
 from torch.utils.data import DataLoader, Subset, ConcatDataset, RandomSampler
 import random as _r
 
@@ -461,11 +499,14 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         # use_info_head=False here → out is per_pt only.
         per_pt = out[0] if isinstance(out, tuple) else out
         valid  = ~pad_mask
+        ba_diag = None
         nll_loss = gaussian2d_nll(per_pt[valid], gt[valid])
         if getattr(accel, '_ba_loss_mode', False):
             ba_l, ba_diag = _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch,
                                           ba_iter=getattr(accel, '_ba_iter', 4),
-                                          damping=getattr(accel, '_ba_damping', 1e-3))
+                                          damping=getattr(accel, '_ba_damping', 1e-3),
+                                          loss_type=getattr(accel, '_ba_loss_type', 'nll'),
+                                          detach_mu=getattr(accel, '_ba_detach_mu', True))
             ba_weight = getattr(accel, '_ba_weight', 0.5)
             if ba_l is None:
                 loss = nll_loss
@@ -498,7 +539,13 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             _dt = time.time() - _t_start
             sps_per  = n * imgs.shape[0] / _dt if _dt > 0 else 0
             sps_glob = sps_per * accel.num_processes
-            print(f"  step {n}  loss={loss.item():+.3f}  "
+            ba_str = ""
+            if ba_diag:
+                ba_str = (f"  rot_err={ba_diag.get('rot_err', float('nan')):.3f}°"
+                          f" t_err={ba_diag.get('t_err', float('nan')):.3f}m")
+                if 'logdet' in ba_diag:
+                    ba_str += f" logdetH={ba_diag['logdet']:.1f}"
+            print(f"  step {n}  loss={loss.item():+.3f}{ba_str}  "
                   f"sps/rank={sps_per:.0f}  sps(global)={sps_glob:.0f}", flush=True)
             _last_log_step = n
     return (total_nll / max(n, 1), total_mse / max(n, 1))
@@ -531,6 +578,15 @@ def main():
     p.add_argument('--ba-damping', type=float, default=1e-3)
     p.add_argument('--ba-weight', type=float, default=0.5,
                    help='weight of BA loss in mixture; (1-w) * nll + w * ba')
+    p.add_argument('--ba-loss-type', type=str, default='nll',
+                   choices=['nll', 'mse'],
+                   help='BA pose objective: "nll" (Mahalanobis under Σ_δ=H⁻¹, '
+                        'degeneracy-safe, default) or "mse" (legacy rot+100·t).')
+    p.add_argument('--ba-detach-mu', action='store_true',
+                   help='Detach μ in the BA pose loss so it trains only W (default '
+                        'OFF = μ attached, natural E2E). Was a band-aid for the '
+                        'σ-saturation that the range→Z unprojection fix actually '
+                        'root-caused; kept for A/B only.')
     p.add_argument('--prefetch', type=int, default=4)
     p.add_argument('--n-iter', type=int, default=3)
     p.add_argument('--n-heads', type=int, default=4)
@@ -639,6 +695,8 @@ def main():
     accel._ba_iter      = int(args.ba_iter)
     accel._ba_damping   = float(args.ba_damping)
     accel._ba_weight    = float(args.ba_weight)
+    accel._ba_loss_type = str(args.ba_loss_type)
+    accel._ba_detach_mu = bool(args.ba_detach_mu)
 
     # ClearML init (rank-0 only, BEFORE main loop so cml_logger lookups work)
     if args.clearml and int(os.environ.get('RANK', '0')) == 0:
