@@ -66,63 +66,57 @@ def run(model, batch, dev):
 
 
 def gn_pose(per_pt, dist_uvd, pad_mask, batch, dev):
-    """Mirror _ba_pose_loss: GN 6-DoF solve + return δ_solved, Σ_δ=H⁻¹, δ_gt."""
-    K_orig = batch[10]; cs_t = batch[11]; u0_t = batch[13]; v0_t = batch[14]
-    pert = batch[7]
+    """CANONICAL frame-safe GN (same as _ba_pose_loss): pts_cam_orig/duv_orig,
+    float64. δ_pred = solve_pose(P0,−μ_orig,W); δ_gt = solve_pose(P0,−duv_orig,I);
+    both parent-cam frame via the ONE module → no world/cam bug, no range/Z.
+    Returns (δ_pred, Σ_δ=H⁻¹, δ_gt) on well-conditioned (PD) tiles only."""
+    from scripts.ba.gn_pose import solve_pose
+    pts0 = batch[8].to(dev).double(); duv_o = batch[9].to(dev).double()
+    K = batch[10].to(dev).double(); cs_t = batch[11].to(dev)
     B, N, _ = dist_uvd.shape
-    valid = (~pad_mask).to(dev)
-    img_size = 128.0
-    scale = img_size / cs_t
-    K = torch.zeros(B, 3, 3)
-    K[:, 0, 0] = K_orig[:, 0, 0] * scale; K[:, 1, 1] = K_orig[:, 1, 1] * scale
-    K[:, 0, 2] = (K_orig[:, 0, 2] - u0_t) * scale
-    K[:, 1, 2] = (K_orig[:, 1, 2] - v0_t) * scale; K[:, 2, 2] = 1.0
-    K = K.to(dev)
-    per_pt = per_pt.to(dev); dist_uvd = dist_uvd.to(dev)
-    sx = per_pt[..., 2].exp().clamp(0.1, 50.0)
-    sy = per_pt[..., 3].exp().clamp(0.1, 50.0)
-    rho = per_pt[..., 4].tanh() * 0.95
+    per_pt = per_pt.to(dev)
+    Zc = pts0[..., 2]
+    valid = (~pad_mask.to(dev)) & (Zc > 0.5)
+    safe = torch.tensor([0., 0., 10.], device=dev, dtype=torch.float64)
+    P0 = torch.where(valid.unsqueeze(-1), pts0, safe)
+    s2o = (cs_t / 128.0).view(B, 1)
+    mu_o = (per_pt[..., :2] * s2o.unsqueeze(-1)).double()
+    sx = (per_pt[..., 2].exp().clamp(0.1, 50.0) * s2o).double()
+    sy = (per_pt[..., 3].exp().clamp(0.1, 50.0) * s2o).double()
+    rho = (per_pt[..., 4].tanh() * 0.95).double()
     W = make_info_from_sigma_rho(sx, sy, rho)
-    fx = K[..., 0, 0:1]; fy = K[..., 1, 1:2]; cx = K[..., 0, 2:3]; cy = K[..., 1, 2:3]
-    d = (dist_uvd[..., 2] * 100.0)
-    safe_d = torch.where(valid, d, torch.full_like(d, 10.0)).clamp(min=0.5)
-    u, v = dist_uvd[..., 0], dist_uvd[..., 1]
-    pts_cam = torch.stack([(u - cx) * safe_d / fx, (v - cy) * safe_d / fy, safe_d], -1)
-    uv_target = dist_uvd[..., :2] + per_pt[..., :2]
-    dof = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
-    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev)
-    omega = torch.zeros(B, 3, device=dev); t = torch.zeros(B, 3, device=dev); H = None
-    for _ in range(4):
-        pts_t = _apply_extrinsic(pts_cam, omega, t)
-        uv_proj = project_pinhole(pts_t, K)
-        r = uv_target - uv_proj
-        Xp, Yp, Zp = pts_t.unbind(-1)
-        J = pinhole_jacobian(Xp, Yp, Zp, K, uv_proj.detach(), dof)
-        delta, H = gn_step(J, W, r, valid=valid, damping=1e-3, prior_diag=prior)
-        omega = omega + delta[:, :3]; t = t + delta[:, 3:]
-    delta_solved = torch.cat([omega, t], -1)
+    Wi = make_info_from_sigma_rho(torch.ones(B, N, device=dev, dtype=torch.float64),
+                                  torch.ones(B, N, device=dev, dtype=torch.float64),
+                                  torch.zeros(B, N, device=dev, dtype=torch.float64))
+    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev, dtype=torch.float64)
+    dpred, H = solve_pose(P0, -mu_o, W, K, valid=valid, n_iter=1, damping=1e-3, prior_diag=prior)
+    dgt, _ = solve_pose(P0, -duv_o, Wi, K, valid=valid, n_iter=1, damping=1e-3, prior_diag=prior)
     Sigma = torch.linalg.inv(H)
-    ypr = pert[:, 3:6].to(dev); tgt = pert[:, :3].to(dev)
-    delta_gt = torch.cat([ypr.flip(-1), tgt], -1)
-    return delta_solved.cpu(), Sigma.cpu(), delta_gt.cpu()
+    return dpred.cpu(), Sigma.cpu(), dgt.cpu()
 
 
-def draw(ax, true_uvd, dist_uvd, per_pt, valid, k_show, title):
-    idx = np.where(valid)[0][:k_show]
+def draw(ax, img, true_uvd, dist_uvd, per_pt, valid, k_show, title):
+    # img: (3,S,S) tensor 0..1 → show the actual tile, overlay points in tile-px.
+    im = img.permute(1, 2, 0).cpu().numpy()
+    S = im.shape[0]
+    ax.imshow(np.clip(im, 0, 1), extent=[0, S, S, 0])          # top-left origin
+    idx = np.where(valid)[0]
+    if len(idx) > k_show:
+        idx = idx[np.linspace(0, len(idx) - 1, k_show).astype(int)]
     for i in idx:
         xp = dist_uvd[i, :2]; gt = true_uvd[i, :2]; mu = xp + per_pt[i, :2]
-        ax.plot(xp[0], xp[1], 'x', c='tab:red', ms=6, mew=1.5)
-        ax.plot(gt[0], gt[1], 'o', mfc='none', mec='tab:green', ms=9, mew=1.5)
-        ax.plot(mu[0], mu[1], '+', c='tab:blue', ms=8, mew=1.5)
+        ax.plot(xp[0], xp[1], 'x', c='red', ms=7, mew=2.0)
+        ax.plot(gt[0], gt[1], 'o', mfc='none', mec='lime', ms=11, mew=2.0)
+        ax.plot(mu[0], mu[1], '+', c='cyan', ms=9, mew=2.0)
         sx = math.exp(per_pt[i, 2]); sy = math.exp(per_pt[i, 3]); rho = math.tanh(per_pt[i, 4])
         cov = np.array([[sx*sx, rho*sx*sy], [rho*sx*sy, sy*sy]])
         ev, evec = np.linalg.eigh(cov)
         ang = math.degrees(math.atan2(evec[1, 1], evec[0, 1]))
-        for ns in (1, 2):
-            ax.add_patch(Ellipse(mu, 2*ns*math.sqrt(max(ev[1], 1e-6)),
-                                 2*ns*math.sqrt(max(ev[0], 1e-6)), angle=ang,
-                                 fill=False, ec='tab:blue', alpha=0.5, lw=1))
-    ax.set_title(title, fontsize=11); ax.set_aspect('equal'); ax.invert_yaxis()
+        ax.add_patch(Ellipse(mu, 2*math.sqrt(max(ev[1], 1e-6)),
+                             2*math.sqrt(max(ev[0], 1e-6)), angle=ang,
+                             fill=False, ec='cyan', alpha=0.85, lw=1.3))  # 1σ
+    ax.set_xlim(0, S); ax.set_ylim(S, 0); ax.set_aspect('equal'); ax.axis('off')
+    ax.set_title(title, fontsize=10)
 
 
 def main():
@@ -144,7 +138,8 @@ def main():
                                   split_pert=False, pair_mode=False)
     dl = DataLoader(ds, batch_size=16, shuffle=True, num_workers=2, collate_fn=collate_full)
     batch = next(iter(dl))
-    true_uvd, dist_uvd, pad_mask = batch[1], batch[2], batch[3]
+    imgs = batch[0]; true_uvd, dist_uvd, pad_mask = batch[1], batch[2], batch[3]
+    img_s = imgs[args.sample].float() / 255.0                  # (3,S,S) for imshow
     s = args.sample; valid = (~pad_mask[s]).numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 8), dpi=120)
@@ -152,18 +147,28 @@ def main():
         m = load_model(ck, dev)
         per_pt = run(m, batch, dev)
         ds_, Sig, dg = gn_pose(per_pt, dist_uvd, pad_mask, batch, dev)
-        # calibration over batch: mean |δ-δgt| vs predicted std sqrt(diag Σ_δ)
+        # calibration over WELL-CONDITIONED tiles only (PD Σ_δ, finite): mean
+        # |δ_pred-δ_gt| (actual pose err) vs predicted std sqrt(diag Σ_δ=H⁻¹).
         e = (ds_ - dg)
-        pred_std = torch.sqrt(torch.clamp(torch.diagonal(Sig, dim1=-2, dim2=-1), min=0))
+        diagS = torch.diagonal(Sig, dim1=-2, dim2=-1)
+        okt = torch.isfinite(e).all(-1) & torch.isfinite(diagS).all(-1) & (diagS > 0).all(-1)
+        e = e[okt]; pred_std = torch.sqrt(diagS[okt].clamp_min(0))
         rot_err = e[:, :3].abs().mean().item(); t_err = e[:, 3:].abs().mean().item()
         rot_std = pred_std[:, :3].mean().item(); t_std = pred_std[:, 3:].mean().item()
-        print(f'[{lab}] rot_err={rot_err:.3f}° (pred σ={rot_std:.3f}°)  '
-              f't_err={t_err:.3f}m (pred σ={t_std:.3f}m)  '
-              f'σ_px mean={math.exp(per_pt[s][valid][:,2].mean().item()):.2f}')
-        draw(ax, true_uvd[s].numpy(), dist_uvd[s].numpy(), per_pt[s].numpy(), valid,
-             args.k_show, f'{lab}: rot_err {rot_err:.3f}° t_err {t_err:.3f}m')
-    fig.suptitle('× pert   ○ GT   + pred   ellipse=2σ info   |   left vs right = Σ re-distribution',
-                 fontsize=12)
+        # per-point σ (tile-local px) stats for THIS sample
+        spx = torch.sqrt(per_pt[s][valid][:, 2].exp() * per_pt[s][valid][:, 3].exp())
+        spx_med = float(spx.median())
+        verdict = ('OVER-confident (IID)' if rot_std < 0.5 * rot_err
+                   else 'calibrated' if rot_std < 2.0 * rot_err else 'under-confident')
+        print(f'[{lab}] rot_err={rot_err:.3f}° predσ={rot_std:.3f}°  '
+              f't_err={t_err:.3f}m predσ={t_std:.3f}m  σ_px med={spx_med:.2f}  → {verdict}')
+        draw(ax, img_s, true_uvd[s].numpy(), dist_uvd[s].numpy(), per_pt[s].numpy(), valid,
+             args.k_show,
+             f'{lab}\nσ_px median={spx_med:.1f}px   pose σ_rot(pred)={rot_std:.3f}°')
+    fig.suptitle('per-point 1σ ellipse on the tile (×pert ○GT +pred).  LEFT calib-'
+                 'baseline: tight IID σ≈1px (over-counts → over-confident pose).  '
+                 'RIGHT pose-supervised: σ INFLATED to the correlation-aware value.',
+                 fontsize=10)
     fig.tight_layout()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, bbox_inches='tight'); print(f'saved {args.out}')
