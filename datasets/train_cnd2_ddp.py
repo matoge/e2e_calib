@@ -120,11 +120,23 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     delta_solved = torch.cat([omega, t], dim=-1)     # (B, 6) [ω_deg, t_m]
     # pert_vec layout: [tx, ty, tz, yaw, pitch, roll, dfx, dfy]
     t_gt   = pert_vec[:, :3]
-    ypr_gt = pert_vec[:, 3:6]
-    delta_gt = torch.cat([ypr_gt, t_gt], dim=-1)     # (B, 6), same DOF order
+    ypr_gt = pert_vec[:, 3:6]                         # [yaw, pitch, roll]
+    # CONVENTION FIX: the GN solves an axis-angle rotation `omega`=[ωx,ωy,ωz]
+    # (Rodrigues, dof_names omega_x/y/z), but the GT rotation is built by the
+    # dataset as Rotation.from_euler('zyx', [yaw,pitch,roll]). The axis-angle
+    # of that matrix is [roll, pitch, yaw] (verified numerically: ypr=[1,0,0]→
+    # ω=[0,0,1]; ypr=[0,0,1]→ω=[1,0,0]) — i.e. yaw and roll are SWAPPED vs the
+    # naive [yaw,pitch,roll] order. Comparing ω to [yaw,pitch,roll] makes the
+    # pose target physically unsatisfiable on the yaw/roll axes, so the net
+    # distorts per-point μ to fake a swapped rotation (≈fx·1°≈6px error) and
+    # inflates σ to hide it — that was the mse 1.6→8.4 blow-up, NOT degeneracy.
+    # Reverse ypr → [roll,pitch,yaw] to match ω's axis order (exact to 1st
+    # order; residual cross-coupling <0.005° at ±1°, far below signal).
+    omega_gt = ypr_gt.flip(-1)                        # [roll, pitch, yaw] ≈ ω
+    delta_gt = torch.cat([omega_gt, t_gt], dim=-1)    # (B, 6), matches omega/t
 
     if loss_type == 'mse':
-        rot_loss = (omega - ypr_gt).pow(2).mean()
+        rot_loss = (omega - omega_gt).pow(2).mean()
         t_loss   = (t - t_gt).pow(2).mean()
         loss = rot_loss + 100.0 * t_loss
     else:
@@ -142,7 +154,7 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
         nll = 0.5 * quad - 0.5 * logdet
         loss = nll.mean()
     with torch.no_grad():
-        rot_err = (omega - ypr_gt).abs().mean()
+        rot_err = (omega - omega_gt).abs().mean()
         t_err   = (t - t_gt).abs().mean()
         diag = {'rot_err': rot_err.item(), 't_err': t_err.item()}
         if loss_type != 'mse':
