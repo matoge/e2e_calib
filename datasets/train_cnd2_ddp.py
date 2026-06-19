@@ -568,6 +568,11 @@ def main():
     p.add_argument('--oversample', type=int, default=16)
     p.add_argument('--rot-deg', type=float, default=1.5)
     p.add_argument('--t-m', type=float, default=0.20)
+    p.add_argument('--radial-pert-px', type=float, default=0.0,
+                   help='Inject edge-concentrated radial distortion into the '
+                        'observed projection (px at the image corner; 0=off). '
+                        'PS is 1080p → corner radius ≈1100px. The net learns to '
+                        'undistort (μ); a 12-DoF GN can later recover it.')
     p.add_argument('--min-crop-px', type=int, default=256)
     p.add_argument('--max-crop-px', type=int, default=512)
     p.add_argument('--grid-n', type=int, default=16)
@@ -745,7 +750,8 @@ def main():
                  split_pert=False,
                  pair_stride=int(args.pair_stride),
                  pair_bidir=bool(args.pair_bidir),
-                 calib_pert=bool(args.calib_pert))
+                 calib_pert=bool(args.calib_pert),
+                 radial_pert_px=float(args.radial_pert_px))
     cache_paths = [s.strip() for s in args.cache.split(',') if s.strip()]
     # Per-cache mode override (mixed pair+calib training)
     mode_map: dict[str, str] = {}

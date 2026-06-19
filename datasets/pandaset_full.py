@@ -172,6 +172,24 @@ def _is_obj_per_point(pts_sel: np.ndarray, cuboids: list) -> np.ndarray:
     return inside.any(axis=0).astype(np.float32)                                  # (N,)
 
 
+def _apply_radial_pert(uv, cx, cy, halfdiag, budget_px):
+    """Inject an EDGE-CONCENTRATED radial distortion into parent-image-coord
+    pixels `uv` (N,2). Profile is high-order (ρ⁶ + a little ρ⁴, ρ=r/halfdiag)
+    so the interior is ~flat and only the edge warps; Δr is linear in the
+    coeff so we rescale exactly to a px budget (this sample's CORNER, ρ=1,
+    displacement ~ U(0, budget_px)). Random sign (barrel/pincushion). Monotonic
+    for sane budgets (no fold). Apply to uv_off (observed) only; uv_gt stays
+    pinhole → the residual is the distortion the net must undo."""
+    du = uv[:, 0] - cx; dv = uv[:, 1] - cy
+    rho = np.sqrt(du * du + dv * dv) / max(halfdiag, 1e-6)
+    a = np.random.uniform(0.5, 1.0); b = np.random.uniform(0.0, 0.4)
+    sgn = 1.0 if np.random.random() < 0.5 else -1.0
+    mag = np.random.uniform(0.0, budget_px)                  # corner Δr this sample
+    c = sgn * mag / (halfdiag * (a + b) + 1e-9)              # Δr(ρ=1)=mag exactly
+    factor = 1.0 + c * (a * rho**6 + b * rho**4)
+    return np.stack([cx + du * factor, cy + dv * factor], axis=-1).astype(np.float32)
+
+
 def _photometric_jitter_tuple(tup, half_range: float):
     """Apply per-channel brightness/contrast/saturation jitter to the
     uint8 image in a build_crop output tuple. Returns a new tuple with
@@ -247,6 +265,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  calib_pert: bool = False,
                  same_frame_self_sup: bool = False,
                  photometric_jitter: float = 0.25,
+                 radial_pert_px: float = 0.0,
                  preload: bool = True):
         self.cache_dir = Path(cache_dir)
         self.inst_dir  = self.cache_dir / 'inst'
@@ -275,6 +294,13 @@ class PandaSetCalibDatasetFull(Dataset):
         self.max_crop_px = int(max_crop_px)
         self.max_offset_m = float(max_offset_m)
         self.max_rot_deg  = float(max_rot_deg)
+        # Radial-distortion PERTURBATION budget (px at the image corner). >0
+        # injects an edge-concentrated radial warp into the OBSERVED projection
+        # (uv_off) only — uv_gt stays pinhole — so the net learns to UNDISTORT
+        # (μ) and a 12-DoF GN can recover the distortion. Sized for the full
+        # frame (e.g. 1080p ⇒ corner radius ≈1100px); a center tile sees ≈0, an
+        # edge tile sees the steep part. Monotonic (no fold) at sane budgets.
+        self.radial_pert_px = float(radial_pert_px)
         # Multiplicative fx/fy perturbation half-range (e.g. 0.02 = ±2%).
         # When non-zero, sampled δ_fx, δ_fy ∈ [-pct, +pct] are folded into the
         # projection K used for `dist_uvd` and appended to the per-sample pert
@@ -1389,6 +1415,15 @@ class PandaSetCalibDatasetFull(Dataset):
         else:
             uv_off_c = (pts_cam_off[:, :2] * (np.array([K_pert[0,0], K_pert[1,1]], dtype=np.float32))) / \
                        np.maximum(z_off[:, None], 1e-6) + np.array([K_pert[0,2], K_pert[1,2]], dtype=np.float32)
+        # Radial-distortion perturbation: warp the OBSERVED pinhole projection
+        # (parent coords, BEFORE tile-origin subtraction so ρ is measured from
+        # the true image center). uv_gt is left undistorted → duv carries the
+        # distortion the net learns to undo. Pinhole cams only (fisheye already
+        # has its own KB model above).
+        if getattr(self, 'radial_pert_px', 0.0) > 0 and not inst.get('is_fisheye', False):
+            uv_off_c = _apply_radial_pert(
+                uv_off_c, float(K[0, 2]), float(K[1, 2]),
+                0.5 * float(np.hypot(IW, IH)), self.radial_pert_px)
         # Tile mode: K_full is unchanged (parent coords) so the freshly-projected
         # uv_off_c lives in parent image coords. Subtract the tile origin so it
         # matches the already-tile-local uv_full / u0 / v0.
