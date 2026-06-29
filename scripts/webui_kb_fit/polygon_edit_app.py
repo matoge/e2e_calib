@@ -165,7 +165,14 @@ function redraw() {{
       const v = toView(pt);
       const handle = new Konva.Circle({{
         x:v[0], y:v[1], radius:6, fill:'#fff', stroke:c, strokeWidth:2,
-        draggable: pi===activeIdx}});
+        draggable: pi===activeIdx,
+        dragBoundFunc: function(pos) {{
+          // clamp inside the visible canvas so handles can't go out of reach
+          return {{
+            x: Math.max(0, Math.min(VIEW_W, pos.x)),
+            y: Math.max(0, Math.min(VIEW_H, pos.y))
+          }};
+        }}}});
       handle.on('dragmove', () => {{
         poly[vi] = toOrig(handle.x(), handle.y());
         line.points(poly.flatMap(toView));
