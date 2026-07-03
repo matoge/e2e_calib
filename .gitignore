@@ -10,6 +10,10 @@ sim3d_val.pt
 web_viewer/data/*.bin
 __pycache__/
 *.pyc
+
+# splatad_kb local sweep dumps
+scripts/splatad_kb/_outputs_*.jpg
+scripts/splatad_kb/_*.jpg
 .pytest_cache/
 .claude/
 logs/
