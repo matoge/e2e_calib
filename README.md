@@ -4,61 +4,67 @@
   <img src="docs/images/hero.png" width="820" alt="Four validation crops: LiDAR reprojection before/after sub-pixel correction">
 </p>
 
-LiDAR 点を画像平面にマッピングする**ローカルな evidence detector**。各点ごとに
-2D ガウシアン `(Δu, Δv, σu, σv, ρ)` を出力し、その共分散つき残差を Ceres ベースの
-バンドルアジャスト (BA) に流して剛体補正を解きます。
+A **local evidence detector** that maps LiDAR points onto the image plane. For each
+point it emits a 2D Gaussian `(Δu, Δv, σu, σv, ρ)`, and those covariance-aware
+residuals are fed into a Ceres-based bundle adjustment (BA) that solves for the
+rigid correction.
 
-> **なぜこの分解か**: フルフレーム end-to-end で剛体 6DoF を回帰するより、
-> パッチ単位の局所証拠だけに学習を閉じ込めた方が (1) 小さく速く、
-> (2) リグ構成に非依存で、(3) BA で不確かさ伝搬でき、(4) なぜ失敗したか debug できる。
+> **Why this decomposition**: rather than regressing the full 6-DoF rigid pose
+> end-to-end from a whole frame, we restrict learning to per-patch local
+> evidence. That yields (1) a smaller/faster network, (2) independence from the
+> rig configuration, (3) principled uncertainty propagation via BA, and (4) a
+> debuggable pipeline where failures can be traced.
 
 ---
 
-## 主要な結果
+## Headline results
 
-### ① パッチ精度 (ps_v9_objsplit)
-| 指標 | 値 |
+### ① Patch accuracy (ps_v9_objsplit)
+| Metric | Value |
 |---|---|
 | Held-out **object** reproj MSE | **0.91 px** |
-| パラメータ数 | 1.62 M |
-| 訓練 | PandaSet 103 scene / 33,458 crops / 200 ep / 87 min (1× GPU) |
+| Parameter count | 1.62 M |
+| Training | PandaSet 103 scene / 33,458 crops / 200 ep / 87 min (1× GPU) |
 
-### ② ジョイント学習 (NuScenes + PandaSet + Waymo)
+### ② Joint training (NuScenes + PandaSet + Waymo)
 | Dataset | obj MSE | bg MSE |
 |---|---|---|
 | PandaSet | 1.25 px | 3.16 px |
 | Waymo | 1.93 px | 4.35 px |
 | NuScenes | 2.32 px | 5.23 px |
 
-→ 一つのネットワークで 3 つの異なるセンサ構成を処理。詳細は
+→ A single network handles three different sensor rigs. Details in
 [static/ns_ps_v2_report.html](static/ns_ps_v2_report.html) /
-[static/ps_v9_report.html](static/ps_v9_report.html)。
+[static/ps_v9_report.html](static/ps_v9_report.html).
 
 ### ③ Multi-frame BA (scene 015, 10 frames)
-GT drift `ypr ‖ ‖=0.46°, t ‖ ‖=26.2 cm` を共有 6DoF で共同最適化:
+Jointly optimizing a shared 6-DoF correction against a GT drift of
+`ypr ‖ ‖=0.46°, t ‖ ‖=26.2 cm`:
 
-| 設定 | rot_err | t_err | reproj med |
+| Setting | rot_err | t_err | reproj med |
 |---|---|---|---|
 | pinhole | 0.035° | **2.10 cm** | 0.75 px |
 | KB `k₂=+0.01` | 0.029° | **1.56 cm** | 0.72 px ← best |
 | fx −0.5 % | 0.018° | 17.7 cm | 4.17 px |
 | fx −1.0 % | 0.031° | 33.5 cm | 7.96 px |
 
-k₂≈+0.01 が残差を最小化 → PandaSet のピンホールモデルに微小な pincushion がある示唆。
-詳細は [experiments/all_v3_mc/ba_kb/summary.png](experiments/all_v3_mc/ba_kb/summary.png)。
+`k₂≈+0.01` minimizes the residual — a hint that PandaSet's nominal pinhole
+model has a slight pincushion component.
+See [experiments/all_v3_mc/ba_kb/summary.png](experiments/all_v3_mc/ba_kb/summary.png).
 
 ### ④ Deformable cross-attn (joint NS+PS+WM, 60k/1.5k, 200 ep)
-| Block | val NLL | 備考 |
+| Block | val NLL | Notes |
 |---|---|---|
 | standard cross-attn | 2.074 | baseline |
 | deformable SL | **1.568** | [experiments/vdef_sl/](experiments/vdef_sl/) |
 | deformable ML | 1.573 | [experiments/vdef_ml/](experiments/vdef_ml/) |
 
-bf16 native CUDA kernel でベースラインと同速 (19.3 vs 19.5 ms/iter, B=48 N=256)。
+Matches baseline speed on a bf16 native CUDA kernel (19.3 vs 19.5 ms/iter,
+B=48 N=256).
 
 ---
 
-## アーキテクチャ
+## Architecture
 
 ```
 Image (RGB 64×64 or 128×128)
@@ -71,7 +77,7 @@ LiDAR Points (N × 3, [U, V, D])
     └─ PointMLP + Frustum local encoder ──→ query (N × D)
                                               │
                        ┌──────────────────────┴──────────────────────┐
-                       │  CrossAttentionBlockCov  (L1 … L4 カスケード) │
+                       │  CrossAttentionBlockCov  (L1 … L4 cascade)  │
                        │   ├ (optional) image-side self-attn          │
                        │   ├ cross-attn  (pt → image)                 │
                        │   ├ self-attn   (pt → pt)                    │
@@ -79,38 +85,38 @@ LiDAR Points (N × 3, [U, V, D])
                        └──────────────────────┬──────────────────────┘
                                        warp UV and recurse
                                               │
-                              最終出力: (N × 5) per-point 2D ガウシアン
+                        final output: (N × 5) per-point 2D Gaussian
 ```
 
-設計の肝:
-- **Frustum encoder** が重要（外すと +0.81 NLL 悪化）
-- **Cross-attn を先**、self-attn はその後 (self-first にすると悪化)
-- **Coarse→Fine** のカスケード (`cross_coarse → cross_refine → cross_fine → cross_fine2`)
-- ピクセル座標系を `[0,1]` 正規化して sinusoidal 2D PE を統一
-- 出力は常に 2D 共分散つき → BA で Σ-重み付け残差として使える
+Design highlights:
+- The **frustum encoder** matters — removing it costs +0.81 NLL.
+- **Cross-attn first, then self-attn** (self-first regresses noticeably).
+- **Coarse→fine** cascade (`cross_coarse → cross_refine → cross_fine → cross_fine2`).
+- Pixel coordinates normalized to `[0,1]` with a unified sinusoidal 2D PE.
+- Every output carries a 2D covariance, so BA can consume Σ-weighted residuals.
 
 ---
 
-## Quick start — clone から PNG まで 1 分
+## Quick start — from clone to a PNG in one minute
 
-**実測のコピペ手順** (このリポでテスト済み):
+**Verified copy-paste flow** (tested against this repo):
 
 ```bash
-# 1) clone + LFS pull (チェックポイントは LFS でコミット済み)
+# 1) clone + LFS pull (checkpoints are committed via LFS)
 git clone git@github-enterprise:tmc-autonomy/loom-calibration.git
 cd loom-calibration
 git lfs install
 git lfs pull --include "experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2/best_model.pt"
-#   --include を外せば全実験の best_model.pt を落とす (大きい)
+#   Drop --include to fetch every experiment's best_model.pt (large).
 
-# 2) 依存
+# 2) dependencies
 sudo apt install -y git-lfs
 pip install torch torchvision flask matplotlib numpy pyceres clearml
 
-# 3) val cache を ClearML Dataset から取得 (woven_v3_tile, 圧縮 6.7 GiB)
-#    事前準備: ClearML web (http://172.16.200.185:8002) にログインして
-#      Profile → "Create new credentials" でトークン発行 → `clearml-init` に貼る。
-#    `~/clearml.conf` は最終的にこんな感じになる:
+# 3) grab the val cache from ClearML Dataset (woven_v3_tile, 6.7 GiB compressed)
+#    First-time setup: log in to ClearML web (http://172.16.200.185:8002),
+#      Profile → "Create new credentials" → paste the token into `clearml-init`.
+#    Your `~/clearml.conf` should look roughly like this:
 #      api {
 #        web_server   = http://172.16.200.185:8002
 #        api_server   = http://172.16.200.185:8003
@@ -122,10 +128,10 @@ from clearml import Dataset
 p = Dataset.get(dataset_id='786a56a01d5a454a876352ecaf8c281f').get_local_copy()
 print(p)   # ~/.clearml/cache/storage_manager/datasets/...
 "
-#   → 表示された path を data/woven_v3_tile にシンボリックリンク
-ln -s "<上で表示された path>" data/woven_v3_tile
+#   → symlink the printed path to data/woven_v3_tile
+ln -s "<path printed above>" data/woven_v3_tile
 
-# 4) 推論 + 可視化 ワンライナー
+# 4) one-liner inference + visualization
 PYTHONPATH=. python -m scripts.inference.infer_pipeline \
     --exp km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2 \
     --cache data/woven_v3_tile \
@@ -133,7 +139,7 @@ PYTHONPATH=. python -m scripts.inference.infer_pipeline \
     --out out/quickstart_demo
 ```
 
-これで以下が出ます (実測値):
+Expected output (measured on this repo):
 ```
 load model: km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2
 build dataset: data/woven_v3_tile (val)
@@ -144,61 +150,64 @@ build dataset: data/woven_v3_tile (val)
 done → out/quickstart_demo
 ```
 
-`out/quickstart_demo/idx{000017,000100,001000}.png` に red→green 可視化が
-出力されます。`hyp→true` が摂動入力の誤差 (px)、`pred→true` がモデル補正後の
-誤差。idx=17 の **11.60 → 2.33 px** が典型的な成功シグナル。
+The red→green visualizations land in
+`out/quickstart_demo/idx{000017,000100,001000}.png`.
+`hyp→true` is the perturbed input's error (px), `pred→true` is the model's
+corrected error. `idx=17` going from **11.60 → 2.33 px** is the typical
+success signal.
 
-### データキャッシュ (ClearML Dataset)
+### Data caches (ClearML Dataset)
 
-| Dataset (project=`e2e_calib/datasets`) | id | 用途 |
+| Dataset (project=`e2e_calib/datasets`) | id | Purpose |
 |---|---|---|
-| `woven_v3_tile_v1` | `786a56a01d5a454a876352ecaf8c281f` | TSS4 fisheye val (上記 Quick start で使用) |
-| `kamikado_raw` | `93880ccd96ab49e0aa53cda9002276f9` | kamikado raw scene zip 群 (下の「kamikado raw 1 frame …」で使用) |
-| `pandaset_v3_tiled` / `nuscenes_v3_tiled` / `waymo_v3_tiled` | (`scripts/preprocessing/upload_tile_caches.py` 参照) | joint 学習用 tile cache |
+| `woven_v3_tile_v1` | `786a56a01d5a454a876352ecaf8c281f` | TSS4 fisheye val (used by the Quick start above) |
+| `kamikado_raw` | `93880ccd96ab49e0aa53cda9002276f9` | Kamikado raw scene zips (used by "kamikado raw one-frame …" below) |
+| `pandaset_v3_tiled` / `nuscenes_v3_tiled` / `waymo_v3_tiled` | (see `scripts/preprocessing/upload_tile_caches.py`) | Tile caches for joint training |
 
-`Dataset.get(dataset_id=...).get_local_copy()` は ClearML cache に展開して
-local path を返すだけなので、二度目以降はキャッシュヒットして即返る。
-キャッシュ実体を別の disk に置きたい場合は `~/clearml.conf` の
-`sdk.storage.cache.default_base_dir` を書き換える。
+`Dataset.get(dataset_id=...).get_local_copy()` just unpacks into the ClearML
+cache and returns a local path, so the second call is an instant cache hit.
+To move the cache to a different disk, edit
+`sdk.storage.cache.default_base_dir` in `~/clearml.conf`.
 
-> **学習済みモデルを ClearML から取りたいとき** (LFS に載ってない実験):
+> **Pulling a trained model from ClearML** (experiments not on LFS):
 > ```python
 > from clearml import Task
 > t = Task.get_task(task_id='7e6f442a118042188609a115f139f61d')
-> ckpt = t.artifacts['best_model.pt'].get_local_copy()   # → ローカル path
+> ckpt = t.artifacts['best_model.pt'].get_local_copy()   # → local path
 > ```
 
 ---
 
-### 推論 CLI のオプション
+### Inference CLI options
 
-`scripts/inference/infer_pipeline.py` が**学習と byte-identical** な前処理で
-推論し、red→green 可視化 PNG を吐く**唯一の正しい入口**です。全ての
-可視化・eval・BA スクリプトはこのモジュールを経由します。
+`scripts/inference/infer_pipeline.py` is the **only correct entry point** —
+it runs preprocessing that is byte-identical to training and emits red→green
+visualization PNGs. Every visualization / eval / BA script goes through this
+module.
 
 ```bash
-# ランダム N 枚
+# random N samples
 PYTHONPATH=. python -m scripts.inference.infer_pipeline \
     --exp <NAME> --cache <CACHE_DIR> --split val --n 8 --out out/foo
 
-# 全点描画 (タイル単位 BA debug 向け)
+# draw all points (useful for per-tile BA debug)
 PYTHONPATH=. python -m scripts.inference.infer_pipeline \
     --exp <NAME> --cache <CACHE_DIR> --split val --idxs 0 --top-k -1 --out out/all
 ```
 
-出力 PNG の凡例:
-- `red ○` = 摂動入力 hyp_uv
-- `green ○` = モデル予測 pred_uv (= hyp + Δ)
+PNG legend:
+- `red ○` = perturbed input hyp_uv
+- `green ○` = model prediction pred_uv (= hyp + Δ)
 - `yellow / magenta ✗` = GT
-- 黄/橙の矢印 = 補正 Δ (red → green)
-- cyan/magenta 線 = 補正後の残差 (green → GT)
-- lime 楕円 = per-point 2D σ
+- yellow/orange arrow = correction Δ (red → green)
+- cyan/magenta line = post-correction residual (green → GT)
+- lime ellipse = per-point 2D σ
 
-タイトル例: `idx=17 top100 of 223 valid pts σ 1.46-1.82px |pred-GT| 2.93±0.39px err b→a: 11.60→2.71px`
+Example title: `idx=17 top100 of 223 valid pts σ 1.46-1.82px |pred-GT| 2.93±0.39px err b→a: 11.60→2.71px`
 
-`b→a` が補正前→補正後の平均ピクセル誤差。
+`b→a` is the mean pixel error before → after correction.
 
-### プログラム経由で叩く
+### Calling it from Python
 
 ```python
 import numpy as np
@@ -215,45 +224,46 @@ print(f"err {np.linalg.norm(res['hyp_uv'][v]  - res['true_uv'][v], axis=1).mean(
 render_red_to_green(res, 'idx17.png', top_k=100)
 ```
 
-`load_calib_model` は `experiments/<exp>/config.py` の `CFG` から
-`frustum_dense / use_intensity / n_layers / img_size / deform_mode / use_pose_emb`
-等を全部読み取ってモデル形状を組むので、**load 時に何も指定しなくて良い**。
-ckpt と config がズレてれば `size mismatch` で落ちる。
+`load_calib_model` reads `frustum_dense / use_intensity / n_layers / img_size /
+deform_mode / use_pose_emb` (etc.) directly from `experiments/<exp>/config.py`'s
+`CFG`, so **you don't have to pass anything at load time**. A ckpt/config
+mismatch fails loud with `size mismatch`.
 
-### WebUI デモサーバー
+### WebUI demo server
 
 ```bash
 PYTHONPATH=. python -m scripts.serving.caaas_app    # http://localhost:5002
 ```
 
-`caaas_app` は推論ロード周りで `infer_calib.load_calib_model` を共有し、
-タイル単位の `infer_tiles(model_input_size=c['img_size'])` で sliding 推論する。
+`caaas_app` shares `infer_calib.load_calib_model` for model loading and runs
+sliding inference tile-by-tile with `infer_tiles(model_input_size=c['img_size'])`.
 
-### kamikado raw 1 frame をローカルだけで δ̂ まで回す
+### One-frame kamikado raw → δ̂, fully local
 
-社内 calib API (`http://172.16.200.185:8082/calibrate/frame`) と等価な処理を、
-HTTP サーバを介さずローカルで実行する。`scripts/_debug/infer_raw_frame.py` が
-正規 CLI で、kamikado raw scene dir の `image_<f>.png + points_V_<f>.txt + calib.calib`
-を直接食ってタイル化推論 → BA → 6DoF δ̂ + σ をテキスト出力する。
+Runs the equivalent of the internal calib API
+(`http://172.16.200.185:8082/calibrate/frame`) without an HTTP server.
+`scripts/_debug/infer_raw_frame.py` is the canonical CLI. It takes a kamikado
+raw scene dir's `image_<f>.png + points_V_<f>.txt + calib.calib`, tiles it,
+runs the calib model, feeds BA, and prints the 6-DoF δ̂ + σ.
 
 ```bash
-# 1) raw scene を ClearML Dataset から取得 (kamikado_raw, ~900MB / 1 シーン)
-#    Quick start の「データキャッシュ」と同じ ~/clearml.conf があれば即動く。
+# 1) pull the raw scene from ClearML Dataset (kamikado_raw, ~900 MB / scene)
+#    Same ~/clearml.conf as the Quick start.
 python -c "
 from clearml import Dataset
 p = Dataset.get(dataset_id='93880ccd96ab49e0aa53cda9002276f9').get_local_copy()
-print(p)   # ClearML cache 上の展開済み path
+print(p)   # unpacked path in the ClearML cache
 "
-#   → 表示された path に points_ip664_D_*/{calib.calib, image_N.png, points_V_N.txt} が並ぶ
+#   → the printed path contains points_ip664_D_*/{calib.calib, image_N.png, points_V_N.txt}
 
-# 2) 1 frame 走らせる
+# 2) run one frame
 PYTHONPATH=. python scripts/_debug/infer_raw_frame.py \
-    --scene <上で表示された path>/points_ip664_D_20260226_224648_d005_3000_3020 \
+    --scene <path printed above>/points_ip664_D_20260226_224648_d005_3000_3020 \
     --frame 0 \
     --exp km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2
 ```
 
-実測出力 (このリポでテスト済み):
+Measured output (tested against this repo):
 
 ```
 == adapter: data/kamikado_raw/...d005_3000_3020  frame=0 ==
@@ -274,7 +284,7 @@ ty          +0.1510     0.0006
 tz          -0.0266     0.0007
 ```
 
-データ flow (`scripts/_debug/infer_raw_frame.py:1-90`):
+Data flow (`scripts/_debug/infer_raw_frame.py:1-90`):
 
 ```
 image_<f>.png + points_V_<f>.txt + calib.calib
@@ -292,38 +302,38 @@ list[tile_inst]  (tile_size=384, stride=320, max_pts=256)
 δ (6,) deg/m  +  cov[6,6]
 ```
 
-`infer_raw_frame.py` のオプション:
+`infer_raw_frame.py` flags:
 
-| flag | default | 何 |
+| flag | default | Meaning |
 |---|---|---|
-| `--scene` | (必須) | kamikado raw scene dir |
-| `--frame` | (必須) | int |
-| `--exp`   | `km_wv_wm_dgx2_n2_img128_v2` | `experiments/<exp>/best_model.pt` |
-| `--tile-size` | 384 | 学習時の `max_crop_px` と一致させる |
-| `--tile-stride` | 320 | tile 間 ~64px overlap |
-| `--huber-k` | 0.0 | >0 で IRLS Huber on |
-| `--n-iter`  | 1   | IRLS 反復 |
-| `--sigma-max` | 0.0 | >0 で σ_pt > sigma_max を BA 前に drop |
+| `--scene` | (required) | kamikado raw scene dir |
+| `--frame` | (required) | int |
+| `--exp`   | `km_wv_wm_dgx2_n2_img128_v2` | resolves to `experiments/<exp>/best_model.pt` |
+| `--tile-size` | 384 | match the training `max_crop_px` |
+| `--tile-stride` | 320 | ~64 px overlap between tiles |
+| `--huber-k` | 0.0 | >0 enables IRLS Huber |
+| `--n-iter`  | 1   | IRLS iterations |
+| `--sigma-max` | 0.0 | >0 drops points with σ_pt > sigma_max before BA |
 
-**ClearML や socket 一切なし**、ローカル disk + GPU だけで動く。サーバー側
-(`services/calib_api/server.py:671 calibrate_frame`) は同じ関数群を HTTP で
-ラップしているだけなので、レスポンスの δ̂ は本番と一致する。
+**No ClearML, no sockets** — just local disk + GPU. The server side
+(`services/calib_api/server.py:671 calibrate_frame`) is just an HTTP wrapper
+around the same functions, so the δ̂ returned here matches production.
 
-### 学習
+### Training
 
 ```bash
-# 実データ DDP 学習 (最近の主流。configs/<NAME>.py が直接 CFG)
+# Real-data DDP training (the main path lately; configs/<NAME>.py is the CFG itself)
 PYTHONPATH=. torchrun --nproc_per_node 8 \
     scripts/training/train_ps_v3_ddp.py --cfg <NAME>
 
-# 旧合成系 (sanity check 用)
+# Legacy synthetic runs (sanity check only)
 python scripts/training/train_64.py
 python scripts/training/train_sim3d.py
 ```
 
-実験結果は `experiments/<name>/{best_model.pt, train.log, config.py, vis_ep*/}` に保存。
+Results are written to `experiments/<name>/{best_model.pt, train.log, config.py, vis_ep*/}`.
 
-### データキャッシュを自分で作る場合
+### Building the data cache yourself
 
 ```bash
 python scripts/data_preparation/build_ps_full.py     # PandaSet → v3 tiled cache
@@ -331,105 +341,105 @@ python scripts/data_preparation/build_ns_full.py     # NuScenes
 python scripts/data_preparation/build_waymo_full.py  # Waymo
 ```
 
-リポにコミットしてある `data/woven_v3_tile` だけで動く構成にしてあるので、
-**推論を試すだけならキャッシュ構築は不要**。
+The repo already ships with `data/woven_v3_tile` committed, so
+**you do not need to build the caches just to run inference**.
 
 ---
 
-## リポジトリ構成
+## Repository layout
 
 ```
 .
-├── app.py                           # Flask デモサーバー
-├── train{,_multi,_cov,_depth,_grid_depth}.py   # SYNTH 系 (CLAUDE.md quickstart)
-├── vis{,_cov,_depth}.py                        # 対応する可視化
-├── ba_{singleframe,multiframe,kb_multiframe}.py  # active BA entries
-├── models/                          # PyTorch nn.Module 群 (package)
+├── app.py                           # Flask demo server
+├── train{,_multi,_cov,_depth,_grid_depth}.py   # synthetic-data entrypoints (see CLAUDE.md quickstart)
+├── vis{,_cov,_depth}.py                        # matching visualizers
+├── ba_{singleframe,multiframe,kb_multiframe}.py  # active BA entrypoints
+├── models/                          # PyTorch nn.Module package
 │   ├── model.py                     # CalibNet
-│   ├── model_cov.py                 # CalibNetCov (共分散)
+│   ├── model_cov.py                 # CalibNetCov (covariance)
 │   ├── model_depth.py               # CalibNetDepth (frustum + deform)
-│   ├── model_deform.py              # deformable cross-attn ブロック
-│   └── model_no_sa.py               # ablation: self-attn 無し
-├── datasets/                        # データローダ (package)
+│   ├── model_deform.py              # deformable cross-attn block
+│   └── model_no_sa.py               # ablation: no self-attn
+├── datasets/                        # data loaders (package)
 │   ├── synthetic.py, sim3d.py
 │   ├── pandaset.py, nuscenes.py, waymo.py
-├── configs/                         # 実験 config (package)
+├── configs/                         # experiment configs (package)
 │   └── grid_depth.py
 ├── ops/                             # MSDeformAttn bf16 CUDA kernel
 ├── scripts/
-│   ├── ba/                          # less-active BA entries
-│   ├── training/                    # 実データ学習スクリプト
-│   ├── visualization/               # 可視化ユーティリティ
-│   ├── data_preparation/            # キャッシュ/マップ構築
-│   └── eval/                        # eval/verify/bench
-├── docs/                            # GitHub Pages レポート群
-│   ├── index.html                   # 技術概要 (01)
-│   ├── report.html                  # バイリンガル実験まとめ (02)
-│   ├── ba_report.html               # Multi-frame BA sweep (03)
-│   ├── deform_report.html           # Deformable cross-attn (04)
-│   ├── images/                      # レポート挿絵
-│   └── assets/                      # 追加生成 viz
-├── static/                          # WebUI + 旧技術レポート
-├── experiments/                     # 実験結果 (checkpoint + log + config)
-└── legacy/                          # 参考用の旧ファイル
+│   ├── ba/                          # less-active BA entrypoints
+│   ├── training/                    # real-data training scripts
+│   ├── visualization/               # visualization utilities
+│   ├── data_preparation/            # cache / map builders
+│   └── eval/                        # eval / verify / bench
+├── docs/                            # GitHub Pages reports
+│   ├── index.html                   # technical overview (01)
+│   ├── report.html                  # bilingual experiment writeup (02)
+│   ├── ba_report.html               # multi-frame BA sweep (03)
+│   ├── deform_report.html           # deformable cross-attn (04)
+│   ├── images/                      # report figures
+│   └── assets/                      # additional generated visualizations
+├── static/                          # WebUI + legacy technical reports
+├── experiments/                     # experiment results (checkpoint + log + config)
+└── legacy/                          # older files kept for reference
 ```
 
-### 旧 flat-layout から package 化した箇所
+### Old flat layout → package layout migration
 
 | before (< 2026-04-23) | after |
 |---|---|
 | `model_*.py` (root) | `models/model_*.py` |
 | `dataset*.py` (root) | `datasets/{synthetic,sim3d,pandaset,nuscenes,waymo}.py` |
 | `config_grid_depth.py` | `configs/grid_depth.py` |
-| `train_pandaset.py` 等 (root) | `scripts/training/*.py` |
+| `train_pandaset.py` etc. (root) | `scripts/training/*.py` |
 | `vis_*.py` (root) | `scripts/visualization/*.py` |
 | `build_*.py` (root) | `scripts/data_preparation/*.py` |
-| `ba_global.py`, `icp_scan_residual.py` 等 | `scripts/ba/*.py` |
+| `ba_global.py`, `icp_scan_residual.py`, etc. | `scripts/ba/*.py` |
 
-import は `from models.model_depth import CalibNetDepth` のように
-パッケージパスで書く。`scripts/**/*.py` は冒頭に
-`sys.path.insert(0, repo_root)` の bootstrap を自動挿入済みなので
-どこから実行しても import は解決する。
+Imports use package paths, e.g. `from models.model_depth import CalibNetDepth`.
+Every `scripts/**/*.py` prepends a `sys.path.insert(0, repo_root)` bootstrap
+automatically, so imports resolve no matter where you invoke the script from.
 
 ---
 
-## レポート
+## Reports
 
-| # | Path | 何 |
+| # | Path | What |
 |---|---|---|
-| 01 | [docs/index.html](docs/index.html) | 技術概要 (ps_v9_objsplit ベース) |
-| 02 | [docs/report.html](docs/report.html) | バイリンガル実験まとめ (合成→実データ) |
-| 03 | [docs/ba_report.html](docs/ba_report.html) | Multi-frame BA + fx/KB 感度スイープ |
-| 04 | [docs/deform_report.html](docs/deform_report.html) | Deformable cross-attn (val_nll −0.5) |
-| 05 | [docs/cross_frame_report.html](docs/cross_frame_report.html) | Cross-frame residual (dual projection, PoC 0.60 px) |
+| 01 | [docs/index.html](docs/index.html) | technical overview (based on ps_v9_objsplit) |
+| 02 | [docs/report.html](docs/report.html) | bilingual experiment writeup (synthetic → real data) |
+| 03 | [docs/ba_report.html](docs/ba_report.html) | multi-frame BA + fx/KB sensitivity sweep |
+| 04 | [docs/deform_report.html](docs/deform_report.html) | deformable cross-attn (val_nll −0.5) |
+| 05 | [docs/cross_frame_report.html](docs/cross_frame_report.html) | cross-frame residual (dual projection, PoC 0.60 px) |
 
 ---
 
-## 注目の実験
+## Notable experiments
 
-LFS でコミット済みなので `git lfs pull` すれば即推論できる主要モデル:
+Committed to LFS, so `git lfs pull` is enough to run inference on any of these:
 
-| Path | 何 |
+| Path | What |
 |---|---|
-| `experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2/` | **メイン**: kamikado+woven+waymo joint, n=4 ML deformable + dense PE, 200ep on dgx2 |
-| `experiments/km_wv_wm_tss4_n4_img128_grid16_50ep_dgx3_16gpu_warm/` | 上記から TSS4 を 80% 入れて 50ep warm-start (TSS4 fisheye キャリブ問題対策) |
-| `experiments/tss4_iter1baked_n4_img128_30ep_os16_dgx2_16gpu_warm/` | TSS4 iter1 cache を baked 化 + os16 で warm-start |
-| `experiments/ps_full_n4_img128_parity_dgx4_100ep/` | PandaSet 単体 parity baseline (DGX4 100ep) |
-| `experiments/ps_v9_objsplit/` | (旧) PandaSet object-split ベストモデル (0.91 px) |
-| `experiments/all_v3_mc/ba_kb/` | (旧) 12 点 fx×KB スイープ、t=1.56 cm (k₂=+0.01) |
-| `experiments/vdef_{sl,ml}/` | (旧) Deformable cross-attn (val NLL 1.57) |
+| `experiments/km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2/` | **main model**: kamikado + woven + waymo joint, n=4 ML deformable + dense PE, 200 ep on dgx2 |
+| `experiments/km_wv_wm_tss4_n4_img128_grid16_50ep_dgx3_16gpu_warm/` | warm-started from the main model with 80 % TSS4 for 50 ep (TSS4 fisheye recovery) |
+| `experiments/tss4_iter1baked_n4_img128_30ep_os16_dgx2_16gpu_warm/` | TSS4 iter1 cache baked + os16 warm start |
+| `experiments/ps_full_n4_img128_parity_dgx4_100ep/` | PandaSet single-dataset parity baseline (DGX4 100 ep) |
+| `experiments/ps_v9_objsplit/` | (legacy) PandaSet object-split best model (0.91 px) |
+| `experiments/all_v3_mc/ba_kb/` | (legacy) 12-point fx×KB sweep, t=1.56 cm at k₂=+0.01 |
+| `experiments/vdef_{sl,ml}/` | (legacy) deformable cross-attn (val NLL 1.57) |
 
 ---
 
-## 環境
+## Environment
 
-- PyTorch 2.x + CUDA (fp16 autocast 必須 — bf16 だと sm_70 で fp32 emulated に
-  落ちて学習時の Δuv 分布とズレる。`infer_pipeline.infer_one` は fp16 固定)
-- RTX 5080 / 5090 / V100 / A100 / DGX2 でテスト
-- `git-lfs` (チェックポイント取り出しに必要)
-- `pyceres` (Python bindings for Ceres Solver) が BA に必要
-- `clearml` は学習中の scalar / vis を見るときと、LFS に載ってない実験を
-  artifact から取り出すときだけ
+- PyTorch 2.x + CUDA — fp16 autocast is required. On sm_70 bf16 falls back to
+  fp32-emulated math, which shifts the Δuv distribution away from training.
+  `infer_pipeline.infer_one` is pinned to fp16.
+- Tested on RTX 5080 / 5090 / V100 / A100 / DGX2.
+- `git-lfs` (needed to pull checkpoints).
+- `pyceres` (Python bindings for Ceres Solver) is required for BA.
+- `clearml` is only needed to inspect training scalars/visualizations and to
+  fetch experiments that aren't on LFS.
 
 ```bash
 sudo apt install git-lfs
