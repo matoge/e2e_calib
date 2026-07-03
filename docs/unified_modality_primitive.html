@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja"><head>
+<html lang="en"><head>
 <meta charset="utf-8">
 <title>unified modality primitive</title>
 <link rel="stylesheet" href="assets/report.css">
@@ -19,32 +19,34 @@ h1 { border-bottom: 2px solid #444; padding-bottom: 8px; }
 h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 </style>
 </head><body>
-<h1 id="1-n-frame_token">1 モデル、N 問題 — 位置クエリ + 多モーダル frame_token</h1>
-<p><strong>TL;DR</strong> — Query を <code>(uv, depth)</code> 由来の埋め込みだけにし、KV を
-<strong>modality 不問の frame_token グリッド</strong> にすると、cross-frame pose
-residual・camera-LiDAR 外部 calibration・camera-Radar・multi-camera
-calibration をすべて <strong>同じモデル定義 (同じコード、同じ重み形式)</strong> で解ける。
-PandaSet 103 シーンで calib と cross-frame の両方を verify 済み。</p>
+<h1 id="1-n-frame_token">1 model, N problems — positional query + multi-modal frame_token</h1>
+<p><strong>TL;DR</strong> — By restricting the Query to embeddings derived purely from
+<code>(uv, depth)</code> and making the KV a <strong>modality-agnostic frame_token grid</strong>,
+cross-frame pose residual, camera-LiDAR extrinsic calibration, camera-Radar,
+and multi-camera calibration can all be solved with <strong>the same model definition
+(same code, same weight format)</strong>.
+Verified on both calib and cross-frame on PandaSet 103 scenes.</p>
 <hr />
-<h2 id="1">1. 何が「同じ」なのか</h2>
-<p>学習対象のネットワークは <a href="../models/cross_frame_unified.py"><code>models/cross_frame_unified.py</code></a> の
-<code>CalibNetUnifiedFrame</code> 1 個だけ。下のすべての問題で:</p>
+<h2 id="1">1. What exactly is "the same"</h2>
+<p>The network being trained is a single <code>CalibNetUnifiedFrame</code> in
+<a href="../models/cross_frame_unified.py"><code>models/cross_frame_unified.py</code></a>.
+Across all problems below we use:</p>
 <ul>
-<li>同じ <code>class CalibNetUnifiedFrame(...)</code> インスタンス</li>
-<li>同じ層構成 (frame encoder + N × deformable cross-attn + intra-frame self-attn)</li>
-<li>同じ出力ヘッド (per-point <code>(Δu, Δv, log σu, log σv, ρ)</code>)</li>
+<li>the same <code>class CalibNetUnifiedFrame(...)</code> instance</li>
+<li>the same layer structure (frame encoder + N × deformable cross-attn + intra-frame self-attn)</li>
+<li>the same output head (per-point <code>(Δu, Δv, log σu, log σv, ρ)</code>)</li>
 </ul>
-<p>を使う。問題ごとに変わるのは <strong>dataset の作り方</strong> と <strong>encoder に渡す
-modality flag</strong> だけ。</p>
+<p>Only two things change per problem: <strong>the way the dataset is constructed</strong>,
+and <strong>the modality flag passed to the encoder</strong>.</p>
 <table>
 <thead>
 <tr>
-<th>問題</th>
-<th>入力 frame_A</th>
-<th>入力 frame_B</th>
-<th>摂動</th>
-<th>出力</th>
-<th>検証</th>
+<th>Problem</th>
+<th>Input frame_A</th>
+<th>Input frame_B</th>
+<th>Perturbation</th>
+<th>Output</th>
+<th>Verification</th>
 </tr>
 </thead>
 <tbody>
@@ -52,76 +54,78 @@ modality flag</strong> だけ。</p>
 <td>Cross-frame pose residual</td>
 <td>image + LiDAR (frame t1)</td>
 <td>image + LiDAR (frame t2)</td>
-<td>相対 pose ノイズ</td>
+<td>relative pose noise</td>
 <td>per-point Δuv (t1→t2)</td>
-<td>✅ v304 (PandaSet 103)</td>
+<td>v304 (PandaSet 103)</td>
 </tr>
 <tr>
-<td><strong>Cam-LiDAR 外部 calib</strong></td>
+<td><strong>Cam-LiDAR extrinsic calib</strong></td>
 <td>image (frame t)</td>
-<td>LiDAR scatter (frame t, 摂動 extrinsic で射影)</td>
-<td>外部 extrinsic ノイズ</td>
+<td>LiDAR scatter (frame t, projected with perturbed extrinsic)</td>
+<td>extrinsic noise</td>
 <td>per-point Δuv</td>
-<td>✅ v303 (PandaSet 103)</td>
+<td>v303 (PandaSet 103)</td>
 </tr>
 <tr>
-<td><strong>Cam-Radar 外部 calib</strong></td>
+<td><strong>Cam-Radar extrinsic calib</strong></td>
 <td>image (frame t)</td>
-<td>Radar scatter (frame t, 摂動 extrinsic で射影)</td>
-<td>外部 extrinsic ノイズ</td>
+<td>Radar scatter (frame t, projected with perturbed extrinsic)</td>
+<td>extrinsic noise</td>
 <td>per-point Δuv</td>
-<td>✅ v305 (nuScenes 150, ARS 408 ×5)</td>
+<td>v305 (nuScenes 150, ARS 408 ×5)</td>
 </tr>
 <tr>
 <td><strong>Multi-camera calib</strong> ★</td>
 <td>camera_A image</td>
 <td>camera_B image</td>
-<td>相対 extrinsic ノイズ</td>
+<td>relative extrinsic noise</td>
 <td>per-point Δuv</td>
-<td>未検証 (実装パッチは設計上 trivial)</td>
+<td>not yet verified (implementation patch is trivial by design)</td>
 </tr>
 </tbody>
 </table>
-<p>★ = 未検証。実装は modality flag を <code>'cam'</code>/<code>'cam'</code> にするだけで動くはず。</p>
+<p>★ = not yet verified. The implementation should work simply by setting the
+modality flag to <code>'cam'</code>/<code>'cam'</code>.</p>
 <hr />
-<h2 id="2-query-kv">2. 設計の核 — Query と KV を分離する</h2>
-<h3 id="21-query-modality">2.1 Query は位置のみ (modality 非依存)</h3>
-<p>旧版モデル (cross_frame v100 系) では Query を:</p>
-<div class="codehilite"><pre><span></span><code><span class="n">Q</span><span class="o">[</span><span class="n">i</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bilinear_sample</span><span class="p">(</span><span class="n">frame_token_anchor</span><span class="p">,</span><span class="w"> </span><span class="n">uv_i</span><span class="p">)</span><span class="w">  </span><span class="err">#</span><span class="w"> </span><span class="err">←</span><span class="w"> </span><span class="n">anchor</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="n">の局所特徴</span>
-<span class="w">     </span><span class="o">+</span><span class="w"> </span><span class="n">PointMLP</span><span class="p">(</span><span class="n">uv_i</span><span class="p">,</span><span class="w"> </span><span class="n">depth_i</span><span class="p">)</span><span class="w">                    </span><span class="err">#</span><span class="w"> </span><span class="err">←</span><span class="w"> </span><span class="mi">3</span><span class="n">D</span><span class="w"> </span><span class="n">位置情報</span>
-<span class="w">     </span><span class="o">+</span><span class="w"> </span><span class="n">pose_emb</span><span class="p">(</span><span class="n">target</span><span class="p">)</span><span class="w">                           </span><span class="err">#</span><span class="w"> </span><span class="err">←</span><span class="w"> </span><span class="n">target</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="n">への姿勢ヒント</span>
+<h2 id="2-query-kv">2. Design core — separate Query and KV</h2>
+<h3 id="21-query-modality">2.1 Query is position-only (modality independent)</h3>
+<p>In the older model (cross_frame v100 series) the Query was constructed as:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">Q</span><span class="o">[</span><span class="n">i</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bilinear_sample</span><span class="p">(</span><span class="n">frame_token_anchor</span><span class="p">,</span><span class="w"> </span><span class="n">uv_i</span><span class="p">)</span><span class="w">  </span><span class="err">#</span><span class="w"> </span><span class="err">←</span><span class="w"> </span><span class="n">local</span><span class="w"> </span><span class="n">feature</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">anchor</span><span class="w"> </span><span class="n">frame</span>
+<span class="w">     </span><span class="o">+</span><span class="w"> </span><span class="n">PointMLP</span><span class="p">(</span><span class="n">uv_i</span><span class="p">,</span><span class="w"> </span><span class="n">depth_i</span><span class="p">)</span><span class="w">                    </span><span class="err">#</span><span class="w"> </span><span class="err">←</span><span class="w"> </span><span class="mi">3</span><span class="n">D</span><span class="w"> </span><span class="n">positional</span><span class="w"> </span><span class="n">info</span>
+<span class="w">     </span><span class="o">+</span><span class="w"> </span><span class="n">pose_emb</span><span class="p">(</span><span class="n">target</span><span class="p">)</span><span class="w">                           </span><span class="err">#</span><span class="w"> </span><span class="err">←</span><span class="w"> </span><span class="n">pose</span><span class="w"> </span><span class="n">hint</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">target</span><span class="w"> </span><span class="n">frame</span>
 </code></pre></div>
 
-<p>の和で組んでいた。<strong>bilinear_sample の項が anchor frame に多モーダル
-特徴 (image + LiDAR の融合) があることを暗黙に仮定している</strong> ため、
-anchor が camera-only や LiDAR-only になる calib の場面では特徴の
-偏りが query を歪める。</p>
-<p>新版 (<code>uv_only_query=True</code>):</p>
+<p>Being a sum of these three, <strong>the bilinear_sample term implicitly assumes the
+anchor frame has multi-modal features (image + LiDAR fused)</strong>. When the anchor
+is camera-only or LiDAR-only (as in calib settings), the feature bias distorts
+the query.</p>
+<p>The new version (<code>uv_only_query=True</code>):</p>
 <div class="codehilite"><pre><span></span><code><span class="n">Q</span><span class="o">[</span><span class="n">i</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PointMLP</span><span class="p">(</span><span class="n">uv_i</span><span class="p">,</span><span class="w"> </span><span class="n">depth_i</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">pose_emb</span><span class="p">(</span><span class="n">target</span><span class="p">)</span>
 </code></pre></div>
 
-<p>純粋に位置情報だけ。<strong>modality に何が入っているかを query 側が知らない</strong>
-ので、frame_A が画像専用でも LiDAR 専用でもクエリの作り方が変わらない。</p>
-<h3 id="22-kv-frame_token">2.2 KV は固定形状の frame_token グリッド</h3>
-<p>各フレームを <code>(B, D, 16, 16)</code> のテンソル 1 個に潰す。中身は:</p>
+<p>uses purely positional information. <strong>The query side has no knowledge of what
+modality is inside</strong>, so whether frame_A is image-only or LiDAR-only, the query
+is constructed identically.</p>
+<h3 id="22-kv-frame_token">2.2 KV is a fixed-shape frame_token grid</h3>
+<p>Each frame is collapsed into a single tensor of shape <code>(B, D, 16, 16)</code>. Its content is:</p>
 <div class="codehilite"><pre><span></span><code>frame_token[c, h, w] = fuse(image_feat[c,h,w],
                              lidar_scatter[c,h,w],
                              has_lidar_mask[h,w])
 </code></pre></div>
 
-<p>この <code>fuse</code> は 1×1 Conv で、image 側はゼロ点で identity、LiDAR 側は
-ゼロ初期化。<strong>modality flag</strong> で encoder が:</p>
+<p>This <code>fuse</code> is a 1×1 Conv, with the image side initialized as identity at zero
+and the LiDAR side initialized to zero. A <strong>modality flag</strong> switches encoder behaviour:</p>
 <ul>
-<li><code>'mm'</code>: 通常通り両方使う</li>
-<li><code>'cam'</code>: lidar_scatter / mask を強制ゼロ → image 単独</li>
-<li><code>'lidar'</code>: image_feat を強制ゼロ → LiDAR 単独</li>
+<li><code>'mm'</code>: use both as usual</li>
+<li><code>'cam'</code>: forces lidar_scatter / mask to zero → image only</li>
+<li><code>'lidar'</code>: forces image_feat to zero → LiDAR only</li>
 </ul>
-<p>を切り替える (<a href="../models/cross_frame_unified.py">cross_frame_unified.py:96-129</a>)。
-<strong>出力の形状は modality に依らず常に <code>(B, D, 16, 16)</code></strong>。
-Cross-attention 側はこの「同じ shape」しか見ないので、上流の問題定義に
-無関係に動作する。</p>
-<h3 id="23">2.3 図解</h3>
-<div class="codehilite"><pre><span></span><code>                  各フレーム独立にエンコード
+<p>(<a href="../models/cross_frame_unified.py">cross_frame_unified.py:96-129</a>).
+<strong>The output shape is always <code>(B, D, 16, 16)</code> regardless of modality</strong>.
+The cross-attention side only ever sees this "same shape", so it operates
+independently of the upstream problem definition.</p>
+<h3 id="23">2.3 Diagram</h3>
+<div class="codehilite"><pre><span></span><code>              Each frame is encoded independently
    ┌────────────┐         ┌────────────┐
    │ image      │         │ LiDAR      │
    │ + LiDAR    │ ──cam──▶│ + image    │ ──lidar─▶
@@ -132,7 +136,7 @@ Cross-attention 側はこの「同じ shape」しか見ないので、上流の�
    frame_token_A           frame_token_B
    (B, D, 16, 16)         (B, D, 16, 16)
                                   │
-                                  │ どちらも同じ shape の grid
+                                  │ both are grids of the same shape
                                   ▼
                     ┌─────────────────────────┐
                     │ Q = uv_emb + pose_emb   │
@@ -143,15 +147,15 @@ Cross-attention 側はこの「同じ shape」しか見ないので、上流の�
 </code></pre></div>
 
 <hr />
-<h2 id="3-3-modality-2-dataset">3. 実証 — 3 modality / 2 dataset で同モデル動作確認</h2>
-<p><code>uv_only_query=True</code> の同一モデル設定 (<code>CalibNetUnifiedFrame</code>,
-n_cross_layers=4, 1.65M params) で、</p>
+<h2 id="3-3-modality-2-dataset">3. Empirical verification — same model works across 3 modalities / 2 datasets</h2>
+<p>With the identical model setting (<code>CalibNetUnifiedFrame</code>, <code>uv_only_query=True</code>,
+n_cross_layers=4, 1.65M params) we trained three variants in parallel:</p>
 <ul>
 <li><strong>cam-LiDAR calib</strong> (PandaSet 103)</li>
 <li><strong>cross-frame pose residual</strong> (PandaSet 103)</li>
 <li><strong>cam-Radar calib</strong> (nuScenes 150)</li>
 </ul>
-<p>の 3 種類を平行学習。すべて同じコード、同じモデル定義、同じ recipe。</p>
+<p>All use the same code, same model definition, same recipe.</p>
 <table>
 <thead>
 <tr>
@@ -160,7 +164,7 @@ n_cross_layers=4, 1.65M params) で、</p>
 <th>dataset</th>
 <th>cams</th>
 <th>encoder modality</th>
-<th>摂動</th>
+<th>perturbation</th>
 <th>base err</th>
 <th>val err</th>
 <th>val NLL</th>
@@ -235,37 +239,41 @@ n_cross_layers=4, 1.65M params) で、</p>
 </tr>
 </tbody>
 </table>
-<p>(val_err / val_NLL は ep30 best、px / nat 単位)</p>
-<p><strong>ハイライト</strong>:</p>
+<p>(val_err / val_NLL are best at ep30, in px / nat units)</p>
+<p><strong>Highlights</strong>:</p>
 <ul>
-<li><strong>3 modality (LiDAR / Radar / multimodal)</strong> × <strong>3 dataset (PandaSet / nuScenes /
-  combined)</strong> × <strong>single-cam ↔ all-cam (6/4/5 cameras)</strong> の 6 通り全てで、<strong>同じ
-  モデル定義・同じ recipe</strong> が動作。</li>
-<li><strong>cam-Radar</strong> (nuScenes ARS 408 ×5、~50-200 点 / frame の sparsity、仰角 0 の
-  2.5D) でも cam-LiDAR と同じ calib 精度クラス (0.61-0.71 px val_err) に到達。
-  平面に scatter するだけ — modality 拡張のコストゼロ (<a href="#41-画像-vs-lidar-の対称性">§4.1 の対称性論</a> どおり)。</li>
-<li><strong>All-cam</strong> (PandaSet 6, DDAD 4, Waymo 5, nuScenes 6) でも <strong>数千の (scene, cam)
-  pair</strong> を 1 モデルで同時学習可能。<code>cameras='all'</code> で全カメラの LiDAR / Radar
-  / 画像が同じ frame_token に帰着する (前後左右の symmetry もモデルが勝手に学ぶ)。</li>
-<li>ほぼ全 run で val_NLL ≤ 1 (= 不確実性 σ が overshoot してない) → <strong>per-point Σ
-  が calibrated</strong> で、下流の Σ-weighted PnP / BA がそのまま使える。</li>
+<li>Across all 6 combinations of <strong>3 modalities (LiDAR / Radar / multimodal)</strong> ×
+  <strong>3 datasets (PandaSet / nuScenes / combined)</strong> × <strong>single-cam ↔ all-cam
+  (6/4/5 cameras)</strong>, the <strong>same model definition and same recipe</strong> work.</li>
+<li>Even for <strong>cam-Radar</strong> (nuScenes ARS 408 ×5, ~50-200 points/frame sparsity,
+  2.5D with zero elevation), we reach the same calib accuracy class as cam-LiDAR
+  (0.61-0.71 px val_err). We simply scatter on a plane — zero cost for modality
+  extension (as the <a href="#41-vs-lidar">§4.1 symmetry argument</a> predicts).</li>
+<li>Even for <strong>all-cam</strong> (PandaSet 6, DDAD 4, Waymo 5, nuScenes 6), we can jointly
+  train on <strong>thousands of (scene, cam) pairs</strong> in a single model. With
+  <code>cameras='all'</code>, LiDAR / Radar / image from all cameras collapse into the same
+  frame_token (front/rear/left/right symmetry is learned by the model itself).</li>
+<li>Almost every run has val_NLL ≤ 1 (uncertainty σ is not overshooting) → <strong>the
+  per-point Σ is calibrated</strong>, and downstream Σ-weighted PnP / BA works as-is.</li>
 </ul>
-<p><strong>ポイント</strong>:</p>
+<p><strong>Key points</strong>:</p>
 <ul>
-<li>同じ <code>CalibNetUnifiedFrame(uv_only_query=True, n_cross_layers=4)</code> が
-  両方の問題で意味のある誤差削減を達成</li>
-<li>重みは別々に学習 (ヘッド共有はまだ未試行) — それでも「<strong>問題が変わると
-  モデルも変わる</strong>」という帰納が間違っていることを示せる</li>
-<li>v303 の base 8.05 px → 0.68 px は cm 級の calibration 精度に相当する
-  (img_size=64 patch、CROP=128-256 px、典型 焦点距離換算で 0.3° 以内)</li>
+<li>The same <code>CalibNetUnifiedFrame(uv_only_query=True, n_cross_layers=4)</code>
+  achieves meaningful error reduction on both problems.</li>
+<li>The weights are trained separately (head sharing not yet attempted) — even
+  so, this refutes the inductive prior that "<strong>a different problem needs a
+  different model</strong>".</li>
+<li>v303's base 8.05 px → 0.68 px corresponds to cm-class calibration accuracy
+  (img_size=64 patch, CROP=128-256 px, within 0.3° in typical focal-length terms).</li>
 </ul>
 <hr />
-<h2 id="4">4. なぜ効くか</h2>
-<h3 id="41-vs-lidar">4.1 「画像 vs LiDAR」 の対称性</h3>
-<p>camera-LiDAR calibration を「<strong>1 つの画像</strong> に対して LiDAR を <strong>2 通りの
-extrinsic</strong> で射影し、その差を予測する」 問題と捉えると、
-cross-frame の「<strong>1 つの世界点</strong> を <strong>2 つの相対 pose</strong> で射影してその差を
-予測する」 構造と完全に等価になる。式で書くと:</p>
+<h2 id="4">4. Why it works</h2>
+<h3 id="41-vs-lidar">4.1 The "image vs LiDAR" symmetry</h3>
+<p>If we view camera-LiDAR calibration as the problem of "<strong>projecting LiDAR onto
+one image with two different extrinsics</strong> and predicting the difference", it
+becomes exactly equivalent to the cross-frame problem of "<strong>projecting one
+world point through two relative poses</strong> and predicting the difference". Written
+as equations:</p>
 <div class="codehilite"><pre><span></span><code>Cross-frame:
    uv_B_GT  = π(K_B,  T_BW · X_world)
    uv_B_HAT = π(K_B,  T_BW · ΔT_pose · T_WA · X_cam_A)
@@ -277,57 +285,61 @@ Cam-LiDAR calib:
    target = uv_GT - uv_HAT
 </code></pre></div>
 
-<p>両方で <strong>target = π(GT) − π(HAT) = 「正しい外部変換 vs 摂動した外部変換」 の
-画素差</strong>。この target が同じ形をしている限り、ネットワークは同じ residual
-primitive を学べばいい。</p>
-<h3 id="42-frame_token-modality-1">4.2 Frame_token 設計が「modality を 1 つの名前」 に押し込む</h3>
-<p>ネットワークの上半分 (cross-attn 以降) は frame_token しか見ない。
-frame_token は出力 shape が固定 (D, 16, 16)、中身が image でも LiDAR でも
-混合でも、上半分にとってはどれも「<strong>16×16 セルの局所特徴</strong>」。
-modality 切り替えで生じる差は encoder の中で吸収され、上半分は気づかない。</p>
-<p>これは ViT が画像のパッチを「<strong>一様に並んだ token</strong>」 として扱い、内容が
-画像でも文章 (LiT) でも音声 (Whisper) でも上流の transformer 構造を
-変えないのと完全に同じ抽象化。</p>
-<h3 id="43-encoder-modality">4.3 拡張は「encoder の modality を増やす」 だけ</h3>
-<p>Radar 用の encoder ブランチ (range-angle 変換 → grid scatter) を 1 つ
-追加すれば、cam-Radar calibration も同じモデルで動く。Multi-camera
-calibration なら encoder が 2 個の image を受けるだけで OK
-(modality は両方 'cam')。</p>
+<p>In both cases, <strong>target = π(GT) − π(HAT) = "pixel difference between the correct
+external transform and a perturbed external transform"</strong>. As long as the target
+has this same form, the network only needs to learn a single residual primitive.</p>
+<h3 id="42-frame_token-modality-1">4.2 The frame_token design collapses "modality" to a single name</h3>
+<p>The upper half of the network (cross-attn onward) only sees frame_token. The
+output shape of frame_token is fixed at (D, 16, 16), and whether its content is
+image, LiDAR, or a mixture, the upper half treats it uniformly as
+"<strong>local features on a 16×16 cell grid</strong>". Differences arising from modality
+switching are absorbed inside the encoder; the upper half never notices.</p>
+<p>This is exactly the same abstraction as ViT treating image patches as
+"<strong>uniformly arranged tokens</strong>" — whether the content is image, text (LiT), or
+audio (Whisper), the upstream transformer structure does not change.</p>
+<h3 id="43-encoder-modality">4.3 Extension is just "adding a modality to the encoder"</h3>
+<p>To handle Radar, adding one Radar encoder branch (range-angle transform → grid
+scatter) is enough — the same model then handles cam-Radar calibration. For
+multi-camera calibration, the encoder simply takes two images (both with
+modality 'cam').</p>
 <hr />
-<h2 id="5">5. 何が変わるか — 製品設計のインパクト</h2>
+<h2 id="5">5. What changes — product-design impact</h2>
 <table>
 <thead>
 <tr>
-<th>旧アプローチ</th>
-<th>本設計</th>
+<th>Old approach</th>
+<th>This design</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>タスクごとに専用ネット (CalibNet, MatchNet, PoseNet, ...) を別々に学習・運用</td>
-<td><strong>1 つの residual primitive ネット</strong>、上流で問題定義だけ差し替え</td>
+<td>Per-task specialized nets (CalibNet, MatchNet, PoseNet, ...) trained and operated separately</td>
+<td><strong>A single residual-primitive net</strong>; only the problem definition changes upstream</td>
 </tr>
 <tr>
-<td>新規 sensor (Radar / 異種カメラ) を入れると新しいネットを設計し直す</td>
-<td>encoder の modality flag を増やすだけ。<strong>上流ネットは触らない</strong></td>
+<td>Adding a new sensor (Radar / heterogeneous camera) requires redesigning a new net</td>
+<td>Just add a modality flag to the encoder. <strong>The upstream net is untouched.</strong></td>
 </tr>
 <tr>
-<td>Calibration / SLAM / mapping / loop-closure が別々のチームの別々のシステム</td>
-<td>全部 <strong>同じ重み + 異なる前処理</strong> で解ける</td>
+<td>Calibration / SLAM / mapping / loop-closure are separate systems in separate teams</td>
+<td>All can be solved with <strong>the same weights + different preprocessing</strong></td>
 </tr>
 </tbody>
 </table>
-<p>「sensor / task の対称性」を architecture の中に折り畳むことで、
-ロボット / 自動運転の空間スタックが大幅に薄くなる。</p>
+<p>By folding "sensor / task symmetry" into the architecture, the spatial stack
+of robotics / autonomous driving becomes dramatically thinner.</p>
 <hr />
 <h2 id="55-production-recipe-pre-train-combined-fine-tune-single-dataset">5.5 Production recipe — pre-train (combined) → fine-tune (single dataset)</h2>
-<p>Combined-dataset 学習 (v306 / v307b) は per-dataset best (v303 / v304) より
-<strong>やや劣る</strong> (1.00 vs 0.67、2.63 vs 2.54)。理由は各 ds の calib / sensor noise
-分布の差異を 1 重みでは吸収しきれないため。</p>
-<p>これを解決する <strong>production recipe</strong> を実証:</p>
+<p>Combined-dataset training (v306 / v307b) is <strong>slightly worse</strong> than the
+per-dataset best (v303 / v304) (1.00 vs 0.67, 2.63 vs 2.54). The reason is that
+a single set of weights cannot fully absorb differences in the calib / sensor
+noise distribution across datasets.</p>
+<p>We verified a <strong>production recipe</strong> to solve this:</p>
 <ol>
-<li><strong>大規模 pre-train</strong>: combined-multi-dataset で M0 pair / M0 calib を 30 epoch</li>
-<li><strong>per-dataset fine-tune</strong>: 重みを 1 つの dataset に対し低 lr (5e-4) で 15 epoch</li>
+<li><strong>Large-scale pre-train</strong>: 30 epochs of M0 pair / M0 calib on a combined
+multi-dataset.</li>
+<li><strong>Per-dataset fine-tune</strong>: fine-tune the weights on a single dataset at a
+low lr (5e-4) for 15 epochs.</li>
 </ol>
 <table>
 <thead>
@@ -383,7 +395,7 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 </tr>
 </tbody>
 </table>
-<p><strong>Cross-modal transfer の非対称性</strong> (v316 / v317):</p>
+<p><strong>Asymmetry of cross-modal transfer</strong> (v316 / v317):</p>
 <table>
 <thead>
 <tr>
@@ -408,171 +420,175 @@ calibration なら encoder が 2 個の image を受けるだけで OK
 </tr>
 </tbody>
 </table>
-<p>LiDAR → Radar は「dense geometry を学んだ encoder の subset を使う」 ので転移可能。
-Radar → LiDAR は「sparse / planar しか見てない encoder を dense / 3D に使う」 ので
-情報不足。同一 modality を経由せずに cross-modal 転移するなら、表現容量の大きい
-側を pre-train に置くこと。</p>
-<p><strong>Pre-train fine-tune が単独学習を超える</strong> (3/3 比較した case で勝利):</p>
+<p>LiDAR → Radar is transferable because "a subset of an encoder that learned
+dense geometry is being used". Radar → LiDAR is information-poor because
+"an encoder that only saw sparse / planar data is being applied to dense / 3D".
+When doing cross-modal transfer without going through the same modality, place
+the higher-capacity representation side in pre-training.</p>
+<p><strong>Pre-train + fine-tune beats standalone training</strong> (winning in 3/3 compared cases):</p>
 <ul>
-<li>v306 が <strong>1100 シーン × 3 dataset family × all-cam</strong> で学んだ汎用な
-  geometry / appearance 表現が encoder に乗ってる</li>
-<li>per-dataset fine-tune は cam-specific noise / focal length range に
-  わずかに適応するだけ → 数 epoch (数分) で済む</li>
-<li>メモリフットプリント / 学習コスト両面で実運用向き</li>
+<li>v306's general-purpose geometry / appearance representation, learned across
+  <strong>1100 scenes × 3 dataset families × all-cam</strong>, sits inside the encoder.</li>
+<li>Per-dataset fine-tune only slightly adapts to cam-specific noise / focal-length
+  range → completed in a few epochs (a few minutes).</li>
+<li>Practical for deployment in both memory footprint and training cost.</li>
 </ul>
-<p><strong>Deployment 視点</strong>:</p>
+<p><strong>Deployment perspective</strong>:</p>
 <ul>
-<li>1 つの "base" 重みを社内サーバに置く</li>
-<li>各 ds / 各車載 SoC 向けに数十分の fine-tune で展開</li>
-<li>新 sensor / 新地域は同じ recipe で追加学習可能</li>
+<li>Keep a single "base" weight on an in-house server.</li>
+<li>Deploy to each dataset / each in-vehicle SoC via a few tens of minutes of fine-tuning.</li>
+<li>New sensors / new regions can be added with the same recipe.</li>
 </ul>
 <hr />
-<h2 id="6-frame_token">6. 地図ありのケース — frame_token を「地図から」 作る</h2>
-<p>ここまでは複数の <strong>観測フレーム</strong> 同士の cross-attn だった。これを
-「<strong>地図から来た frame_token vs 現在の観測 frame_token</strong>」 に置き換えると、
-そのまま <strong>localization / loop closure / map update</strong> の primitive になる。</p>
-<h3 id="61">6.1 地図表現</h3>
-<p>時間累積で持っておくのは:</p>
+<h2 id="6-frame_token">6. The map-based case — building frame_token "from the map"</h2>
+<p>So far we have discussed cross-attn between multiple <strong>observation frames</strong>.
+Replacing this with "<strong>frame_token coming from the map vs frame_token from the
+current observation</strong>" directly gives us a primitive for
+<strong>localization / loop closure / map update</strong>.</p>
+<h3 id="61">6.1 Map representation</h3>
+<p>What we accumulate over time can be any of:</p>
 <ul>
-<li><strong>Gaussian Splat 群</strong> (μ_3D, Σ_3D, 色 or 特徴ベクトル) — 高密度・高品質</li>
-<li>もしくは <strong>点群 + per-point 特徴</strong> (色 / descriptor)</li>
-<li>もしくは <strong>surfel mesh</strong></li>
+<li><strong>A cloud of Gaussian Splats</strong> (μ_3D, Σ_3D, color or feature vector) — dense, high quality</li>
+<li>Or <strong>point cloud + per-point features</strong> (color / descriptor)</li>
+<li>Or a <strong>surfel mesh</strong></li>
 </ul>
-<p>どれでもよい。重要なのは「<strong>現在のポーズ仮説に対して frame_token に
-潰せる</strong>」 こと。</p>
-<h3 id="62-render-frame_token">6.2 仮説ポーズで render → frame_token</h3>
-<div class="codehilite"><pre><span></span><code><span class="n">T_world_to_cam_HAT</span><span class="w"> </span><span class="p">(</span><span class="err">現在の</span><span class="w"> </span><span class="n">pose</span><span class="w"> </span><span class="err">仮説</span><span class="p">)</span><span class="w">  </span><span class="o">+</span><span class="w">  </span><span class="err">地図</span><span class="w"> </span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">g</span><span class="o">.</span><span class="w"> </span><span class="n">GS</span><span class="w"> </span><span class="err">群</span><span class="p">)</span>
+<p>Any of these will do. What matters is that it can be "<strong>collapsed into a
+frame_token given the current pose hypothesis</strong>".</p>
+<h3 id="62-render-frame_token">6.2 Render at hypothesis pose → frame_token</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">T_world_to_cam_HAT</span><span class="w"> </span><span class="p">(</span><span class="n">current</span><span class="w"> </span><span class="n">pose</span><span class="w"> </span><span class="n">hypothesis</span><span class="p">)</span><span class="w">  </span><span class="o">+</span><span class="w">  </span><span class="n">map</span><span class="w"> </span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">g</span><span class="o">.</span><span class="w"> </span><span class="n">GS</span><span class="w"> </span><span class="n">cloud</span><span class="p">)</span>
 <span class="w">   </span><span class="err">↓</span>
-<span class="w">   </span><span class="err">各</span><span class="w"> </span><span class="n">splat</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">point</span><span class="w"> </span><span class="err">を</span><span class="w"> </span><span class="n">T_HAT</span><span class="w"> </span><span class="err">で</span><span class="w"> </span><span class="nb">camera</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="err">に変換</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="err">射影</span>
+<span class="w">   </span><span class="n">Transform</span><span class="w"> </span><span class="n">each</span><span class="w"> </span><span class="n">splat</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">point</span><span class="w"> </span><span class="n">into</span><span class="w"> </span><span class="nb">camera</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="k">with</span><span class="w"> </span><span class="n">T_HAT</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">project</span>
 <span class="w">   </span><span class="err">↓</span>
-<span class="w">   </span><span class="n">image</span><span class="w"> </span><span class="nb">plane</span><span class="w"> </span><span class="err">で</span><span class="w"> </span><span class="n">feature</span><span class="w"> </span><span class="err">を</span><span class="w"> </span><span class="n">accumulate</span><span class="w"> </span><span class="p">(</span><span class="err">α</span><span class="o">-</span><span class="n">blend</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">scatter</span><span class="p">)</span>
+<span class="w">   </span><span class="n">Accumulate</span><span class="w"> </span><span class="n">features</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">image</span><span class="w"> </span><span class="nb">plane</span><span class="w"> </span><span class="p">(</span><span class="err">α</span><span class="o">-</span><span class="n">blend</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">scatter</span><span class="p">)</span>
 <span class="w">   </span><span class="err">↓</span>
-<span class="w">   </span><span class="n">frame_token_map</span><span class="w">  </span><span class="p">(</span><span class="n">B</span><span class="p">,</span><span class="w"> </span><span class="n">D</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">)</span><span class="w">   </span><span class="err">←</span><span class="w"> </span><span class="err">既存</span><span class="w"> </span><span class="n">encoder</span><span class="w"> </span><span class="err">の出力と同じ</span><span class="w"> </span><span class="n">shape</span>
+<span class="w">   </span><span class="n">frame_token_map</span><span class="w">  </span><span class="p">(</span><span class="n">B</span><span class="p">,</span><span class="w"> </span><span class="n">D</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">)</span><span class="w">   </span><span class="err">←</span><span class="w"> </span><span class="n">same</span><span class="w"> </span><span class="n">shape</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">existing</span><span class="w"> </span><span class="n">encoder</span><span class="w"> </span><span class="n">output</span>
 </code></pre></div>
 
-<p><code>frame_token_map</code> を、現フレームの <strong>観測 frame_token</strong> (image + 現フレ
-LiDAR の従来 encoder) と並べて KV にすればよい。Q は依然として位置のみ。</p>
-<h3 id="63">6.3 これで何が出るか</h3>
+<p>We place <code>frame_token_map</code> alongside the current frame's
+<strong>observed frame_token</strong> (conventional encoder over image + current-frame LiDAR)
+as the KV. Q is still position-only.</p>
+<h3 id="63">6.3 What comes out</h3>
 <table>
 <thead>
 <tr>
-<th>用途</th>
-<th>やること</th>
+<th>Use case</th>
+<th>What to do</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><strong>localization</strong></td>
-<td>仮説 pose から map render → frame_token_map. 観測 ft と cross-attn → per-point Δuv → Σ-weighted PnP で pose 更新. iterate.</td>
+<td>Render the map from the hypothesis pose → frame_token_map. Cross-attn with the observed ft → per-point Δuv → update pose with Σ-weighted PnP. Iterate.</td>
 </tr>
 <tr>
-<td><strong>loop closure 検証</strong></td>
-<td>place-recognition が出す候補 pose で map render. inlier σ ratio が閾値超えたら loop 採択. <strong>σ が naturally rejection metric になる</strong>。</td>
+<td><strong>loop closure verification</strong></td>
+<td>Render the map at a candidate pose from place-recognition. If the inlier σ ratio exceeds the threshold, accept the loop. <strong>σ naturally becomes the rejection metric.</strong></td>
 </tr>
 <tr>
-<td><strong>map update / 差分検出</strong></td>
-<td>観測と map の残差が大きい patch (Δuv 大 / σ 小) は <strong>「地図と違う」</strong> = 動的変化または mapping 漏れ。新規取り込み or 動的除去の判断に使える.</td>
+<td><strong>map update / change detection</strong></td>
+<td>A patch with large residual between observation and map (large Δuv / small σ) means <strong>"different from the map"</strong> = dynamic change or missing mapping. Usable to decide whether to ingest a new observation or reject a dynamic object.</td>
 </tr>
 <tr>
 <td><strong>multi-session merge</strong></td>
-<td>別セッションで作った map 同士を、共通エリアの観測経由で align。session A の地図に B の観測を流すだけ.</td>
+<td>Maps built in different sessions can be aligned via observations in a shared area. Just feed session B observations into session A's map.</td>
 </tr>
 </tbody>
 </table>
-<h3 id="64-livo-fast-livo">6.4 LIVO / FAST-LIVO 系との比較 — 地図最適化の有無が決定的</h3>
-<p><a href="https://github.com/hku-mars/FAST-LIVO2">FAST-LIVO2</a> などの最新の
-LIDAR-Inertial-Visual Odometry は <strong>純幾何</strong> (ICP + photometric error +
-EKF / factor graph)、ネットワークを一切使わない。さらに重要なのは:</p>
+<h3 id="64-livo-fast-livo">6.4 Comparison to LIVO / FAST-LIVO family — map optimization is the decisive difference</h3>
+<p>State-of-the-art LIDAR-Inertial-Visual Odometry like
+<a href="https://github.com/hku-mars/FAST-LIVO2">FAST-LIVO2</a> is <strong>purely geometric</strong>
+(ICP + photometric error + EKF / factor graph), using no network at all.
+More importantly:</p>
 <blockquote>
-<p><strong>LIVO 系は「地図を最適化しない」</strong></p>
+<p><strong>LIVO systems "do not optimize the map"</strong></p>
 </blockquote>
 <table>
 <thead>
 <tr>
-<th>システム</th>
-<th>map 表現</th>
-<th>map 最適化</th>
+<th>System</th>
+<th>Map representation</th>
+<th>Map optimization</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>FAST-LIO2</td>
-<td>ikd-tree 点群</td>
-<td>❌ 蓄積のみ</td>
+<td>ikd-tree point cloud</td>
+<td>No — accumulation only</td>
 </tr>
 <tr>
 <td>FAST-LIVO2</td>
-<td>LiDAR ikd-tree + 視覚 patch</td>
-<td>LiDAR ❌ / patch も最小限</td>
+<td>LiDAR ikd-tree + visual patches</td>
+<td>LiDAR none / patches minimally</td>
 </tr>
 <tr>
 <td>LIO-SAM</td>
-<td>点群</td>
-<td>❌ pose graph だけ最適化</td>
+<td>point cloud</td>
+<td>No — only pose graph is optimized</td>
 </tr>
 <tr>
 <td>R3LIVE++</td>
-<td>点群 + 色</td>
-<td>❌ IESKF 蓄積</td>
+<td>point cloud + color</td>
+<td>No — IESKF accumulation</td>
 </tr>
 <tr>
 <td>3DGS / Photo-SLAM</td>
 <td>Gaussian</td>
-<td>⚠️ rendering loss で勾配 (動物体焼き込み)</td>
+<td>Rendering-loss gradient (bakes dynamic objects)</td>
 </tr>
 <tr>
-<td><strong>本設計 (提案)</strong></td>
-<td><strong>GS or 点群 + 特徴</strong></td>
-<td><strong>✅ Σ-weighted residual で pose / 点位置 / 点 σ 全部に勾配</strong></td>
+<td><strong>This design (proposed)</strong></td>
+<td><strong>GS or point cloud + features</strong></td>
+<td><strong>Σ-weighted residual gives gradients to pose / point position / point σ all together</strong></td>
 </tr>
 </tbody>
 </table>
-<p>LIVO 系が動かす部分:</p>
+<p>What LIVO systems actually move:</p>
 <ul>
-<li>ICP — 静的シーン仮定。動物体で破綻 (heuristic で除去)</li>
-<li>photometric — 暗所 / モーションブラー / 反射で破綻</li>
-<li>IMU — drift の積分でしか地図と繋がらない</li>
-<li>loop closure があっても <strong>pose 軌跡をずらすだけ</strong>、過去 map 点の誤差は固化</li>
+<li>ICP — assumes a static scene. Breaks with dynamic objects (heuristics required to remove them)</li>
+<li>photometric — breaks under darkness / motion blur / reflection</li>
+<li>IMU — connects to the map only through drift integration</li>
+<li>Even when loop closure exists, it <strong>only shifts the pose trajectory</strong>; past map-point errors remain fixed</li>
 </ul>
-<p>本設計の優位:</p>
+<p>Advantages of this design:</p>
 <ul>
-<li><strong>σ が動的物体 / OOD を勝手に分離</strong> (annotation 不要、§4.1 参照) →
-  地図に動的物体を焼かない / 焼いても σ 大で再除去可能</li>
-<li>modality 失調を学習が吸収 (camera 暗所 → LiDAR 主導、LiDAR 雨天 → camera 主導)</li>
-<li><strong>map 自体に勾配が流せる</strong> → drift が地図に固化しない、loop closure で
-  過去の map 点もまとめて補正できる</li>
-<li>地図側を frame_token に潰せれば、新規 sensor が増えるたびにシステム再設計不要</li>
+<li><strong>σ separates dynamic objects / OOD by itself</strong> (no annotation needed, see §4.1)
+  → dynamic objects are not baked into the map, and if baked they can be removed later because σ is large</li>
+<li>Modality failure is absorbed by learning (dark camera → LiDAR-driven, rainy LiDAR → camera-driven)</li>
+<li><strong>Gradients flow into the map itself</strong> → drift does not become fixed in the map,
+  and past map points can be corrected together via loop closure</li>
+<li>Since the map side can be collapsed into a frame_token, no system redesign is needed when new sensors are added</li>
 </ul>
-<p>つまり「<strong>network-augmented full SLAM</strong>」(localization + map optimization +
-loop closure + sensor calib + 動物体除去 すべて 1 primitive で扱う) を、
-LIVO 並みの軽量 footprint で実現する設計。</p>
-<h3 id="65-deployment">6.5 エッジ deployment</h3>
-<p><code>CalibNetUnifiedFrame(d=128, n_cross_layers=4)</code> = <strong>1.65M params</strong>。</p>
+<p>In other words: a design for a <strong>network-augmented full SLAM</strong> (localization
++ map optimization + loop closure + sensor calib + dynamic object removal, all
+handled by one primitive) with a footprint as light as LIVO.</p>
+<h3 id="65-deployment">6.5 Edge deployment</h3>
+<p><code>CalibNetUnifiedFrame(d=128, n_cross_layers=4)</code> = <strong>1.65M params</strong>.</p>
 <ul>
 <li>fp16: <strong>3.3 MB</strong></li>
-<li>int8 量子化: <strong>1.7 MB</strong></li>
-<li>Jetson Orin Nano (8W) クラスで 30+ FPS 想定</li>
-<li>自動車向け車載 SoC (Renesas R-Car / NVIDIA DRIVE) なら余裕</li>
+<li>int8 quantized: <strong>1.7 MB</strong></li>
+<li>30+ FPS is realistic on the Jetson Orin Nano (8W) class</li>
+<li>Automotive in-vehicle SoCs (Renesas R-Car / NVIDIA DRIVE) can handle it comfortably</li>
 </ul>
-<p>「地図持ち SLAM が車載で常時動く」 構成が現実的サイズ。</p>
+<p>A configuration where "map-based SLAM runs continuously in a vehicle" is a realistic size.</p>
 <hr />
-<h2 id="7">7. 既知の限界 / 次のステップ</h2>
+<h2 id="7">7. Known limitations / next steps</h2>
 <ul>
-<li><strong>modality 重みの共有実験</strong>: 今は v303 と v304 で重みが別。同じ
-  チェックポイントから両方 fine-tune して「どこまで多 task が共有できるか」
-  を計測したい。</li>
-<li><strong>Cam-Radar PoC</strong>: AV2 (Radar 7 sensor) または社内データで Radar
-  modality encoder を実装し、同じ recipe で calib 学習。</li>
-<li><strong>Multi-camera calib</strong>: PandaSet 6cam で前後カメラ間の extrinsic
-  estimation を 同モデルで学習。社内 surround-view rig も同じ。</li>
-<li><strong>Inference-time モード切替</strong>: 1 重みで calib / cross-frame / radar 全部
-  推論できる sentry network を作って、エッジ deployment の
-  メモリフットプリントを 1/N にする。</li>
+<li><strong>Modality weight-sharing experiments</strong>: Right now the weights for v303 and
+  v304 are separate. We want to fine-tune both from a single checkpoint and
+  measure how much of the multi-task can be shared.</li>
+<li><strong>Cam-Radar PoC</strong>: Implement a Radar modality encoder on AV2 (Radar 7 sensor)
+  or in-house data, and train calibration with the same recipe.</li>
+<li><strong>Multi-camera calib</strong>: Train front/rear inter-camera extrinsic estimation
+  with the same model on PandaSet 6cam. The in-house surround-view rig would be the same.</li>
+<li><strong>Inference-time mode switching</strong>: Build a sentry network that can perform
+  calib / cross-frame / radar inference all from a single weight, cutting the
+  edge deployment memory footprint by a factor of N.</li>
 </ul>
 <hr />
-<p><em>関連</em>:
-<a href="no_matching_advantage.md">no_matching_advantage.md</a> (本ネットの primitive
-設計の根拠) /
-<a href="unified_progression.md">unified_progression.md</a> (cross-frame v70→v100 系の
-収束推移)</p>
+<p><em>Related</em>:
+<a href="no_matching_advantage.md">no_matching_advantage.md</a> (rationale for the
+primitive design of this net) /
+<a href="unified_progression.md">unified_progression.md</a> (convergence progression
+of the cross-frame v70→v100 series)</p>
 </body></html>

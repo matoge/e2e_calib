@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja"><head>
+<html lang="en"><head>
 <meta charset="utf-8">
 <title>dynamic object sigma</title>
 <link rel="stylesheet" href="assets/report.css">
@@ -20,82 +20,83 @@ h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 </style>
 </head><body>
 <h1 id="dynamic-object-behaviour-of-the-cross-frame-residual-model">Dynamic-object σ behaviour of the cross-frame residual model</h1>
-<p><strong>TL;DR</strong>: モデルに動的物体ラベルを一切教えていないにもかかわらず、
-学習済み cross-frame residual model (v92, unified frame-token, multi-frame, c=4)
-は出力 σ で<strong>動いてる物体を勝手に分離する</strong>。
-ただし上昇幅は controlled で、特に「画像 appearance では何とか合わせられる」
-中域の動車に対して σ は inflate せず over-confident になる。</p>
+<p><strong>TL;DR</strong>: Although the model is never given any dynamic-object labels,
+the trained cross-frame residual model (v92, unified frame-token, multi-frame, c=4)
+<strong>spontaneously separates moving objects</strong> in its output σ.
+However, the magnitude of the increase is controlled, and especially for
+mid-range moving vehicles where "the image appearance can still somehow be matched",
+σ is not inflated and the model becomes over-confident.</p>
 <p><img alt="σ and residual histograms by motion attribute" src="images/dynamic_object_sigma_v92.png" /></p>
-<h2 id="_1">設定</h2>
+<h2 id="_1">Setup</h2>
 <ul>
 <li>model: <code>experiments/cross_frame_v92_unified_multi_c4</code> (val_err=1.93 px, val_nll=1.93)</li>
 <li>dataset: PandaSet 39-scene <code>front_camera</code> val split (~200 pair samples, ~32K query points)</li>
 <li>analysis script: <code>scripts/analysis/dynamic_object_variance.py</code></li>
 </ul>
-<p>各 query point の世界座標を dataset から取り出し (<code>pts_w_A_query</code>)、PandaSet の 3D
-cuboid annotation の box 内判定で:</p>
+<p>We take the world coordinates of each query point from the dataset (<code>pts_w_A_query</code>),
+and by checking whether each point falls inside a PandaSet 3D cuboid annotation, we classify:</p>
 <table>
 <thead>
 <tr>
-<th>ラベル</th>
-<th>元データ</th>
-<th>説明</th>
+<th>label</th>
+<th>source data</th>
+<th>description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>background</code></td>
-<td>どの cuboid にも入らない</td>
-<td>路面、建物、植生、etc</td>
+<td>not inside any cuboid</td>
+<td>road surface, buildings, vegetation, etc.</td>
 </tr>
 <tr>
 <td><code>parked</code></td>
 <td><code>attributes.object_motion == 'Parked'</code></td>
-<td>駐車中の車</td>
+<td>parked vehicles</td>
 </tr>
 <tr>
 <td><code>stopped</code></td>
 <td><code>attributes.object_motion == 'Stopped'</code></td>
-<td>信号待ち等</td>
+<td>waiting at a traffic light, etc.</td>
 </tr>
 <tr>
 <td><code>moving</code></td>
 <td><code>attributes.object_motion == 'Moving'</code></td>
-<td>走行中</td>
+<td>driving</td>
 </tr>
 </tbody>
 </table>
-<p>の 4 カテゴリに分類し、モデル予測 σ と実残差 |Δuv - GT| を集計。
-<code>moving</code> についてはさらに 3D box 中心の A↔B 間 displacement で 4 bucket に
-細分:</p>
+<p>into 4 categories, and aggregate the predicted σ and the actual residual |Δuv - GT|.
+For <code>moving</code>, we further subdivide into 4 buckets based on the A↔B displacement
+of the 3D box center:</p>
 <table>
 <thead>
 <tr>
 <th>bucket</th>
-<th>A↔B 移動量</th>
+<th>A↔B displacement</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>mv 0-1m</code></td>
-<td>0 m ≤ d &lt; 1 m (徐行・カーブ)</td>
+<td>0 m ≤ d &lt; 1 m (crawling / cornering)</td>
 </tr>
 <tr>
 <td><code>mv 1-3m</code></td>
-<td>1 m ≤ d &lt; 3 m (一般走行)</td>
+<td>1 m ≤ d &lt; 3 m (normal driving)</td>
 </tr>
 <tr>
 <td><code>mv 3-10m</code></td>
-<td>3 m ≤ d &lt; 10 m (中速、対向車含む)</td>
+<td>3 m ≤ d &lt; 10 m (medium speed, including oncoming traffic)</td>
 </tr>
 <tr>
 <td><code>mv 10+m</code></td>
-<td>10 m 以上 (高速対向車、フレーム間で view を抜けるレベル)</td>
+<td>10 m or more (fast oncoming traffic, vehicles leaving the view between frames)</td>
 </tr>
 </tbody>
 </table>
-<h2 id="v92-multi-c4">結果 (v92 multi c4)</h2>
-<h3 id="motion-attr-_pred">motion-attr で分けた σ_pred と実残差</h3>
+<h2 id="v92-multi-c4">Results (v92 multi c4)</h2>
+<h3 id="motion-attr-_pred">σ_pred and actual residuals split by motion-attr</h3>
 <div class="codehilite"><pre><span></span><code>σ_pred (px):    bg     parked   stopped   moving
 median          0.87   0.75     0.87      1.07
 mean            1.07   0.99     0.88      1.16
@@ -107,7 +108,7 @@ mean            2.37   2.62     1.59      3.59
 p90             4.54   7.81     3.79      13.03
 </code></pre></div>
 
-<h3 id="moving-displacement">moving 内を displacement で細分</h3>
+<h3 id="moving-displacement">Subdivision of moving by displacement</h3>
 <div class="codehilite"><pre><span></span><code>σ_pred (px):    mv 0-1m   mv 1-3m   mv 3-10m   mv 10+m
 median          0.78      1.30      1.21       1.03
 mean            0.82      1.22      1.33       1.11
@@ -119,62 +120,61 @@ mean            1.12      2.31      5.90       3.42
 p90             1.71      5.36      15.43      12.99
 </code></pre></div>
 
-<h2 id="_2">解釈</h2>
-<h3 id="_3">✅ 仮説の前半は当たってる</h3>
+<h2 id="_2">Interpretation</h2>
+<h3 id="_3">✅ The first half of the hypothesis holds</h3>
 <ul>
-<li><code>parked</code> と <code>stopped</code> は背景と同等かそれ以下 (median 0.75 / 0.87 vs bg 0.87)。
-  車表面はテクスチャ豊富で predict しやすい</li>
-<li><code>moving</code> は明確に σ が上がる (1.07 vs 0.87)。動的物体に対して「予測自信ない」
-  という signal が出ている</li>
-<li>displacement と σ も 0-1m → 1-3m で <strong>0.78 → 1.30</strong> ときれいに ordered</li>
+<li><code>parked</code> and <code>stopped</code> are on par with background or lower (median 0.75 / 0.87 vs bg 0.87).
+  Vehicle surfaces are texture-rich and easy to predict.</li>
+<li><code>moving</code> shows a clear rise in σ (1.07 vs 0.87). A "not confident in this prediction"
+  signal is produced for dynamic objects.</li>
+<li>Displacement and σ are also cleanly ordered from 0-1m → 1-3m: <strong>0.78 → 1.30</strong>.</li>
 </ul>
-<h3 id="3-10m-bucket">⚠ ただし上昇幅は控えめ、3-10m bucket で破綻</h3>
+<h3 id="3-10m-bucket">⚠ However the increase is modest, and it breaks down in the 3-10m bucket</h3>
 <ul>
-<li><code>mv 3-10m</code> は最も悲惨: 残差 mean 5.9 px / p90 15.4 px なのに σ=1.33
-  → z = err/σ ≈ 4.4、キャリブ大幅破綻 (over-confident)</li>
-<li><code>mv 10+m</code> で σ がむしろ下がる (1.03)。たぶんモデルが「completely wrong, give up」モード
-  に入ってる</li>
+<li><code>mv 3-10m</code> is the worst: residual mean 5.9 px / p90 15.4 px yet σ=1.33
+  → z = err/σ ≈ 4.4, a major calibration failure (over-confident).</li>
+<li>In <code>mv 10+m</code>, σ actually drops (1.03). The model likely enters a "completely wrong, give up" mode.</li>
 </ul>
-<h3 id="_4">🔍 メカニズム仮説</h3>
-<p>モデルは静的シーン仮定で「画像 appearance マッチング」を学んでいる。
-動き量別に挙動は:</p>
+<h3 id="_4">🔍 Mechanism hypothesis</h3>
+<p>The model has learned "image appearance matching" under a static-scene assumption.
+Its behaviour by amount of motion is:</p>
 <table>
 <thead>
 <tr>
-<th>動き量 (px in image)</th>
-<th>モデルの挙動</th>
+<th>motion (px in image)</th>
+<th>model behaviour</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>&lt; 数 px</td>
-<td>画像マッチングのノイズ以下 → 静的扱いで当てちゃう、σ も低い</td>
+<td>&lt; a few px</td>
+<td>below image-matching noise → treated as static and hit correctly, σ is low</td>
 </tr>
 <tr>
 <td>5-15 px</td>
-<td>マッチング部分破綻、σ ちょっと上げる</td>
+<td>matching partially breaks down, σ rises a bit</td>
 </tr>
 <tr>
 <td>&gt; 20 px</td>
-<td>完全に外れるが画像的にもっともらしい候補がある → 過信して σ 低い</td>
+<td>completely misses, but a visually plausible candidate exists → over-confident, σ is low</td>
 </tr>
 </tbody>
 </table>
-<p>つまり「<strong>見た目で行ける範囲は σ 上げない</strong>」。これは calibration 的には正しい
-(視差として説明可能なら静的シーン仮定で OK)。動的検出器として使うには上限が
-ある。</p>
-<h3 id="_5">構造的な観測欠落</h3>
-<p>dataset の <code>inb</code> filter (line 1097 <code>pandaset_pair.py</code>) で <code>uv_hat</code> または <code>uv_gt</code>
-が patch 外に出る点は val pool から完全に除外される。<strong>動いて view 完全に
-抜けた車</strong>は最初から観測されない → σ がフルレンジ (上限 30 px) に振り切れる
-ケースは観測不能。</p>
-<h2 id="_6">利用可能性</h2>
-<p><code>σ &gt; 1.5 px</code> 閾値で <strong>動車候補マスク</strong>として実用可能 (precision OK):</p>
+<p>In other words, "<strong>σ is not raised as long as the appearance can carry it</strong>". This is
+correct from a calibration standpoint (if it is explainable as parallax, the static-scene
+assumption is fine). But as a dynamic-object detector there is an upper limit.</p>
+<h3 id="_5">Structural observation gap</h3>
+<p>The dataset's <code>inb</code> filter (line 1097 of <code>pandaset_pair.py</code>) completely excludes from
+the val pool any point whose <code>uv_hat</code> or <code>uv_gt</code> falls outside the patch. <strong>Vehicles that
+have moved and completely left the view</strong> are never observed to begin with → cases where
+σ saturates at its full range (upper limit 30 px) cannot be observed.</p>
+<h2 id="_6">Usability</h2>
+<p>With a <code>σ &gt; 1.5 px</code> threshold it is practical as a <strong>moving-vehicle candidate mask</strong> (precision OK):</p>
 <table>
 <thead>
 <tr>
-<th>カテゴリ</th>
-<th>σ &gt; 1.5 占有率</th>
+<th>category</th>
+<th>share with σ &gt; 1.5</th>
 </tr>
 </thead>
 <tbody>
@@ -200,22 +200,24 @@ p90             1.71      5.36      15.43      12.99
 </tr>
 </tbody>
 </table>
-<p>map maker / σ-weighted BA の前段の動的物体 down-weighting には十分使える。</p>
-<h2 id="_7">制限と次のステップ</h2>
-<p><strong>現状の限界</strong>:
-- σ の天井が ~2-3 px あたりに学習で固定されてる (motion-aware loss 無し)
-- view 外の動車は観測できない
-- 中速動車 (3-10m bucket) で over-confident</p>
-<p><strong>改善案</strong>:
-1. <strong>GT の書き換え</strong>: 動車内の点を box の動き分 warp すれば「移動先 = 真の B 位置」
-   になる。これでモデルは "appearance + motion compose" を学べる。半教師付き
-2. <strong>multi-frame consistency loss</strong>: M frame 経由で動いてる手がかり (M に映ってるが
-   B には映ってない) があれば σ を上げるよう誘導
-3. <strong>filter 緩和</strong>: <code>inb</code> を外してフルレンジ σ を観測可能にする (BA 評価には必要)</p>
-<h2 id="_8">関連ファイル</h2>
+<p>This is good enough for dynamic-object down-weighting as a front-end to the map maker / σ-weighted BA.</p>
+<h2 id="_7">Limitations and next steps</h2>
+<p><strong>Current limitations</strong>:
+- The ceiling of σ is fixed at around ~2-3 px through training (no motion-aware loss).
+- Moving vehicles outside the view cannot be observed.
+- Over-confident on medium-speed moving vehicles (3-10m bucket).</p>
+<p><strong>Improvement ideas</strong>:
+1. <strong>Rewriting the GT</strong>: warping the points inside a moving vehicle by the box's motion
+   makes "the warped location = true B position". This lets the model learn "appearance + motion compose".
+   Semi-supervised.
+2. <strong>Multi-frame consistency loss</strong>: if there are motion cues via M frames (visible in M but not in B),
+   guide σ upward.
+3. <strong>Relaxing the filter</strong>: remove <code>inb</code> so that the full range of σ can be observed
+   (needed for BA evaluation).</p>
+<h2 id="_8">Related files</h2>
 <ul>
-<li><code>scripts/analysis/dynamic_object_variance.py</code> — 解析スクリプト</li>
-<li><code>/tmp/dyn_var_v92.png</code> — 出力プロット (σ と残差の log-hist by category)</li>
-<li><code>experiments/cross_frame_v92_unified_multi_c4/</code> — 解析対象モデル</li>
+<li><code>scripts/analysis/dynamic_object_variance.py</code> — analysis script</li>
+<li><code>/tmp/dyn_var_v92.png</code> — output plot (log-hist of σ and residuals by category)</li>
+<li><code>experiments/cross_frame_v92_unified_multi_c4/</code> — model under analysis</li>
 </ul>
 </body></html>

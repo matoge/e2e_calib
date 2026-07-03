@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>実験 Progression — 何を学ぶ／何を凍結する</title>
+<title>Experiment Progression — What to Learn / What to Freeze</title>
 <style>
   body {
     max-width: 960px;
@@ -37,78 +37,77 @@
 </head>
 <body>
 
-<h1>実験 Progression — 何を学ぶ／何を凍結する</h1>
+<h1>Experiment Progression — What to Learn / What to Freeze</h1>
 
-<p>方針: <strong>ベース学習 (full train)</strong> はデータセットを変えた時だけ。
-それ以外の架構拡張 (extension) は <strong>fine-tune</strong> で、新しく追加した部品だけを学習する。
-これでイテレーションを高速化する。</p>
+<p>Policy: <strong>base training (full train)</strong> is done only when the dataset changes.
+All other architectural extensions are handled via <strong>fine-tune</strong>, training only the newly added components.
+This keeps iteration fast.</p>
 
-<h2>1. モジュール台帳 (どこに何があるか)</h2>
+<h2>1. Module Registry (What lives where)</h2>
 
-<p>毎ステージで <em>どの state_dict prefix を凍結するか</em> を厳密にするため、
-モデル構成を以下に固定する。</p>
+<p>To make <em>which state_dict prefix to freeze</em> unambiguous at every stage,
+the model composition is fixed as follows.</p>
 
 <table>
-<tr><th>役割</th><th>state_dict prefix</th><th>役職</th></tr>
-<tr><td>画像エンコーダ</td><td><code>cnn.*</code></td><td>ConvNeXt or CNN backbone — patch → coarse feature</td></tr>
-<tr><td>点エンコーダ</td><td><code>point_mlp.*</code></td><td>(u,v,d) → D-token</td></tr>
-<tr><td>frustum 局所</td><td><code>frustum_enc.*</code></td><td>近傍 LiDAR 集約</td></tr>
-<tr><td>intra-frame 融合</td><td><code>intra_blocks.*</code></td><td>concat(pt, img) self-attn (per-frame)</td></tr>
-<tr><td>Q-shift pose</td><td><code>pose_mlp.*</code></td><td><code>Q ← Q + pose_mlp(pose_AB)</code>。 attention 直前に Q を pose 方向にずらすことで、 pair モードでも cross-attn に明示的 pose 信号を入れる。 (per-frame KV bias のみだと pair モードで softmax が定数を打ち消し効果ゼロ — そのための補完)</td></tr>
-<tr><td>per-frame KV bias</td><td><code>pose_bias.*</code></td><td>cross-attn scores に <strong>per-(Q-frame, KV-frame) スカラー</strong> 加算。 pair (KV=1 frame) では定数なので無効化。 multi-frame (KV=M‖B) で M↔B の選択を pose 距離に応じて gate</td></tr>
-<tr><td>cross blocks</td><td><code>cross_blocks.*</code></td><td>N-frame KV 連結 + per-frame bias 付き cross-attn → self-attn → FFN → 出力 head。 pair = N=1 KV、 multi-frame = N≥2 KV の特殊化</td></tr>
+<tr><th>Role</th><th>state_dict prefix</th><th>Function</th></tr>
+<tr><td>Image encoder</td><td><code>cnn.*</code></td><td>ConvNeXt or CNN backbone — patch → coarse feature</td></tr>
+<tr><td>Point encoder</td><td><code>point_mlp.*</code></td><td>(u,v,d) → D-token</td></tr>
+<tr><td>Frustum local</td><td><code>frustum_enc.*</code></td><td>Neighborhood LiDAR aggregation</td></tr>
+<tr><td>Intra-frame fusion</td><td><code>intra_blocks.*</code></td><td>concat(pt, img) self-attn (per-frame)</td></tr>
+<tr><td>Q-shift pose</td><td><code>pose_mlp.*</code></td><td><code>Q ← Q + pose_mlp(pose_AB)</code>. By shifting Q in the pose direction immediately before attention, an explicit pose signal is injected into cross-attn even in pair mode. (With per-frame KV bias alone, in pair mode the softmax cancels the constant and the effect is zero — this fills that gap.)</td></tr>
+<tr><td>Per-frame KV bias</td><td><code>pose_bias.*</code></td><td>Adds a <strong>per-(Q-frame, KV-frame) scalar</strong> to cross-attn scores. In pair (KV=1 frame) it is constant and therefore ineffective. In multi-frame (KV=M‖B) it gates the M↔B selection based on pose distance.</td></tr>
+<tr><td>Cross blocks</td><td><code>cross_blocks.*</code></td><td>N-frame KV concatenation + cross-attn with per-frame bias → self-attn → FFN → output head. Pair = N=1 KV, multi-frame = N≥2 KV specializations.</td></tr>
 </table>
 
-<p>「<code>cnn + point_mlp + frustum_enc + intra_blocks</code>」をまとめて
-<strong>frame encoder</strong> と呼ぶ。これがデータ依存の部分で、
-ステージ拡張ではここを凍結する。</p>
+<p>We call the bundle "<code>cnn + point_mlp + frustum_enc + intra_blocks</code>" the
+<strong>frame encoder</strong>. This is the data-dependent part and is frozen during stage extensions.</p>
 
-<h2>2. ステージ表</h2>
+<h2>2. Stage Table</h2>
 
 <table>
-<tr><th>段階</th><th>名前</th><th>extension の中身</th><th class="train">学習</th><th class="froz">凍結</th><th>init</th></tr>
+<tr><th>Stage</th><th>Name</th><th>Extension content</th><th class="train">Train</th><th class="froz">Freeze</th><th>Init</th></tr>
 <tr>
   <td>S0</td><td>v50 pair-net (base)</td>
-  <td>Hybrid: Q-shift (<code>pose_mlp</code>) + per-frame KV bias (<code>pose_bias</code>)。 pair では Q-shift だけが有効 (bias は定数で打ち消される)、 後段の multi-frame 用に bias 経路も学習空間に残す</td>
-  <td>全部</td>
+  <td>Hybrid: Q-shift (<code>pose_mlp</code>) + per-frame KV bias (<code>pose_bias</code>). In pair mode only Q-shift is effective (the bias is cancelled as a constant), but the bias path is kept in the trainable space for the later multi-frame stage.</td>
+  <td>Everything</td>
   <td>—</td>
   <td>random</td>
 </tr>
 <tr>
   <td>S1</td><td>v51 multi-frame</td>
-  <td>KV を {M, B} 連結に拡張。 Q-shift は v50 から流用、 per-frame bias が <strong>ここで初めて effective</strong> (M と B の選択 gate)。 新規パラメータ無し — pose_bias と cross_blocks の重みを M-frame 入力にも対応するよう更新</td>
+  <td>Extend KV to a {M, B} concatenation. Q-shift is reused from v50; per-frame bias becomes <strong>effective for the first time here</strong> (as the M vs B selection gate). No new parameters — pose_bias and cross_blocks weights are updated to handle M-frame input.</td>
   <td><code>pose_bias</code><br><code>cross_blocks</code></td>
   <td>frame encoder<br><code>pose_mlp</code></td>
   <td>v50</td>
 </tr>
 <tr>
   <td>S2</td><td>v52 depth-optional</td>
-  <td>(u,v,μ_d,σ_d,has_d) 入力に拡張。 modality dropout 学習</td>
-  <td><code>point_mlp</code> 差し替え<br>(新 5-dim → D)</td>
-  <td>S1 で学習したもの全部 + 旧 cnn/frustum_enc/intra/cross/pose_bias</td>
+  <td>Extend the input to (u,v,μ_d,σ_d,has_d). Trained with modality dropout.</td>
+  <td><code>point_mlp</code> replaced<br>(new 5-dim → D)</td>
+  <td>Everything trained through S1 + old cnn/frustum_enc/intra/cross/pose_bias</td>
   <td>v51</td>
 </tr>
 <tr>
   <td>S3</td><td>v53 dynamic obj hint</td>
-  <td>3D box pose を補助 token として KV 末尾に追加</td>
-  <td>新 box embedder<br>cross_blocks の追加 head</td>
-  <td>frame encoder + pose_bias + 既存 cross blocks</td>
+  <td>Add 3D box pose as auxiliary tokens appended to the end of KV.</td>
+  <td>New box embedder<br>Extra head on cross_blocks</td>
+  <td>frame encoder + pose_bias + existing cross blocks</td>
   <td>v52</td>
 </tr>
 <tr>
   <td>S4</td><td>v54 long-chain (4+ frame)</td>
-  <td>M を複数枚 (M1, M2…) に拡張、 chain 長 N=4-8</td>
-  <td>cross_blocks 微調整 (or LoRA)<br>pose_bias 再学習</td>
+  <td>Extend M to multiple frames (M1, M2, …), chain length N=4-8.</td>
+  <td>Fine-tune cross_blocks (or LoRA)<br>Retrain pose_bias</td>
   <td>frame encoder</td>
   <td>v53</td>
 </tr>
 <tr class="reset"><td colspan="6">
-  <strong>RESET (データセット変更時のみ)</strong> ⇒ S0 を新データで full train。
-  例: PandaSet → PandaSet+Waymo+NS+DDAD+AV2 (ベース更新) → 以降の S1〜S4 を新ベースの上で再 fine-tune。
+  <strong>RESET (only when the dataset changes)</strong> ⇒ Full-train S0 on the new data.
+  Example: PandaSet → PandaSet+Waymo+NS+DDAD+AV2 (base updated) → then re-fine-tune S1–S4 on top of the new base.
 </td></tr>
 </table>
 
-<h2>3. 凍結の実装フック</h2>
+<h2>3. Freezing Implementation Hooks</h2>
 
 <pre><code>python train_cross_frame.py \
     --multi-frame \
@@ -117,45 +116,43 @@
     [...]
 </code></pre>
 
-<p><code>--init-from</code> の動作 (実装中):</p>
+<p>Behavior of <code>--init-from</code> (in progress):</p>
 
 <ol>
-<li><code>best_model.pt</code> を <code>strict=False</code> でロード</li>
-<li>マッチした key (frame encoder + pose_mlp) はコピー</li>
-<li>マッチしなかった key (新しい cross_blocks, pose_bias) はランダム init のまま</li>
-<li><code>cnn, point_mlp, frustum_enc, intra_blocks, pose_mlp</code> の <code>requires_grad=False</code></li>
-<li>optimizer は <code>filter(lambda p: p.requires_grad, model.parameters())</code> で構築</li>
+<li>Load <code>best_model.pt</code> with <code>strict=False</code></li>
+<li>Copy matched keys (frame encoder + pose_mlp)</li>
+<li>Unmatched keys (new cross_blocks, pose_bias) remain at random init</li>
+<li>Set <code>requires_grad=False</code> on <code>cnn, point_mlp, frustum_enc, intra_blocks, pose_mlp</code></li>
+<li>Build the optimizer with <code>filter(lambda p: p.requires_grad, model.parameters())</code></li>
 </ol>
 
-<p>Sanity check: 学習開始時のパラメータ数ログを「総数 / 学習対象」で出すこと。
-たとえば S1 では <code>1.514M total / 0.31M trainable</code> になる想定。</p>
+<p>Sanity check: log the parameter count at training start as "total / trainable".
+For example, S1 is expected to show <code>1.514M total / 0.31M trainable</code>.</p>
 
-<h2>4. ステージごとの「成功基準」</h2>
+<h2>4. Success Criteria per Stage</h2>
 
 <table>
-<tr><th>段階</th><th>比較対象</th><th>成功とみなす条件</th></tr>
+<tr><th>Stage</th><th>Baseline</th><th>Condition to be considered a success</th></tr>
 <tr><td>S0 v50</td><td>v42 (PandaSet 109)</td><td>val_err ≤ 3.0 px on PS39 front</td></tr>
-<tr><td>S1 v51</td><td>v50</td><td>val_err 同等 (±0.2 px) <strong>または</strong> 長 baseline (≥30 frame) で val_err 改善</td></tr>
-<tr><td>S2 v52</td><td>v51</td><td>radar/stereo/mono データで val_nll 健全 (≤4.0)、 LiDAR-only が劣化しない</td></tr>
-<tr><td>S3 v53</td><td>v52</td><td>動的物体上の σ が静止物体の 2-3× に拡大 (識別できている)</td></tr>
-<tr><td>S4 v54</td><td>v53</td><td>chain N=4 で N=2 (v53) より val_err 改善</td></tr>
+<tr><td>S1 v51</td><td>v50</td><td>val_err on par (±0.2 px) <strong>or</strong> val_err improved on long baseline (≥30 frame)</td></tr>
+<tr><td>S2 v52</td><td>v51</td><td>Healthy val_nll (≤4.0) on radar/stereo/mono data, with no regression on LiDAR-only</td></tr>
+<tr><td>S3 v53</td><td>v52</td><td>σ on dynamic objects grows to 2-3× that of static objects (they are distinguishable)</td></tr>
+<tr><td>S4 v54</td><td>v53</td><td>val_err at chain N=4 improves over N=2 (v53)</td></tr>
 </table>
 
-<h2>5. 重要な不変条件 (どの段階でも崩さない)</h2>
+<h2>5. Key Invariants (never broken at any stage)</h2>
 
 <ul>
-<li>Q と KV の token は <strong>自分のフレーム local の uv</strong> しか持たない (絶対 3D を流し込まない)</li>
-<li>pose 情報は <strong>RPE bias</strong> として attention scores に加算するだけ (Q-shift 旧式は legacy)</li>
-<li>frame encoder の重みは凍結後も同じ data 分布 (PandaSet 系) で使い続ける限り再学習不要</li>
-<li>データセットを混ぜる (S2 で stereo / mono を入れるとか) 場合は modality dropout で
-    LiDAR-only ベースラインが回帰しないことを毎評価</li>
+<li>Q and KV tokens carry <strong>only their own frame-local uv</strong> (no absolute 3D is fed in)</li>
+<li>Pose information is only added to attention scores as an <strong>RPE bias</strong> (the old-style Q-shift is legacy)</li>
+<li>As long as the same data distribution (PandaSet family) is used, the frame encoder weights need no retraining after being frozen</li>
+<li>When mixing datasets (e.g., adding stereo / mono at S2), verify at every evaluation via modality dropout that the LiDAR-only baseline does not regress</li>
 </ul>
 
 <div class="keypoint">
-<strong>進め方の本筋:</strong><br>
-S0 を一度しっかり作る → 以降は extension を 1 個ずつ fine-tune で乗せる。
-データを変える時だけ S0 から作り直す。 これで毎エポック数十分 → 数分のオーダーで
-イテレーションできるはず。
+<strong>Main flow of the approach:</strong><br>
+Build S0 solidly once → then stack extensions one at a time via fine-tune.
+Only rebuild from S0 when the data changes. This should shrink iteration time from tens of minutes to minutes per epoch.
 </div>
 
 </body>

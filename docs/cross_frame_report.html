@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
 <link rel="stylesheet" href="assets/report.css">
 <meta charset="utf-8">
@@ -797,7 +797,7 @@ stage 5:  retrain on full range → done</div>
   <td><a href="../experiments/cross_frame_v12_uvd/train.log">log</a> ·
       <a href="../experiments/cross_frame_v12_uvd/curve.png">curve</a> ·
       <a href="../experiments/cross_frame_v12_uvd/best_model.pt">ckpt</a></td></tr>
-<tr class="best"><td>v13</td><td>v11 arch + <strong>PandaSet 39 + Waymo 80 混合</strong> (119 scenes, ~3× data)</td>
+<tr class="best"><td>v13</td><td>v11 arch + <strong>PandaSet 39 + Waymo 80 mix</strong> (119 scenes, ~3× data)</td>
   <td class="num">1.59 M</td><td class="num"><strong>2.42 px</strong></td><td class="num">16.2 px</td>
   <td class="num">82 %</td><td class="num">3.0 ×</td>
   <td><a href="../experiments/cross_frame_v13_mix/train.log">log</a> ·
@@ -815,27 +815,28 @@ stage 5:  retrain on full range → done</div>
 </p>
 
 <p style="font-size: 13px;">
-  <strong>v12 → v13 知見</strong>:
-  Waymo Open Dataset v2 から 80 segment を PandaSet 形式に変換 (先頭 80 frame を
-  truncate、OpenCV cam 系に回転) し、既存 <code>PandaSetCrossFrameDataset</code> に
-  そのまま 2 root 指定で流し込んだ。
-  val err <strong>2.61 → 2.42 px (+7.3%)</strong>。train 誤差は横ばい
-  (1.03 → 1.03 px)、train/val gap が <strong>1.59 → 1.40 px (20% 減)</strong> で、
-  データ量 3× で overfit が確かに緩和。
+  <strong>v12 → v13 finding</strong>:
+  Converted 80 segments from Waymo Open Dataset v2 into PandaSet format (truncated to the
+  first 80 frames and rotated into the OpenCV cam frame), then fed them directly into the
+  existing <code>PandaSetCrossFrameDataset</code> by specifying 2 roots.
+  val err <strong>2.61 → 2.42 px (+7.3%)</strong>. train error is flat
+  (1.03 → 1.03 px), and the train/val gap goes from <strong>1.59 → 1.40 px (20% reduction)</strong>,
+  showing that 3× data does relax overfitting.
   <br/>
-  <em>注意</em>: LLN+BA 評価は <code>scripts/eval/cross_frame_lln.py</code> が
-  現状 PandaSet val のみ走る (name.isdigit フィルタ)。v13 の PandaSet-only BA は
-  v12 より若干悪化しており、σ の絶対スケールが Waymo 側の分布に適応して
-  PandaSet と合わない可能性。raw per-point 予測は改善、BA-level 再校正が次タスク。
+  <em>Note</em>: LLN+BA evaluation via <code>scripts/eval/cross_frame_lln.py</code> currently
+  runs on PandaSet val only (name.isdigit filter). v13's PandaSet-only BA is slightly
+  worse than v12, likely because σ's absolute scale has adapted to the Waymo-side
+  distribution and no longer matches PandaSet. Raw per-point prediction improved;
+  BA-level recalibration is the next task.
 </p>
 
 <p style="font-size: 12px; color: var(--ink-dim);">
-  <em>NuScenes について</em>: converter を書いて 80 scene 混合する v14 を試したが
-  val 2.42 → 2.62 px に悪化。NuScenes は 2 Hz keyframe なので baseline=20 frame が
-  ~10 sec = 100 m 相当となり、10 Hz データセット側の regime と噛み合わず。
-  pose GT 品質も長 baseline では弱い。後回し。
-  変換コード (<code>scripts/preprocessing/nuscenes_to_pandaset.py</code>) と v14 ckpt は
-  残してあるが、当面の mix は PandaSet + Waymo に絞る。
+  <em>On NuScenes</em>: I tried v14, which writes a converter and mixes in 80 scenes,
+  but val degraded 2.42 → 2.62 px. NuScenes is 2 Hz keyframe, so baseline=20 frames
+  corresponds to ~10 sec = ~100 m, which does not mesh with the 10 Hz datasets' regime.
+  Pose GT quality is also weak at long baselines. Deferred.
+  The conversion code (<code>scripts/preprocessing/nuscenes_to_pandaset.py</code>) and the
+  v14 ckpt are kept, but for now the mix is limited to PandaSet + Waymo.
 </p>
 
 <p style="font-size: 12px; color: var(--ink-dim);">

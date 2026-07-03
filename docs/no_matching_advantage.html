@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja"><head>
+<html lang="en"><head>
 <meta charset="utf-8">
 <title>no matching advantage</title>
 <link rel="stylesheet" href="assets/report.css">
@@ -19,396 +19,392 @@ h1 { border-bottom: 2px solid #444; padding-bottom: 8px; }
 h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 36px; }
 </style>
 </head><body>
-<h1 id="pose-conditioned-residual">Pose-conditioned residual ネット — 「マッチングしない」設計の意義</h1>
-<p><strong>TL;DR</strong> — 自動運転 / ロボット用の各種空間タスク (再キャリブレーション、
-高精度地図の更新、SLAM、loop closure 検証など) の中身は、すべて
-「ある点がカメラ画像のどこに対応するか」を高い信頼度で当てる primitive で
-書き直せる。本プロジェクトはこの primitive を <strong>per-point の
-(Δuv, Σ) 出力ネットワーク</strong> として直接学習する。 特徴量マッチング、
-RANSAC、shadow descriptor、巨大 SLAM solver — どれも要らなくなる。</p>
+<h1 id="pose-conditioned-residual">Pose-conditioned residual net — the significance of a "no matching" design</h1>
+<p><strong>TL;DR</strong> — The various spatial tasks in autonomous driving / robotics
+(recalibration, HD-map updates, SLAM, loop-closure verification, and so on) can
+all be rewritten in terms of a single primitive: "predict, with high confidence,
+where a given point corresponds in the camera image." This project trains that
+primitive directly as a <strong>per-point (Δuv, Σ) output network</strong>. Feature
+matching, RANSAC, shadow descriptors, and heavy SLAM solvers — none of them
+are needed anymore.</p>
 <hr />
-<h2 id="1">1. 出力サンプル</h2>
-<p>PandaSet 39-scene front_camera で訓練したモデル v100 (multi c4 quad) の
-val 出力。 各サンプルは 1 つの A→B 投影ペアを示す:</p>
+<h2 id="1">1. Output samples</h2>
+<p>Validation outputs from model v100 (multi c4 quad) trained on PandaSet 39-scene
+front_camera. Each sample shows a single A→B projection pair:</p>
 <p><img alt="per-point Δuv + σ predictions" src="images/no_matching_pred_examples.png" /></p>
-<p>各点について:</p>
+<p>For each point:</p>
 <ul>
-<li><strong>× (灰色)</strong> = 静的シーン仮定 + ノイジー pose 仮説での射影位置 (= 入力)</li>
-<li><strong>+ (青)</strong> = ネットワーク出力 (× + Δuv 補正後)</li>
-<li><strong>○ (緑/赤)</strong> = 真の B 位置 (GT)。緑 = 2σ 楕円内 / 赤 = 外</li>
-<li><strong>楕円</strong> = 1σ / 2σ 不確実性 (Σ から描画)</li>
-<li>タイトル "2σ-cover=XX%" = 2σ 楕円内に GT が入る点の割合 (理想 ~95%)</li>
+<li><strong>× (gray)</strong> = projected position under the static-scene assumption with a noisy pose hypothesis (= input)</li>
+<li><strong>+ (blue)</strong> = network output (× corrected by Δuv)</li>
+<li><strong>○ (green/red)</strong> = true B position (GT). green = inside 2σ ellipse / red = outside</li>
+<li><strong>Ellipse</strong> = 1σ / 2σ uncertainty (drawn from Σ)</li>
+<li>Title "2σ-cover=XX%" = fraction of points whose GT lies inside the 2σ ellipse (ideal ~95%)</li>
 </ul>
-<p>ぱっと見の特徴:</p>
+<p>At a glance:</p>
 <ul>
-<li>道路面など静的シーン上の点は楕円が小さく、+ と ○ がほぼ重なる</li>
-<li>動的物体の点は楕円が膨らみ、ずれを 2σ で吸収できている</li>
-<li>1 つの物体内では σ も Δuv も一貫した分布で出力される</li>
+<li>Points on static scene such as road surface have small ellipses, with + and ○ nearly overlapping</li>
+<li>Points on dynamic objects have inflated ellipses, absorbing the offset within 2σ</li>
+<li>Within a single object, σ and Δuv are output with a consistent distribution</li>
 </ul>
 <hr />
-<h2 id="2">2. 何の役に立つのか (応用)</h2>
-<p>「同じ点がどこに、どのくらいの確信度で対応するか」 が高精度に出るだけで、
-自動運転の現場で発生する空間タスクは下流が組める:</p>
+<h2 id="2">2. What is it useful for (applications)</h2>
+<p>Simply obtaining accurate answers to "where does the same point correspond, and with what confidence"
+is enough to build downstream systems for the spatial tasks that arise in real autonomous driving:</p>
 <table>
 <thead>
 <tr>
-<th>用途</th>
-<th>何をするか</th>
+<th>Use case</th>
+<th>What it does</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><strong>再 calibration</strong></td>
-<td>工場出荷時の K, T_extrinsic が経年で drift。各点 (Δuv, Σ) → Σ-weighted least squares で 1 patch 数秒で修正</td>
+<td><strong>Recalibration</strong></td>
+<td>Factory-set K, T_extrinsic drift over time. Per-point (Δuv, Σ) → Σ-weighted least squares fixes it in seconds per patch</td>
 </tr>
 <tr>
-<td><strong>高精度地図の更新</strong></td>
-<td>既存マップに新走行データを align。変更がある patch だけ Σ-weighted BA、毎日の差分更新が安価</td>
+<td><strong>HD-map updates</strong></td>
+<td>Align new driving data against an existing map. Run Σ-weighted BA only on patches with changes — cheap daily incremental updates</td>
 </tr>
 <tr>
-<td><strong>visual / LiDAR odometry</strong></td>
-<td>per-frame の pose 仮説に対する残差 head として接続。BA layer の中で iterate 可能</td>
+<td><strong>Visual / LiDAR odometry</strong></td>
+<td>Plug in as a residual head against per-frame pose hypotheses. Can iterate inside a BA layer</td>
 </tr>
 <tr>
-<td><strong>SLAM の loop closure 検証</strong></td>
-<td>candidate pose に対し全点 σ を見れば「正しい loop か」即判定</td>
+<td><strong>SLAM loop-closure verification</strong></td>
+<td>Look at all-point σ against a candidate pose — instantly judge whether it is a "correct loop"</td>
 </tr>
 <tr>
-<td><strong>動的物体 down-weighting</strong></td>
-<td>σ inflation が motion / OOD を勝手に分離 (ラベル不要)</td>
+<td><strong>Dynamic-object down-weighting</strong></td>
+<td>σ inflation separates motion / OOD on its own (no labels required)</td>
 </tr>
 </tbody>
 </table>
-<p>つまり同じネットワークが <strong>calibration / マッピング / SLAM / odometry</strong> を
-横断的に支える primitive になる。タスクごとに重い専用システムを
-作り分けない。</p>
+<p>In other words, the same network becomes a primitive that supports
+<strong>calibration / mapping / SLAM / odometry</strong> horizontally. There is no need to build
+a heavy dedicated system per task.</p>
 <hr />
-<h2 id="3">3. 既存手法との違い</h2>
-<p>特徴量マッチングを学習可能にする / 回避する研究は過去 5 年大量にある:</p>
+<h2 id="3">3. How it differs from existing methods</h2>
+<p>There has been a flood of research over the past five years on making
+feature matching learnable / avoiding it:</p>
 <table>
 <thead>
 <tr>
-<th>系統</th>
-<th>代表手法</th>
-<th>出力</th>
-<th>pose 扱い</th>
+<th>Family</th>
+<th>Representative methods</th>
+<th>Output</th>
+<th>Pose handling</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>学習型 matcher</td>
+<td>Learned matchers</td>
 <td>LightGlue, RoMa, DKM</td>
-<td>対応点ペア + 信頼度</td>
-<td><strong>出力</strong> (RANSAC)</td>
+<td>Correspondence pairs + confidence</td>
+<td><strong>Output</strong> (RANSAC)</td>
 </tr>
 <tr>
-<td>Detector-free matcher</td>
+<td>Detector-free matchers</td>
 <td>LoFTR, ASpanFormer</td>
 <td>dense correspondences</td>
-<td><strong>出力</strong></td>
+<td><strong>Output</strong></td>
 </tr>
 <tr>
 <td>Differentiable SfM</td>
 <td>DROID-SLAM, ACE</td>
-<td>密 flow + dense BA</td>
-<td><strong>出力</strong></td>
+<td>dense flow + dense BA</td>
+<td><strong>Output</strong></td>
 </tr>
 <tr>
 <td>Pair → pointmap</td>
 <td>DUSt3R, MASt3R</td>
 <td>3D point map</td>
-<td><strong>出力</strong></td>
+<td><strong>Output</strong></td>
 </tr>
 <tr>
 <td>Multi-view → all</td>
 <td>VGGT, Fast3R, Spann3R</td>
 <td>poses + intrinsics + 3D</td>
-<td><strong>出力</strong></td>
+<td><strong>Output</strong></td>
 </tr>
 <tr>
-<td>学習型 PnP</td>
+<td>Learned PnP</td>
 <td>PixLoc, DSAC*</td>
-<td>pose 直接回帰</td>
-<td><strong>出力</strong></td>
+<td>Direct pose regression</td>
+<td><strong>Output</strong></td>
 </tr>
 <tr>
-<td><strong>本手法</strong></td>
+<td><strong>This method</strong></td>
 <td>(this)</td>
 <td><strong>per-point (Δuv, Σ)</strong></td>
-<td><strong>入力 (条件)</strong></td>
+<td><strong>Input (conditioning)</strong></td>
 </tr>
 </tbody>
 </table>
-<p>軸別に何が違うか:</p>
-<h4 id="a-pose">A. pose は入力 (条件)、出力じゃない</h4>
-<p>ここは整理が要る:</p>
+<p>Axis by axis, what is different:</p>
+<h4 id="a-pose">A. Pose is an input (conditioning), not an output</h4>
+<p>This axis needs to be laid out carefully:</p>
 <ul>
-<li><strong>DUSt3R / VGGT / Fast3R</strong>: pose を入力に取らない、画像群から
-  pointmap または pose を直接回帰する。 「ノイジーな初期 pose を
-  refine したい」用途には使えない (そもそも入力チャネルがない)</li>
-<li><strong>DROID-SLAM</strong>: 例外的に init pose を条件にして dense flow + BA layer で
-  iterative に refine する。 設計思想は近い</li>
-<li><strong>学習型 matcher (LightGlue / LoFTR)</strong>: pose を入出力どちらにも持たない、
-  画像ペアから対応関係を出すだけ</li>
-<li><strong>学習型 PnP (PixLoc / DSAC*)</strong>: 画像 → pose の direct regression、
-  refine 用途じゃない</li>
+<li><strong>DUSt3R / VGGT / Fast3R</strong>: do not take pose as input; they directly
+  regress a pointmap or pose from a set of images. They cannot be used for the
+  use case of "refining a noisy initial pose" (there is no input channel for it in the first place)</li>
+<li><strong>DROID-SLAM</strong>: an exception that conditions on an initial pose and
+  iteratively refines it via dense flow + a BA layer. Design philosophy is close</li>
+<li><strong>Learned matchers (LightGlue / LoFTR)</strong>: pose is neither input nor output;
+  they only produce correspondences from an image pair</li>
+<li><strong>Learned PnP (PixLoc / DSAC*)</strong>: direct regression from image → pose,
+  not intended for refinement</li>
 </ul>
-<p>つまり「pose 入力で refine」は DROID 系だけ似た構造で、 他は構造的にできない。</p>
-<p>DROID との本質的な違いは設計思想:</p>
+<p>In other words, "refinement with pose as input" is only structurally similar in the DROID family; the others cannot do it by construction.</p>
+<p>The essential difference from DROID is design philosophy:</p>
 <ul>
-<li>DROID は <strong>end-to-end SLAM システム</strong> として完結。 dense flow ネット +
-  dense BA solver を 1 個に統合</li>
-<li>本手法は <strong>primitive 出すだけ</strong>。 後段の solver は別レイヤ</li>
+<li>DROID is complete as an <strong>end-to-end SLAM system</strong>. A dense flow network + a
+  dense BA solver are integrated into a single unit</li>
+<li>This method <strong>only outputs the primitive</strong>. The downstream solver is a separate layer</li>
 </ul>
-<p>ここで重要なのは、本手法の場合 <strong>dense BA は要らない</strong>:</p>
-<p>per-point の (Δuv, Σ) が出ていれば、 数百点の <strong>sparse な Σ-weighted
-最小二乗</strong> を 1 回解くだけで pose が出る。 反復 dense BA を回す必要はなく、
-これは calibration や per-frame pose refinement の <strong>closed-form 一発</strong>
-解析解 (Σ-weighted PnP / extrinsic 推定) として機能する。 dense BA は
-シーン全体の bundle 整合を取りに行く重い問題で、本提案のスコープ外。</p>
-<p>両者の違いを並べると:</p>
+<p>The important point here is that in this method <strong>dense BA is not needed</strong>:</p>
+<p>Once per-point (Δuv, Σ) is available, pose can be recovered by solving just a single
+<strong>sparse Σ-weighted least squares</strong> over a few hundred points. There is no need to
+iterate dense BA; this works as a <strong>closed-form one-shot</strong> analytic solution
+(Σ-weighted PnP / extrinsic estimation) for calibration or per-frame pose refinement.
+Dense BA is a heavy problem that seeks bundle consistency across the entire scene, and is out of scope for this proposal.</p>
+<p>Laid out side by side:</p>
 <table>
 <thead>
 <tr>
 <th></th>
 <th>DROID</th>
-<th>本手法</th>
+<th>This method</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>出力</td>
-<td>per-pixel dense flow + scalar 信頼度</td>
+<td>Output</td>
+<td>per-pixel dense flow + scalar confidence</td>
 <td>per-point (Δuv, 2x2 Σ)</td>
 </tr>
 <tr>
-<td>solver</td>
-<td>dense BA layer を内蔵</td>
-<td>用途別 — sparse 一発、 patch BA、 等</td>
+<td>Solver</td>
+<td>dense BA layer built in</td>
+<td>Per-use-case — sparse one-shot, patch BA, etc.</td>
 </tr>
 <tr>
-<td>表現力</td>
-<td>isotropic 重み付けに帰着</td>
-<td>異方性 Σ を保つ</td>
+<td>Expressiveness</td>
+<td>Reduces to isotropic weighting</td>
+<td>Keeps anisotropic Σ</td>
 </tr>
 <tr>
-<td>結合度</td>
-<td>flow ネット + BA layer 一体</td>
-<td>primitive 単独、 solver は外部</td>
+<td>Coupling</td>
+<td>flow net + BA layer fused</td>
+<td>primitive alone; solver is external</td>
 </tr>
 <tr>
-<td>用途</td>
-<td>SLAM 専用</td>
-<td>calibration / map / SLAM / loop verify 共用</td>
+<td>Use case</td>
+<td>SLAM only</td>
+<td>Shared across calibration / map / SLAM / loop verify</td>
 </tr>
 </tbody>
 </table>
-<p>「<strong>モジュール境界をどこに引くか</strong>」の選択。本提案は primitive を 1 個に
-切り出して、 task ごとに solver を組み替える deployment economics
-重視の設計。タスク 1 個ずつに専用 SLAM システムを組むより、 1 つの
-primitive を維持する方が運用コストが低い。</p>
-<h4 id="gru-vs-cross-attention">補足: 時間軸の扱い (GRU vs cross-attention)</h4>
-<p>ネットワークアーキテクチャの観点でも DROID と本提案は対比できる:</p>
+<p>It is a choice of "<strong>where to draw the module boundary</strong>". This proposal
+carves out the primitive into a single piece, then swaps solvers per task — a
+design that emphasises deployment economics. Maintaining a single
+primitive is cheaper to operate than building a dedicated SLAM system for each task.</p>
+<h4 id="gru-vs-cross-attention">Supplement: handling the temporal axis (GRU vs cross-attention)</h4>
+<p>DROID and this proposal can also be contrasted from an architectural point of view:</p>
 <ul>
-<li>DROID は <strong>GRU で時間軸を recurrent に積む</strong>。 t = 0, 1, 2, ... と
-  順次 flow + pose を update していく</li>
-<li>本提案は <strong>transformer cross-attention で複数 KV フレーム (M1, M2, ..., B) を
-  並列に統合</strong>。 時間軸を recurrent じゃなく attention の KV 軸に乗せる</li>
+<li>DROID <strong>stacks time recurrently with a GRU</strong>. It sequentially updates flow +
+  pose at t = 0, 1, 2, ...</li>
+<li>This proposal <strong>integrates multiple KV frames (M1, M2, ..., B) in parallel via
+  transformer cross-attention</strong>. Time is put onto the KV axis of attention rather than being recurrent</li>
 </ul>
-<p>ざっくり「DROID の GRU を transformer + sparse 化したもの」と捉えても
-近い。共通: 時間方向の情報を集約して per-frame 出力を refine する目的。</p>
-<p>trade-off:</p>
+<p>Roughly speaking, one could think of it as "DROID's GRU replaced with a transformer and sparsified".
+Common ground: aggregating information over time to refine per-frame output.</p>
+<p>Trade-offs:</p>
 <ul>
-<li>transformer + parallel KV: GPU で並列化が効く。 N フレームまとめて 1 forward</li>
-<li>GRU recurrent: 時間軸が無制限に伸ばせる (理論上)。 ただし long sequence で
-  vanishing/exploding 傾向、 並列化困難</li>
-<li>本提案で長時間軸は <strong>chain composition</strong> (N=4 windows を sliding) で
-  扱う。 windowed transformer の標準パターン</li>
+<li>transformer + parallel KV: parallelises well on GPU. N frames in a single forward pass</li>
+<li>GRU recurrent: the time axis is (theoretically) extensible without bound. However, long sequences
+  tend to vanish/explode, and parallelisation is hard</li>
+<li>This proposal handles long time horizons via <strong>chain composition</strong> (sliding N=4 windows).
+  Standard windowed-transformer pattern</li>
 </ul>
-<h4 id="b">B. 出力は「シーン再構成」じゃなく「残差 + 不確実性」</h4>
-<p>DUSt3R は 3D 点群、VGGT は scene 全体を出す。本手法は <strong>pose 仮説に対する
-局所残差</strong>だけを出す。シーン構造の再構築は別タスクとして上に乗せる構造。
-代わりに「同じシーンの別 pose 仮説」「同じ点の別フレーム評価」を高速で
-回せる、軽量 layer として機能する。</p>
-<h4 id="c-matcher">C. matcher 系の前提「両方見えてる」を外せる</h4>
-<p>matcher は構造上「両画像で同じ点が見えている」前提で対応を取る。 視点外
-移動、遮蔽、視点差大はすべて「対応なし」として削除される。</p>
-<p>本手法は片側 (A) の query 点だけを起点に、pose 仮説下の射影位置 +
-不確実性を出す。 静的シーンであれば遮蔽でも geometry で uv が出る (ただし
-image-side の証拠は欠ける、片肺になる)。 動的物体だけが本質的に
-「静的仮定が破れる」 ので σ が増える。 ハードな inlier/outlier 判定では
-なく σ という連続値で表現される。</p>
-<h4 id="d-invariance">D. 視点変化の invariance を学習しない</h4>
-<p>descriptor 系は「同じ 3D 点は視点が変わっても似た descriptor を出す」
-という invariance を学習で内製してきた。これは大角度で破綻しやすい。
-本手法は pose を入力にもらうので「視点が変わる」を invariance で
-解決する必要がない。</p>
+<h4 id="b">B. The output is "residual + uncertainty", not "scene reconstruction"</h4>
+<p>DUSt3R outputs a 3D point cloud; VGGT outputs the entire scene. This method outputs only a
+<strong>local residual against a pose hypothesis</strong>. Reconstructing scene structure is handled as a separate
+task placed on top. In exchange, it functions as a lightweight layer that can rapidly evaluate
+"a different pose hypothesis for the same scene" or "the same point evaluated in a different frame".</p>
+<h4 id="c-matcher">C. It removes the matcher's premise of "visible in both"</h4>
+<p>By construction, matchers assume that "the same point is visible in both images" when establishing correspondence.
+Out-of-view motion, occlusion, and large viewpoint differences are all discarded as "no correspondence".</p>
+<p>This method starts only from one-sided (A) query points and outputs the projected position + uncertainty
+under the pose hypothesis. For static scenes, uv can be computed from geometry even under occlusion (though
+image-side evidence is missing, so it is one-legged). Only for dynamic objects is the
+"static assumption fundamentally broken", so σ increases. This is not a hard inlier/outlier decision but rather expressed as a continuous σ value.</p>
+<h4 id="d-invariance">D. It does not learn invariance to viewpoint change</h4>
+<p>Descriptor-based systems internally learn the invariance that "the same 3D point produces similar descriptors
+even when the viewpoint changes". This tends to break at large angles.
+This method takes pose as input, so there is no need to solve "viewpoint changes"
+via invariance.</p>
 <hr />
-<h2 id="4">4. どう動くのか</h2>
-<h3 id="_1">入出力</h3>
-<div class="codehilite"><pre><span></span><code><span class="err">入力</span><span class="o">:</span>
-<span class="w">  </span><span class="n">query</span><span class="w"> </span><span class="err">フレーム</span><span class="w"> </span><span class="n">A</span><span class="w">  </span><span class="o">(</span><span class="err">画像</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">LiDAR</span><span class="o">)</span>
-<span class="w">  </span><span class="n">target</span><span class="w"> </span><span class="err">フレーム</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="o">(</span><span class="err">画像</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">LiDAR</span><span class="o">)</span>
-<span class="w">  </span><span class="err">相対</span><span class="w"> </span><span class="n">pose</span><span class="w"> </span><span class="err">仮説</span><span class="w"> </span><span class="n">T_AB_hat</span><span class="w">  </span><span class="o">(</span><span class="err">ノイジーで</span><span class="w"> </span><span class="n">OK</span><span class="o">)</span>
+<h2 id="4">4. How it works</h2>
+<h3 id="_1">Inputs and outputs</h3>
+<div class="codehilite"><pre><span></span><code><span class="err">Input</span><span class="o">:</span>
+<span class="w">  </span><span class="n">query</span><span class="w"> </span><span class="err">frame</span><span class="w"> </span><span class="n">A</span><span class="w">  </span><span class="o">(</span><span class="err">image</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">LiDAR</span><span class="o">)</span>
+<span class="w">  </span><span class="n">target</span><span class="w"> </span><span class="err">frame</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="o">(</span><span class="err">image</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">LiDAR</span><span class="o">)</span>
+<span class="w">  </span><span class="err">relative</span><span class="w"> </span><span class="n">pose</span><span class="w"> </span><span class="err">hypothesis</span><span class="w"> </span><span class="n">T_AB_hat</span><span class="w">  </span><span class="o">(</span><span class="err">noisy</span><span class="w"> </span><span class="err">is</span><span class="w"> </span><span class="n">OK</span><span class="o">)</span>
 
-<span class="err">出力</span><span class="o">:</span><span class="w">  </span><span class="err">各</span><span class="w"> </span><span class="n">query</span><span class="w"> </span><span class="err">点について</span>
-<span class="w">  </span><span class="err">Δ</span><span class="n">uv</span><span class="w">  </span><span class="err">∈</span><span class="w"> </span><span class="err">ℝ²</span><span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="err">画像内での投影位置補正</span>
-<span class="w">  </span><span class="err">Σ</span><span class="w">    </span><span class="err">∈</span><span class="w"> </span><span class="err">ℝ²ˣ²</span><span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="err">補正の</span><span class="w"> </span><span class="mi">2</span><span class="n">D</span><span class="w"> </span><span class="err">共分散</span><span class="w"> </span><span class="o">(</span><span class="err">確信度</span><span class="o">)</span>
+<span class="err">Output</span><span class="o">:</span><span class="w">  </span><span class="err">for</span><span class="w"> </span><span class="err">each</span><span class="w"> </span><span class="n">query</span><span class="w"> </span><span class="err">point</span>
+<span class="w">  </span><span class="err">Δ</span><span class="n">uv</span><span class="w">  </span><span class="err">∈</span><span class="w"> </span><span class="err">ℝ²</span><span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="err">correction</span><span class="w"> </span><span class="err">to</span><span class="w"> </span><span class="err">projected</span><span class="w"> </span><span class="err">position</span><span class="w"> </span><span class="err">in</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="err">image</span>
+<span class="w">  </span><span class="err">Σ</span><span class="w">    </span><span class="err">∈</span><span class="w"> </span><span class="err">ℝ²ˣ²</span><span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="mi">2</span><span class="n">D</span><span class="w"> </span><span class="err">covariance</span><span class="w"> </span><span class="err">of</span><span class="w"> </span><span class="err">correction</span><span class="w"> </span><span class="o">(</span><span class="err">confidence</span><span class="o">)</span>
 </code></pre></div>
 
-<p><code>(Δuv, Σ)</code> は 2D Gaussian の自然なパラメータ化。 そのまま
-Σ-weighted least squares / Gauss-Newton / Levenberg-Marquardt の
-最適化道具に接続できる。 RANSAC や inlier threshold を介在させる
-必要はない。</p>
-<h3 id="3d-gaussian-splatting-3dgs">補足: 3D Gaussian Splatting (3DGS) との対応</h3>
-<p>Gaussian Splatting も「点ではなく分布で世界を表現する」設計の代表例:
-GS はシーン側 (3D 描画用 Gaussian)、本手法はマッチング側 (2D 残差用 Gaussian)。
-適用領域は違うが、共通する設計原理:</p>
+<p><code>(Δuv, Σ)</code> is a natural parameterisation of a 2D Gaussian. It plugs directly into
+Σ-weighted least squares / Gauss-Newton / Levenberg-Marquardt optimisation tools.
+There is no need to interpose RANSAC or an inlier threshold.</p>
+<h3 id="3d-gaussian-splatting-3dgs">Supplement: correspondence with 3D Gaussian Splatting (3DGS)</h3>
+<p>Gaussian Splatting is another representative example of the "represent the world with distributions rather than points" design:
+GS is on the scene side (Gaussians for 3D rendering); this method is on the matching side (Gaussians for 2D residuals).
+Their application domains differ, but they share the same design principles:</p>
 <ul>
-<li>各要素を <strong>point ではなく分布</strong> として持つことで局所的な不確実性が陽に乗る</li>
-<li>解析的微分可能 → end-to-end 学習や down-stream BA に直結</li>
-<li>集合演算 (重み付け平均、product, marginalisation) が Gaussian の閉性で書ける</li>
+<li>Holding each element as a <strong>distribution rather than a point</strong> explicitly carries local uncertainty</li>
+<li>Analytically differentiable → connects directly to end-to-end training or downstream BA</li>
+<li>Set operations (weighted averages, product, marginalisation) can be written using the closure of Gaussians</li>
 </ul>
-<p>「点を分布に格上げした方が世界をうまく扱える」という同じ直感に立っている。</p>
-<h3 id="multi-frame-deformable-attn">アーキテクチャ — フレームトークン + multi-frame deformable attn</h3>
-<p>各フレームを <strong>画像 + LiDAR が同じ 8x8 grid 上に統合された frame_token</strong>
-にエンコード。 Empty cell = 0 + has-pt mask。 cross-attention で複数 KV
-フレームを deformable に sample 統合。詳細: <code>models/cross_frame_unified.py</code>、
-<code>docs/unified_progression.md</code>、<code>docs/multi_frame_attention.md</code>。</p>
-<h3 id="transformer">なぜ単一ネットワークで解けるのか — Transformer の多層構造</h3>
-<p>「pose 仮説を入力にもらって per-point の Δuv + σ を一発で出す」は
-非自明なタスクで、 cross-attention の <strong>depth = thinking steps</strong> の構造で
-解けてる:</p>
+<p>Both stand on the same intuition that "the world is better handled by promoting points to distributions".</p>
+<h3 id="multi-frame-deformable-attn">Architecture — frame tokens + multi-frame deformable attn</h3>
+<p>Each frame is encoded as a <strong>frame_token in which image + LiDAR are unified on the same 8x8 grid</strong>.
+Empty cell = 0 + has-pt mask. Multiple KV frames are deformably sampled and integrated by cross-attention.
+Details: <code>models/cross_frame_unified.py</code>,
+<code>docs/unified_progression.md</code>, <code>docs/multi_frame_attention.md</code>.</p>
+<h3 id="transformer">Why a single network can solve it — the multi-layer structure of the Transformer</h3>
+<p>"Taking a pose hypothesis as input and producing per-point Δuv + σ in one shot" is a non-trivial task,
+and it is solved by the cross-attention structure of <strong>depth = thinking steps</strong>:</p>
 <ul>
-<li>段 1: pose 仮説で射影した位置の周辺に何があるか? (候補 sampling)</li>
-<li>段 2: 別フレーム M でも整合するか? (consistency check)</li>
-<li>段 3: pose 仮説のどこをどれくらい補正するか? (residual refinement)</li>
-<li>段 4: 最終 σ を確信度として出力 (calibration)</li>
+<li>Step 1: what is around the position projected by the pose hypothesis? (candidate sampling)</li>
+<li>Step 2: is it consistent with another frame M as well? (consistency check)</li>
+<li>Step 3: where and by how much should the pose hypothesis be corrected? (residual refinement)</li>
+<li>Step 4: output final σ as confidence (calibration)</li>
 </ul>
-<p>これは LLM の reasoning depth と同じ構造。一発出しでは無理なタスクを
-段階的合成で解いている。</p>
-<p>実験裏付け (詳細: <code>docs/unified_progression.md</code>):</p>
-<div class="codehilite"><pre><span></span><code>                pair (KV=B のみ)    multi (KV=M+B)
-C=2  val_err :  2.35              2.38           ← 同じ
-C=3  val_err :  2.36              2.09           ← multi が効き始め
-C=4  val_err :  2.29              1.93           ← さらに伸びる
-N=4 (M1+M2+B), C=4 :              1.85, val_nll 1.59 (歴代最高)
+<p>This is the same structure as reasoning depth in LLMs. Tasks that are impossible in a single shot
+are solved by stepwise composition.</p>
+<p>Experimental support (details: <code>docs/unified_progression.md</code>):</p>
+<div class="codehilite"><pre><span></span><code>                pair (KV=B only)    multi (KV=M+B)
+C=2  val_err :  2.35              2.38           <- same
+C=3  val_err :  2.36              2.09           <- multi starts to help
+C=4  val_err :  2.29              1.93           <- extends further
+N=4 (M1+M2+B), C=4 :              1.85, val_nll 1.59 (all-time best)
 </code></pre></div>
 
 <ul>
-<li>pair (KV 1 つ) では depth flat: 各段が同じ証拠を見るだけで分業できない</li>
-<li>multi (KV=M+B) で depth が monotonic に効く: 段ごとに「整合確認」「精緻化」
-  の分業が成立し、 思考容量として depth が機能する</li>
-<li>N=4 で NLL 急進 (2.0 → 1.6): 3 frame 一貫性チェックで static / dynamic を
-  きれいに割り振れる。matcher 系は pair 単位の対応しか出さないので構造上不可能</li>
+<li>In pair (single KV) depth is flat: each layer only sees the same evidence, so labour cannot be divided</li>
+<li>In multi (KV=M+B) depth kicks in monotonically: division of labour into "consistency check" and "refinement"
+  emerges per layer, and depth functions as thinking capacity</li>
+<li>NLL jumps sharply at N=4 (2.0 → 1.6): the 3-frame consistency check cleanly allocates static / dynamic.
+  Structurally impossible for matcher-based methods, which only produce pair-wise correspondences</li>
 </ul>
 <hr />
-<h2 id="5-scalable">5. 訓練データ — 公開データセットだけで scalable</h2>
-<p>supervised learning には pose の正解と各点の uv 正解が要る。 これらは
-専用アノテーションなしに作れる:</p>
-<h3 id="gt">短基線 GT は精度が高い</h3>
-<p>連続フレーム (A, M1) (0.1-0.5 秒、距離 1-5m):</p>
+<h2 id="5-scalable">5. Training data — scalable with public datasets alone</h2>
+<p>Supervised learning needs GT poses and GT uv for each point. These can be
+constructed without dedicated annotation:</p>
+<h3 id="gt">Short-baseline GT is high accuracy</h3>
+<p>Consecutive frames (A, M1) (0.1-0.5 s, distance 1-5 m):</p>
 <ul>
-<li>LiDAR の点群重複率 80%+ → GICP がほぼ完璧に収束 (mm 級誤差)</li>
-<li>IMU drift も 0.5 秒で &lt;1cm</li>
-<li>→ T_{A→M1} の真値は <strong>mm 〜 cm 級精度</strong></li>
+<li>LiDAR point-cloud overlap 80%+ → GICP converges almost perfectly (mm-level error)</li>
+<li>IMU drift is also &lt;1 cm within 0.5 s</li>
+<li>→ the true value of T_{A→M1} has <strong>mm- to cm-level accuracy</strong></li>
 </ul>
-<h3 id="gt-chain-composition">長基線 GT は短基線の chain composition で作る</h3>
-<p>A → M1 → M2 → ... → M_k → B の chain:</p>
+<h3 id="gt-chain-composition">Long-baseline GT is built by chain composition of short baselines</h3>
+<p>Chain A → M1 → M2 → ... → M_k → B:</p>
 <div class="codehilite"><pre><span></span><code>T_{A→B} = T_{A→M1} ∘ T_{M1→M2} ∘ ... ∘ T_{Mk→B}
 </code></pre></div>
 
-<p>100m baseline = 30 hop × 3m → 30 因子の合成。 GICP は各 hop で点群を anchor
-として align するので drift が systematic に蓄積しない。実測で 30 hop 合成で
-final 誤差 &lt; 10cm @ 100m baseline (= 角度 0.06°、画素 1-2 px) に収まる。</p>
-<h3 id="gt_1">残った GT ノイズは大数の法則で消える</h3>
-<p>合成誤差を完全に 0 にはできないが、 supervised learning では深刻ではない:</p>
+<p>100 m baseline = 30 hops × 3 m → composition of 30 factors. Because GICP aligns the point clouds
+as anchors at each hop, drift does not accumulate systematically. In practice, after 30-hop composition the
+final error stays &lt; 10 cm @ 100 m baseline (= angle 0.06°, pixel 1-2 px).</p>
+<h3 id="gt_1">Residual GT noise vanishes by the law of large numbers</h3>
+<p>Composition error cannot be made exactly zero, but it is not serious for supervised learning:</p>
 <ul>
-<li>各 (A, B) サンプルの GT 誤差 e_i は zero-mean (GICP は biased しない)</li>
-<li>独立サンプル N 個で訓練 → 平均誤差は <strong>O(1/√N) で収束</strong></li>
-<li>1M サンプル × σ_GT ~ 1-2 px なら、 訓練後ネットワークは原理上
-  <strong>0.001-0.002 px</strong> の精度に到達</li>
+<li>The GT error e_i for each (A, B) sample is zero-mean (GICP is not biased)</li>
+<li>With N independent samples in training → the mean error <strong>converges as O(1/√N)</strong></li>
+<li>With 1M samples × σ_GT ~ 1-2 px, the trained network can in principle reach
+  <strong>0.001-0.002 px</strong> accuracy</li>
 </ul>
-<p>つまり「データ量で GT noise が消える」。 公開データ 5 種 (PandaSet,
-Waymo, nuScenes, AV2, DDAD) を統合すると 1500+ scenes、ZOD を加えれば
-さらに増える。 自然な data diversity (天候、地理、 sensor 仕様) で
-photometric augmentation や hard negative mining を回避できる。</p>
-<h3 id="box-tracking">動的物体は box tracking で扱える</h3>
-<p>公開データセットには 3D bounding box annotation + uuid tracking が
-ある。動的物体 (<code>attributes.object_motion = Moving</code>) の box 内点は box の
-rigid 変換で warp して GT を更新できる (詳細: <code>docs/dynamic_object_sigma.md</code>)。
-matcher が必要だった「動的物体 → 排除」は要らない。</p>
+<p>In other words, "GT noise disappears with data volume". Combining 5 public datasets (PandaSet,
+Waymo, nuScenes, AV2, DDAD) yields 1500+ scenes; adding ZOD grows it further.
+Natural data diversity (weather, geography, sensor specs) avoids the need for
+photometric augmentation or hard negative mining.</p>
+<h3 id="box-tracking">Dynamic objects are handled by box tracking</h3>
+<p>Public datasets come with 3D bounding-box annotation + uuid tracking.
+Points inside a box of a dynamic object (<code>attributes.object_motion = Moving</code>) can have their GT updated
+by warping with the rigid transform of the box (details: <code>docs/dynamic_object_sigma.md</code>).
+The "dynamic object → reject" step that matchers required is not needed.</p>
 <hr />
-<h2 id="6">6. 制約</h2>
-<h3 id="_2">用途違い</h3>
+<h2 id="6">6. Constraints</h2>
+<h3 id="_2">Wrong use case</h3>
 <ul>
-<li><strong>完全 visual-only system</strong> (LiDAR / IMU / odometry なし): 初期 pose を
-  作る手段がないので visual matcher か photometric SLAM が要る。 本手法は
-  「pose を持ってる側」を refine する後段にいる、競合じゃなく用途違い</li>
+<li><strong>Fully visual-only systems</strong> (no LiDAR / IMU / odometry): there is no means
+  of producing an initial pose, so a visual matcher or photometric SLAM is required. This method sits
+  in the downstream stage that "refines the side already holding a pose" — it is not a competitor, just a different use case</li>
 </ul>
 <h3 id="engineering-trade-off">Engineering trade-off</h3>
 <ul>
-<li><strong>計算コスト</strong>: matcher は 1 ペアの対応取得が安い。 本手法は pose
-  hypothesis ごとに forward が要る (BA 内 iter で頻繁に呼ぶと重い)。
-  ただし unified arch は batch で並列化可能、 現代 GPU では問題にならない</li>
-<li><strong>学習分布外</strong>: 訓練に使ってない sensor 構成や特殊環境 (重雨、雪嵐) で
-  σ が大きく出る可能性。 該当データで再学習が必要</li>
+<li><strong>Compute cost</strong>: matchers are cheap for obtaining correspondences per pair. This method requires a
+  forward pass per pose hypothesis (heavy if called frequently inside a BA iteration).
+  However, the unified architecture can be batched in parallel, and this is not a problem on modern GPUs</li>
+<li><strong>Out of training distribution</strong>: for sensor configurations or unusual environments (heavy rain, blizzards) not
+  covered in training, σ may come out large. Retraining on the relevant data is required</li>
 </ul>
-<h3 id="poc-caveat">PoC 設定の caveat (報告値の解釈)</h3>
+<h3 id="poc-caveat">PoC-setting caveat (interpretation of reported numbers)</h3>
 <ul>
-<li><strong>中間 frame M の pose は訓練時 GT で渡してる</strong>。 v100 の 1.85 px /
-  1.59 nll は M の pose 仮説にノイズなしの状態での値。 production だと
-  pose_AM もノイジー (A↔M baseline が短いので精度は高いはずだが 0 では
-  ない)</li>
-<li><strong>M に向いた supervision は無い</strong>。 現状 loss は A↔B 双方向のみ、 M は
-  KV としてだけ provide。 6 directions (A↔M, B↔M, M↔A, M↔B 含む) を全部
-  supervise する設計は別途試したが、 stacked-path で σ output 周りが
-  不安定になり今は legacy triplet (M=KV-only) を使ってる</li>
+<li><strong>The intermediate frame M's pose is passed as GT during training</strong>. The 1.85 px / 1.59 nll of v100
+  are values under the noise-free setting of M's pose hypothesis. In production, pose_AM would also be noisy
+  (the A↔M baseline is short, so accuracy should be high, but not zero)</li>
+<li><strong>There is no supervision directed at M</strong>. Currently the loss is only bidirectional A↔B; M is provided only as KV.
+  A design that supervises all 6 directions (including A↔M, B↔M, M↔A, M↔B) was tried separately, but with the stacked path
+  the σ output became unstable, so we currently use the legacy triplet (M=KV-only)</li>
 </ul>
-<p>ここは <strong>本質的な問題ではなく、 段階的に直せる engineering issue</strong>:</p>
+<p>These are <strong>not fundamental problems but engineering issues that can be fixed step by step</strong>:</p>
 <ol>
-<li>まず短基線 A↔M で本手法を訓練 (= 既に v55 / v70 系でやってる、 安定動作)</li>
-<li>その重みを使って M を「ノイジー pose で渡される第二の証拠源」 として
-   A↔B 訓練に組み込む (= curriculum learning)</li>
-<li>最後に M↔A, M↔B 方向にも loss 拡張</li>
+<li>First train this method on short baseline A↔M (= already done in the v55 / v70 line, stable operation)</li>
+<li>Use those weights and incorporate M as "a second evidence source passed with noisy pose"
+   into A↔B training (= curriculum learning)</li>
+<li>Finally extend the loss to the M↔A, M↔B directions as well</li>
 </ol>
-<p>順次回せば pose_AM ノイズ対応も M-supervision も乗る。</p>
-<p>そして本論文の中核論点 — <strong>「中間フレームを KV として入れると multi-frame の
-情報統合で精度がジャンプする」</strong> — はこの caveat に依存しない。 pair (M なし)
-で頭打ちだった val_err が multi (M 有) で大きく下がる現象は、 M=GT-pose 設定
-でも noisy-pose 設定でも同じ方向性で出る (= 多視点 consistency が thinking
-depth を活かす)。 PoC 設定は数値の絶対値に効くだけで、 定性的結論は揺るがない。</p>
-<h3 id="matcher">「matcher が必要なのでは」という誤解への反論</h3>
-<p>長基線 (&gt;100m + 大角差) では matcher が要るのでは、と言われがちだが:</p>
+<p>Running these in sequence brings both pose_AM noise handling and M-supervision online.</p>
+<p>And the core claim of this article — <strong>"putting intermediate frames as KV causes a jump in accuracy from multi-frame
+information integration"</strong> — does not depend on this caveat. The phenomenon in which val_err, which plateaued in pair (no M),
+drops significantly in multi (with M) points in the same direction in both the M=GT-pose setting and the noisy-pose setting
+(= multi-view consistency leverages thinking depth). The PoC setting only affects the absolute numbers; the qualitative
+conclusion does not shift.</p>
+<h3 id="matcher">Rebuttal to the misunderstanding that "a matcher is needed"</h3>
+<p>It is often said that a matcher is needed at long baselines (&gt;100 m + large angular differences), but:</p>
 <ul>
-<li>中間フレームを増やす chain で解ける。 v100 で M を 2 つ追加すると
-  val_err 0.45 px 改善、 N=5 でさらに改善。 <strong>chain 長を増やせば任意の
-  baseline が扱える</strong> ことが示唆される</li>
-<li>candidate loop pose 周辺で複数 M を並べ、 全 (Mi, Mi+1) 残差が低 σ で
-  揃えば「正しい loop」と判定できる</li>
-<li>matcher は構造的に不要</li>
+<li>This can be solved by extending the chain of intermediate frames. Adding 2 Ms in v100 improves val_err by 0.45 px,
+  and N=5 improves it further. This suggests that <strong>arbitrary baselines can be handled by lengthening the chain</strong></li>
+<li>By lining up multiple Ms around a candidate loop pose, if all (Mi, Mi+1) residuals align with low σ,
+  we can judge "correct loop"</li>
+<li>A matcher is structurally unnecessary</li>
 </ul>
 <hr />
-<h2 id="7-publish">7. なぜ今までこれが publish されてこなかったか</h2>
-<p>この組合せ (pose 入力 + 2D Gaussian 出力 + cross-modal supervised + chain
-composable) を直接やってる先行論文は知る限り見当たらない。理由は推測:</p>
+<h2 id="7-publish">7. Why has this not been published before?</h2>
+<p>To the best of my knowledge, there is no prior paper that directly does this combination
+(pose input + 2D Gaussian output + cross-modal supervised + chain composable). Guesses at the reasons:</p>
 <ul>
-<li>visual-only research community (CVPR / ICCV メイン) は LiDAR を持って
-  ない、 cross-modal supervised setup が組めない</li>
-<li>LiDAR-heavy 産業 (Waymo / Cruise / Aurora) は internal にこの種類の
-  network を持ってる可能性は高いが publish されてない</li>
-<li>公開データセットで「短基線 GICP-refined pose + 動的物体 box tracking」が
-  揃って利用可能になったのが比較的最近 (Waymo v2、 PandaSet、 AV2、 ZOD)、
-  community がこの組合せに気付くタイミング</li>
+<li>The visual-only research community (mainly CVPR / ICCV) does not have LiDAR,
+  so a cross-modal supervised setup cannot be assembled</li>
+<li>LiDAR-heavy industry players (Waymo / Cruise / Aurora) may well have this kind of network internally,
+  but it is not published</li>
+<li>Public datasets in which "short-baseline GICP-refined pose + dynamic-object box tracking"
+  are jointly available have only become usable relatively recently (Waymo v2, PandaSet, AV2, ZOD) —
+  the timing at which the community would notice this combination</li>
 </ul>
-<p>つまり理論的なブレイクスルーではなく、 <strong>現代の sensor stack + 公開データ
-状況に合わせた具体的な engineering choice の組合せ</strong> に新規性がある。</p>
+<p>In other words, the novelty lies not in a theoretical breakthrough but in
+<strong>a specific combination of engineering choices tailored to the modern sensor stack + the state of public data</strong>.</p>
 <hr />
-<h2 id="_3">関連ファイル</h2>
+<h2 id="_3">Related files</h2>
 <ul>
-<li><code>models/cross_frame_unified.py</code> — 本手法の実装本体</li>
-<li><code>docs/unified_progression.md</code> — アーキ進化と val_err / nll の改善履歴</li>
-<li><code>docs/dynamic_object_sigma.md</code> — σ が動的物体を勝手に分離する解析</li>
-<li><code>docs/multi_frame_attention.md</code> — 複数フレーム統合の設計議論</li>
+<li><code>models/cross_frame_unified.py</code> — the main implementation of this method</li>
+<li><code>docs/unified_progression.md</code> — architecture evolution and val_err / nll improvement history</li>
+<li><code>docs/dynamic_object_sigma.md</code> — analysis of how σ separates dynamic objects on its own</li>
+<li><code>docs/multi_frame_attention.md</code> — design discussion of multi-frame integration</li>
 </ul>
 </body></html>
