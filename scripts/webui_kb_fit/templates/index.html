@@ -1,0 +1,508 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8"><title>TSS4 KB4 fit</title>
+<script src="https://unpkg.com/konva@9.3.6/konva.min.js"></script>
+<style>
+  body { margin:0; padding:0; font-family: monospace; background:#1a1a1a; color:#ddd; }
+  #toolbar { padding:6px 10px; background:#222; border-bottom:1px solid #444;
+             display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  #toolbar select, #toolbar button, #toolbar input {
+      background:#333; color:#ddd; border:1px solid #555; padding:3px 8px;
+      font-family: inherit; }
+  #stage_wrap { width:100vw; height: calc(100vh - 44px); background:#000;
+                overflow:hidden; cursor: crosshair; }
+  .info { color:#8c8; font-size:12px; }
+  .err  { color:#f88; font-size:12px; }
+  #kbox { color:#ffd; font-size:12px; }
+</style>
+</head><body>
+<div id="toolbar">
+  <label>seq: <select id="seq">
+    {% for s in seqs %}<option value="{{s}}">{{s}}</option>{% endfor %}
+  </select></label>
+  <label>idx: <input id="idx" type="number" value="0" min="0" style="width:60px"></label>
+  <button id="prev">◀</button><button id="next">▶</button>
+  <span style="border-left:1px solid #555;height:18px"></span>
+  <label><input type="checkbox" id="show_anchors" checked> anchors</label>
+  <label>n_r  <input id="nar"  type="number" value="6"  style="width:46px"></label>
+  <label>n_φ  <input id="naph" type="number" value="16" style="width:46px"></label>
+  <label>θmax° <input id="thmax" type="number" step="2" value="30" style="width:54px"></label>
+  <span style="border-left:1px solid #555;height:18px"></span>
+  <button id="fit">Fit KB4</button>
+  <button id="reset_kb">Reset KB</button>
+  <button id="clear_arrows">Clear arrows</button>
+  <span style="border-left:1px solid #555;height:18px"></span>
+  <label>Δrot°<input id="rot_step" type="number" step="0.005" value="0.01" style="width:54px"></label>
+  <span style="color:#888">yaw</span>
+  <button class="rotbtn" data-axis="yaw" data-sign="-1">−</button>
+  <button class="rotbtn" data-axis="yaw" data-sign="+1">+</button>
+  <span style="color:#888">pitch</span>
+  <button class="rotbtn" data-axis="pitch" data-sign="-1">−</button>
+  <button class="rotbtn" data-axis="pitch" data-sign="+1">+</button>
+  <span style="color:#888">roll</span>
+  <button class="rotbtn" data-axis="roll" data-sign="-1">−</button>
+  <button class="rotbtn" data-axis="roll" data-sign="+1">+</button>
+  <span style="border-left:1px solid #555;height:18px"></span>
+  <label>Δmp(cm)<input id="mp_step_cm" type="number" step="0.1" value="1" style="width:54px"></label>
+  <span style="color:#888">x</span>
+  <button class="mpbtn" data-axis="x" data-sign="-1">−</button>
+  <button class="mpbtn" data-axis="x" data-sign="+1">+</button>
+  <span style="color:#888">y</span>
+  <button class="mpbtn" data-axis="y" data-sign="-1">−</button>
+  <button class="mpbtn" data-axis="y" data-sign="+1">+</button>
+  <span style="color:#888">z</span>
+  <button class="mpbtn" data-axis="z" data-sign="-1">−</button>
+  <button class="mpbtn" data-axis="z" data-sign="+1">+</button>
+  <span style="border-left:1px solid #555;height:18px"></span>
+  <button id="save" style="background:#2a8;color:white;font-weight:bold">Save → ClearML</button>
+  <button id="cml_reload" style="background:#27a;color:white">↻ History</button>
+  <select id="cml_pick" style="max-width:480px"><option value="">— ClearML history —</option></select>
+  <button id="cml_apply">Apply</button>
+  <span id="kbox">k=—</span>
+  <span id="rotbox" style="color:#aaf">rot=—</span>
+  <span id="mpbox" style="color:#fa8">mp=—</span>
+  <span class="info" id="info">—</span>
+</div>
+<div id="bar2" style="background:#1a1a1a;color:#ddd;padding:6px 10px;border-bottom:1px solid #333;font-family:monospace;font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+  <span style="color:#888">why (≥50 chars):</span>
+  <input id="why" type="text" placeholder="this fit's intent — what arrow you placed and why" style="flex:1;min-width:300px;background:#222;color:#ddd;border:1px solid #444;padding:3px 6px">
+  <span id="save_status" class="info">—</span>
+  <span class="info" style="color:#888">L-click→drag→click=arrow · R-click=delete · wheel=zoom · drag bg=pan</span>
+</div>
+<div id="stage_wrap"></div>
+
+<script>
+const wrap = document.getElementById('stage_wrap');
+const stage = new Konva.Stage({
+  container: 'stage_wrap',
+  width: wrap.clientWidth,
+  height: wrap.clientHeight,
+  draggable: true,
+});
+const layerImg = new Konva.Layer();      // background image
+const layerDots = new Konva.Layer();     // projected lidar
+const layerAnchor = new Konva.Layer();   // anchor markers
+const layerArrow = new Konva.Layer();    // user arrows + ghost
+stage.add(layerImg);
+stage.add(layerDots);
+stage.add(layerAnchor);
+stage.add(layerArrow);
+window.addEventListener('resize', () => {
+  stage.width(wrap.clientWidth); stage.height(wrap.clientHeight);
+});
+
+// Image meta
+let IW = 1, IH = 1, PAD_U = 0, PAD_V = 0;
+
+// ─── Zoom / pan ────────────────────────────────────────────────
+const SCALE_BY = 1.1;
+stage.on('wheel', (e) => {
+  e.evt.preventDefault();
+  const old = stage.scaleX();
+  const ptr = stage.getPointerPosition();
+  const mp = { x: (ptr.x - stage.x()) / old, y: (ptr.y - stage.y()) / old };
+  const scale = e.evt.deltaY > 0 ? old / SCALE_BY : old * SCALE_BY;
+  stage.scale({ x: scale, y: scale });
+  stage.position({ x: ptr.x - mp.x * scale, y: ptr.y - mp.y * scale });
+});
+
+// Disable browser context menu on stage so right-click can be ours.
+wrap.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ─── Helpers ───────────────────────────────────────────────────
+function depthColor(z, zmax=80) {
+  const t = Math.max(0, Math.min(1, z / zmax));
+  if (t < 0.5) { const s = t / 0.5; return `rgb(255,${Math.round(255*s)},0)`; }
+  const s = (t - 0.5) / 0.5;
+  return `rgb(${Math.round(255*(1-s))},255,${Math.round(255*s)})`;
+}
+function stageToImg(pos) {
+  const s = stage.scaleX();
+  return { x: (pos.x - stage.x()) / s, y: (pos.y - stage.y()) / s };
+}
+
+// ─── Arrows state ──────────────────────────────────────────────
+//   arrows: [{u0, v0, u1, v1, node}]
+//   draft : while user is dragging:  {u0, v0, ghost}
+let arrows = [];
+let draft = null;
+
+function drawArrowNode(u0, v0, u1, v1, isDraft=false) {
+  return new Konva.Arrow({
+    points: [u0, v0, u1, v1],
+    stroke: isDraft ? '#ff0' : '#f3f',
+    fill:   isDraft ? '#ff0' : '#f3f',
+    strokeWidth: 2 / Math.max(stage.scaleX(), 0.2),
+    pointerLength: 12 / Math.max(stage.scaleX(), 0.2),
+    pointerWidth:  10 / Math.max(stage.scaleX(), 0.2),
+    listening: !isDraft,
+  });
+}
+function rescaleArrows() {
+  // After zoom, arrow stroke + arrowhead should stay screen-sized.
+  const s = Math.max(stage.scaleX(), 0.2);
+  layerArrow.find('Arrow').forEach(n => {
+    n.strokeWidth(2 / s);
+    n.pointerLength(12 / s);
+    n.pointerWidth(10 / s);
+  });
+  layerArrow.batchDraw();
+}
+stage.on('wheel', rescaleArrows);
+
+// Click on background = either start arrow, finish arrow, or ignore.
+// Click on arrow node (right-click) = delete.
+stage.on('mousedown', (e) => {
+  const evt = e.evt;
+  // Right-click → delete arrow if hit
+  if (evt.button === 2) {
+    if (e.target && e.target.getClassName() === 'Arrow') {
+      const node = e.target;
+      arrows = arrows.filter(a => a.node !== node);
+      node.destroy(); layerArrow.batchDraw();
+    }
+    return;
+  }
+  if (evt.button !== 0) return;
+  // Only respond if the mousedown happened on the stage / image / dots — not
+  // when we're in the middle of a stage-pan drag (Konva sends 'mousedown'
+  // before 'dragstart'; we detect pan via 'dragmove').
+  // Use shift-key to force pan-only? simpler: if image not loaded skip.
+  if (IW === 1) return;
+});
+// We use plain stage clicks for arrow start/end because mousedown begins a
+// drag-pan when stage.draggable=true. Distinguish by movement: if pointerup
+// without significant move → it's a click.
+let downPos = null;
+let downAt  = 0;
+stage.on('pointerdown', (e) => {
+  if (e.evt.button !== 0) return;
+  const p = stage.getPointerPosition();
+  downPos = { x: p.x, y: p.y }; downAt = Date.now();
+});
+stage.on('pointerup', (e) => {
+  if (e.evt.button !== 0) return;
+  const p = stage.getPointerPosition();
+  if (!downPos) return;
+  const dx = p.x - downPos.x, dy = p.y - downPos.y;
+  const dist = Math.hypot(dx, dy);
+  downPos = null;
+  // If the user dragged > 4 px, treat as pan (no arrow action).
+  if (dist > 4) return;
+  const ip = stageToImg(p);
+  // pad 領域 (画像外周 10%) でも矢印を引けるようにする (folded fisheye 領域)
+  if (ip.x < -PAD_U || ip.x > IW + PAD_U ||
+      ip.y < -PAD_V || ip.y > IH + PAD_V) return;
+  if (!draft) {
+    // start a new arrow
+    const ghost = drawArrowNode(ip.x, ip.y, ip.x, ip.y, true);
+    layerArrow.add(ghost); layerArrow.batchDraw();
+    draft = { u0: ip.x, v0: ip.y, ghost };
+  } else {
+    // finalize
+    draft.ghost.destroy();
+    const a = drawArrowNode(draft.u0, draft.v0, ip.x, ip.y, false);
+    layerArrow.add(a);
+    arrows.push({ u0: draft.u0, v0: draft.v0, u1: ip.x, v1: ip.y, node: a });
+    draft = null;
+    rescaleArrows();
+  }
+});
+stage.on('pointermove', (e) => {
+  if (!draft) return;
+  const ip = stageToImg(stage.getPointerPosition());
+  draft.ghost.points([draft.u0, draft.v0, ip.x, ip.y]);
+  layerArrow.batchDraw();
+});
+// ESC = cancel current draft
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && draft) { draft.ghost.destroy(); draft = null; layerArrow.batchDraw(); }
+});
+
+// ─── Anchors (visual): θ-uniform polar grid ──────────────────
+let _calib = null;  // {fx, cx, cy, k1..k4}
+function kbDistort(theta) {
+  if (!_calib) return theta;
+  const t2 = theta*theta;
+  return theta * (1 + _calib.k1*t2 + _calib.k2*t2*t2
+                    + _calib.k3*t2*t2*t2 + _calib.k4*t2*t2*t2*t2);
+}
+function drawAnchors() {
+  layerAnchor.destroyChildren();
+  if (!document.getElementById('show_anchors').checked || !_calib) {
+    layerAnchor.batchDraw(); return;
+  }
+  const nr  = parseInt(document.getElementById('nar').value);
+  const nph = parseInt(document.getElementById('naph').value);
+  const thmax_deg = parseFloat(document.getElementById('thmax').value);
+  const fx = _calib.fx, cx = _calib.cx, cy = _calib.cy;
+  const sInv = 1 / Math.max(stage.scaleX(), 0.2);
+  // θ values (skip θ=0)
+  const th0 = 2 * Math.PI / 180;
+  const th1 = thmax_deg * Math.PI / 180;
+  const thetas = [];
+  for (let i = 0; i < nr; i++)
+    thetas.push(th0 + (th1 - th0) * i / Math.max(nr-1, 1));
+  // outer dashed circle = θ_max envelope
+  const r_outer = fx * kbDistort(th1);
+  layerAnchor.add(new Konva.Circle({
+    x: cx, y: cy, radius: r_outer,
+    stroke: '#0cf', strokeWidth: 2 * sInv, dash: [10, 6], listening: false,
+  }));
+  // dot grid
+  for (const th of thetas) {
+    const r = fx * kbDistort(th);
+    for (let j = 0; j < nph; j++) {
+      const phi = 2 * Math.PI * j / nph;
+      const u = cx + r * Math.cos(phi);
+      const v = cy + r * Math.sin(phi);
+      if (u < 0 || u > IW || v < 0 || v > IH) continue;
+      layerAnchor.add(new Konva.Circle({
+        x: u, y: v, radius: 4 * sInv,
+        stroke: '#0cf', strokeWidth: sInv, listening: false,
+      }));
+    }
+  }
+  layerAnchor.batchDraw();
+}
+['show_anchors','nar','naph','thmax'].forEach(id => {
+  document.getElementById(id).onchange = drawAnchors;
+});
+stage.on('wheel', drawAnchors);
+
+// ─── Frame load + reproject ────────────────────────────────────
+async function fetchCalib() {
+  const r = await fetch('/api/calib'); const j = await r.json();
+  _calib = j;
+  document.getElementById('kbox').textContent =
+    `k=[${j.k1.toFixed(4)}, ${j.k2.toFixed(4)}, ${j.k3.toFixed(4)}, ${j.k4.toFixed(4)}]`;
+  if (typeof j.yaw === 'number') {
+    document.getElementById('rotbox').textContent =
+      `rot(roll,pitch,yaw)=[${j.roll.toFixed(4)}, ${j.pitch.toFixed(4)}, ${j.yaw.toFixed(4)}]°`;
+  }
+  if (typeof j.mp_z_m === 'number') {
+    document.getElementById('mpbox').textContent =
+      `mp(x,y,z)=[${j.mp_x_m.toFixed(3)}, ${j.mp_y_m.toFixed(3)}, ${j.mp_z_m.toFixed(3)}]m`;
+  }
+  drawAnchors();
+}
+async function loadFrame(resetView=false) {
+  const seq = document.getElementById('seq').value;
+  const idx = document.getElementById('idx').value;
+  const r = await fetch(`/api/frame?seq=${encodeURIComponent(seq)}&idx=${idx}`);
+  const j = await r.json();
+  if (j.error) { document.getElementById('info').textContent = 'error: ' + j.error; return; }
+  IW = j.IW; IH = j.IH;
+  PAD_U = j.pad_u || 0.10 * IW;
+  PAD_V = j.pad_v || 0.10 * IH;
+  document.getElementById('info').textContent =
+      `${j.cam_name}  ${IW}×${IH} (+pad ${PAD_U.toFixed(0)}×${PAD_V.toFixed(0)})  npts=${j.uv.length}  frames=${j.n_frames}`;
+
+  layerImg.destroyChildren(); layerDots.destroyChildren();
+  const im = new Image();
+  im.onload = () => {
+    // pad 領域 (画像外 10%) を黒帯として描く
+    layerImg.add(new Konva.Rect({
+      x: -PAD_U, y: -PAD_V,
+      width: IW + 2*PAD_U, height: IH + 2*PAD_V,
+      fill: '#000', listening: false,
+    }));
+    layerImg.add(new Konva.Image({ image: im, x: 0, y: 0, width: IW, height: IH }));
+    // 画像境界 (white dashed)
+    layerImg.add(new Konva.Rect({
+      x: 0, y: 0, width: IW, height: IH,
+      stroke: '#fff', strokeWidth: 1, dash: [6, 4], listening: false,
+      opacity: 0.4,
+    }));
+    if (resetView || (stage.scaleX() === 1 && stage.x() === 0 && stage.y() === 0)) {
+      const Wt = IW + 2*PAD_U, Ht = IH + 2*PAD_V;
+      const sx = stage.width() / Wt, sy = stage.height() / Ht;
+      const s = Math.min(sx, sy) * 0.98;
+      stage.scale({x:s, y:s});
+      stage.position({
+        x: (stage.width()  - Wt*s)/2 + PAD_U*s,
+        y: (stage.height() - Ht*s)/2 + PAD_V*s,
+      });
+    }
+    layerImg.batchDraw();
+    drawDots(j.uv, j.z);
+    drawAnchors();
+  };
+  im.src = 'data:image/jpeg;base64,' + j.img_b64;
+  fetchCalib();
+}
+function drawDots(uv, z) {
+  layerDots.destroyChildren();
+  layerDots.opacity(0.45);
+  for (let i = 0; i < uv.length; i++) {
+    const [u, v] = uv[i];
+    layerDots.add(new Konva.Circle({
+      x: u, y: v, radius: 1.4,
+      fill: depthColor(z[i]), strokeWidth: 0, listening: false,
+    }));
+  }
+  layerDots.batchDraw();
+}
+async function reproject() {
+  const seq = document.getElementById('seq').value;
+  const idx = document.getElementById('idx').value;
+  const r = await fetch(`/api/reproject?seq=${encodeURIComponent(seq)}&idx=${idx}`);
+  const j = await r.json();
+  if (j.error) return;
+  drawDots(j.uv, j.z);
+}
+
+// ─── Buttons ───────────────────────────────────────────────────
+document.getElementById('seq').onchange = () => loadFrame(true);
+document.getElementById('idx').onchange = () => loadFrame(false);
+document.getElementById('prev').onclick = () => {
+  const e = document.getElementById('idx');
+  e.value = Math.max(0, parseInt(e.value)-1); loadFrame();
+};
+document.getElementById('next').onclick = () => {
+  const e = document.getElementById('idx');
+  e.value = parseInt(e.value)+1; loadFrame();
+};
+document.getElementById('clear_arrows').onclick = () => {
+  arrows.forEach(a => a.node.destroy());
+  arrows = []; layerArrow.batchDraw();
+};
+document.getElementById('reset_kb').onclick = async () => {
+  await fetch('/api/reset_kb', {method:'POST'});
+  await fetchCalib();
+  await reproject();
+};
+document.getElementById('fit').onclick = async () => {
+  const payload = {
+    arrows: arrows.map(a => ({u0:a.u0, v0:a.v0, u1:a.u1, v1:a.v1})),
+    n_anchor_r:   parseInt(document.getElementById('nar').value),
+    n_anchor_phi: parseInt(document.getElementById('naph').value),
+    theta_anchor_max_deg: parseFloat(document.getElementById('thmax').value),
+    n_iter: 8,
+  };
+  const r = await fetch('/api/fit_kb', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const j = await r.json();
+  console.log('fit', j);
+  if (j.history && j.history.length) {
+    const last = j.history[j.history.length-1];
+    document.getElementById('info').textContent =
+      `fit: rms=${last.rms.toFixed(2)} px  iters=${j.history.length}  arrows=${j.n_arrows}  anchors=${j.n_anchors}`;
+  }
+  await fetchCalib();
+  await reproject();
+};
+
+// rotation nudge buttons (±0.01° default)
+document.querySelectorAll('.rotbtn').forEach(btn => {
+  btn.onclick = async () => {
+    const axis = btn.dataset.axis;
+    const sign = parseInt(btn.dataset.sign);
+    const step = parseFloat(document.getElementById('rot_step').value);
+    const delta = sign * step;
+    await fetch('/api/nudge_rot', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({axis, delta_deg: delta}),
+    });
+    await fetchCalib();
+    await reproject();
+  };
+});
+
+// mp (mount position) nudge buttons (±1cm default)
+document.querySelectorAll('.mpbtn').forEach(btn => {
+  btn.onclick = async () => {
+    const axis = btn.dataset.axis;
+    const sign = parseInt(btn.dataset.sign);
+    const step_cm = parseFloat(document.getElementById('mp_step_cm').value);
+    const delta_m = sign * step_cm * 0.01;
+    await fetch('/api/nudge_mp', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({axis, delta_m}),
+    });
+    await fetchCalib();
+    await reproject();
+  };
+});
+
+document.getElementById('save').onclick = async () => {
+  const why = document.getElementById('why').value.trim();
+  const status = document.getElementById('save_status');
+  if (why.length < 50) {
+    status.textContent = `why must be ≥ 50 chars (you have ${why.length})`;
+    status.style.color = '#f66';
+    return;
+  }
+  status.textContent = 'saving to ClearML…';
+  status.style.color = '#ff8';
+  const payload = {
+    seq: document.getElementById('seq').value,
+    idx: parseInt(document.getElementById('idx').value),
+    arrows: arrows.map(a => ({u0:a.u0, v0:a.v0, u1:a.u1, v1:a.v1})),
+    fit_params: {
+      n_anchor_r: parseInt(document.getElementById('nar').value),
+      n_anchor_phi: parseInt(document.getElementById('naph').value),
+      theta_anchor_max_deg: parseFloat(document.getElementById('thmax').value),
+    },
+    why: why,
+  };
+  const r = await fetch('/api/save', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const j = await r.json();
+  if (j.error) {
+    status.textContent = `save failed: ${j.error}`;
+    status.style.color = '#f66';
+    return;
+  }
+  const d = j.delta;
+  status.innerHTML = `saved → <a href="${j.task_url}" target="_blank" style="color:#8ff">${j.task_id.slice(0,12)}</a>  Δfx=${d.d_fx.toFixed(2)} Δk1=${d.d_k1.toExponential(2)}`;
+  status.style.color = '#9f9';
+};
+
+async function reloadCmlHistory() {
+  const status = document.getElementById('save_status');
+  status.textContent = 'fetching ClearML history…';
+  status.style.color = '#ff8';
+  const r = await fetch('/api/cml_history?n=30&kind=all');
+  const j = await r.json();
+  const sel = document.getElementById('cml_pick');
+  sel.innerHTML = '<option value="">— ClearML history —</option>';
+  for (const t of (j.tasks || [])) {
+    const o = document.createElement('option');
+    o.value = t.task_id;
+    const fx = t.after_fx ? Number(t.after_fx).toFixed(1) : '—';
+    const cm = (t.comment || '').slice(0, 60);
+    const tag = t.kind === 'gn' ? '[GN]' : '[manual]';
+    o.textContent = `${tag} ${t.last_update.slice(0,16)} f${t.frame_idx} fx=${fx} ${cm}`;
+    sel.appendChild(o);
+  }
+  status.textContent = `loaded ${(j.tasks || []).length} tasks`;
+  status.style.color = '#9f9';
+}
+document.getElementById('cml_reload').onclick = reloadCmlHistory;
+document.getElementById('cml_apply').onclick = async () => {
+  const tid = document.getElementById('cml_pick').value;
+  if (!tid) return;
+  const status = document.getElementById('save_status');
+  status.textContent = `applying ${tid.slice(0,12)}…`;
+  status.style.color = '#ff8';
+  const r = await fetch(`/api/cml_load/${tid}`, {method: 'POST'});
+  const j = await r.json();
+  if (j.error) {
+    status.textContent = `load failed: ${j.error}`;
+    status.style.color = '#f66';
+    return;
+  }
+  status.textContent = `applied ${tid.slice(0,12)}`;
+  status.style.color = '#9f9';
+  await loadFrame(true);
+};
+
+reloadCmlHistory();
+loadFrame(true);
+</script>
+</body></html>

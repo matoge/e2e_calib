@@ -1,0 +1,185 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8"><title>Crop Designer (3-box)</title>
+<script src="https://unpkg.com/konva@9.3.6/konva.min.js"></script>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; font-family:monospace; background:#1a1a1a; color:#ddd; overflow:hidden; }
+  #toolbar { padding:6px 10px; background:#222; border-bottom:1px solid #444; display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:13px; }
+  #toolbar button, #toolbar input { background:#333; color:#ddd; border:1px solid #555; padding:3px 8px; font-family:inherit; }
+  #stage_wrap { width:100vw; height: calc(100vh - 44px); background:#0a0a0a; overflow:hidden; }
+  .info { color:#8c8; font-size:12px; margin-left:8px; }
+  .meta { color:#aaf; font-size:12px; margin-left:8px; }
+  table.boxinfo { font-size:12px; border-collapse:collapse; margin-left:10px; }
+  table.boxinfo td { padding:1px 6px; border:1px solid #444; }
+</style>
+</head><body>
+<div id="toolbar">
+  <button id="reload">Reload image</button>
+  <button id="reset_boxes">Reset 3 boxes</button>
+  <button id="save_boxes" style="background:#2a8;color:white;font-weight:bold">Save → JSON</button>
+  <span id="info" class="info">—</span>
+  <table class="boxinfo" id="box_table">
+    <tr><th>name</th><th>x0</th><th>y0</th><th>x1</th><th>y1</th><th>W×H (orig)</th></tr>
+  </table>
+  <span id="save_status" class="meta">—</span>
+</div>
+<div id="stage_wrap"></div>
+
+<script>
+const wrap = document.getElementById('stage_wrap');
+const stage = new Konva.Stage({ container:'stage_wrap', width: wrap.clientWidth, height: wrap.clientHeight });
+const layerImg = new Konva.Layer(); stage.add(layerImg);
+const layerBox = new Konva.Layer(); stage.add(layerBox);
+let img_meta = null;
+let boxes = [];   // {name, color, x0,y0,x1,y1 in original 10000x5083 coords}
+let scale = 1;    // preview scale
+
+function previewToOrig(p) {
+  return p / img_meta.scale;
+}
+function origToPreview(p) {
+  return p * img_meta.scale;
+}
+
+async function loadImage() {
+  const r = await fetch('/api/rect_image');
+  const j = await r.json();
+  if (j.error) { document.getElementById('info').textContent = 'err: '+j.error; return; }
+  img_meta = j;
+  document.getElementById('info').textContent =
+    `preview ${j.preview_W}×${j.preview_H} | orig ${j.orig_W}×${j.orig_H} | scale=${j.scale.toFixed(3)} | fx=${j.K_rect_fx.toFixed(0)}`;
+  layerImg.destroyChildren();
+  const im = new Image();
+  im.onload = () => {
+    layerImg.add(new Konva.Image({ image: im, x: 0, y: 0,
+        width: j.preview_W, height: j.preview_H }));
+    layerImg.batchDraw();
+    initBoxes();
+  };
+  im.src = 'data:image/jpeg;base64,' + j.img_b64;
+}
+
+function initBoxes() {
+  layerBox.destroyChildren();
+  boxes = [];
+  const W = img_meta.orig_W, H = img_meta.orig_H;
+  const cx = W / 2;
+  const yc = 3050, yh = 1400;
+  // single rectangle, user resizes freely
+  boxes.push({name:'crop', color:'#ff3333', x0:cx-3000, y0:yc-yh/2, x1:cx+3000, y1:yc+yh/2});
+  for (const b of boxes) drawBox(b);
+  refreshTable();
+}
+
+function drawBox(b) {
+  // 左右対称リサイズ: image center cx を中心として、左右ハンドルだけが対称に動く
+  // 上下も画像の cy を中心として対称、ドラッグで全体移動はナシ (常にcenter固定)
+  const cx_orig = img_meta.orig_W / 2;
+  const cy_orig = img_meta.orig_H / 2;
+  const cx_p = origToPreview(cx_orig);
+  const cy_p = origToPreview(cy_orig);
+  const halfW_p = origToPreview((b.x1 - b.x0) / 2);
+  const halfH_p = origToPreview((b.y1 - b.y0) / 2);
+  const rect = new Konva.Rect({
+    x: cx_p - halfW_p, y: cy_p - halfH_p,
+    width: 2 * halfW_p, height: 2 * halfH_p,
+    stroke: b.color, strokeWidth: 2, draggable: false, name: b.name,
+  });
+  const label = new Konva.Text({
+    x: cx_p - halfW_p + 6, y: cy_p - halfH_p + 4,
+    text: b.name + ' (symmetric resize)', fill: b.color,
+    fontSize: 14, fontStyle: 'bold', listening: false });
+  // center line crosshair for visualization
+  const vline = new Konva.Line({
+    points: [cx_p, 0, cx_p, img_meta.preview_H],
+    stroke: '#888', strokeWidth: 1, dash: [6, 4], listening: false });
+  const hline = new Konva.Line({
+    points: [0, cy_p, img_meta.preview_W, cy_p],
+    stroke: '#888', strokeWidth: 1, dash: [6, 4], listening: false });
+  layerBox.add(vline); layerBox.add(hline);
+  layerBox.add(rect); layerBox.add(label);
+  // Transformer with only the 4 mid-side anchors enabled (= symmetric resize)
+  const tr = new Konva.Transformer({
+    nodes: [rect], rotateEnabled: false, anchorSize: 12,
+    enabledAnchors: ['middle-left', 'middle-right', 'top-center', 'bottom-center'],
+    centeredScaling: true,        // resize about center
+    boundBoxFunc: (oldB, newB) =>
+      newB.width >= 20 && newB.height >= 20 ? newB : oldB,
+  });
+  layerBox.add(tr);
+  // 真ん中に専用ハンドル (= drag だけで上下移動)
+  const handleY = new Konva.Circle({
+    x: cx_p, y: cy_p, radius: 14,
+    fill: b.color, stroke: '#fff', strokeWidth: 3,
+    draggable: true, opacity: 0.85,
+  });
+  handleY.dragBoundFunc(function(pos) {
+    return { x: cx_p, y: pos.y };  // x 固定、y 自由
+  });
+  handleY.on('dragmove', () => {
+    const new_cy_p = handleY.y();
+    const w_p = rect.width() * rect.scaleX();
+    const h_p = rect.height() * rect.scaleY();
+    const new_x_p = cx_p - w_p / 2;
+    const new_y_p = new_cy_p - h_p / 2;
+    rect.position({ x: new_x_p, y: new_y_p });
+    label.position({ x: new_x_p + 6, y: new_y_p + 4 });
+    b.x0 = previewToOrig(new_x_p);
+    b.y0 = previewToOrig(new_y_p);
+    b.x1 = previewToOrig(new_x_p + w_p);
+    b.y1 = previewToOrig(new_y_p + h_p);
+    layerBox.batchDraw();
+    refreshTable();
+  });
+  layerBox.add(handleY);
+  function syncFromRect() {
+    const r = rect;
+    const sx = r.scaleX(), sy = r.scaleY();
+    const w_p = r.width() * sx, h_p = r.height() * sy;
+    // box 中心 (cx_p, current cy_p) を保持しつつ scale を反映
+    const cur_cy_p = handleY.y();
+    const new_x_p = cx_p - w_p / 2;
+    const new_y_p = cur_cy_p - h_p / 2;
+    r.x(new_x_p); r.y(new_y_p);
+    r.width(w_p); r.height(h_p);
+    r.scaleX(1); r.scaleY(1);
+    b.x0 = previewToOrig(new_x_p);
+    b.y0 = previewToOrig(new_y_p);
+    b.x1 = previewToOrig(new_x_p + w_p);
+    b.y1 = previewToOrig(new_y_p + h_p);
+    label.position({ x: new_x_p + 6, y: new_y_p + 4 });
+    layerBox.batchDraw();
+    refreshTable();
+  }
+  rect.on('transform', syncFromRect);
+  rect.on('transformend', syncFromRect);
+  layerBox.batchDraw();
+}
+
+function refreshTable() {
+  const tbl = document.getElementById('box_table');
+  tbl.innerHTML = '<tr><th>name</th><th>x0</th><th>y0</th><th>x1</th><th>y1</th><th>W×H (orig)</th></tr>';
+  for (const b of boxes) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td style="color:${b.color}">${b.name}</td>` +
+      `<td>${Math.round(b.x0)}</td><td>${Math.round(b.y0)}</td>` +
+      `<td>${Math.round(b.x1)}</td><td>${Math.round(b.y1)}</td>` +
+      `<td>${Math.round(b.x1-b.x0)}×${Math.round(b.y1-b.y0)}</td>`;
+    tbl.appendChild(tr);
+  }
+}
+
+document.getElementById('reload').onclick = loadImage;
+document.getElementById('reset_boxes').onclick = initBoxes;
+document.getElementById('save_boxes').onclick = async () => {
+  const r = await fetch('/api/save_crops', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({boxes}),
+  });
+  const j = await r.json();
+  document.getElementById('save_status').textContent = j.wrote ? `saved → ${j.wrote}` : ('err: '+(j.error||''));
+};
+window.addEventListener('resize', () => { stage.width(wrap.clientWidth); stage.height(wrap.clientHeight); });
+loadImage();
+</script>
+</body></html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8"><title>LiDAR 3D (raw sensor frame)</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; font-family: monospace; background:#0a0a0a; color:#ddd; overflow:hidden; }
+  #toolbar { position:fixed; top:0; left:0; right:0; z-index:9; padding:6px 10px;
+             background:#1a1a1a; border-bottom:1px solid #444;
+             display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+             font-size:13px; height: 26px; box-sizing: content-box; }
+  #toolbar select, #toolbar button, #toolbar input {
+      background:#333; color:#ddd; border:1px solid #555; padding:2px 6px;
+      font-family: inherit; font-size: 13px; }
+  #canvas { position: fixed; top: 40px; left: 0; right: 0; bottom: 0;
+            width: 100vw; height: calc(100vh - 40px); display: block;
+            outline: none; touch-action: none; }
+  #info { color:#8c8; margin-left:8px; }
+  .err { color:#f88; }
+</style>
+</head><body>
+<div id="toolbar">
+  <label>seq: <select id="seq" style="max-width:520px">
+    {% for s in seqs %}<option value="{{s}}">{{s}}</option>{% endfor %}
+  </select></label>
+  <label>idx: <input id="idx" type="number" value="0" min="0" style="width:60px"></label>
+  <button id="prev">◀</button><button id="next">▶</button>
+  <span style="border-left:1px solid #555;height:18px"></span>
+  <label>color: <select id="color">
+    <option value="azimuth">azimuth</option>
+    <option value="time">time (sweep)</option>
+    <option value="layer">layer (beam)</option>
+    <option value="intensity">intensity</option>
+    <option value="depth">depth</option>
+  </select></label>
+  <label>sub: <input id="sub" type="number" value="2" min="1" max="20" style="width:46px"></label>
+  <label>size: <input id="psize" type="number" step="0.005" value="0.04" style="width:60px"></label>
+  <label style="color:#fa8"><input type="checkbox" id="deskew"> deskew</label>
+  <button id="reload">Reload</button>
+  <span id="info">—</span>
+</div>
+<canvas id="canvas"></canvas>
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script>
+const cv = document.getElementById('canvas');
+const engine = new BABYLON.Engine(cv, true, { preserveDrawingBuffer: true });
+let scene, pcs;
+
+// Sensor frame: x=forward, y=left, z=up.
+// Babylon left-handed: x=right, y=up, z=forward.
+// Map sensor (x,y,z) → babylon (-y, z, x) so that sensor +x (forward) = babylon +z,
+// sensor +y (left) = babylon -x, sensor +z (up) = babylon +y.
+function s2b(x, y, z) { return new BABYLON.Vector3(-y, z, x); }
+
+function makeScene() {
+  const s = new BABYLON.Scene(engine);
+  s.clearColor = new BABYLON.Color4(0.04, 0.04, 0.05, 1);
+  const cam = new BABYLON.ArcRotateCamera('cam',
+      -Math.PI / 2, Math.PI / 2 - 0.4, 40,
+      BABYLON.Vector3.Zero(), s);
+  cam.attachControl(cv, true);
+  cam.upVector = new BABYLON.Vector3(0, 1, 0);
+  cam.wheelPrecision = 4;
+  cam.panningSensibility = 100;
+  cam.lowerRadiusLimit = 0.5;
+  cam.upperRadiusLimit = 800;
+  cam.minZ = 0.05; cam.maxZ = 2000;
+
+  // sensor axes drawn in babylon space; red=+x (forward), green=+y (left), blue=+z (up)
+  const axL = 5;
+  const axM = (color, sx, sy, sz) => {
+    const l = BABYLON.MeshBuilder.CreateLines('a', {
+      points: [s2b(0,0,0), s2b(sx, sy, sz)] }, s);
+    l.color = color; return l;
+  };
+  axM(new BABYLON.Color3(1, 0.2, 0.2), axL, 0, 0);  // forward
+  axM(new BABYLON.Color3(0.2, 1, 0.2), 0, axL, 0);  // left
+  axM(new BABYLON.Color3(0.4, 0.6, 1), 0, 0, axL);  // up
+
+  // grid on sensor x-y plane (z=0), 100m × 100m, every 5m
+  const gridColor = new BABYLON.Color3(0.22, 0.22, 0.28);
+  const major = new BABYLON.Color3(0.40, 0.40, 0.45);
+  for (let g = -50; g <= 50; g += 5) {
+    const c = (g === 0) ? major : gridColor;
+    const lx = BABYLON.MeshBuilder.CreateLines('lx', {
+      points: [s2b(-50, g, 0), s2b(50, g, 0)] }, s);
+    lx.color = c;
+    const ly = BABYLON.MeshBuilder.CreateLines('ly', {
+      points: [s2b(g, -50, 0), s2b(g, 50, 0)] }, s);
+    ly.color = c;
+  }
+  return s;
+}
+
+function turbo(t) {
+  // approximate turbo colormap (t in [0,1])
+  t = Math.max(0, Math.min(1, t));
+  const r = Math.max(0, Math.min(1, -2.62 + 9.91*t - 11.55*t*t + 5.40*t*t*t));
+  const g = Math.max(0, Math.min(1, 0.39 + 4.10*t - 6.55*t*t + 2.91*t*t*t));
+  const b = Math.max(0, Math.min(1, 1.22 - 0.81*t + 4.97*t*t - 5.72*t*t*t));
+  return new BABYLON.Color4(r, g, b, 1);
+}
+
+async function load() {
+  const seq = document.getElementById('seq').value;
+  const idx = document.getElementById('idx').value;
+  const sub = document.getElementById('sub').value;
+  const colorMode = document.getElementById('color').value;
+  const psize = parseFloat(document.getElementById('psize').value) || 0.04;
+  document.getElementById('info').textContent = 'loading…';
+  const deskew = document.getElementById('deskew').checked ? 1 : 0;
+  let r;
+  try { r = await fetch(`/api/lidar_raw?seq=${encodeURIComponent(seq)}&idx=${idx}&sub=${sub}&deskew=${deskew}`); }
+  catch (e) { document.getElementById('info').textContent = 'fetch error: ' + e; return; }
+  const j = await r.json();
+  if (j.error) { document.getElementById('info').textContent = 'err ' + j.error; return; }
+
+  if (pcs) { pcs.dispose(); pcs = null; }
+  pcs = new BABYLON.PointsCloudSystem('pcs', psize * 100, scene);
+  const N = j.xs.length;
+  const xs = j.xs, ys = j.ys, zs = j.zs;
+  const intensity = j.intensity, pt_off = j.pt_off_us, layer = j.layer;
+  const az_raw = j.az_raw;
+  let off_min = Infinity, off_max = -Infinity;
+  for (let i = 0; i < N; i++) {
+    if (pt_off[i] < off_min) off_min = pt_off[i];
+    if (pt_off[i] > off_max) off_max = pt_off[i];
+  }
+  const off_range = Math.max(1, off_max - off_min);
+  pcs.addPoints(N, (p, i) => {
+    p.position = s2b(xs[i], ys[i], zs[i]);
+    let t = 0;
+    if (colorMode === 'time')   t = (pt_off[i] - off_min) / off_range;
+    else if (colorMode === 'layer') t = layer[i] / 127;
+    else if (colorMode === 'intensity') t = Math.min(1, intensity[i]);
+    else if (colorMode === 'depth') {
+      const d = Math.sqrt(xs[i]*xs[i] + ys[i]*ys[i] + zs[i]*zs[i]);
+      t = Math.min(1, d / 80);
+    }
+    else if (colorMode === 'azimuth') {
+      // raw sensor-frame azimuth from npz (atan2(y_sensor, x_sensor))
+      t = (az_raw[i] + Math.PI) / (2 * Math.PI);
+    }
+    p.color = turbo(t);
+  });
+  await pcs.buildMeshAsync();
+  pcs.mesh.material.pointSize = psize * 100;
+
+  let extra = '';
+  if (j.deskewed && j.deskew_stats) {
+    const s = j.deskew_stats;
+    extra = `  DESKEW: max=${(s.max_m*100).toFixed(1)}cm  p99=${(s.p99_m*100).toFixed(1)}cm  mean=${(s.mean_m*1000).toFixed(2)}mm`;
+  }
+  document.getElementById('info').textContent =
+      `${j.cam_name}  ${j.coordinate_system}  pts=${j.n_points_returned}/${j.n_points_total}  ` +
+      `sweep_end=${j.sweep_end_ts_sec.toFixed(3)}s  speed=${j.speed_mps.toFixed(2)}m/s  ` +
+      `yaw=${j.yawrate_rps.toFixed(4)}rad/s  ` +
+      `frame=${j.idx + 1}/${j.n_frames}${extra}`;
+}
+
+scene = makeScene();
+engine.runRenderLoop(() => scene.render());
+window.addEventListener('resize', () => engine.resize());
+// initial sizing — without this the canvas can stay at default 300×150
+requestAnimationFrame(() => engine.resize());
+document.getElementById('reload').onclick = load;
+document.getElementById('seq').onchange = load;
+document.getElementById('idx').onchange = load;
+document.getElementById('color').onchange = load;
+document.getElementById('sub').onchange = load;
+document.getElementById('psize').onchange = load;
+document.getElementById('prev').onclick = () => {
+  const e = document.getElementById('idx');
+  e.value = Math.max(0, parseInt(e.value) - 1); load();
+};
+document.getElementById('next').onclick = () => {
+  const e = document.getElementById('idx');
+  e.value = parseInt(e.value) + 1; load();
+};
+
+load();
+</script>
+</body></html>

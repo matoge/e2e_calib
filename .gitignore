@@ -14,6 +14,10 @@ __pycache__/
 # splatad_kb local sweep dumps
 scripts/splatad_kb/_outputs_*.jpg
 scripts/splatad_kb/_*.jpg
+
+# webui_kb_fit local dumps (keep only tracked polygon json)
+scripts/webui_kb_fit/_outputs/*
+!scripts/webui_kb_fit/_outputs/_dashboard_polygons.json
 .pytest_cache/
 .claude/
 logs/
