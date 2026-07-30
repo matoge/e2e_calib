@@ -156,6 +156,52 @@ def _project(pts_w: np.ndarray, R: np.ndarray, t: np.ndarray,
 RAW_SEQ_ROOT = Path('/mnt/ecp-perception/woven_sequence/tss4_calib_raw_01/'
                     '20230612_001946')
 
+# Woven canary sequences (each dir holds setting-<ipXXX>.json + tss4_fcm/).
+CANARY_SEQ_ROOTS = [
+    Path('/raid/home/hfunaya/woven_canary_local/canary_unilab/test01'),
+]
+
+
+def _canary_options() -> list[dict]:
+    """Enumerate (vehicle, seq_dir, sample_jpg) for the crop_designer
+    dropdown. Vehicle = ipXXX parsed from `sequence=<vehicle>-...`.
+    """
+    opts = []
+    for root in CANARY_SEQ_ROOTS:
+        if not root.is_dir():
+            continue
+        for seq_dir in sorted(root.iterdir()):
+            if not (seq_dir.is_dir() and seq_dir.name.startswith('sequence=')):
+                continue
+            head = seq_dir.name[len('sequence='):]
+            vehicle = head.split('-')[0]           # 'ip607-lidar0-...' → 'ip607'
+            setting = seq_dir / f'setting-{vehicle}.json'
+            fcm_dir = seq_dir / 'tss4_fcm'
+            if not (setting.is_file() and fcm_dir.is_dir()):
+                continue
+            jpgs = sorted(fcm_dir.glob('*.jpg'))
+            if not jpgs:
+                continue
+            opts.append({
+                'source': 'canary',
+                'label': f'{vehicle} — {seq_dir.name[:60]}',
+                'vehicle': vehicle,
+                'seq_dir': str(seq_dir),
+                'sample_jpg': str(jpgs[0]),
+            })
+    # TSS4 default (hard-coded in original /api/rect_image).
+    tss4_jpg = (RAW_SEQ_ROOT / 'sequence=248_20230612_001946_'
+                '1686533186104-1686533191007/tss4_fcm/0000_1686533186104.jpg')
+    if tss4_jpg.is_file():
+        opts.insert(0, {
+            'source': 'tss4',
+            'label': '248 (TSS4 raw / 20230612_001946)',
+            'vehicle': '248',
+            'seq_dir': '',
+            'sample_jpg': str(tss4_jpg),
+        })
+    return opts
+
 
 @app.route('/')
 def index():
@@ -168,23 +214,53 @@ def crop_designer():
     return render_template('crop_designer.html')
 
 
+@app.route('/api/crop_options')
+def api_crop_options():
+    return jsonify({'options': _canary_options()})
+
+
 @app.route('/api/rect_image')
 def api_rect_image():
-    """Return the balance=1.0 stretched rectified image (10000x5083) as
-    a downscaled JPEG b64 + the K_rect for the original resolution."""
-    import io as _io, base64
-    src_jpg = (RAW_SEQ_ROOT / 'sequence=248_20230612_001946_'
-               '1686533186104-1686533191007/tss4_fcm/0000_1686533186104.jpg')
-    if not src_jpg.is_file():
-        return jsonify({'error': f'no src jpg: {src_jpg}'}), 404
-    fcm = json.loads(RECALIB_PATH.read_text())['248']['fcm']
+    """Return the balance=1.0 stretched rectified image as a downscaled
+    JPEG b64 + the K_rect for the original resolution.
+
+    Query params (optional):
+      source   = 'canary' | 'tss4'     (default 'tss4' = backwards compat)
+      vehicle  = 'ipXXX' or '247/248/249'
+      seq_dir  = when source=canary, the sequence directory
+    """
+    import base64
+    src = request.args.get('source', 'tss4')
+    if src == 'canary':
+        seq_dir = Path(request.args.get('seq_dir', ''))
+        vehicle = request.args.get('vehicle', '')
+        setting = seq_dir / f'setting-{vehicle}.json'
+        if not setting.is_file():
+            return jsonify({'error': f'no setting: {setting}'}), 404
+        raw = json.loads(setting.read_text())
+        entry = raw[0] if isinstance(raw, list) else raw
+        fcm = entry['fcm']
+        jpgs = sorted((seq_dir / 'tss4_fcm').glob('*.jpg'))
+        if not jpgs:
+            return jsonify({'error': f'no jpgs under {seq_dir}/tss4_fcm'}), 404
+        src_jpg = jpgs[0]
+    else:
+        vehicle = request.args.get('vehicle', '248')
+        src_jpg = (RAW_SEQ_ROOT / 'sequence=248_20230612_001946_'
+                   '1686533186104-1686533191007/tss4_fcm/0000_1686533186104.jpg')
+        if not src_jpg.is_file():
+            return jsonify({'error': f'no src jpg: {src_jpg}'}), 404
+        fcm = json.loads(RECALIB_PATH.read_text())[vehicle]['fcm']
     fx = fy = float(fcm['kb']['focal_length'])
     cx0, cy0 = fcm['cc']
     W, H = int(fcm['resolution'][0]), int(fcm['resolution'][1])
     K = np.array([[fx, 0, cx0], [0, fy, cy0], [0, 0, 1]], dtype=np.float64)
     D = np.asarray([fcm['kb'][f'k{i}'] for i in (1, 2, 3, 4)],
                    dtype=np.float64).reshape(4, 1)
-    W_out, H_out = 10000, 5083
+    # Fixed stretched canvas width; height scales with input aspect so the
+    # KB rectify doesn't crop out FOV for tall (2160-line) canary jpgs.
+    W_out = 10000
+    H_out = int(round(W_out * H / W))
     K_b1 = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
         K, D, (W, H), np.eye(3), balance=1.0, fov_scale=1.0,
         new_size=(W_out, H_out))

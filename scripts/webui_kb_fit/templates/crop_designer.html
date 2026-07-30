@@ -14,6 +14,9 @@
 </style>
 </head><body>
 <div id="toolbar">
+  <label style="color:#8cf">vehicle:
+    <select id="vehicle_sel" style="min-width:280px"></select>
+  </label>
   <button id="reload">Reload image</button>
   <button id="reset_boxes">Reset 3 boxes</button>
   <button id="save_boxes" style="background:#2a8;color:white;font-weight:bold">Save → JSON</button>
@@ -41,8 +44,36 @@ function origToPreview(p) {
   return p * img_meta.scale;
 }
 
+function selectedQuery() {
+  const sel = document.getElementById('vehicle_sel');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || !opt.dataset) return '';
+  const qs = new URLSearchParams({
+    source: opt.dataset.source || 'tss4',
+    vehicle: opt.dataset.vehicle || '',
+    seq_dir: opt.dataset.seq_dir || '',
+  });
+  return '?' + qs.toString();
+}
+
+async function loadOptions() {
+  const r = await fetch('/api/crop_options');
+  const j = await r.json();
+  const sel = document.getElementById('vehicle_sel');
+  sel.innerHTML = '';
+  for (const o of (j.options || [])) {
+    const opt = document.createElement('option');
+    opt.textContent = o.label;
+    opt.dataset.source  = o.source;
+    opt.dataset.vehicle = o.vehicle;
+    opt.dataset.seq_dir = o.seq_dir;
+    sel.appendChild(opt);
+  }
+  sel.onchange = loadImage;
+}
+
 async function loadImage() {
-  const r = await fetch('/api/rect_image');
+  const r = await fetch('/api/rect_image' + selectedQuery());
   const j = await r.json();
   if (j.error) { document.getElementById('info').textContent = 'err: '+j.error; return; }
   img_meta = j;
@@ -180,6 +211,6 @@ document.getElementById('save_boxes').onclick = async () => {
   document.getElementById('save_status').textContent = j.wrote ? `saved → ${j.wrote}` : ('err: '+(j.error||''));
 };
 window.addEventListener('resize', () => { stage.width(wrap.clientWidth); stage.height(wrap.clientHeight); });
-loadImage();
+(async () => { await loadOptions(); await loadImage(); })();
 </script>
 </body></html>
