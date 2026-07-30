@@ -4,6 +4,14 @@ region.  Output:
     <out_dir>/<stem>.jpg   cropped pinhole jpg
     <out_dir>/K_rect.json  K matrix for the cropped image
                             (so SplatAD can use it directly)
+
+Two intrinsics sources are supported:
+  1. --seq-dir <woven_sequence_dir> --vehicle <ipXXX>
+     Reads <seq-dir>/setting-<vehicle>.json (Woven canary layout,
+     e.g. ip607/ip708). --src-jpgs-dir defaults to <seq-dir>/tss4_fcm.
+  2. --recalib <recalibration.json> --vehicle <numeric_key>
+     Reads recalibration.json[<vehicle>]['fcm'] (TSS4 llinking_26
+     layout, keys '247'/'248'/'249'). --src-jpgs-dir is required.
 """
 from __future__ import annotations
 import argparse, json
@@ -12,15 +20,39 @@ import cv2
 import numpy as np
 
 
-RECALIB = Path('/home/hfunaya/git/loom/backend/assets/woven_sequence/'
-               'llinking_26/recalibration.json')
+DEFAULT_RECALIB = Path(
+    '/home/hfunaya/git/loom/backend/assets/woven_sequence/'
+    'llinking_26/recalibration.json')
+
+
+def _load_fcm(args) -> dict:
+    """Return the fcm dict (with kb / cc / resolution)."""
+    if args.seq_dir is not None:
+        setting = args.seq_dir / f'setting-{args.vehicle}.json'
+        raw = json.loads(setting.read_text())
+        # canary sequences ship a 1-element list; TSS4 recalib is a plain dict.
+        entry = raw[0] if isinstance(raw, list) else raw
+        return entry['fcm']
+    recalib_path = args.recalib or DEFAULT_RECALIB
+    return json.loads(Path(recalib_path).read_text())[args.vehicle]['fcm']
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--src-jpgs-dir', type=Path, required=True)
+    ap.add_argument('--src-jpgs-dir', type=Path, default=None,
+                    help='dir of input fisheye .jpg; default = '
+                         '<seq-dir>/tss4_fcm when --seq-dir is given')
     ap.add_argument('--out-dir', type=Path, required=True)
-    ap.add_argument('--vehicle', default='248')
+    ap.add_argument('--vehicle', default='248',
+                    help='numeric TSS4 key (247/248/249) OR canary '
+                         'vehicle id (ipXXX) when --seq-dir is set')
+    ap.add_argument('--seq-dir', type=Path, default=None,
+                    help='Woven canary sequence dir (contains '
+                         'setting-<vehicle>.json + tss4_fcm/). '
+                         'Mutually exclusive with --recalib.')
+    ap.add_argument('--recalib', type=Path, default=None,
+                    help='recalibration.json (dict[vehicle]->{fcm}). '
+                         f'Default: {DEFAULT_RECALIB}')
     ap.add_argument('--rect-W', type=int, default=10000,
                     help='balance=1.0 stretched canvas width')
     ap.add_argument('--rect-H', type=int, default=5083)
@@ -30,7 +62,14 @@ def main():
     ap.add_argument('--crop-y1', type=int, required=True)
     args = ap.parse_args()
 
-    fcm = json.loads(RECALIB.read_text())[args.vehicle]['fcm']
+    if args.seq_dir is not None and args.recalib is not None:
+        ap.error('--seq-dir and --recalib are mutually exclusive')
+    if args.src_jpgs_dir is None:
+        if args.seq_dir is None:
+            ap.error('--src-jpgs-dir required (or pass --seq-dir)')
+        args.src_jpgs_dir = args.seq_dir / 'tss4_fcm'
+
+    fcm = _load_fcm(args)
     fx = fy = float(fcm['kb']['focal_length'])
     cx0, cy0 = fcm['cc']
     W_in, H_in = int(fcm['resolution'][0]), int(fcm['resolution'][1])
