@@ -28,3 +28,4 @@ build/
 experiments/*/best_model.pt
 experiments/*/train.log
 infra/.cml_setup.sh
+!scripts/webui_kb_fit/_outputs/crop_boxes_ip607.json
