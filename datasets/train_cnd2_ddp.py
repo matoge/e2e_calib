@@ -1477,6 +1477,14 @@ def main():
                                     out_path=out_p,
                                     img_size=args.img_size,
                                     pert_vec=pert_v,
+                                    # sigma も渡す。楕円が無いと「悪い窓が
+                                    # 自分で悪いと分かっているか」が図から
+                                    # 読めない。chi2 ゲートが弾く窓は
+                                    # 楕円が太い窓と一致するはず。
+                                    pred_sigma=(per_pt_np[:, 2:5]
+                                                if per_pt_np.ndim > 1
+                                                and per_pt_np.shape[1] >= 5
+                                                else None),
                                     title_prefix=f'ep{ep+1} {ds_label} {cache_name} #{i}',
                                 )
                                 if cml_logger is not None:

@@ -18,3 +18,123 @@
 14:25:15  ep010/100  tr_nll=2.9295 tr_mse=8.113  va_nll=2.4000 va_mse=6.654  lr=2.98e-04  ep_t=167.2s  total=23.3min
 14:25:15  ep010/100   POSE rot=0.0742deg t=0.0154m chi2r=1.2 sigma=2.889px frac_pd=1.00
 14:25:17    ↳ best val_nll=2.4000  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+14:27:32  ep011/100  tr_nll=2.8199 tr_mse=8.044  va_nll=nan va_mse=nan  lr=2.97e-04  ep_t=134.5s  total=25.6min
+14:29:46  ep012/100  tr_nll=2.8193 tr_mse=8.013  va_nll=nan va_mse=nan  lr=2.96e-04  ep_t=134.0s  total=27.8min
+14:32:00  ep013/100  tr_nll=2.7967 tr_mse=8.001  va_nll=nan va_mse=nan  lr=2.95e-04  ep_t=134.6s  total=30.1min
+14:34:15  ep014/100  tr_nll=2.7493 tr_mse=7.814  va_nll=nan va_mse=nan  lr=2.93e-04  ep_t=134.2s  total=32.3min
+14:37:02  ep015/100  tr_nll=2.7727 tr_mse=7.914  va_nll=2.3770 va_mse=7.079  lr=2.92e-04  ep_t=167.8s  total=35.1min
+14:37:02  ep015/100   POSE rot=0.0884deg t=0.0172m chi2r=1.1 sigma=3.230px frac_pd=1.00
+14:37:04    ↳ best val_nll=2.3770  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+14:39:19  ep016/100  tr_nll=2.8210 tr_mse=8.054  va_nll=nan va_mse=nan  lr=2.90e-04  ep_t=134.2s  total=37.4min
+14:41:34  ep017/100  tr_nll=2.7400 tr_mse=7.772  va_nll=nan va_mse=nan  lr=2.88e-04  ep_t=135.1s  total=39.7min
+14:43:49  ep018/100  tr_nll=2.6989 tr_mse=7.564  va_nll=nan va_mse=nan  lr=2.86e-04  ep_t=134.9s  total=41.9min
+14:46:04  ep019/100  tr_nll=2.7116 tr_mse=7.795  va_nll=nan va_mse=nan  lr=2.84e-04  ep_t=134.7s  total=44.1min
+14:48:51  ep020/100  tr_nll=2.7066 tr_mse=7.860  va_nll=2.3374 va_mse=6.744  lr=2.82e-04  ep_t=166.8s  total=46.9min
+14:48:51  ep020/100   POSE rot=0.0814deg t=0.0136m chi2r=1.2 sigma=3.089px frac_pd=1.00
+14:48:53    ↳ best val_nll=2.3374  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+14:51:07  ep021/100  tr_nll=2.6860 tr_mse=7.779  va_nll=nan va_mse=nan  lr=2.80e-04  ep_t=134.5s  total=49.2min
+14:53:22  ep022/100  tr_nll=2.6960 tr_mse=7.884  va_nll=nan va_mse=nan  lr=2.77e-04  ep_t=134.7s  total=51.4min
+14:55:37  ep023/100  tr_nll=2.6505 tr_mse=7.559  va_nll=nan va_mse=nan  lr=2.74e-04  ep_t=134.5s  total=53.7min
+14:57:51  ep024/100  tr_nll=2.5992 tr_mse=7.501  va_nll=nan va_mse=nan  lr=2.71e-04  ep_t=134.4s  total=55.9min
+15:00:38  ep025/100  tr_nll=2.6623 tr_mse=7.674  va_nll=2.7131 va_mse=7.009  lr=2.68e-04  ep_t=167.5s  total=58.7min
+15:00:38  ep025/100   POSE rot=0.0871deg t=0.0181m chi2r=1.9 sigma=3.065px frac_pd=1.00
+15:02:55  ep026/100  tr_nll=2.6019 tr_mse=7.489  va_nll=nan va_mse=nan  lr=2.65e-04  ep_t=134.5s  total=61.0min
+15:05:10  ep027/100  tr_nll=2.6349 tr_mse=7.431  va_nll=nan va_mse=nan  lr=2.62e-04  ep_t=134.6s  total=63.2min
+15:07:24  ep028/100  tr_nll=2.5823 tr_mse=7.406  va_nll=nan va_mse=nan  lr=2.59e-04  ep_t=134.5s  total=65.5min
+15:09:39  ep029/100  tr_nll=2.5711 tr_mse=7.348  va_nll=nan va_mse=nan  lr=2.55e-04  ep_t=134.6s  total=67.7min
+15:12:26  ep030/100  tr_nll=2.4817 tr_mse=7.285  va_nll=2.2952 va_mse=6.430  lr=2.52e-04  ep_t=167.4s  total=70.5min
+15:12:26  ep030/100   POSE rot=0.0743deg t=0.0128m chi2r=1.2 sigma=2.839px frac_pd=1.00
+15:12:28    ↳ best val_nll=2.2952  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+15:14:43  ep031/100  tr_nll=2.5289 tr_mse=7.329  va_nll=nan va_mse=nan  lr=2.48e-04  ep_t=134.2s  total=72.8min
+15:16:57  ep032/100  tr_nll=2.5391 tr_mse=7.364  va_nll=nan va_mse=nan  lr=2.44e-04  ep_t=134.4s  total=75.0min
+15:19:12  ep033/100  tr_nll=2.4994 tr_mse=7.173  va_nll=nan va_mse=nan  lr=2.40e-04  ep_t=134.6s  total=77.3min
+15:21:26  ep034/100  tr_nll=2.4871 tr_mse=7.248  va_nll=nan va_mse=nan  lr=2.36e-04  ep_t=134.6s  total=79.5min
+15:24:14  ep035/100  tr_nll=2.4550 tr_mse=7.046  va_nll=2.1741 va_mse=6.391  lr=2.32e-04  ep_t=167.5s  total=82.3min
+15:24:14  ep035/100   POSE rot=0.0595deg t=0.0135m chi2r=1.0 sigma=2.571px frac_pd=1.00
+15:24:16    ↳ best val_nll=2.1741  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+15:26:30  ep036/100  tr_nll=2.4181 tr_mse=7.101  va_nll=nan va_mse=nan  lr=2.28e-04  ep_t=133.9s  total=84.6min
+15:28:44  ep037/100  tr_nll=2.4280 tr_mse=7.079  va_nll=nan va_mse=nan  lr=2.24e-04  ep_t=134.4s  total=86.8min
+15:30:59  ep038/100  tr_nll=2.3947 tr_mse=6.918  va_nll=nan va_mse=nan  lr=2.19e-04  ep_t=134.7s  total=89.1min
+15:33:14  ep039/100  tr_nll=2.3678 tr_mse=6.847  va_nll=nan va_mse=nan  lr=2.15e-04  ep_t=134.7s  total=91.3min
+15:36:01  ep040/100  tr_nll=2.4289 tr_mse=7.069  va_nll=1.9959 va_mse=5.734  lr=2.11e-04  ep_t=167.2s  total=94.1min
+15:36:01  ep040/100   POSE rot=0.0647deg t=0.0107m chi2r=1.3 sigma=2.517px frac_pd=1.00
+15:36:03    ↳ best val_nll=1.9959  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+15:38:17  ep041/100  tr_nll=2.3642 tr_mse=6.835  va_nll=nan va_mse=nan  lr=2.06e-04  ep_t=134.1s  total=96.4min
+15:40:31  ep042/100  tr_nll=2.3867 tr_mse=6.936  va_nll=nan va_mse=nan  lr=2.01e-04  ep_t=134.0s  total=98.6min
+15:42:46  ep043/100  tr_nll=2.3520 tr_mse=6.973  va_nll=nan va_mse=nan  lr=1.97e-04  ep_t=134.5s  total=100.8min
+15:45:00  ep044/100  tr_nll=2.3773 tr_mse=6.901  va_nll=nan va_mse=nan  lr=1.92e-04  ep_t=134.2s  total=103.1min
+15:47:47  ep045/100  tr_nll=2.3411 tr_mse=6.923  va_nll=2.0869 va_mse=6.202  lr=1.87e-04  ep_t=166.9s  total=105.9min
+15:47:47  ep045/100   POSE rot=0.0671deg t=0.0128m chi2r=1.1 sigma=2.764px frac_pd=1.00
+15:50:03  ep046/100  tr_nll=2.2363 tr_mse=6.577  va_nll=nan va_mse=nan  lr=1.82e-04  ep_t=134.5s  total=108.1min
+15:52:17  ep047/100  tr_nll=2.2423 tr_mse=6.674  va_nll=nan va_mse=nan  lr=1.78e-04  ep_t=133.8s  total=110.4min
+15:54:31  ep048/100  tr_nll=2.2479 tr_mse=6.648  va_nll=nan va_mse=nan  lr=1.73e-04  ep_t=134.0s  total=112.6min
+15:56:46  ep049/100  tr_nll=2.1754 tr_mse=6.434  va_nll=nan va_mse=nan  lr=1.68e-04  ep_t=134.3s  total=114.8min
+15:59:33  ep050/100  tr_nll=2.2266 tr_mse=6.558  va_nll=1.9289 va_mse=5.812  lr=1.63e-04  ep_t=167.1s  total=117.6min
+15:59:33  ep050/100   POSE rot=0.0546deg t=0.0113m chi2r=1.2 sigma=2.548px frac_pd=1.00
+15:59:35    ↳ best val_nll=1.9289  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+16:01:49  ep051/100  tr_nll=2.1936 tr_mse=6.509  va_nll=nan va_mse=nan  lr=1.58e-04  ep_t=134.2s  total=119.9min
+16:04:04  ep052/100  tr_nll=2.1946 tr_mse=6.528  va_nll=nan va_mse=nan  lr=1.53e-04  ep_t=134.5s  total=122.1min
+16:06:18  ep053/100  tr_nll=2.1799 tr_mse=6.416  va_nll=nan va_mse=nan  lr=1.48e-04  ep_t=134.4s  total=124.4min
+16:08:33  ep054/100  tr_nll=2.1568 tr_mse=6.484  va_nll=nan va_mse=nan  lr=1.43e-04  ep_t=134.5s  total=126.6min
+16:11:20  ep055/100  tr_nll=2.1172 tr_mse=6.391  va_nll=1.8141 va_mse=5.940  lr=1.38e-04  ep_t=167.4s  total=129.4min
+16:11:20  ep055/100   POSE rot=0.0572deg t=0.0113m chi2r=0.9 sigma=2.661px frac_pd=1.00
+16:11:22    ↳ best val_nll=1.8141  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+16:13:36  ep056/100  tr_nll=2.1434 tr_mse=6.484  va_nll=nan va_mse=nan  lr=1.33e-04  ep_t=134.0s  total=131.7min
+16:15:51  ep057/100  tr_nll=2.1063 tr_mse=6.350  va_nll=nan va_mse=nan  lr=1.28e-04  ep_t=134.8s  total=133.9min
+16:18:05  ep058/100  tr_nll=2.0804 tr_mse=6.271  va_nll=nan va_mse=nan  lr=1.23e-04  ep_t=134.4s  total=136.2min
+16:20:20  ep059/100  tr_nll=2.0159 tr_mse=6.203  va_nll=nan va_mse=nan  lr=1.19e-04  ep_t=134.5s  total=138.4min
+16:23:07  ep060/100  tr_nll=2.0212 tr_mse=6.200  va_nll=1.7763 va_mse=5.572  lr=1.14e-04  ep_t=167.3s  total=141.2min
+16:23:07  ep060/100   POSE rot=0.0501deg t=0.0085m chi2r=1.2 sigma=2.466px frac_pd=1.00
+16:23:09    ↳ best val_nll=1.7763  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+16:25:24  ep061/100  tr_nll=2.0302 tr_mse=6.162  va_nll=nan va_mse=nan  lr=1.09e-04  ep_t=134.2s  total=143.5min
+16:27:38  ep062/100  tr_nll=2.0293 tr_mse=6.191  va_nll=nan va_mse=nan  lr=1.04e-04  ep_t=134.1s  total=145.7min
+16:29:52  ep063/100  tr_nll=2.0305 tr_mse=6.206  va_nll=nan va_mse=nan  lr=9.96e-05  ep_t=134.3s  total=148.0min
+16:32:07  ep064/100  tr_nll=1.9655 tr_mse=6.041  va_nll=nan va_mse=nan  lr=9.50e-05  ep_t=134.7s  total=150.2min
+16:34:54  ep065/100  tr_nll=1.9531 tr_mse=6.048  va_nll=2.0392 va_mse=5.591  lr=9.04e-05  ep_t=167.5s  total=153.0min
+16:34:54  ep065/100   POSE rot=0.0524deg t=0.0088m chi2r=1.5 sigma=2.259px frac_pd=1.00
+16:37:11  ep066/100  tr_nll=1.9136 tr_mse=5.962  va_nll=nan va_mse=nan  lr=8.60e-05  ep_t=134.5s  total=155.3min
+16:39:25  ep067/100  tr_nll=1.9302 tr_mse=6.003  va_nll=nan va_mse=nan  lr=8.15e-05  ep_t=134.3s  total=157.5min
+16:41:39  ep068/100  tr_nll=1.8750 tr_mse=5.913  va_nll=nan va_mse=nan  lr=7.72e-05  ep_t=134.3s  total=159.7min
+16:43:54  ep069/100  tr_nll=1.9092 tr_mse=5.960  va_nll=nan va_mse=nan  lr=7.29e-05  ep_t=134.2s  total=162.0min
+16:46:41  ep070/100  tr_nll=1.8740 tr_mse=5.911  va_nll=2.0994 va_mse=5.150  lr=6.87e-05  ep_t=167.6s  total=164.8min
+16:46:41  ep070/100   POSE rot=0.0482deg t=0.0090m chi2r=1.2 sigma=2.174px frac_pd=1.00
+16:48:57  ep071/100  tr_nll=1.8745 tr_mse=5.900  va_nll=nan va_mse=nan  lr=6.46e-05  ep_t=134.1s  total=167.0min
+16:51:12  ep072/100  tr_nll=1.8697 tr_mse=5.847  va_nll=nan va_mse=nan  lr=6.06e-05  ep_t=134.5s  total=169.3min
+16:53:26  ep073/100  tr_nll=1.8321 tr_mse=5.831  va_nll=nan va_mse=nan  lr=5.67e-05  ep_t=134.2s  total=171.5min
+16:55:40  ep074/100  tr_nll=1.8265 tr_mse=5.825  va_nll=nan va_mse=nan  lr=5.29e-05  ep_t=134.2s  total=173.8min
+16:58:28  ep075/100  tr_nll=1.8013 tr_mse=5.744  va_nll=1.6970 va_mse=5.506  lr=4.92e-05  ep_t=167.7s  total=176.5min
+16:58:28  ep075/100   POSE rot=0.0456deg t=0.0081m chi2r=1.0 sigma=2.295px frac_pd=1.00
+16:58:30    ↳ best val_nll=1.6970  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+17:00:44  ep076/100  tr_nll=1.7910 tr_mse=5.719  va_nll=nan va_mse=nan  lr=4.57e-05  ep_t=134.2s  total=178.8min
+17:02:58  ep077/100  tr_nll=1.8274 tr_mse=5.769  va_nll=nan va_mse=nan  lr=4.22e-05  ep_t=134.0s  total=181.1min
+17:05:13  ep078/100  tr_nll=1.7765 tr_mse=5.697  va_nll=nan va_mse=nan  lr=3.89e-05  ep_t=134.1s  total=183.3min
+17:07:27  ep079/100  tr_nll=1.7752 tr_mse=5.714  va_nll=nan va_mse=nan  lr=3.56e-05  ep_t=134.4s  total=185.5min
+17:10:14  ep080/100  tr_nll=1.7510 tr_mse=5.684  va_nll=1.4653 va_mse=5.238  lr=3.25e-05  ep_t=167.2s  total=188.3min
+17:10:14  ep080/100   POSE rot=0.0420deg t=0.0070m chi2r=1.4 sigma=2.225px frac_pd=1.00
+17:10:16    ↳ best val_nll=1.4653  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+17:12:31  ep081/100  tr_nll=1.7504 tr_mse=5.664  va_nll=nan va_mse=nan  lr=2.96e-05  ep_t=134.4s  total=190.6min
+17:14:45  ep082/100  tr_nll=1.7261 tr_mse=5.617  va_nll=nan va_mse=nan  lr=2.67e-05  ep_t=134.3s  total=192.8min
+17:17:00  ep083/100  tr_nll=1.7248 tr_mse=5.666  va_nll=nan va_mse=nan  lr=2.40e-05  ep_t=134.3s  total=195.1min
+17:19:14  ep084/100  tr_nll=1.7252 tr_mse=5.603  va_nll=nan va_mse=nan  lr=2.14e-05  ep_t=134.4s  total=197.3min
+17:22:02  ep085/100  tr_nll=1.6747 tr_mse=5.569  va_nll=1.4548 va_mse=4.891  lr=1.90e-05  ep_t=167.4s  total=200.1min
+17:22:02  ep085/100   POSE rot=0.0420deg t=0.0077m chi2r=1.4 sigma=2.065px frac_pd=1.00
+17:22:03    ↳ best val_nll=1.4548  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+17:24:18  ep086/100  tr_nll=1.7327 tr_mse=5.602  va_nll=nan va_mse=nan  lr=1.67e-05  ep_t=134.2s  total=202.4min
+17:26:32  ep087/100  tr_nll=1.6744 tr_mse=5.582  va_nll=nan va_mse=nan  lr=1.46e-05  ep_t=134.3s  total=204.6min
+17:28:47  ep088/100  tr_nll=1.6637 tr_mse=5.551  va_nll=nan va_mse=nan  lr=1.26e-05  ep_t=134.6s  total=206.9min
+17:31:01  ep089/100  tr_nll=1.6839 tr_mse=5.549  va_nll=nan va_mse=nan  lr=1.08e-05  ep_t=134.7s  total=209.1min
+17:33:49  ep090/100  tr_nll=1.7132 tr_mse=5.566  va_nll=1.4733 va_mse=5.036  lr=9.10e-06  ep_t=167.7s  total=211.9min
+17:33:49  ep090/100   POSE rot=0.0386deg t=0.0071m chi2r=1.1 sigma=2.079px frac_pd=1.00
+17:36:06  ep091/100  tr_nll=1.6360 tr_mse=5.550  va_nll=nan va_mse=nan  lr=7.57e-06  ep_t=134.5s  total=214.2min
+17:38:20  ep092/100  tr_nll=1.6615 tr_mse=5.459  va_nll=nan va_mse=nan  lr=6.20e-06  ep_t=134.2s  total=216.4min
+17:40:34  ep093/100  tr_nll=1.6515 tr_mse=5.560  va_nll=nan va_mse=nan  lr=4.99e-06  ep_t=134.5s  total=218.7min
+17:42:49  ep094/100  tr_nll=1.6768 tr_mse=5.557  va_nll=nan va_mse=nan  lr=3.93e-06  ep_t=134.4s  total=220.9min
+17:45:36  ep095/100  tr_nll=1.6769 tr_mse=5.576  va_nll=1.2633 va_mse=4.762  lr=3.04e-06  ep_t=167.3s  total=223.7min
+17:45:36  ep095/100   POSE rot=0.0385deg t=0.0065m chi2r=1.1 sigma=2.041px frac_pd=1.00
+17:45:38    ↳ best val_nll=1.2633  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+17:47:53  ep096/100  tr_nll=1.6517 tr_mse=5.576  va_nll=nan va_mse=nan  lr=2.31e-06  ep_t=134.4s  total=226.0min
+17:50:07  ep097/100  tr_nll=1.6381 tr_mse=5.538  va_nll=nan va_mse=nan  lr=1.74e-06  ep_t=134.3s  total=228.2min
+17:52:22  ep098/100  tr_nll=1.6548 tr_mse=5.528  va_nll=nan va_mse=nan  lr=1.33e-06  ep_t=134.7s  total=230.4min
+17:54:37  ep099/100  tr_nll=1.6265 tr_mse=5.510  va_nll=nan va_mse=nan  lr=1.08e-06  ep_t=134.5s  total=232.7min
+17:57:24  ep100/100  tr_nll=1.6159 tr_mse=5.490  va_nll=1.5624 va_mse=4.972  lr=1.00e-06  ep_t=167.3s  total=235.5min
+17:57:24  ep100/100   POSE rot=0.0392deg t=0.0061m chi2r=1.3 sigma=2.012px frac_pd=1.00

@@ -25,13 +25,18 @@ def render_one_calib(img_chw, true_uvd, dist_uvd, pred_duv,
                      out_path: Path,
                      img_size: int,
                      pert_vec=None,
-                     title_prefix: str = '') -> dict:
+                     title_prefix: str = '',
+                     pred_sigma=None) -> dict:
     """
     img_chw   : (3, H, W) uint8 numpy or torch tensor
     true_uvd  : (N, 4 or 5) GT-projection [u, v, d, ...]
     dist_uvd  : (N, 4 or 5) HAT-projection (model input) [u, v, d, ...]
     pred_duv  : (N, 2)      predicted (Δu, Δv) — added to dist to get pred
     pert_vec  : (8,) optional perturbation params for title
+    pred_sigma: (N, 3) optional [log_sx, log_sy, rho] — drawn as 1-sigma
+                ellipses on the predicted points. Without it you cannot see
+                whether a bad window KNOWS it is bad; with it, the windows the
+                chi2 gate rejects are visibly the ones with fat ellipses.
     """
     if hasattr(img_chw, 'numpy'):
         img_chw = img_chw.numpy()
@@ -41,6 +46,8 @@ def render_one_calib(img_chw, true_uvd, dist_uvd, pred_duv,
         dist_uvd = dist_uvd.numpy()
     if hasattr(pred_duv, 'numpy'):
         pred_duv = pred_duv.numpy()
+    if pred_sigma is not None and hasattr(pred_sigma, 'numpy'):
+        pred_sigma = pred_sigma.numpy()
 
     img = img_chw.transpose(1, 2, 0).astype(np.uint8)
     H, W = img.shape[:2]
@@ -79,8 +86,27 @@ def render_one_calib(img_chw, true_uvd, dist_uvd, pred_duv,
     ax.scatter(pred[:, 0], pred[:, 1], s=8,
                c='cyan', alpha=0.7, label='pred (dist + Δuv)')
 
+    sig_txt = ''
+    if pred_sigma is not None:
+        from matplotlib.patches import Ellipse
+        ps = pred_sigma[in_img]
+        sx = np.exp(np.clip(ps[:, 0], -6, 6))
+        sy = np.exp(np.clip(ps[:, 1], -6, 6))
+        rho = np.tanh(ps[:, 2]) * 0.99 if np.abs(ps[:, 2]).max() > 1.0 else ps[:, 2]
+        for j in range(len(pred)):
+            cov = np.array([[sx[j]**2, rho[j]*sx[j]*sy[j]],
+                            [rho[j]*sx[j]*sy[j], sy[j]**2]])
+            w_, V = np.linalg.eigh(cov)
+            w_ = np.sqrt(np.maximum(w_, 1e-12))
+            ang = np.degrees(np.arctan2(V[1, -1], V[0, -1]))
+            ax.add_patch(Ellipse((pred[j, 0], pred[j, 1]),
+                                 width=2*w_[-1], height=2*w_[0], angle=ang,
+                                 fill=False, ec='cyan', lw=0.5, alpha=0.35))
+        sig_txt = (f'   sigma median {np.median(np.sqrt(sx*sy)):.2f}px'
+                   f'  (p90 {np.percentile(np.sqrt(sx*sy), 90):.2f})')
+
     title = (f'{title_prefix}  N={n_ok}\n'
-             f'HAT→GT={err_hat:.2f}px   PRED→GT={err_pred:.2f}px')
+             f'HAT→GT={err_hat:.2f}px   PRED→GT={err_pred:.2f}px{sig_txt}')
     if pert_vec is not None:
         pv = pert_vec.numpy() if hasattr(pert_vec, 'numpy') else pert_vec
         title += (f'\npert: t=({pv[0]:+.2f},{pv[1]:+.2f},{pv[2]:+.2f})m  '

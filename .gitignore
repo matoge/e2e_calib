@@ -48,3 +48,8 @@ experiments/*/best_model_ep*.pt
 experiments/*/debug_samples/
 experiments/*/*.png
 experiments/*/*.mp4
+
+# レポートに埋め込む図は追跡する。*.png が全部除外されていて、
+# 2026-08-29 のレポートの図も入っていなかった。
+!docs/_figs/
+!docs/_figs/*.png
