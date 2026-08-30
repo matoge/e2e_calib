@@ -1,6 +1,7 @@
 # nuScenes LiDAR–カメラ外部キャリブレーション
 
-2026-08-31 / CalibNet2 + 外側 GN
+2026-08-31 / CalibNet2 + 外側 GN ／
+[English](2026-08-31_nuscenes-calibration.en.md)
 
 ---
 
