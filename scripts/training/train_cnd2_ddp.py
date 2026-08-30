@@ -286,9 +286,13 @@ def main():
         except Exception as _e:
             log(f"[clearml] logger init failed: {_e}")
 
-    # preflight vis at ep=0
-    from scripts.util.clearml_vis import report_debug_images
-    report_debug_images(model, accel, cml_logger, cache_paths, exp_dir, 0, ds_kw, log, n=5)
+    # preflight vis at ep=0 (scripts/util/clearml_vis.py is missing from the repo)
+    try:
+        from scripts.util.clearml_vis import report_debug_images
+    except ModuleNotFoundError:
+        report_debug_images = None
+    if report_debug_images is not None:
+        report_debug_images(model, accel, cml_logger, cache_paths, exp_dir, 0, ds_kw, log, n=5)
     accel.wait_for_everyone()
 
     for ep in range(epochs):
@@ -332,8 +336,7 @@ def main():
                     except Exception as _e:
                         log(f"  ↳ ClearML upload skipped: {_e}")
             # Per-10-epoch debug images
-            if (ep + 1) % 10 == 0 or (ep + 1) == epochs:
-                from scripts.util.clearml_vis import report_debug_images
+            if ((ep + 1) % 10 == 0 or (ep + 1) == epochs) and report_debug_images is not None:
                 report_debug_images(
                     model, accel, cml_logger, cache_paths, exp_dir,
                     ep + 1, ds_kw, log)

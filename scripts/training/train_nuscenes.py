@@ -19,14 +19,14 @@ CFG = dict(
     img_size     = 64,
     in_channels  = 3,
     use_convnext = True,
-    use_frustum  = True,
+    use_frustum  = False,
     epochs       = 100,
     batch_size   = 32,
     lr           = 1e-3,
     lr_min       = 1e-6,
 )
 
-CACHE = '/tmp/nuscenes_static_cache.pt'
+CACHE = '/tmp/claude-1000/-home-hiro-git-radar-neuralmap-offset/nusc_mini_cache.pt'
 
 
 def epoch_loop(model, loader, optimizer, scaler, train):
@@ -92,7 +92,8 @@ def main():
     model = CalibNetDepth(img_size=c["img_size"], in_channels=c["in_channels"],
                           n_layers=c["n_layers"], self_first=False,
                           use_convnext=c.get("use_convnext", False),
-                          use_frustum=c.get("use_frustum", False)).to(DEVICE)
+                          use_frustum=c.get("use_frustum", False),
+                          use_intensity=False).to(DEVICE)
     log(f"params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=c["lr"], weight_decay=1e-3)
@@ -103,7 +104,7 @@ def main():
         t = (e-5)/max(1,epochs-5)
         return lr_min_r + (1-lr_min_r)*0.5*(1+math.cos(math.pi*t))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    scaler    = torch.GradScaler(device="cuda")
+    scaler    = torch.cuda.amp.GradScaler()
     best_val  = float("inf")
     ckpt      = exp_dir / "best_model.pt"
     t0        = time.time()

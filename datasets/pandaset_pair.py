@@ -26,7 +26,9 @@ from scipy.spatial.transform import Rotation
 
 try:
     import turbojpeg as _tj
-    _HAVE_TJ = True
+    # PyTurboJPEG installs the same module name but exposes a TurboJPEG class,
+    # not the module-level transform/decompress this code path uses.
+    _HAVE_TJ = hasattr(_tj, 'transform') and hasattr(_tj, 'decompress')
 except ImportError:
     _HAVE_TJ = False
 
