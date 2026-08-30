@@ -553,7 +553,7 @@ flowchart TB
   IMG["画像 256x256"] -->|ConvNeXt| COARSE["coarse 16x16"]
   IMG -->|ConvNeXt| FINE["fine 32x32"]
   LID["LiDAR 点<br/>摂動して投影済み"] -->|forward_dense| LDMAP["lidar 16x16"]
-  LID -->|"PointMLP([u/S, v/S, d, i])<br/>+ 周辺 LiDAR との差分"| Q["Q : 点ごとトークン<br/>約 150 点/窓"]
+  LID -->|"PointMLP3(u,v,d,i)<br/>+ FrustumLocalEncoder"| Q["Q : 占有セルごとの代表点<br/>16x16 グリッド、約 150 セル/窓"]
 
   COARSE --> KV["KV 3 レベル連結<br/>+ level_embed"]
   FINE --> KV
@@ -585,16 +585,24 @@ flowchart TB
   class L1,L2 loss
 ```
 
-### Query — 点ごとのトークン
+### Query — 占有セルごとのトークン
 
 ```python
-q_in = [u/img_size, v/img_size, d, intensity]      # 摂動後に投影した位置と深度
-q    = point_mlp(q_in)
-q   += frustum_enc(query_uvd - bucket_uvd, ...)    # 周辺 LiDAR 点との相対配置
+q_in = [u/img_size, v/img_size, d, intensity]   # そのセルの代表点
+q    = point_mlp(q_in)                          # PointMLP3
+q   += frustum_enc(query_uvd, bucket_uvd, ...)  # FrustumLocalEncoder
 ```
 
-1 点 1 トークン。窓あたり約 150 点。`frustum_enc` が「その点の周りに LiDAR 点が
-どう並んでいるか」を差分で足すので、点は孤立せず局所構造を持つ。
+トークンは**点ごとではなくセルごと**。クロップを `grid_n × grid_n`（256px なら
+16×16）に区切り、各セルの中心付近から LiDAR 点を 1 つ代表として取って、その
+`(u, v, d, intensity)` を埋め込む。256 セルのうち LiDAR 点が入るのは窓あたり
+約 150 セル。
+
+そこに `FrustumLocalEncoder` がセル周辺の 3D 構造を足す。**PointNet++ の
+set-abstraction** と同じ形で、同じクロップの生の点群から画像平面距離で近い
+`k` 点を取り、その**相対**座標 `(Δu, Δv, Δd)` を 3 層 MLP で持ち上げ、`k` 個を
+channel-wise max-pool する。相対座標なので画像平面の平行移動に不変、max-pool
+なので順序に不変。ここに attention は無い（attention は後段の KV 相手）。
 
 ### KV — 3 レベル
 

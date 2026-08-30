@@ -609,7 +609,7 @@ flowchart TB
   IMG["image 256x256"] -->|ConvNeXt| COARSE["coarse 16x16"]
   IMG -->|ConvNeXt| FINE["fine 32x32"]
   LID["LiDAR points<br/>perturbed and projected"] -->|forward_dense| LDMAP["lidar 16x16"]
-  LID -->|"PointMLP([u/S, v/S, d, i])<br/>+ difference from neighboring LiDAR"| Q["Q : per-point token<br/>~150 points/window"]
+  LID -->|"PointMLP3(u,v,d,i)<br/>+ FrustumLocalEncoder"| Q["Q : one token per occupied cell<br/>16x16 grid, ~150 cells/window"]
 
   COARSE --> KV["KV 3-level concat<br/>+ level_embed"]
   FINE --> KV
@@ -641,17 +641,27 @@ flowchart TB
   class L1,L2 loss
 ```
 
-### Query — per-point token
+### Query — one token per occupied cell
 
 ```python
-q_in = [u/img_size, v/img_size, d, intensity]      # position and depth projected after perturbation
-q    = point_mlp(q_in)
-q   += frustum_enc(query_uvd - bucket_uvd, ...)    # relative layout of neighboring LiDAR points
+q_in = [u/img_size, v/img_size, d, intensity]   # the cell's representative point
+q    = point_mlp(q_in)                          # PointMLP3
+q   += frustum_enc(query_uvd, bucket_uvd, ...)  # FrustumLocalEncoder
 ```
 
-One point, one token. About 150 points per window. `frustum_enc` adds "how
-LiDAR points are arranged around this point" as a difference, so a point
-isn't isolated — it carries local structure.
+The token is **per occupied cell, not per point**. The crop is binned into a
+`grid_n × grid_n` grid (16×16 at 256 px), one representative LiDAR point is
+taken per cell near its centre, and its `(u, v, d, intensity)` is embedded.
+About 150 of the 256 cells hold LiDAR points in a typical window.
+
+`FrustumLocalEncoder` then adds the local 3D structure around that cell,
+following the **PointNet++ set-abstraction** pattern: from the dense raw point
+cloud of the same crop, take the `k` nearest neighbours by image-plane
+distance, lift their *relative* coordinates `(Δu, Δv, Δd)` through a 3-layer
+MLP, and channel-wise max-pool over the `k`. Relative, so it is
+translation-invariant in the image plane; max-pool, so it is
+permutation-invariant. No attention here — the attention happens later,
+against the KV.
 
 ### KV — 3 levels
 
