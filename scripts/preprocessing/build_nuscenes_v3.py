@@ -18,7 +18,7 @@ Usage:
   python build_nuscenes_v3.py                        # all scenes, 2Hz, front cam
   python build_nuscenes_v3.py --cams CAM_FRONT,CAM_BACK --stride 1
 """
-import argparse, json, sys, time
+import argparse, json, os, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
@@ -97,7 +97,7 @@ def _ann_to_cuboid(ann) -> dict:
 
 def _convert_scene(args_tuple):
     (scene_token, out_dir, data_root, cams_keep, stride, max_frames, gid_start,
-     tile_layout, lmdb_direct, shard_path) = args_tuple
+     tile_layout, lmdb_direct, shard_path, frame_frac) = args_tuple
     scene = _CTX['scenes'][scene_token]
     scene_name = scene['name']
     out_dir = Path(out_dir)
@@ -118,6 +118,15 @@ def _convert_scene(args_tuple):
         sample_tok = _CTX['samples'][sample_tok]['next']
     if stride > 1:
         samples = samples[::stride]
+    if frame_frac < 1.0 and len(samples) > 1:
+        # Evenly spaced subset, endpoints included. Spending the frame budget
+        # across many scenes beats taking every frame of a few: consecutive
+        # nuScenes keyframes are 0.5 s apart and see nearly the same geometry,
+        # so they add little the fusion cannot already get from one of them
+        # (measured: 16 fused frames carry ~4-5 frames' worth of information).
+        k = max(2, int(round(len(samples) * frame_frac)))
+        idx = np.unique(np.linspace(0, len(samples) - 1, k).round().astype(int))
+        samples = [samples[i] for i in idx]
     if max_frames:
         samples = samples[:max_frames]
 
@@ -283,6 +292,13 @@ def main():
     ap.add_argument('--meta-dir',    default=str(META_DIR))
     ap.add_argument('--cams',        default='CAM_FRONT', help='comma list e.g. CAM_FRONT,CAM_BACK')
     ap.add_argument('--workers',     type=int, default=8)
+    ap.add_argument('--scenes',      default='',
+                    help='file with one scene name per line, or a comma-separated '
+                         'list; restrict the build to those scenes')
+    ap.add_argument('--frame-frac',  type=float, default=1.0,
+                    help="keep this fraction of each scene's frames, evenly "
+                         'spaced (0.1 = every 10th). Spends a frame budget on '
+                         'many scenes instead of all frames of a few.')
     ap.add_argument('--max-scenes',  type=int, default=None)
     ap.add_argument('--max-frames',  type=int, default=None)
     ap.add_argument('--stride',      type=int, default=1, help='1 → 2Hz (native), 2 → 1Hz')
@@ -320,10 +336,28 @@ def main():
     # Load minimum meta in main proc to enumerate scenes; full meta in workers.
     scenes = json.load(open(Path(args.meta_dir) / 'scene.json'))
     scenes_sorted = sorted(scenes, key=lambda s: s['name'])
+    if args.scenes:
+        # Explicit scene list (file with one name per line, or comma-separated).
+        # --max-scenes takes the first N by NAME, which is a contiguous slab of
+        # one recording session rather than a sample of the dataset. For
+        # calibration the useful variety is geometric (how much the view
+        # rotates) more than the scene count, so the list is picked by
+        # farthest-point sampling over yaw_total / speed / dist / night / rain
+        # / location -- see scripts/scene_stats.py and scripts/pick_scenes.py.
+        txt = (open(args.scenes).read() if os.path.exists(args.scenes)
+               else args.scenes)
+        want = {x.strip() for x in txt.replace(',', '\n').split('\n') if x.strip()}
+        have = {s['name'] for s in scenes_sorted}
+        missing = want - have
+        scenes_sorted = [s for s in scenes_sorted if s['name'] in want]
+        print(f'--scenes: {len(scenes_sorted)}/{len(want)} matched'
+              + (f'; {len(missing)} absent, e.g. {sorted(missing)[:5]}'
+                 if missing else ''), flush=True)
     if args.max_scenes:
         scenes_sorted = scenes_sorted[:args.max_scenes]
     print(f'cams={cams_keep}  scenes={len(scenes_sorted)}  stride={args.stride}  '
-          f'workers={args.workers}  out={out_dir}', flush=True)
+          f'frame_frac={args.frame_frac}  workers={args.workers}  out={out_dir}',
+          flush=True)
 
     gid_stride = 4000  # ~40 frames × 6 cams = 240 per scene, buffer
     shard_dir = out_dir / '_shards'
@@ -331,7 +365,8 @@ def main():
         shard_dir.mkdir(parents=True, exist_ok=True)
     argv = [(s['token'], str(out_dir), args.data_root, cams_keep, args.stride,
              args.max_frames, i * gid_stride, tile_layout, args.lmdb_direct,
-             str(shard_dir / f'{s["name"]}.lmdb') if args.lmdb_direct else '')
+             str(shard_dir / f'{s["name"]}.lmdb') if args.lmdb_direct else '',
+             args.frame_frac)
             for i, s in enumerate(scenes_sorted)]
 
     t0 = time.time()

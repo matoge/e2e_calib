@@ -38,7 +38,8 @@ from scripts.ba.ba_torch import (
 
 
 def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
-                  loss_type='nll', detach_mu=False):
+                  loss_type='nll', detach_mu=False, img_size=None, group=1,
+                  W_head=None, is_grid=None, return_pose=False):
     """BA pose loss for cnd2 — uses the canonical, self-tested GN module
     (scripts/ba/gn_pose.solve_pose) on the dataset's ORIGINAL-camera solver
     fields (pts_cam_orig / duv_orig / K_orig). NO range→Z / tile-local-K
@@ -76,13 +77,26 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     # Network μ/σ are TILE-LOCAL px; scale to original-camera px by cs/S (the
     # tile origin cancels in a Δ, only the S/cs zoom remains — so duv_orig =
     # duv_local·cs/S EXACTLY, and σ scales the same way). S = model img_size.
-    img_size = 128.0
+    if img_size is None:
+        raise ValueError('_ba_pose_loss: img_size must be the model input size; '
+                         'it was hardcoded to 128 and silently doubled mu at 256.')
+    img_size = float(img_size)
     s2o = (cs_t / img_size).view(B, 1)                        # (B,1)
     mu_orig = per_pt[..., :2] * s2o.unsqueeze(-1)             # (B,N,2) orig px
     sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0) * s2o
     sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0) * s2o
     rho = torch.tanh(per_pt[..., 4]) * 0.95
-    W = make_info_from_sigma_rho(sx, sy, rho)
+    if W_head is not None:
+        # InfoHead2x2's learnable 2x2 per-point information matrix. It is the
+        # thing that is supposed to keep the GN from being overconfident, so it
+        # has to BE the W the GN uses. Rebuilding W from per_pt[..., 2:5]
+        # instead left info_head.mlp[-1] at its zero init -- never a single
+        # gradient step -- through every run so far.
+        # W_head is in LOCAL px^-2; the GN runs in original camera px, and
+        # duv scales by s2o, so the information scales by s2o^-2.
+        W = W_head / (s2o * s2o).view(B, 1, 1, 1)
+    else:
+        W = make_info_from_sigma_rho(sx, sy, rho)
     prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev, dtype=torch.float64)
 
     # FLOAT64 GN + NLL. fx_orig~930 → J~930 → H entries ~1e7 while prior floors
@@ -92,6 +106,55 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     # fp64 carries ~16 digits so the 1e9-conditioned factorisation + its grad
     # stay clean; the .double() cast is autograd-transparent (grad casts back to
     # the fp32 net). solve_pose only needs the float-precision bump here.
+    # group: windows-per-frame that share ONE delta (dataset share_pert). Their
+    # normal equations are the SAME pose problem, so concatenate the points into
+    # one solve instead of solving each 256px tile alone. A single tile is
+    # 24x overconfident (e^T H e / 6 = 24.4 measured on val); fusing G windows
+    # is what actually adds independent constraints.
+    G = int(group)
+    _mixed = (is_grid is not None and float(is_grid.max()) > 0.5
+              and float(is_grid.min()) < 0.5)
+    if G > 1 and _mixed:
+        # Mixed batch: some frames are full-image grids (fuse their G windows
+        # into ONE pose), the rest are random single windows (solve alone).
+        # Recurse per regime and average the two losses.
+        assert B % G == 0, f"batch {B} not divisible by group {G}"
+        gm = is_grid.reshape(B // G, G)[:, 0] > 0.5          # (B/G,) per frame
+        sub = lambda m: [x[m.repeat_interleave(G)] if torch.is_tensor(x) else x
+                         for x in (batch[8], batch[9], batch[10], batch[11])]
+        outs = []
+        for m, g in ((gm, G), (~gm, 1)):
+            if not bool(m.any()):
+                continue
+            mm = m.repeat_interleave(G)
+            b2 = list(batch)
+            for i in (8, 9, 10, 11):
+                b2[i] = batch[i][mm]
+            l, d = _ba_pose_loss(per_pt[mm], dist_uvd[mm], pad_mask[mm], b2,
+                                 ba_iter=ba_iter, damping=damping,
+                                 loss_type=loss_type, detach_mu=detach_mu,
+                                 img_size=img_size, group=g,
+                                 W_head=None if W_head is None else W_head[mm],
+                                 is_grid=None)
+            if l is not None:
+                outs.append((l, d, int(mm.sum())))
+        if not outs:
+            return None, {}
+        tot = sum(n for _, _, n in outs)
+        loss = sum(l * (n / tot) for l, _, n in outs)
+        diag = {}
+        for k in outs[0][1]:
+            diag[k] = sum(d[k] * (n / tot) for _, d, n in outs)
+        diag['frac_grid'] = float(gm.float().mean())
+        return loss, diag
+    if G > 1:
+        assert B % G == 0, f"batch {B} not divisible by group {G}"
+        def _grp(x):
+            return x.reshape(B // G, G * x.shape[1], *x.shape[2:])
+        P0, mu_orig, duv_orig = _grp(P0), _grp(mu_orig), _grp(duv_orig)
+        W, valid = _grp(W), _grp(valid)
+        K_orig = K_orig.reshape(B // G, G, 3, 3)[:, 0]   # one camera per frame
+        B, N = B // G, G * N            # N too: Wi below is built from (B, N)
     P0d = P0.double(); Kd = K_orig.double()
     mu_in = (mu_orig.detach() if detach_mu else mu_orig).double()
     delta_pred, H_last = solve_pose(P0d, -mu_in, W.double(), Kd, valid=valid,
@@ -141,6 +204,30 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
             t_err   = (delta_pred[okm, 3:] - delta_gt[okm, 3:]).abs().mean() if okm.any() else torch.tensor(float('nan'))
             diag = {'rot_err': float(rot_err), 't_err': float(t_err),
                     'frac_pd': float(ok.float().mean())}
+            if return_pose:
+                # The per-group 6-DOF estimate, its information matrix, and the
+                # target the error is measured against. Summing H across groups
+                # (frames) is what over-counts when the groups are correlated:
+                # measured chi2/6 goes 1.8 -> 4.4 from 1 to 16 adjacent frames.
+                # Handing these out lets a fusion rule other than plain
+                # summation be tried without re-deriving the GN setup.
+                diag['delta_pred'] = delta_pred.detach()
+                diag['delta_gt']   = delta_gt.detach()
+                diag['H']          = H.detach()
+                diag['ok']         = ok.detach()
+            # The sigma the GN actually weighted with, in ORIGINAL camera px.
+            # Switching the BA loss on gives the net a cheap way to cut
+            # e^T H e: inflate sigma so H shrinks (-0.5*logdet H only fights
+            # back logarithmically). sigma and mu come out of the same head,
+            # so that inflation drags mu -- measured va_mse 4.96 -> 7.53 ->
+            # 8.69 over ep100/110/120 when it was enabled at weight 0.02.
+            # Plot it: sigma_px rising while chi2_reduced falls IS that trade.
+            # `valid` was regrouped to (B/G, N*G) for the fused solve; sx/sy
+            # are still (B, N), so mask with the per-point validity, not it.
+            _vp = (~pad_mask) & (Zc > 0.5)
+            _sg = (sx * sy).clamp_min(1e-12).sqrt()[_vp]
+            if _sg.numel():
+                diag['sigma_px'] = float(_sg.median())
             if quad is not None:
                 diag['logdet'] = float(logdet.mean()); diag['quad'] = float(quad.mean())
         else:
@@ -501,8 +588,46 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         valid  = ~pad_mask
         ba_diag = None
         nll_loss = gaussian2d_nll(per_pt[valid], gt[valid])
+        if (not train) and getattr(accel, '_pose_eval', None) is not None:
+            # POSE evaluation, run every eval epoch whether or not the BA loss
+            # is switched on. tr_mse/va_mse are ||mu - gt|| in local crop px --
+            # the POINT error. Nothing on the curve was ever the pose error,
+            # which is what this calibration is actually for. Diagnostics only:
+            # no graph, no gradient, does not touch the loss.
+            with torch.no_grad():
+                _l, _d = _ba_pose_loss(
+                    per_pt.detach(), dist_uvd, pad_mask, batch,
+                    img_size=img_size, group=getattr(accel, '_ba_group', 1),
+                    W_head=(None if getattr(accel, '_ba_w_source', 'infohead')
+                            == 'sigma' else
+                            (out[1].detach() if isinstance(out, tuple)
+                             and len(out) > 1 else None)),
+                    is_grid=(batch[15] if len(batch) > 15 else None),
+                    ba_iter=getattr(accel, '_ba_iter', 4),
+                    damping=getattr(accel, '_ba_damping', 1e-3),
+                    loss_type='nll', detach_mu=True)
+            if _d:
+                accel._pose_eval.append(_d)
         if getattr(accel, '_ba_loss_mode', False):
+            # Which 2x2 per-point information matrix the GN weights with.
+            # 'infohead': InfoHead2x2's learnable W. At init its last layer is
+            #   zero-weight/zero-bias, so W is a CONSTANT 0.48*I for every
+            #   point -- no down-weighting at all, and the BA squared term is
+            #   dominated by whichever points have bad mu (measured tr_nll
+            #   14651 at ep1 resuming from head_ns200, whose info_head never
+            #   received gradient).
+            # 'sigma': make_info_from_sigma_rho(sx, sy, rho) from the per-point
+            #   head, which gaussian2d_nll trains directly. This is the path
+            #   cam_rnd400 / task 93304c44 actually ran on.
+            _src = getattr(accel, '_ba_w_source', 'infohead')
+            W_head = out[1] if (isinstance(out, tuple) and len(out) > 1) else None
+            if _src == 'sigma':
+                W_head = None
             ba_l, ba_diag = _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch,
+                                          img_size=img_size,
+                                          group=getattr(accel, '_ba_group', 1),
+                                          W_head=W_head,
+                                          is_grid=(batch[15] if len(batch) > 15 else None),
                                           ba_iter=getattr(accel, '_ba_iter', 4),
                                           damping=getattr(accel, '_ba_damping', 1e-3),
                                           loss_type=getattr(accel, '_ba_loss_type', 'nll'),
@@ -543,6 +668,12 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             if ba_diag:
                 ba_str = (f"  rot_err={ba_diag.get('rot_err', float('nan')):.3f}°"
                           f" t_err={ba_diag.get('t_err', float('nan')):.3f}m")
+                if 'frac_pd' in ba_diag:
+                    # fraction of tiles whose H is PD, i.e. NOT dropped by
+                    # cholesky_ex. Always print it: silently dropping tiles is
+                    # what hid pts_cam_orig being in WORLD frame (only ~54% of
+                    # points passed Z>0.5 and 4/6 tiles went non-PD).
+                    ba_str += f" frac_pd={ba_diag['frac_pd']:.2f}"
                 if 'logdet' in ba_diag:
                     ba_str += f" logdetH={ba_diag['logdet']:.1f}"
             print(f"  step {n}  loss={loss.item():+.3f}{ba_str}  "
@@ -581,12 +712,32 @@ def main():
                    help='Use BA-based pose loss instead of per-point gaussian2d_nll')
     p.add_argument('--ba-iter', type=int, default=4)
     p.add_argument('--ba-damping', type=float, default=1e-3)
+    p.add_argument('--ba-w-source', choices=('infohead', 'sigma'),
+                   default='infohead',
+                   help="where the GN's per-point 2x2 information matrix comes "
+                        "from: InfoHead2x2 (learnable, constant 0.48*I at init) "
+                        "or the per-point sigma head (trained by gaussian2d_nll)")
+    p.add_argument('--ba-warmup-start', type=int, default=0,
+                   help='epoch at which the BA weight starts rising from 0')
+    p.add_argument('--ba-warmup-end', type=int, default=0,
+                   help='epoch at which it reaches --ba-weight (<= start means no ramp)')
     p.add_argument('--ba-weight', type=float, default=0.5,
                    help='weight of BA loss in mixture; (1-w) * nll + w * ba')
     p.add_argument('--ba-loss-type', type=str, default='nll',
                    choices=['nll', 'mse'],
                    help='BA pose objective: "nll" (Mahalanobis under Σ_δ=H⁻¹, '
                         'degeneracy-safe, default) or "mse" (legacy rot+100·t).')
+    p.add_argument('--grid-iw', type=int, default=1600, help='image width for the crop grid')
+    p.add_argument('--grid-ih', type=int, default=900,  help='image height for the crop grid')
+    p.add_argument('--grid-frac', type=float, default=0.5,
+                   help='fraction of FRAMES that use the full-image grid (fused '
+                        'pose); the rest use random pivots (single-window pose)')
+    p.add_argument('--crop-grid', action='store_true',
+                   help='deterministic crop grid covering the WHOLE image instead of '
+                        'random lidar-pivot crops (needs oversample = ceil(W/cs)*ceil(H/cs))')
+    p.add_argument('--share-pert', action='store_true',
+                   help='one delta per FRAME: all `oversample` windows share it, '
+                        'so the BA loss can fuse them into a single pose')
     p.add_argument('--ba-detach-mu', action='store_true',
                    help='Detach μ in the BA pose loss so it trains only W (default '
                         'OFF = μ attached, natural E2E). Was a band-aid for the '
@@ -615,6 +766,10 @@ def main():
                    help='σ of the random B matrix in Fourier features '
                         '(NeRF default ~10).')
     p.add_argument('--val-fraction', type=float, default=0.1)
+    p.add_argument('--scene-split', action='store_true',
+                   help="use the cache's own SCENE-disjoint train/val split "
+                        "(meta.pt) instead of reshuffling every frame together; "
+                        "--val-fraction is ignored")
     p.add_argument('--split-seed', type=int, default=42)
     p.add_argument('--use-info-head', action='store_true',
                    help='enable InfoHead2x2 (still ignored by NLL loss; for ckpt only)')
@@ -701,7 +856,25 @@ def main():
     accel._ba_damping   = float(args.ba_damping)
     accel._ba_weight    = float(args.ba_weight)
     accel._ba_loss_type = str(args.ba_loss_type)
+    accel._ba_w_source  = str(args.ba_w_source)
     accel._ba_detach_mu = bool(args.ba_detach_mu)
+    # share_pert makes every window of a frame carry ONE delta; ba_group
+    # then folds those windows into a single GN. Without share_pert a
+    # group would be summing normal equations of DIFFERENT poses.
+    if args.crop_grid:
+        # The grid is ceil(IW/cs) x ceil(IH/cs), so the number of windows a
+        # frame must emit follows from the image size and the crop size. Derive
+        # it instead of trusting a hand-typed --oversample.
+        import math as _math
+        _IW, _IH = int(args.grid_iw), int(args.grid_ih)
+        _cs = int(args.min_crop_px)
+        _need = _math.ceil(_IW / _cs) * _math.ceil(_IH / _cs)
+        if int(args.oversample) != _need:
+            log(f"crop_grid: {_IW}x{_IH} / {_cs}px -> "
+                f"{_math.ceil(_IW/_cs)}x{_math.ceil(_IH/_cs)} = {_need} windows; "
+                f"overriding --oversample {args.oversample} -> {_need}")
+            args.oversample = _need
+    accel._ba_group     = int(args.oversample) if args.share_pert else 1
 
     # ClearML init (rank-0 only, BEFORE main loop so cml_logger lookups work)
     if args.clearml and int(os.environ.get('RANK', '0')) == 0:
@@ -748,6 +921,9 @@ def main():
                  min_crop_px=args.min_crop_px, max_crop_px=args.max_crop_px,
                  grid_n=args.grid_n, oversample=args.oversample,
                  split_pert=False,
+                 share_pert=bool(args.share_pert),
+                 crop_grid=bool(args.crop_grid),
+                 grid_frac=float(args.grid_frac),
                  pair_stride=int(args.pair_stride),
                  pair_bidir=bool(args.pair_bidir),
                  calib_pert=bool(args.calib_pert),
@@ -823,17 +999,32 @@ def main():
     else:
         tr_full = ConcatDataset(tr_parts) if len(tr_parts) > 1 else tr_parts[0]
         va_full = ConcatDataset(va_parts) if len(va_parts) > 1 else va_parts[0]
-        full_ds = ConcatDataset([tr_full, va_full])
-        # __len__ = frame count (oversample handled in __getitem__).
-        idxs = list(range(len(full_ds)))
-        _r.Random(args.split_seed).shuffle(idxs)
-        n_val = int(len(idxs) * args.val_fraction)
-        val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
-        train_ds = Subset(full_ds, train_idxs)
-        val_ds   = Subset(full_ds, val_idxs)
         train_ds_calib = None
         val_ds_calib   = None
-        log(f"frame-level split: train={len(train_ds)} val={len(val_ds)} frames")
+        if args.scene_split:
+            # HELD-OUT SCENES. build_nuscenes_v3 already splits by SCENE
+            # (rng.shuffle(scenes_sorted); n_val = len*val_frac), and the
+            # cache carries that in meta.pt as train/val. The default path
+            # below throws it away: it concatenates both sides and reshuffles
+            # at FRAME level, so a val frame's temporal neighbours sit in
+            # train and the two see the same stretch of road seconds apart.
+            # Every number before 2026-08-30 was measured that way.
+            train_ds = tr_full
+            val_ds   = va_full
+            log(f"SCENE-level split (from the cache meta): "
+                f"train={len(train_ds)} val={len(val_ds)} frames — "
+                f"val scenes are never trained on")
+        else:
+            full_ds = ConcatDataset([tr_full, va_full])
+            # __len__ = frame count (oversample handled in __getitem__).
+            idxs = list(range(len(full_ds)))
+            _r.Random(args.split_seed).shuffle(idxs)
+            n_val = int(len(idxs) * args.val_fraction)
+            val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
+            train_ds = Subset(full_ds, train_idxs)
+            val_ds   = Subset(full_ds, val_idxs)
+            log(f"frame-level split: train={len(train_ds)} val={len(val_ds)} frames "
+                f"(NOT scene-disjoint; pass --scene-split for held-out scenes)")
 
     nw = args.workers
     val_nw = min(4, nw)
@@ -1010,6 +1201,22 @@ def main():
     accel.wait_for_everyone()
     for ep in range(args.start_epoch, epochs):
         ep_t = time.time()
+        # BA weight ramp. H = sum J^T W J with W from an untrained InfoHead is
+        # ill-conditioned, so H^-1 and logdet H blow up: on a fresh model the BA
+        # loss measures ~1.7e4 with 1.9e7 gradients, against ~-20 / 1e3 once
+        # trained. Switching it on from step 0 drowns the per-point loss (tr_mse
+        # went 10.7 -> 21.7 over 20 epochs). Hold it at 0 while the points are
+        # learned, then ramp linearly.
+        if args.ba_loss:
+            w0, w1 = int(args.ba_warmup_start), int(args.ba_warmup_end)
+            if ep < w0:
+                _w = 0.0
+            elif ep >= w1 or w1 <= w0:
+                _w = float(args.ba_weight)
+            else:
+                _w = float(args.ba_weight) * (ep - w0) / float(w1 - w0)
+            accel._ba_weight = _w
+            accel._ba_loss_mode = bool(args.ba_loss) and _w > 0.0
         # epoch_loop_pair returns 4-tuple (nll, mse, nll_calib, mse_calib);
         # epoch_loop returns 2-tuple. Unpack with a length guard so this runs
         # in both modes without changing the legacy single-frame epoch_loop.
@@ -1033,6 +1240,7 @@ def main():
             tr_out_calib = _epoch_fn_calib(model, train_loader_calib, optimizer,
                                             accel, True, args.img_size)
         if do_eval:
+            accel._pose_eval = []
             with torch.no_grad():
                 va_out = _epoch_fn(model, val_loader, optimizer, accel, False,
                                     args.img_size, vis_capture=vis_cap_val)
@@ -1064,8 +1272,40 @@ def main():
                 f"va_nll={va_nll:.4f} va_mse={va_mse:.3f}{calib_str}{mixed_str}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
                 f"ep_t={time.time()-ep_t:.1f}s  total={elapsed/60:.1f}min")
+            # --- pose evaluation -------------------------------------
+            # rot/t are what the calibration is judged on; chi2_reduced =
+            # (e^T H e)/6 is whether the GN's own covariance is honest about
+            # it (1.0 = calibrated). Measured 0.093 deg / 0.022 m with
+            # chi2_reduced 224 on the ep100 BA-free checkpoint: the pose is
+            # right and the covariance is 224x too tight, which is what makes
+            # the BA NLL ~636 and drags mu when it is switched on.
+            # do_eval gate: the accumulator is only refilled on eval
+            # epochs, so without this every non-eval epoch reprinted the
+            # previous eval's pose verbatim (ep002 identical to ep001).
+            _pe = (getattr(accel, '_pose_eval', None) or []) if do_eval else []
+            pose_str = ''
+            if _pe:
+                import statistics as _st
+                _med = lambda k: _st.median([d[k] for d in _pe if d.get(k) is not None]) \
+                    if any(d.get(k) is not None for d in _pe) else float('nan')
+                p_rot, p_t = _med('rot_err'), _med('t_err')
+                p_quad, p_ld = _med('quad'), _med('logdet')
+                p_pd = _med('frac_pd')
+                p_sg = _med('sigma_px')
+                p_chi2 = p_quad / 6.0 if p_quad == p_quad else float('nan')
+                pose_str = (f"  POSE rot={p_rot:.4f}deg t={p_t:.4f}m"
+                            f" chi2r={p_chi2:.1f} sigma={p_sg:.3f}px"
+                            f" frac_pd={p_pd:.2f}")
+                log(f"ep{ep+1:03d}/{epochs} {pose_str}")
             if cml_logger is not None:
                 rs = cml_logger.report_scalar
+                if _pe:
+                    rs(title='pose/rot_err_deg', series='val', value=p_rot, iteration=ep+1)
+                    rs(title='pose/t_err_m',     series='val', value=p_t,   iteration=ep+1)
+                    rs(title='pose/chi2_reduced', series='val', value=p_chi2, iteration=ep+1)
+                    rs(title='pose/logdetH',     series='val', value=p_ld,  iteration=ep+1)
+                    rs(title='pose/frac_pd',     series='val', value=p_pd,  iteration=ep+1)
+                    rs(title='pose/sigma_px',    series='val', value=p_sg,  iteration=ep+1)
                 rs(title='loss/nll', series='train', value=tr_nll, iteration=ep+1)
                 rs(title='loss/mse', series='train', value=tr_mse, iteration=ep+1)
                 rs(title='lr', series='lr',
@@ -1281,7 +1521,12 @@ def main():
                     try:
                         from clearml import OutputModel as _OM
                         _om = _OM(task=cml_task, name=f'{args.name}_best')
-                        _om.update_weights(weights_filename=str(ckpt))
+                        # auto_delete_file defaults to True and os.remove()s
+                        # the file after upload -- every --clearml run so far
+                        # lost its best_model.pt that way (only last_model.pt
+                        # survived, which is why every comparison used `last`).
+                        _om.update_weights(weights_filename=str(ckpt),
+                                           auto_delete_file=False)
                         cfg_p = exp_dir / 'config.py'
                         if cfg_p.exists():
                             cml_task.upload_artifact('config.py',

@@ -29,3 +29,22 @@ experiments/*/best_model.pt
 experiments/*/train.log
 infra/.cml_setup.sh
 !scripts/webui_kb_fit/_outputs/crop_boxes_ip607.json
+
+# 2026-08-30: LiDAR-camera キャリブレーションの標準構成。この 6 実験だけ
+# best_model.pt / train.log / config.py をコミットする。他は従来どおり除外。
+# 重みは ClearML の update_weights にも上がっているので、消えても取り戻せる
+# (2026-08-29 の電源断で /tmp ごと失ったときも回収できた)。
+!experiments/fuse28_infohead_scenesplit/
+!experiments/front_670x3/
+!experiments/fuse28_6cam_300sc/
+!experiments/fuse28_infohead_v2_ssd/
+!experiments/fuse28_infohead_blob01/
+!experiments/cam6_250x2_100ep/
+!experiments/*/best_model.pt
+!experiments/*/train.log
+!experiments/*/config.py
+experiments/*/last_model.pt
+experiments/*/best_model_ep*.pt
+experiments/*/debug_samples/
+experiments/*/*.png
+experiments/*/*.mp4

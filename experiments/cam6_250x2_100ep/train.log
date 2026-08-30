@@ -1,0 +1,20 @@
+14:01:54  accelerate: num_processes=1 mixed_precision=no device=cuda
+14:01:54    [/mnt/ssd2t/work/e2e_calib/cache/ns_250x2_6cam] train=2700 val=300 (os=28) u_band=0.0 mode=calib
+14:01:54  SCENE-level split (from the cache meta): train=2700 val=300 frames — val scenes are never trained on
+14:01:55  params: 1.14M  (world_size=1, bs/rank=4, global_bs=4)
+14:01:55  resumed weights from /home/hiro/git/e2e_calib/experiments/front_670x3/best_model.pt (missing=0 unexpected=0)
+14:03:56  ep001/100  tr_nll=3.5598 tr_mse=7.760  va_nll=3.1532 va_mse=6.449  lr=1.20e-04  ep_t=121.2s  total=2.0min
+14:03:56  ep001/100   POSE rot=0.0569deg t=0.0124m chi2r=1.4 sigma=2.635px frac_pd=1.00
+14:03:58    ↳ best val_nll=3.1532  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)
+14:06:13  ep002/100  tr_nll=3.4493 tr_mse=7.594  va_nll=nan va_mse=nan  lr=1.80e-04  ep_t=134.4s  total=4.3min
+14:08:27  ep003/100  tr_nll=3.4484 tr_mse=7.805  va_nll=nan va_mse=nan  lr=2.40e-04  ep_t=134.4s  total=6.5min
+14:10:42  ep004/100  tr_nll=3.4063 tr_mse=8.014  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=134.3s  total=8.8min
+14:13:29  ep005/100  tr_nll=3.4356 tr_mse=8.262  va_nll=3.1867 va_mse=7.781  lr=3.00e-04  ep_t=167.2s  total=11.6min
+14:13:29  ep005/100   POSE rot=0.0898deg t=0.0185m chi2r=1.2 sigma=3.388px frac_pd=1.00
+14:15:45  ep006/100  tr_nll=5.4341 tr_mse=8.169  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=134.2s  total=13.8min
+14:17:59  ep007/100  tr_nll=3.2100 tr_mse=7.989  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=133.9s  total=16.1min
+14:20:13  ep008/100  tr_nll=3.1149 tr_mse=8.126  va_nll=nan va_mse=nan  lr=2.99e-04  ep_t=134.5s  total=18.3min
+14:22:28  ep009/100  tr_nll=3.0308 tr_mse=8.247  va_nll=nan va_mse=nan  lr=2.99e-04  ep_t=134.5s  total=20.5min
+14:25:15  ep010/100  tr_nll=2.9295 tr_mse=8.113  va_nll=2.4000 va_mse=6.654  lr=2.98e-04  ep_t=167.2s  total=23.3min
+14:25:15  ep010/100   POSE rot=0.0742deg t=0.0154m chi2r=1.2 sigma=2.889px frac_pd=1.00
+14:25:17    ↳ best val_nll=2.4000  saved experiments/cam6_250x2_100ep/best_model.pt (4.62 MB)

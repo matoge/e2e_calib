@@ -1,0 +1,76 @@
+17:31:46  accelerate: num_processes=1 mixed_precision=no device=cuda
+17:31:46    [/mnt/ssd2t/work/e2e_calib/cache/ns_v3_notile_blob01] train=2899 val=477 (os=28) u_band=0.0 mode=calib
+17:31:46  frame-level split: train=3039 val=337 frames
+17:31:46  params: 1.14M  (world_size=1, bs/rank=4, global_bs=4)
+17:31:46  resumed weights from /mnt/ssd2t/work/e2e_calib/ckpt/tilepert_ba_from_repro256b_best.pt (missing=0 unexpected=0)
+17:33:54  ep001/50  tr_nll=3.3347 tr_mse=5.131  va_nll=3.0409 va_mse=4.751  lr=1.20e-04  ep_t=127.5s  total=2.1min
+17:33:54  ep001/50   POSE rot=0.1228deg t=0.0263m chi2r=5173.5 sigma=2.552px frac_pd=1.00
+17:33:56    ↳ best val_nll=3.0409  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+17:36:15  ep002/50  tr_nll=14.9267 tr_mse=5.352  va_nll=nan va_mse=nan  lr=1.80e-04  ep_t=139.4s  total=4.5min
+17:38:35  ep003/50  tr_nll=3.2234 tr_mse=5.440  va_nll=nan va_mse=nan  lr=2.40e-04  ep_t=139.4s  total=6.8min
+17:40:54  ep004/50  tr_nll=3.1971 tr_mse=5.508  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=139.4s  total=9.1min
+17:43:49  ep005/50  tr_nll=3.3182 tr_mse=5.939  va_nll=3.0181 va_mse=5.334  lr=3.00e-04  ep_t=174.8s  total=12.0min
+17:43:49  ep005/50   POSE rot=0.0806deg t=0.0172m chi2r=1.4 sigma=2.973px frac_pd=1.00
+17:43:51    ↳ best val_nll=3.0181  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+17:46:11  ep006/50  tr_nll=3.1066 tr_mse=5.812  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=139.6s  total=14.4min
+17:48:35  ep007/50  tr_nll=2.9757 tr_mse=5.773  va_nll=nan va_mse=nan  lr=2.99e-04  ep_t=144.6s  total=16.8min
+17:50:55  ep008/50  tr_nll=2.8496 tr_mse=5.742  va_nll=nan va_mse=nan  lr=2.97e-04  ep_t=139.6s  total=19.1min
+17:53:15  ep009/50  tr_nll=2.7376 tr_mse=5.816  va_nll=nan va_mse=nan  lr=2.94e-04  ep_t=139.7s  total=21.5min
+17:56:10  ep010/50  tr_nll=2.6997 tr_mse=5.875  va_nll=2.5849 va_mse=5.471  lr=2.91e-04  ep_t=174.9s  total=24.4min
+17:56:10  ep010/50   POSE rot=0.0822deg t=0.0177m chi2r=1.3 sigma=3.199px frac_pd=1.00
+17:56:11    ↳ best val_nll=2.5849  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+17:58:31  ep011/50  tr_nll=2.4411 tr_mse=5.617  va_nll=nan va_mse=nan  lr=2.87e-04  ep_t=139.6s  total=26.8min
+18:00:53  ep012/50  tr_nll=2.4884 tr_mse=5.762  va_nll=nan va_mse=nan  lr=2.83e-04  ep_t=141.9s  total=29.1min
+18:03:16  ep013/50  tr_nll=2.3915 tr_mse=5.554  va_nll=nan va_mse=nan  lr=2.77e-04  ep_t=142.3s  total=31.5min
+18:05:36  ep014/50  tr_nll=2.3746 tr_mse=5.535  va_nll=nan va_mse=nan  lr=2.71e-04  ep_t=140.7s  total=33.8min
+18:08:31  ep015/50  tr_nll=2.3114 tr_mse=5.482  va_nll=2.2666 va_mse=5.345  lr=2.65e-04  ep_t=175.0s  total=36.8min
+18:08:31  ep015/50   POSE rot=0.0710deg t=0.0141m chi2r=1.0 sigma=2.857px frac_pd=1.00
+18:08:34    ↳ best val_nll=2.2666  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+18:10:53  ep016/50  tr_nll=2.3278 tr_mse=5.517  va_nll=nan va_mse=nan  lr=2.58e-04  ep_t=139.5s  total=39.1min
+18:13:13  ep017/50  tr_nll=2.2686 tr_mse=5.409  va_nll=nan va_mse=nan  lr=2.51e-04  ep_t=139.7s  total=41.4min
+18:15:33  ep018/50  tr_nll=2.1898 tr_mse=5.272  va_nll=nan va_mse=nan  lr=2.43e-04  ep_t=139.6s  total=43.8min
+18:17:52  ep019/50  tr_nll=2.2455 tr_mse=5.375  va_nll=nan va_mse=nan  lr=2.34e-04  ep_t=139.7s  total=46.1min
+18:20:47  ep020/50  tr_nll=2.3128 tr_mse=5.277  va_nll=1.9588 va_mse=5.084  lr=2.25e-04  ep_t=175.1s  total=49.0min
+18:20:47  ep020/50   POSE rot=0.0533deg t=0.0121m chi2r=1.2 sigma=2.353px frac_pd=1.00
+18:20:49    ↳ best val_nll=1.9588  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+18:23:10  ep021/50  tr_nll=2.1042 tr_mse=5.209  va_nll=nan va_mse=nan  lr=2.16e-04  ep_t=139.8s  total=51.4min
+18:25:44  ep022/50  tr_nll=2.0500 tr_mse=5.110  va_nll=nan va_mse=nan  lr=2.07e-04  ep_t=154.1s  total=54.0min
+18:28:08  ep023/50  tr_nll=2.0313 tr_mse=5.113  va_nll=nan va_mse=nan  lr=1.97e-04  ep_t=144.8s  total=56.4min
+18:30:28  ep024/50  tr_nll=2.0358 tr_mse=5.049  va_nll=nan va_mse=nan  lr=1.87e-04  ep_t=139.7s  total=58.7min
+18:33:24  ep025/50  tr_nll=2.0180 tr_mse=5.078  va_nll=1.8575 va_mse=4.542  lr=1.76e-04  ep_t=175.5s  total=61.6min
+18:33:24  ep025/50   POSE rot=0.0465deg t=0.0100m chi2r=1.2 sigma=2.234px frac_pd=1.00
+18:33:26    ↳ best val_nll=1.8575  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+18:35:46  ep026/50  tr_nll=1.9943 tr_mse=4.997  va_nll=nan va_mse=nan  lr=1.66e-04  ep_t=139.6s  total=64.0min
+18:38:05  ep027/50  tr_nll=1.9063 tr_mse=4.928  va_nll=nan va_mse=nan  lr=1.56e-04  ep_t=139.7s  total=66.3min
+18:40:25  ep028/50  tr_nll=1.8352 tr_mse=4.861  va_nll=nan va_mse=nan  lr=1.45e-04  ep_t=139.6s  total=68.6min
+18:42:45  ep029/50  tr_nll=1.7919 tr_mse=4.765  va_nll=nan va_mse=nan  lr=1.35e-04  ep_t=139.7s  total=71.0min
+18:45:40  ep030/50  tr_nll=1.8117 tr_mse=4.745  va_nll=1.9509 va_mse=5.247  lr=1.25e-04  ep_t=175.4s  total=73.9min
+18:45:40  ep030/50   POSE rot=0.0468deg t=0.0098m chi2r=1.0 sigma=2.323px frac_pd=1.00
+18:48:01  ep031/50  tr_nll=1.7204 tr_mse=4.650  va_nll=nan va_mse=nan  lr=1.14e-04  ep_t=139.5s  total=76.3min
+18:50:21  ep032/50  tr_nll=1.7162 tr_mse=4.698  va_nll=nan va_mse=nan  lr=1.04e-04  ep_t=139.5s  total=78.6min
+18:52:41  ep033/50  tr_nll=1.6240 tr_mse=4.526  va_nll=nan va_mse=nan  lr=9.45e-05  ep_t=139.6s  total=80.9min
+18:55:00  ep034/50  tr_nll=1.5839 tr_mse=4.468  va_nll=nan va_mse=nan  lr=8.50e-05  ep_t=139.7s  total=83.2min
+18:57:56  ep035/50  tr_nll=1.6185 tr_mse=4.528  va_nll=1.4049 va_mse=4.264  lr=7.58e-05  ep_t=175.4s  total=86.2min
+18:57:56  ep035/50   POSE rot=0.0386deg t=0.0073m chi2r=1.0 sigma=2.055px frac_pd=1.00
+18:57:58    ↳ best val_nll=1.4049  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+19:00:18  ep036/50  tr_nll=1.5242 tr_mse=4.345  va_nll=nan va_mse=nan  lr=6.69e-05  ep_t=139.7s  total=88.5min
+19:02:37  ep037/50  tr_nll=1.5087 tr_mse=4.412  va_nll=nan va_mse=nan  lr=5.85e-05  ep_t=139.7s  total=90.9min
+19:04:57  ep038/50  tr_nll=1.4976 tr_mse=4.330  va_nll=nan va_mse=nan  lr=5.05e-05  ep_t=140.0s  total=93.2min
+19:07:17  ep039/50  tr_nll=1.4442 tr_mse=4.328  va_nll=nan va_mse=nan  lr=4.30e-05  ep_t=139.6s  total=95.5min
+19:10:13  ep040/50  tr_nll=1.3774 tr_mse=4.203  va_nll=1.2464 va_mse=4.073  lr=3.60e-05  ep_t=175.5s  total=98.4min
+19:10:13  ep040/50   POSE rot=0.0334deg t=0.0065m chi2r=0.9 sigma=1.991px frac_pd=1.00
+19:10:14    ↳ best val_nll=1.2464  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+19:12:34  ep041/50  tr_nll=1.3702 tr_mse=4.225  va_nll=nan va_mse=nan  lr=2.96e-05  ep_t=139.7s  total=100.8min
+19:14:54  ep042/50  tr_nll=1.3792 tr_mse=4.217  va_nll=nan va_mse=nan  lr=2.37e-05  ep_t=139.8s  total=103.1min
+19:17:14  ep043/50  tr_nll=1.3367 tr_mse=4.199  va_nll=nan va_mse=nan  lr=1.85e-05  ep_t=139.6s  total=105.5min
+19:19:34  ep044/50  tr_nll=1.3160 tr_mse=4.154  va_nll=nan va_mse=nan  lr=1.39e-05  ep_t=139.8s  total=107.8min
+19:22:29  ep045/50  tr_nll=1.3231 tr_mse=4.152  va_nll=1.2328 va_mse=3.832  lr=1.00e-05  ep_t=175.4s  total=110.7min
+19:22:29  ep045/50   POSE rot=0.0273deg t=0.0054m chi2r=1.1 sigma=1.876px frac_pd=1.00
+19:22:31    ↳ best val_nll=1.2328  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)
+19:24:51  ep046/50  tr_nll=1.2487 tr_mse=4.045  va_nll=nan va_mse=nan  lr=6.79e-06  ep_t=139.9s  total=113.1min
+19:27:11  ep047/50  tr_nll=1.2599 tr_mse=4.127  va_nll=nan va_mse=nan  lr=4.27e-06  ep_t=139.9s  total=115.4min
+19:29:31  ep048/50  tr_nll=1.2997 tr_mse=4.116  va_nll=nan va_mse=nan  lr=2.45e-06  ep_t=139.8s  total=117.7min
+19:31:51  ep049/50  tr_nll=1.2961 tr_mse=4.152  va_nll=nan va_mse=nan  lr=1.36e-06  ep_t=139.8s  total=120.1min
+19:34:49  ep050/50  tr_nll=1.2422 tr_mse=4.098  va_nll=1.0546 va_mse=3.790  lr=1.00e-06  ep_t=177.9s  total=123.0min
+19:34:49  ep050/50   POSE rot=0.0285deg t=0.0053m chi2r=1.1 sigma=1.831px frac_pd=1.00
+19:34:51    ↳ best val_nll=1.0546  saved experiments/fuse28_infohead_blob01/best_model.pt (4.62 MB)

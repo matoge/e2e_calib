@@ -250,6 +250,11 @@ class PandaSetCalibDatasetFull(Dataset):
                  min_pts: int = 8,
                  max_tries: int = 8,
                  oversample: int = 12,
+                 share_pert: bool = False,
+                 crop_grid: bool = False,
+                 grid_frac: float = 0.5,
+                 pert_seed: int = None,
+                 pert_const: bool = False,
                  frame_stride: int = 1,
                  grid_n: int = 16,
                  n_full: int = 1024,
@@ -333,6 +338,16 @@ class PandaSetCalibDatasetFull(Dataset):
         self.min_pts   = int(min_pts)
         self.max_tries = int(max_tries)
         self.oversample = int(oversample)
+        self.share_pert = bool(share_pert)
+        self.crop_grid  = bool(crop_grid)
+        self.grid_frac  = float(grid_frac)
+        self.pert_seed  = None if pert_seed is None else int(pert_seed)
+        self.pert_const = bool(pert_const)
+        self.fixed_pert = None
+        self._grid_k    = 0
+        self._use_grid  = False
+        self._grid_ju = self._grid_jv = 0.0
+        self._grid_cells = None
         self.grid_n     = int(grid_n)
         self.n_full     = int(n_full)
         self.k_per_cell = int(k_per_cell)
@@ -608,6 +623,52 @@ class PandaSetCalibDatasetFull(Dataset):
         is_pair = self.pair_mode
         for _ in range(1024):
             inst = self._load_inst(idx) if not is_pair else None
+            # share_pert: ONE delta for every window of this frame. The windows
+            # then form a single pose problem whose normal equations add up.
+            _shared_pert = None
+            # δ FIRST, from a stream keyed on the frame index only. Drawing it
+            # after the grid/jitter draws made the two crop regimes consume the
+            # global RNG differently, so a grid eval and a random eval of the
+            # SAME checkpoint saw different perturbations (measured: 0/10 frames
+            # matched) and their numbers were not comparable.
+            if self.fixed_pert is not None and not is_pair:
+                # A caller-chosen delta, identical on every frame. Used to sweep
+                # one DOF and read off the response curve of the solved pose.
+                _fp = np.asarray(self.fixed_pert, dtype=np.float64).reshape(6)
+                _shared_pert = (_fp[:3].copy(), _fp[3:].copy())
+            elif self.share_pert and not is_pair:
+                if self.pert_seed is None:
+                    # TRAINING: a fresh delta every time. pert_seed used to
+                    # default to 0, which keyed the delta on the frame index and
+                    # let cam_rnd400 memorise 363 fixed perturbations (tr_mse
+                    # 2.16 by ep400) instead of learning the task.
+                    _shared_pert = ((np.random.rand(3) * 2 - 1) * self.max_offset_m,
+                                    (np.random.rand(3) * 2 - 1) * self.max_rot_deg)
+                else:
+                    # EVAL only: reproducible across checkpoints. pert_const
+                    # gives every frame the SAME delta.
+                    _key = (int(self.pert_seed) if self.pert_const
+                            else int(self.pert_seed) * 1000003 + int(idx))
+                    _g = np.random.default_rng(_key & 0xFFFFFFFF)
+                    _shared_pert = ((_g.random(3) * 2 - 1) * self.max_offset_m,
+                                    (_g.random(3) * 2 - 1) * self.max_rot_deg)
+            # Per FRAME: either the deterministic (jittered) full-image grid,
+            # whose windows are fused into ONE pose, or random lidar pivots
+            # solved one window at a time. grid_frac picks between them, so the
+            # model sees both the fused-N and the single-window regime.
+            self._grid_k  = 0
+            self._use_grid = bool(self.crop_grid) and (
+                np.random.rand() < self.grid_frac)
+            self._grid_ju = np.random.uniform(-1.0, 1.0)
+            self._grid_jv = np.random.uniform(-1.0, 1.0)
+            self._grid_cells = None
+            if self._use_grid and inst is not None:
+                # Plan the grid HERE, keeping only cells that actually contain
+                # lidar. A cell over pure sky carries no calibration signal, and
+                # emitting it either kills the frame (rejection burns max_tries
+                # and __getitem__ re-rolls to a different frame) or produces an
+                # all-padded sample whose attention softmax is NaN.
+                self._grid_cells = self._plan_grid(inst)
             samples = []
             ok = True
             for _ in range(os_n):
@@ -626,7 +687,9 @@ class PandaSetCalibDatasetFull(Dataset):
                         if built_rev is not None:
                             samples.append(built_rev)
                 else:
-                    built = self._build_one_window(idx, _inst_override=inst)
+                    built = self._build_one_window(idx, _inst_override=inst,
+                                                   _force_pert=_shared_pert,
+                                                   _win_i=len(samples))
                     if built is None:
                         ok = False
                         break
@@ -648,7 +711,36 @@ class PandaSetCalibDatasetFull(Dataset):
             f"pair_mode={self.pair_mode}"
         )
 
-    def _build_one_window(self, idx: int, _inst_override: dict = None):
+    def _plan_grid(self, inst):
+        """Grid cells (u0, v0) that hold at least min_pts lidar points.
+
+        nx/ny follow from the image size and the crop size, so this adapts to
+        any camera. Returns [] when nothing qualifies (caller falls back to
+        random pivots)."""
+        IH, IW = int(inst['IH']), int(inst['IW'])
+        cs = int(self.min_crop_px)
+        uv = inst['uv_full'].numpy(); zc = inst['z_cam'].numpy()
+        m = ((zc > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW)
+             & (uv[:, 1] >= 0) & (uv[:, 1] < IH))
+        uv = uv[m]
+        nx = max(1, int(np.ceil(IW / cs)))
+        ny = max(1, int(np.ceil(IH / cs)))
+        sx = max(0, IW - cs) / max(nx - 1, 1)
+        sy = max(0, IH - cs) / max(ny - 1, 1)
+        ju = self._grid_ju * max(0.0, (cs - sx) / 2.0)
+        jv = self._grid_jv * max(0.0, (cs - sy) / 2.0)
+        cells = []
+        for k in range(nx * ny):
+            u0 = int(np.clip(round(sx * (k % nx) + ju), 0, max(0, IW - cs)))
+            v0 = int(np.clip(round(sy * (k // nx) + jv), 0, max(0, IH - cs)))
+            n = int(((uv[:, 0] >= u0) & (uv[:, 0] < u0 + cs) &
+                     (uv[:, 1] >= v0) & (uv[:, 1] < v0 + cs)).sum())
+            if n >= self.min_pts:
+                cells.append((u0, v0))
+        return cells
+
+    def _build_one_window(self, idx: int, _inst_override: dict = None,
+                          _force_pert=None, _win_i: int = None):
         # _inst_override: when __getitem__ wants to call build N times for the
         # same frame (oversample list), it loads inst once and threads the
         # SAME dict in. _build_crop then sees the SAME inst['jpg_bytes']
@@ -791,8 +883,14 @@ class PandaSetCalibDatasetFull(Dataset):
             # Depth-aware cs sampling: <20m → up to 768 px (keep whole vehicle in frame),
             # else stay narrow [min_crop_px, max_crop_px]
             piv_z = float(z[i])
-            if piv_z < 20.0:
-                cs_lo, cs_hi = max(self.min_crop_px, 256), min(768, IW, IH)
+            if self.min_crop_px == self.max_crop_px:
+                # Fixed crop asked for: honour it. The depth branch below widens
+                # near pivots to 768 px, which made 42% of "256-only" crops come
+                # out 256-759 px -- so "equal scale 256" was never true.
+                cs_lo = cs_hi = self.min_crop_px
+            elif piv_z < 20.0:
+                cs_lo = max(self.min_crop_px, min(256, self.max_crop_px))
+                cs_hi = min(768, IW, IH, self.max_crop_px)
             else:
                 cs_lo, cs_hi = self.min_crop_px, self.max_crop_px
             cs = int(np.random.randint(cs_lo, cs_hi + 1))
@@ -810,8 +908,37 @@ class PandaSetCalibDatasetFull(Dataset):
                 cap = 1.0 + t * (scale_max - 1.0)
                 scale = float(np.random.uniform(1.0, max(1.0, scale_max)))
                 cs = max(self.min_crop_px // 4, int(cs / scale))
-            u0 = int(pu - cs / 2)
-            v0 = int(np.clip(pv - cs / 2, 0, IH - cs))
+            if self._use_grid:
+                # Deterministic grid covering the WHOLE image, so the windows a
+                # fused pose sees are the same every time and reach the bottom
+                # rows (v>=815 were never covered by pivot sampling) and both
+                # side edges.
+                cells = self._grid_cells
+                if cells:
+                    u0, v0 = cells[(_win_i if _win_i is not None
+                                    else self._grid_k) % len(cells)]
+                    self._grid_k += 1
+                nx = max(1, int(np.ceil(IW / cs)))
+                ny = max(1, int(np.ceil(IH / cs)))
+                # k comes from the caller's window index: the retry loop must
+                # not advance it, or a rejected window silently skips a grid
+                # cell (measured: 452 distinct (u0,v0) out of 560).
+                k  = (self._grid_k if _win_i is None else _win_i) % (nx * ny)
+                # Spacing is (IW-cs)/(nx-1); with cs=256 on 1600x900 that is
+                # 224 px, so consecutive crops overlap by 32 px. Jitter the whole
+                # grid inside that slack: coverage stays 100% but no two frames
+                # use the same windows. nx/ny come from IW/IH/cs, so this adapts
+                # to any image size and crop size.
+                sx = max(0, IW - cs) / max(nx - 1, 1)
+                sy = max(0, IH - cs) / max(ny - 1, 1)
+                ju = self._grid_ju * max(0.0, (cs - sx) / 2.0)
+                jv = self._grid_jv * max(0.0, (cs - sy) / 2.0)
+                if not cells:
+                    u0 = int(np.clip(round(sx * (k %  nx) + ju), 0, max(0, IW - cs)))
+                    v0 = int(np.clip(round(sy * (k // nx) + jv), 0, max(0, IH - cs)))
+            else:
+                u0 = int(np.clip(pu - cs / 2, 0, IW - cs))
+                v0 = int(np.clip(pv - cs / 2, 0, IH - cs))
 
             # Pre-filter to crop + Δ_uv_max padding using cached uv_full.
             # Padding must be wide enough to contain pts that are OUTSIDE the
@@ -888,7 +1015,23 @@ class PandaSetCalibDatasetFull(Dataset):
                     t_delta = t_delta1 + t_delta2
                     # R_pre / cp_pre = pose after applying ONLY δ1 (no δ2).
                     R_pre  = R_gt @ R_d1
-                    cp_pre = cp + t_delta1
+                    cp_pre = cp + R_gt @ t_delta1  # CAMERA frame: calibration error is a fixed camera<->lidar transform,
+            # so the translation must be applied in the camera's own axes like
+            # the rotation already is (R_off = R_gt @ R_d, right-multiplied).
+            # `cp + t` moved the camera in WORLD, so the same t landed on
+            # different camera axes as the car turned (measured: tz spread
+            # 0.114 m over 40 frames for one fixed 0.2 m delta), and the
+            # cross-frame path at line ~1170 already does it this way.
+                elif _force_pert is not None:
+                    # share_pert: every window of this frame gets the SAME delta,
+                    # so their normal equations can be summed into ONE pose.
+                    t_delta, ypr = _force_pert
+                    t_delta = np.asarray(t_delta, dtype=np.float64).copy()
+                    ypr     = np.asarray(ypr, dtype=np.float64).copy()
+                    t_delta1 = np.zeros(3, dtype=np.float64)
+                    ypr1     = np.zeros(3, dtype=np.float64)
+                    R_pre  = None
+                    cp_pre = None
                 else:
                     t_delta = (np.random.rand(3) * 2 - 1) * self.max_offset_m
                     ypr     = (np.random.rand(3) * 2 - 1) * self.max_rot_deg
@@ -897,7 +1040,7 @@ class PandaSetCalibDatasetFull(Dataset):
                     R_pre  = None
                     cp_pre = None
             R_off = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
-            cp_off = cp + t_delta
+            cp_off = cp + R_gt @ t_delta
             # Intrinsic fx/fy multiplicative perturbation (independent — left/right
             # PS cams show fx/fy don't drift together, so train them separately).
             dfx_pct = float(np.random.uniform(-self.max_fx_pct, self.max_fx_pct)) \
@@ -1341,7 +1484,7 @@ class PandaSetCalibDatasetFull(Dataset):
         ypr = np.asarray(ypr_deg, dtype=np.float64).reshape(3)
         t   = np.asarray(t_delta, dtype=np.float64).reshape(3)
         R_off  = R_gt @ Rotation.from_euler('zyx', ypr, degrees=True).as_matrix()
-        cp_off = cp + t
+        cp_off = cp + R_gt @ t
         K_pert = K.copy()
         if dfx_pct != 0.0: K_pert[0, 0] = K[0, 0] * (1.0 + dfx_pct)
         if dfy_pct != 0.0: K_pert[1, 1] = K[1, 1] * (1.0 + dfy_pct)
@@ -1378,9 +1521,19 @@ class PandaSetCalibDatasetFull(Dataset):
         as a per-sample tensor for the model forward.
         """
         S = self.img_size
-        R_inv = R_off.T.astype(np.float32)
-        t_inv = (-(R_off.T @ cp_off)).astype(np.float32)
-        pts_cam_off = pts_c @ R_inv.T + t_inv       # (M, 3)
+        # ---- everything below is CAMERA FRAME ----------------------------
+        # The cache stores points in nuScenes global coords. Move them to the
+        # camera origin ONCE, here, and never touch world again. A calibration
+        # error is then simply "shift/rotate the camera origin", which is the
+        # same quantity on every frame no matter which way the car faces.
+        _Rgt = inst['R_gt']
+        _Rgt = np.asarray(_Rgt.numpy() if hasattr(_Rgt, 'numpy') else _Rgt,
+                          dtype=np.float64)
+        pts_cam = ((pts_c - cp) @ _Rgt).astype(np.float64)      # (M, 3), z = depth
+        # the caller's (R_off, cp_off) expressed in the camera's own axes
+        R_d = (_Rgt.T @ R_off.astype(np.float64))
+        t_d = (_Rgt.T @ (cp_off.astype(np.float64) - cp))
+        pts_cam_off = ((pts_cam - t_d) @ R_d).astype(np.float32)
         z_off = pts_cam_off[:, 2]
         if inst.get('is_fisheye', False) and 'distortion' in inst:
             # Kannala-Brandt fisheye (e.g. ZOD). Pinhole projection would
@@ -1439,9 +1592,9 @@ class PandaSetCalibDatasetFull(Dataset):
         # `uv_pre_loc - uv_off_loc` = -δ2-induced shift in tile-local px).
         uv_pre_c = None
         if R_pre is not None and cp_pre is not None:
-            R_pre_inv = R_pre.T.astype(np.float32)
-            t_pre_inv = (-(R_pre.T @ cp_pre)).astype(np.float32)
-            pts_cam_pre = pts_c @ R_pre_inv.T + t_pre_inv      # (M, 3)
+            R_d1 = (_Rgt.T @ R_pre.astype(np.float64))
+            t_d1 = (_Rgt.T @ (cp_pre.astype(np.float64) - cp))
+            pts_cam_pre = ((pts_cam - t_d1) @ R_d1).astype(np.float32)
             z_pre = pts_cam_pre[:, 2]
             if inst.get('is_fisheye', False) and 'distortion' in inst:
                 _dist = inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy') \
@@ -1483,6 +1636,11 @@ class PandaSetCalibDatasetFull(Dataset):
         in_crop_off = ((uv_off_c[:, 0] >= u0) & (uv_off_c[:, 0] < u0 + cs) &
                        (uv_off_c[:, 1] >= v0) & (uv_off_c[:, 1] < v0 + cs) &
                        (z_off > 0.5))
+        # In grid mode a cell may legitimately hold no points (sky). Emitting it
+        # with zero points costs nothing -- every downstream consumer masks it --
+        # whereas rejecting it burns max_tries and makes __getitem__ re-roll the
+        # WHOLE frame, so the caller silently gets a different frame than it asked
+        # for (measured: ds[0..4] loaded 22 different frames).
         if in_crop_off.sum() < self.min_pts:
             return None
 
@@ -1533,7 +1691,7 @@ class PandaSetCalibDatasetFull(Dataset):
             uv_target_loc = ((uv_pre_sel - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
         else:
             uv_target_loc = uv_gt_loc
-        dist_m = (np.linalg.norm(pts_sel - cp, axis=1) / 100.0).astype(np.float32)
+        dist_m = (np.linalg.norm(pts_cam[sub_idx], axis=1) / 100.0).astype(np.float32)
         is_obj = is_obj_full[cand_idx[sub_idx]].astype(np.float32)
 
         # u_band GT mask: points outside [gt_u_lo, gt_u_hi] in full-image coords
@@ -1577,7 +1735,13 @@ class PandaSetCalibDatasetFull(Dataset):
         # Network input (img/dist_uvd/vfp) stays local 128px; the solver path is a
         # parallel exit from build_crop. The W (or Σ_uv) the network predicts in
         # local px is converted to original-camera px via (cs/S)² downstream.
-        pts_cam_orig = pts_sel.astype(np.float32)                      # (Nrep, 3) m
+        # GT-CAMERA frame. `pts_c`/`pts_sel` are WORLD (the cache holds one sweep
+        # per frame, shared by every camera/tile/A-B pair, so each projection site
+        # converts on the spot — cf. pts_cam_off above). The solver gets only
+        # (pts, duv, K): no R_gt/cam_pos travels with the sample, so world XYZ is
+        # uninterpretable there. _ba_pose_loss needs project(P0,K) == uv_gt_sel,
+        # i.e. the GT-pose camera frame.
+        pts_cam_orig = pts_cam[sub_idx].astype(np.float32)             # (Nrep, 3) m
         duv_orig     = (uv_gt_sel - uv_off_sel).astype(np.float32)     # (Nrep, 2) px (orig)
         # K_orig: PARENT-camera intrinsics, exactly as stored in the cache.
         # The GN solver only needs (fx, fy) for J = ∂(u,v)/∂δ — cx, cy don't
@@ -1693,7 +1857,8 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.from_numpy(delta1_se3),
                 torch.from_numpy(sub_idx.astype(np.int64)),
                 torch.tensor(float(u0), dtype=torch.float32),
-                torch.tensor(float(v0), dtype=torch.float32))
+                torch.tensor(float(v0), dtype=torch.float32),
+                torch.tensor(1.0 if self._use_grid else 0.0, dtype=torch.float32))
 
 
 def collate_full(batch):
@@ -1771,8 +1936,14 @@ def collate_full(batch):
     else:
         u0_t = v0_t = None
 
+    # 1.0 = this window belongs to a full-image grid frame (fuse the group into
+    # ONE pose); 0.0 = random-pivot frame (solve each window alone).
+    is_grid = (torch.stack([s[15] for s in batch]) if len(batch[0]) >= 16
+               else torch.zeros(B, dtype=torch.float32))
+
     return (imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec,
-            pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3, u0_t, v0_t)
+            pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3, u0_t, v0_t,
+            is_grid)
 
 
 def collate_pair(batch):
