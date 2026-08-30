@@ -553,7 +553,7 @@ flowchart TB
   IMG["画像 256x256"] -->|ConvNeXt| COARSE["coarse 16x16"]
   IMG -->|ConvNeXt| FINE["fine 32x32"]
   LID["LiDAR 点<br/>摂動して投影済み"] -->|forward_dense| LDMAP["lidar 16x16"]
-  LID -->|"PointMLP3(u,v,d,i)<br/>+ FrustumLocalEncoder"| Q["Q : 占有セルごとの代表点<br/>16x16 グリッド、約 150 セル/窓"]
+  LID -->|"PointMLP3(u,v,d,i)<br/>+ FrustumLocalEncoder<br/>(局所 attention)"| Q["Q : 占有セルごとの代表点<br/>16x16 グリッド、約 150 セル/窓"]
 
   COARSE --> KV["KV 3 レベル連結<br/>+ level_embed"]
   FINE --> KV
@@ -598,11 +598,15 @@ q   += frustum_enc(query_uvd, bucket_uvd, ...)  # FrustumLocalEncoder
 `(u, v, d, intensity)` を埋め込む。256 セルのうち LiDAR 点が入るのは窓あたり
 約 150 セル。
 
-そこに `FrustumLocalEncoder` がセル周辺の 3D 構造を足す。**PointNet++ の
-set-abstraction** と同じ形で、同じクロップの生の点群から画像平面距離で近い
-`k` 点を取り、その**相対**座標 `(Δu, Δv, Δd)` を 3 層 MLP で持ち上げ、`k` 個を
-channel-wise max-pool する。相対座標なので画像平面の平行移動に不変、max-pool
-なので順序に不変。ここに attention は無い（attention は後段の KV 相手）。
+そこに `FrustumLocalEncoder` がセル周辺の 3D 構造を足す。**Point Transformer 型
+の局所 attention** で、同じクロップの生の点群から画像平面距離で近い `k` 点を
+取り、その**相対**座標 `(Δu, Δv, Δd, intensity)` を K/V に、セルのトークンを Q に
+して マルチヘッド attention を 2 層（Pre-LN + residual、K/V は各層で相対座標から
+作り直す）。相対座標なので画像平面の平行移動に不変、attention の softmax なので
+近傍の順序に不変。
+
+つまり attention は 2 段構えで、ここが**セル周辺の点群内**、後段の
+MSDeformAttn が**セル ↔ 画像**。
 
 ### KV — 3 レベル
 

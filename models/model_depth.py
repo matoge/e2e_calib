@@ -126,9 +126,9 @@ class FrustumLocalEncoder(nn.Module):
     but a single query token (one LiDAR point per occupied cell) carries no
     information about *what's around it in 3D*. This encoder fills that gap by
     summarizing, for every query, the local 3D neighborhood structure visible
-    in the dense raw point cloud of the same crop. Conceptually it is the
-    PointNet++ "set-abstraction" trick: per-point local feature = MLP +
-    permutation-invariant pool over a small neighborhood.
+    in the dense raw point cloud of the same crop. It is a Point Transformer:
+    the query token attends over its k neighbours, whose relative coordinates
+    form the keys and values.
 
     GEOMETRY
     --------
@@ -154,12 +154,17 @@ class FrustumLocalEncoder(nn.Module):
 
     AGGREGATION
     -----------
-    The k chosen neighbors carry features (Δu, Δv, Δd) relative to the query
-    (intentionally relative, not absolute, so the MLP is translation-invariant
-    in image plane). A 3-layer MLP lifts each to d_out, then channel-wise
-    MaxPool over the k neighbors gives the per-query feature, summed into the
-    transformer's query stream. Padded / no-neighbor cases produce a zero
-    feature (graceful, but logged in vis tools).
+    The k chosen neighbors carry features (Δu, Δv, Δd, intensity) relative to
+    the query (intentionally relative, not absolute, so the encoder is
+    translation-invariant in image plane). These are projected to keys and
+    values; the query token (down-projected to d_local) is the query. Two
+    Point-Transformer blocks run multi-head attention over the k neighbours
+    (Pre-LN + residual, K/V rebuilt from the relative coordinates in each
+    layer), then out_proj lifts d_local back to d_out and the result is summed
+    into the transformer's query stream. Permutation invariance over the
+    neighbours comes from the attention softmax, not from a pool. Padded /
+    no-neighbor cases produce a zero feature (graceful, but logged in vis
+    tools).
 
     SCALING / ASSUMPTIONS
     ---------------------

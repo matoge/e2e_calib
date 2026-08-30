@@ -609,7 +609,7 @@ flowchart TB
   IMG["image 256x256"] -->|ConvNeXt| COARSE["coarse 16x16"]
   IMG -->|ConvNeXt| FINE["fine 32x32"]
   LID["LiDAR points<br/>perturbed and projected"] -->|forward_dense| LDMAP["lidar 16x16"]
-  LID -->|"PointMLP3(u,v,d,i)<br/>+ FrustumLocalEncoder"| Q["Q : one token per occupied cell<br/>16x16 grid, ~150 cells/window"]
+  LID -->|"PointMLP3(u,v,d,i)<br/>+ FrustumLocalEncoder<br/>(local attention)"| Q["Q : one token per occupied cell<br/>16x16 grid, ~150 cells/window"]
 
   COARSE --> KV["KV 3-level concat<br/>+ level_embed"]
   FINE --> KV
@@ -654,14 +654,17 @@ The token is **per occupied cell, not per point**. The crop is binned into a
 taken per cell near its centre, and its `(u, v, d, intensity)` is embedded.
 About 150 of the 256 cells hold LiDAR points in a typical window.
 
-`FrustumLocalEncoder` then adds the local 3D structure around that cell,
-following the **PointNet++ set-abstraction** pattern: from the dense raw point
-cloud of the same crop, take the `k` nearest neighbours by image-plane
-distance, lift their *relative* coordinates `(Δu, Δv, Δd)` through a 3-layer
-MLP, and channel-wise max-pool over the `k`. Relative, so it is
-translation-invariant in the image plane; max-pool, so it is
-permutation-invariant. No attention here — the attention happens later,
-against the KV.
+`FrustumLocalEncoder` then adds the local 3D structure around that cell, as a
+**Point-Transformer-style local attention**: from the dense raw point cloud of
+the same crop, take the `k` nearest neighbours by image-plane distance, use
+their *relative* coordinates `(Δu, Δv, Δd, intensity)` as K/V and the cell's
+token as Q, and run 2 layers of multi-head attention (Pre-LN + residual, K/V
+rebuilt from the relative coordinates at each layer). Relative, so it is
+translation-invariant in the image plane; the attention softmax, so it is
+permutation-invariant over the neighbours.
+
+So there are two stages of attention: this one **within the point cloud around
+the cell**, and the later MSDeformAttn **between cell and image**.
 
 ### KV — 3 levels
 
