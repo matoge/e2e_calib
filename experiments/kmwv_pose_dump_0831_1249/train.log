@@ -1,0 +1,10 @@
+13:14:39  accelerate: num_processes=8 mixed_precision=fp16 device=cuda:0
+13:14:39    [/raid/home/hfunaya/cache_v5/kamikado_v3_full] train=1004 val=98 (os=40) u_band=0.0 crop_px=512-512 mode=calib
+13:14:39    [/raid/home/hfunaya/cache_v5/woven_v3_full] train=1400 val=389 (os=40) u_band=0.0 crop_px=512-512 mode=calib
+13:14:39  SCENE-level split (from the cache meta): train=2404 val=487 frames — val scenes are never trained on
+13:14:41  params: 1.14M  (world_size=8, bs/rank=4, global_bs=32)
+13:14:41  resumed weights from /home/hfunaya/git/e2e_calib/experiments/kmwv_s3_ba40_512r256_0831_0325/best_model.pt (missing=0 unexpected=0)
+13:16:32  ep001/1  tr_nll=0.6730 tr_mse=2.756  va_nll=1.0131 va_mse=3.372  lr=4.00e-07  ep_t=110.3s  total=1.8min
+13:16:32    ↳ pose dump: 64 frames → pose_dump_ep001.pt
+13:16:32  ep001/1   POSE rot=0.0230deg t=0.0065m chi2r=1.4 sigma=2.831px frac_pd=1.00
+13:17:31    ↳ best val_nll=1.0131  saved experiments/kmwv_pose_dump_0831_1249/best_model.pt (4.62 MB)

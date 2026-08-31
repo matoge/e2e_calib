@@ -24,5 +24,9 @@ pyyaml>=6.0
 # fallback で PIL 経路に落ちる。必ず `PyTurboJPEG` (Lilohuang/PyTurboJPEG) を
 # pin する。詳細は docs/sps_bottleneck_analysis.md §8.1。
 PyTurboJPEG==1.7.5
+# LMDB packed-inst cache (build_kamikado_full_lmdb.py + convert_tile_cache_to_lmdb.py
+# → cache_v5/*/data.lmdb). Without this pandaset_full.py falls back to the
+# disabled .pt preload path and raises "Cache ... has no data.lmdb" on load.
+lmdb==2.2.0
 # 可視化系 (matplotlib等) は base image 標準に任せる。 eval/render 時だけ使うため学習 image に
 # は含めないポリシー (将来必要なら infra/Dockerfile.eval を別立てする)。

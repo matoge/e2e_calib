@@ -605,7 +605,8 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
                     is_grid=(batch[15] if len(batch) > 15 else None),
                     ba_iter=getattr(accel, '_ba_iter', 4),
                     damping=getattr(accel, '_ba_damping', 1e-3),
-                    loss_type='nll', detach_mu=True)
+                    loss_type='nll', detach_mu=True,
+                    return_pose=bool(getattr(accel, '_dump_pose', False)))
             if _d:
                 accel._pose_eval.append(_d)
         if getattr(accel, '_ba_loss_mode', False):
@@ -786,6 +787,14 @@ def main():
                    help='comma-separated <cache_path>:<int> per-cache oversample '
                         'overrides. Falls back to --oversample. Example: '
                         '"/home/hfunaya/cache_v5/kamikado_v3_full:8"')
+    p.add_argument('--per-cache-crop-px', type=str, default='',
+                   help='comma-separated <cache_path>:<min>-<max> (or <cs>) '
+                        'per-cache override of --min-crop-px/--max-crop-px. '
+                        'Native 4K caches (km/wv, 3840x2160) can request a '
+                        'larger crop while nuScenes (1600x900) stays at 256. '
+                        'Example: '
+                        '"/raid/home/hfunaya/cache_v5/kamikado_v3_full:512,'
+                        '/raid/home/hfunaya/cache_v5/woven_v3_full:512"')
     p.add_argument('--per-cache-mode', type=str, default='',
                    help='comma-separated <cache_path>:<pair|calib> per-cache '
                         'training mode. When set, OVERRIDES --pair-mode and '
@@ -828,6 +837,10 @@ def main():
                    help='register a ClearML Task with cfg + why + git context')
     p.add_argument('--clearml-project', type=str, default='e2e_calib/calib',
                    help='ClearML project namespace')
+    p.add_argument('--dump-pose', action='store_true',
+                   help='Save per-frame (delta_pred, delta_gt, H) to '
+                        'experiments/<name>/pose_dump_ep<NN>.pt on every eval '
+                        'epoch. Consumed by scripts/eval/frame_fusion.py.')
     p.add_argument('--resume-ckpt', type=str, default=None,
                    help='Path to best_model.pt (or any state_dict). Loaded into '
                         'model BEFORE training starts. Optimizer/scheduler are '
@@ -858,16 +871,51 @@ def main():
     accel._ba_loss_type = str(args.ba_loss_type)
     accel._ba_w_source  = str(args.ba_w_source)
     accel._ba_detach_mu = bool(args.ba_detach_mu)
+    accel._dump_pose    = bool(args.dump_pose)
+
+    # exp_dir and log() must be defined BEFORE the crop_grid branch below
+    # (which calls log() to announce the auto-derived oversample).
+    exp_dir = Path("experiments") / args.name
+    if accel.is_main_process:
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        (exp_dir / "train.log").write_text("")
+    accel.wait_for_everyone()
+
+    def log(msg):
+        if not accel.is_main_process: return
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"{ts}  {msg}"
+        print(line, flush=True)
+        with open(exp_dir / "train.log", "a") as f: f.write(line + "\n")
+
     # share_pert makes every window of a frame carry ONE delta; ba_group
     # then folds those windows into a single GN. Without share_pert a
     # group would be summing normal equations of DIFFERENT poses.
     if args.crop_grid:
-        # The grid is ceil(IW/cs) x ceil(IH/cs), so the number of windows a
-        # frame must emit follows from the image size and the crop size. Derive
-        # it instead of trusting a hand-typed --oversample.
+        # The grid is ceil(IW/cs) x ceil(IH/cs). With --per-cache-crop-px the
+        # crop side differs per cache, so derive using the LARGEST per-cache
+        # crop (which yields the FEWEST windows — the actual value the dataset
+        # emits when a per-cache override is bigger than the global cs).
+        # Fall back to args.min_crop_px when no per-cache override was given.
         import math as _math
         _IW, _IH = int(args.grid_iw), int(args.grid_ih)
-        _cs = int(args.min_crop_px)
+        _cs_global = int(args.min_crop_px)
+        _cs = _cs_global
+        if getattr(args, 'per_cache_crop_px', ''):
+            _cs_list = []
+            for tok in args.per_cache_crop_px.split(','):
+                tok = tok.strip()
+                if not tok: continue
+                _, v = tok.rsplit(':', 1)
+                v = v.strip()
+                _cs_list.append(int(v.split('-')[0]) if '-' in v else int(v))
+            if _cs_list:
+                # All caches must emit the SAME oversample count (batch is
+                # sharded across caches by index). Enforce that here.
+                _counts = sorted({_math.ceil(_IW/c) * _math.ceil(_IH/c) for c in _cs_list})
+                assert len(_counts) == 1, \
+                    f"per-cache crop_px yields different window counts {_counts} — mix not supported yet"
+                _cs = _cs_list[0]  # any cache's crop works, they're equivalent
         _need = _math.ceil(_IW / _cs) * _math.ceil(_IH / _cs)
         if int(args.oversample) != _need:
             log(f"crop_grid: {_IW}x{_IH} / {_cs}px -> "
@@ -890,11 +938,7 @@ def main():
         except Exception as _e:
             print(f'[clearml init failed] {_e}', flush=True)
 
-    exp_dir = Path("experiments") / args.name
     if accel.is_main_process:
-        exp_dir.mkdir(parents=True, exist_ok=True)
-        log_path = exp_dir / "train.log"
-        log_path.write_text("")
         # Save full config (every CLI arg) for reproducibility
         (exp_dir / "config.py").write_text(
             "# auto-generated by train_cnd2_ddp.py at run start\n"
@@ -902,13 +946,6 @@ def main():
             "".join(f"    {k:<20}= {v!r},\n"
                     for k, v in vars(args).items()) + ")\n")
     accel.wait_for_everyone()
-
-    def log(msg):
-        if not accel.is_main_process: return
-        ts = datetime.now().strftime("%H:%M:%S")
-        line = f"{ts}  {msg}"
-        print(line, flush=True)
-        with open(exp_dir / "train.log", "a") as f: f.write(line + "\n")
 
     log(f"accelerate: num_processes={accel.num_processes} "
         f"mixed_precision={accel.mixed_precision} device={accel.device}")
@@ -956,6 +993,23 @@ def main():
             if not tok: continue
             k, v = tok.rsplit(':', 1)
             os_map[k.strip()] = int(v)
+    # Per-cache crop-px override. Value is either "MIN-MAX" or a single "CS"
+    # (fixed crop = MIN = MAX). Overrides both --min-crop-px and --max-crop-px
+    # for that cache; --img-size (the model input resolution AFTER resize) is
+    # still global and set by --img-size on the CLI.
+    crop_map: dict[str, tuple[int, int]] = {}
+    if getattr(args, 'per_cache_crop_px', ''):
+        for tok in args.per_cache_crop_px.split(','):
+            tok = tok.strip()
+            if not tok: continue
+            k, v = tok.rsplit(':', 1)
+            v = v.strip()
+            if '-' in v:
+                lo, hi = v.split('-', 1)
+                crop_map[k.strip()] = (int(lo), int(hi))
+            else:
+                cs = int(v)
+                crop_map[k.strip()] = (cs, cs)
     tr_parts, va_parts = [], []
     tr_modes:  list[str] = []
     va_modes:  list[str] = []
@@ -971,10 +1025,15 @@ def main():
             cp_mode = 'pair' if args.pair_mode else 'calib'
             cp_pair = bool(args.pair_mode)
         cp_kw = {**ds_kw, 'oversample': os_i, 'pair_mode': cp_pair}
+        if cp in crop_map:
+            _lo, _hi = crop_map[cp]
+            cp_kw = {**cp_kw, 'min_crop_px': _lo, 'max_crop_px': _hi}
         tr = PandaSetCalibDatasetFull(cp, split='train', u_band=ub, **cp_kw)
         va = PandaSetCalibDatasetFull(cp, split='val',
                                        center_band=0.5, u_band=ub, **cp_kw)
-        log(f"  [{cp}] train={len(tr)} val={len(va)} (os={os_i}) u_band={ub} mode={cp_mode}")
+        _crop = crop_map.get(cp, (args.min_crop_px, args.max_crop_px))
+        log(f"  [{cp}] train={len(tr)} val={len(va)} (os={os_i}) u_band={ub} "
+            f"crop_px={_crop[0]}-{_crop[1]} mode={cp_mode}")
         tr_parts.append(tr); va_parts.append(va)
         tr_modes.append(cp_mode); va_modes.append(cp_mode)
     if mixed_mode:
@@ -1283,6 +1342,26 @@ def main():
             # epochs, so without this every non-eval epoch reprinted the
             # previous eval's pose verbatim (ep002 identical to ep001).
             _pe = (getattr(accel, '_pose_eval', None) or []) if do_eval else []
+            # When --dump-pose is on, save the per-frame (delta_pred, delta_gt, H)
+            # to a .pt so an offline post-process (chi2 gate + inv-var pool +
+            # over-dispersion k) can sweep F=1,2,4,8,16,32 without re-running val.
+            if _pe and getattr(accel, '_dump_pose', False) and accel.is_main_process:
+                dump = {'delta_pred': [], 'delta_gt': [], 'H': [],
+                        'rot_err': [], 't_err': []}
+                for d in _pe:
+                    if d.get('H') is None: continue
+                    dump['delta_pred'].append(d['delta_pred'].cpu())
+                    dump['delta_gt'].append(d['delta_gt'].cpu())
+                    dump['H'].append(d['H'].cpu())
+                    dump['rot_err'].append(float(d.get('rot_err', float('nan'))))
+                    dump['t_err'].append(float(d.get('t_err', float('nan'))))
+                if dump['H']:
+                    dump['delta_pred'] = torch.cat(dump['delta_pred'], 0)
+                    dump['delta_gt']   = torch.cat(dump['delta_gt'],   0)
+                    dump['H']          = torch.cat(dump['H'],          0)
+                    out_p = exp_dir / f'pose_dump_ep{ep+1:03d}.pt'
+                    torch.save(dump, out_p)
+                    log(f"  ↳ pose dump: {dump['H'].shape[0]} frames → {out_p.name}")
             pose_str = ''
             if _pe:
                 import statistics as _st
