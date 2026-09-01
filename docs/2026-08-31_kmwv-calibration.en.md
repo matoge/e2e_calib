@@ -13,6 +13,20 @@ Ran the **same network, same solver, same staged recipe** as the nuScenes report
 
 Compared to the nuScenes result (1 frame 0.037° / 7.7 mm, 32 frames fused 0.0068° / 1.43 mm) this is on par or slightly better. Training was 5× shorter (nuScenes 100 ep vs. kmwv 30 → 50 ep) and no dataset-specific tuning was applied.
 
+**This is not from scratch.** The initial weights are `experiments/front_670x3/best_model.pt`, trained
+on nuScenes CAM_FRONT (`--resume-ckpt`). So the claim is not "17 scenes / 2404 training frames are
+enough to learn this from nothing" but **"weights pretrained on nuScenes transfer to a different
+sensor (4K tss4_fcm fisheye) with 2404 frames"**. As a bring-up cost for a new sensor rig, that is
+the more useful statement.
+
+| | scenes | train frames | val frames |
+|---|---|---|---|
+| kamikado | 8 | 1004 | 98 |
+| WovenSequence | 9 | 1400 | 389 |
+| total | **17** | **2404** | **487** |
+
+Scene-split: the val scenes are never trained on.
+
 | dataset | 1-frame rot | 1-frame trans | F=32 rot | F=32 trans | χ²/6 (F=1) |
 |---|---|---|---|---|---|
 | nuScenes CAM_FRONT (report) | 0.037°  | 7.7 mm | 0.0068° | 1.43 mm | 1.15 |
