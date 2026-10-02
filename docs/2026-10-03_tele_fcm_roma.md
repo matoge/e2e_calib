@@ -1,6 +1,7 @@
 # TELE ↔ FCM 相対外部キャリブレーション — RoMa v2 + LiDAR PnP
 
-2026-10-03 / woven_sequence tf_long2 ip654
+2026-10-03 / woven_sequence tf_long2 ip654 ／
+[English](2026-10-03_tele_fcm_roma.en.md)
 
 ---
 
@@ -73,11 +74,27 @@ t_tele_from_fcm      (m)  = [-0.044, -0.056, +0.320]
 左: FCM (fx=3000, 広め)。右: TELE (fx=4500)。TELE の方が若干左向きにずれて写って
 いる (= TELE 装着位置が FCM より右) ことで視差が出ている。
 
-### RoMa v2 の密対応 (cert > 0.3、ランダム 4000 点、frame 50)
+### TELE を FCM の view にワープ (RoMa v2 の dense warp 使用、frame 50)
+
+[![warp_vs_fcm](assets/2026-10-03_tele_fcm_roma/warp_vs_fcm.jpg)](assets/2026-10-03_tele_fcm_roma/warp_vs_fcm.jpg)
+
+RoMa 公式 demo と同じ `grid_sample(TELE, warp_AB)` → TELE の各ピクセルを FCM の
+座標系に移送。右画面の **黒い領域** は非共有 (TELE の narrow FOV 外、または遮蔽)。
+中央 patch 内で看板・van・道路標示が FCM と視覚的に一致 → 密対応が成立している
+ことが一目で分かる。
+
+### 密対応点 (ランダムサンプル 4000 点、cert > 0.3)
 
 [![warp](assets/2026-10-03_tele_fcm_roma/warp_dense.jpg)](assets/2026-10-03_tele_fcm_roma/warp_dense.jpg)
 
 空・路面以外にほぼ均一にドットが載る。4916 / 5000 (= 98%) が cert > 0.3 を満たした。
+
+### FCM の per-pixel confidence (overlap_AB、警告色 = heatmap)
+
+[![conf](assets/2026-10-03_tele_fcm_roma/conf_AB.jpg)](assets/2026-10-03_tele_fcm_roma/conf_AB.jpg)
+
+赤 = 高信頼、青 = 低信頼。TELE が見えない周縁・空・遠方・ガラス反射で confidence
+が下がる。
 
 ## コードとデータ
 

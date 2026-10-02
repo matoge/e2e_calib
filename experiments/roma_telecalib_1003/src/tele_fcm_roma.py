@@ -151,6 +151,54 @@ def main():
         cv2.imwrite(str(out_path), blend)
     _overlap_heatmap(preds['overlap_AB'], im_fcm_u,  outd / 'conf_AB.jpg')
     _overlap_heatmap(preds['overlap_BA'], im_tele_u, outd / 'conf_BA.jpg')
+
+    # Paper-style warp viz (same code path as RoMaV2 demo/demo_match.py):
+    # - im2_transfer_rgb = grid_sample(TELE, warp_AB)  ← TELE pixels mapped
+    #   into the FCM grid (so what you see sits in FCM's view).
+    # - im1_transfer_rgb = grid_sample(FCM,  warp_BA)  ← FCM mapped into TELE.
+    # - Multiply by overlap, fade non-covisible to white.
+    import torch.nn.functional as _F
+    def _as_tensor_bgr_01(bgr):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return torch.from_numpy(rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    device_t = torch.device(device)
+    x_fcm  = _as_tensor_bgr_01(im_fcm_u).to(device_t)
+    x_tele = _as_tensor_bgr_01(im_tele_u).to(device_t)
+    warp_AB = preds['warp_AB']        # (1, H, W, 2) in [-1,1]
+    warp_BA = preds['warp_BA']
+    H_grid, W_grid = warp_AB.shape[1:3]
+    # Resize images to the warp grid resolution for grid_sample
+    x_fcm_g  = _F.interpolate(x_fcm,  size=(H_grid, W_grid), mode='bilinear', align_corners=False)
+    x_tele_g = _F.interpolate(x_tele, size=(H_grid, W_grid), mode='bilinear', align_corners=False)
+    tele_in_fcm_view  = _F.grid_sample(x_tele_g, warp_AB, mode='bilinear', align_corners=False)[0]  # (3, H, W)
+    fcm_in_tele_view  = _F.grid_sample(x_fcm_g,  warp_BA, mode='bilinear', align_corners=False)[0]
+    ov_AB = preds['overlap_AB'][0]    # (H, W, 1)
+    ov_BA = preds['overlap_BA'][0]
+    if ov_AB.dim() == 3 and ov_AB.shape[-1] == 1:
+        ov_AB_hw = ov_AB[..., 0]; ov_BA_hw = ov_BA[..., 0]
+    else:
+        ov_AB_hw = ov_AB; ov_BA_hw = ov_BA
+    # Fade non-covisible (occluded / out-of-frame) to BLACK so occlusions are visible.
+    tele_in_fcm_view = ov_AB_hw.unsqueeze(0) * tele_in_fcm_view
+    fcm_in_tele_view = ov_BA_hw.unsqueeze(0) * fcm_in_tele_view
+
+    def _tensor_rgb01_to_bgr(t):
+        a = (t.clamp(0, 1) * 255).byte().cpu().permute(1, 2, 0).numpy()
+        return cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
+    tele_in_fcm_bgr = _tensor_rgb01_to_bgr(tele_in_fcm_view)
+    fcm_in_tele_bgr = _tensor_rgb01_to_bgr(fcm_in_tele_view)
+    cv2.imwrite(str(outd / 'tele_in_fcm_view.jpg'), tele_in_fcm_bgr)
+    cv2.imwrite(str(outd / 'fcm_in_tele_view.jpg'), fcm_in_tele_bgr)
+
+    # Side-by-side: FCM original | TELE warped into FCM view (should line up).
+    tele_in_fcm_rsz = cv2.resize(tele_in_fcm_bgr, (im_fcm_u.shape[1], im_fcm_u.shape[0]))
+    sbs = np.concatenate([im_fcm_u, tele_in_fcm_rsz], axis=1)
+    cv2.putText(sbs, 'FCM (undist)', (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                 (255,255,255), 2, cv2.LINE_AA)
+    cv2.putText(sbs, 'TELE warped into FCM view (RoMa dense)',
+                 (im_fcm_u.shape[1]+16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                 (255,255,255), 2, cv2.LINE_AA)
+    cv2.imwrite(str(outd / 'warp_vs_fcm.jpg'), sbs)
     # Sample dense correspondences
     matches, overlaps, prec_AB, prec_BA = model.sample(preds, 5000)
     kptsA, kptsB = model.to_pixel_coordinates(matches, H_a, W_a, H_b, W_b)
