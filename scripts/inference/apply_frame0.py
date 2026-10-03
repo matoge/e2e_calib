@@ -301,7 +301,8 @@ def main():
     K_t   = torch.from_numpy(K.astype(np.float64)).unsqueeze(0).to(dev)      # (1,3,3)
     v_t   = torch.from_numpy(valid_all).unsqueeze(0).to(dev)
     delta, H = solve_pinhole_xyz(pts_t, duv_t, W_t, K_t, DOF,
-                                  valid=v_t, n_iter=10, damping=1e-3)
+                                  valid=v_t, n_iter=10, damping=1e-3,
+                                  robust='huber', huber_k=1.5)
     delta = delta[0].cpu().numpy()                # (6,)
     H     = H[0].cpu().numpy()                     # (6,6)
     cov   = np.linalg.inv(H)

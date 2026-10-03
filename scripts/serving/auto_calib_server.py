@@ -636,7 +636,8 @@ def calibrate_frame_endpoint(req: FrameReq):
         v_t   = _torch.from_numpy(np.ones(len(pts_cam_all), dtype=bool)).unsqueeze(0).to(STATE['device'])
         from calib_lib import DOF as _DOF
         delta, H = solve_pinhole_xyz(pts_t, duv_t, W_t, K_t, _DOF,
-                                      valid=v_t, n_iter=10, damping=1e-3)
+                                      valid=v_t, n_iter=10, damping=1e-3,
+                                      robust='huber', huber_k=1.5)
         delta = delta[0].cpu().numpy(); H = H[0].cpu().numpy()
 
     from calib_lib import CalibResult as _CR
