@@ -68,9 +68,9 @@ RUN touch /app/scripts/serving/__init__.py \
 
 # Bake weights + config. This is the whole 4.5 MB experiments/… dir; the
 # server auto-discovers it by CKPT env var (see entrypoint.serve.sh).
-COPY experiments/kmwv_s3_ba40_512r256_0901_1344/best_model.pt \
-     experiments/kmwv_s3_ba40_512r256_0901_1344/config.py \
-     /app/weights/kmwv_s3_ba40_512r256_0901_1344/
+COPY experiments/kmwv_calok_s3_ba40_1003_1107/best_model.pt \
+     experiments/kmwv_calok_s3_ba40_1003_1107/config.py \
+     /app/weights/kmwv_calok_s3_ba40_1003_1107/
 
 # Optional hood-mask polygons (per-car_id JSON). If your deployment doesn't
 # use hood masks, this directory just stays empty — the payload-based

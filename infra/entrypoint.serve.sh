@@ -7,14 +7,14 @@
 #
 #   PORT              (default 8501)
 #   HOST              (default 0.0.0.0)
-#   CKPT_DIR          (default /app/weights/kmwv_s3_ba40_512r256_0901_1344 — baked in)
+#   CKPT_DIR          (default /app/weights/kmwv_calok_s3_ba40_1003_1107 — baked in)
 #   HOOD_MASK_ROOT    (default /app/hood_masks — baked in if provided, else disabled)
 #   DEVICE            (default cuda if visible, else cpu)
 set -eu
 
 PORT="${PORT:-8501}"
 HOST="${HOST:-0.0.0.0}"
-CKPT_DIR="${CKPT_DIR:-/app/weights/kmwv_s3_ba40_512r256_0901_1344}"
+CKPT_DIR="${CKPT_DIR:-/app/weights/kmwv_calok_s3_ba40_1003_1107}"
 HOOD_MASK_ROOT="${HOOD_MASK_ROOT:-/app/hood_masks}"
 
 # Auto-detect device unless explicitly overridden.
