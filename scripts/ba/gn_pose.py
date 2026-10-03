@@ -33,12 +33,17 @@ DOF6 = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
 
 def solve_pose(pts_cam: torch.Tensor, duv: torch.Tensor, W: torch.Tensor,
                K: torch.Tensor, *, dof=DOF6, valid=None, n_iter: int = 10,
-               damping: float = 0.0, prior_diag=None):
+               damping: float = 0.0, prior_diag=None,
+               robust: str | None = None, huber_k: float = 1.5):
     """The ONE pose solver. pts_cam (B,N,3) cam-frame metres; duv (B,N,2) px
     (target = project(pts_cam,K)+duv); W (B,N,2,2) info; K (B,3,3).
+    `robust`: optional IRLS kernel ('huber'/'tukey') applied each iter on the
+    Mahalanobis residual. Keep None for the train contract.
     Returns (delta (B,len(dof)), H (B,K,K))."""
     return solve_pinhole_xyz(pts_cam, duv, W, K, dof, valid=valid,
-                             n_iter=n_iter, damping=damping, prior_diag=prior_diag)
+                             n_iter=n_iter, damping=damping,
+                             prior_diag=prior_diag,
+                             robust=robust, huber_k=huber_k)
 
 
 def _identity_W(B, N, dtype, device):
