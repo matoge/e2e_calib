@@ -325,6 +325,11 @@ def process_frame(args_tuple):
 
     try:
         setting = _load_setting(seq)
+        if tile_layout.get('fcm_override'):
+            # 手で合わせた fcm (webui_kb_fit の状態ファイル) で setting の fcm を置き換える。poslv はそのまま
+            ov = json.loads(Path(tile_layout['fcm_override']).read_text())
+            setting = {**setting, 'fcm': {**setting['fcm'], **ov,
+                                          'kb': {**setting['fcm'].get('kb', {}), **ov.get('kb', {})}}}
         K, dist, R_cv, t_cv, W, H, delay_default = _camera_calib_fcm(setting)
         metadata = _load_metadata(seq)
         camera_delay_ms = _camera_delay_ms_for_frame(
@@ -452,6 +457,9 @@ def main():
     ap.add_argument('--workers', type=int, default=8)
     ap.add_argument('--max-frames-per-seq', type=int, default=None)
     ap.add_argument('--val-frac', type=float, default=0.15)
+    ap.add_argument('--fcm-override', default='',
+                    help='JSON with fcm keys (kb/rot/mp/cc/fc) replacing setting-*.json fcm, e.g. the '
+                         'webui_kb_fit state file after a manual fit')
     ap.add_argument('--tile', action='store_true')
     ap.add_argument('--tile-w',       type=int, default=512)
     ap.add_argument('--tile-h',       type=int, default=512)
@@ -481,6 +489,7 @@ def main():
         out=str(out), tile=args.tile,
         tw=args.tile_w, th=args.tile_h, st=args.tile_stride,
         pad=args.tile_pad, y0=args.tile_y_start,
+        fcm_override=args.fcm_override,
     )
 
     tasks = []

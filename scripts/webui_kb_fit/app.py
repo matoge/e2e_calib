@@ -914,23 +914,29 @@ def api_save():
         },
         'delta': delta,
     })
-    task.upload_artifact('arrows', arrows)
-    task.upload_artifact('recalibration_after_fcm', fcm_after)
-
-    out_dir = Path('/home/hfunaya/git/e2e_calib/scripts/webui_kb_fit/_outputs')
-    out_dir.mkdir(parents=True, exist_ok=True)
-    before_path = out_dir / f'{task_name}_before.jpg'
-    after_path = out_dir / f'{task_name}_after.jpg'
-    before_path.write_bytes(_render_overlay_jpg(seq, idx, fcm_before, _state.get('poslv')))
-    after_path.write_bytes(_render_overlay_jpg(seq, idx, fcm_after, _state.get('poslv')))
-    task.upload_artifact('overlay_before', str(before_path))
-    task.upload_artifact('overlay_after', str(after_path))
-
-    task.close()
+    # 失敗してもタスクを必ず閉じる。以前は出力先 (/home/hfunaya/...) が無いマシンで mkdir が落ち、
+    # タスクが開いたまま残って、以後の Save が全部 "Current task already created" で失敗していた。
+    try:
+        task.upload_artifact('arrows', arrows)
+        task.upload_artifact('recalibration_after_fcm', fcm_after)
+        out_dir = Path(__file__).resolve().parent / '_outputs'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        before_path = out_dir / f'{task_name}_before.jpg'
+        after_path = out_dir / f'{task_name}_after.jpg'
+        before_path.write_bytes(_render_overlay_jpg(seq, idx, fcm_before, _state.get('poslv')))
+        after_path.write_bytes(_render_overlay_jpg(seq, idx, fcm_after, _state.get('poslv')))
+        # 調整後の fcm (+ poslv) を recalibration.json と同じ形でも残す
+        (out_dir / f'{task_name}_recalib.json').write_text(json.dumps(
+            {VEHICLE_ID: {**_recalib[VEHICLE_ID], 'fcm': fcm_after}}, indent=1))
+        task.upload_artifact('overlay_before', str(before_path))
+        task.upload_artifact('overlay_after', str(after_path))
+        task_url = task.get_output_log_web_page()
+    finally:
+        task.close()
     return jsonify({
-        'task_id': task.id, 'task_name': task_name,
-        'task_url': f'http://172.16.200.185:8082/projects/*/experiments/{task.id}',
+        'task_id': task.id, 'task_name': task_name, 'task_url': task_url,
         'before_jpg': str(before_path), 'after_jpg': str(after_path),
+        'recalib_json': str(out_dir / f'{task_name}_recalib.json'),
         'delta': delta,
     })
 
