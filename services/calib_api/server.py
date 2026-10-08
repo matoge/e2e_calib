@@ -52,6 +52,10 @@ from services.calib_api import __version__ as API_VERSION
 HERE = Path(__file__).resolve().parent
 EXP = os.environ.get('E2E_EXP', 'ps_s1_noleak')
 DEVICE = os.environ.get('E2E_DEVICE', 'cuda')
+CKPT = os.environ.get('E2E_CKPT', 'best_model.pt')
+# 魚眼 (kamikado / woven / TSS4) は別のモデルで解ける。未指定なら E2E_EXP を全部に使う
+EXP_FE = os.environ.get('E2E_EXP_FISHEYE', '')
+CKPT_FE = os.environ.get('E2E_CKPT_FISHEYE', 'best_model.pt')
 
 app = FastAPI(title='e2e_calib calibration API', version=API_VERSION)
 _state: dict = {}
@@ -59,10 +63,14 @@ _state: dict = {}
 
 @app.on_event('startup')
 def _startup():
-    model, cfg = load_model(EXP, device=DEVICE)
+    model, cfg = load_model(EXP, device=DEVICE, ckpt=CKPT)
     _state.update(model=model, cfg=cfg)
-    print(f'[boot] exp={EXP} img_size={cfg["img_size"]} grid_n={cfg["grid_n"]} '
+    print(f'[boot] exp={EXP}/{CKPT} img_size={cfg["img_size"]} grid_n={cfg["grid_n"]} '
           f'crop={cfg["min_crop_px"]} device={DEVICE}', flush=True)
+    if EXP_FE:
+        m2, c2 = load_model(EXP_FE, device=DEVICE, ckpt=CKPT_FE)
+        _state.update(model_fe=m2, cfg_fe=c2)
+        print(f'[boot] fisheye exp={EXP_FE}/{CKPT_FE} crop={c2["min_crop_px"]}', flush=True)
 
 
 def _sigma_from_H(H: np.ndarray):
@@ -92,7 +100,10 @@ async def _read_inputs(image: UploadFile, points: UploadFile, calib: UploadFile)
 
 
 def _solve(img, pts, K, dist, T, fe):
-    model, cfg = _state['model'], _state['cfg']
+    if fe and 'model_fe' in _state:
+        model, cfg = _state['model_fe'], _state['cfg_fe']
+    else:
+        model, cfg = _state['model'], _state['cfg']
     t0 = time.time()
     try:
         inst = build_inst(img=img, pts=pts, K=K, T_cam_lidar=T, dist=dist, is_fisheye=fe)
@@ -181,6 +192,8 @@ async def eval_frame(image: UploadFile = File(...), points: UploadFile = File(..
 VAL_CACHES = {
     'pandaset': os.environ.get('E2E_PS_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full'),
     'nuscenes': os.environ.get('E2E_NS_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/ns_850x4_pad256'),
+    'kamikado': os.environ.get('E2E_KM_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/kamikado_pad256'),
+    'tss4': os.environ.get('E2E_TSS4_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/tss4_pad256'),
 }
 PS_CACHE = VAL_CACHES['pandaset']
 
@@ -204,12 +217,13 @@ def _val_src(ds: str):
 
 
 def _val_raw(ds: str, i: int):
-    """キャッシュの inst → (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, ラベル, JPEG)。CLI と同じ関数。"""
-    from scripts.inference.infer_calib import load_pandaset_val
+    """キャッシュの inst → (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, ラベル, JPEG, dist, is_fisheye)。
+    CLI と同じ関数。魚眼のキャッシュは Kannala-Brandt の係数も返す。"""
+    from scripts.inference.infer_calib import load_val_frame
     n = len(_val_src(ds))
     if not 0 <= int(i) < n:
         raise HTTPException(400, f'{ds} val index must be 0..{n - 1}, got {i}')
-    return load_pandaset_val(i, _cache_of(ds))
+    return load_val_frame(i, _cache_of(ds))
 
 
 def _parse_pert(rot_deg: str, t_m: str):
@@ -222,23 +236,23 @@ def _parse_pert(rot_deg: str, t_m: str):
 
 
 def _val_eval(ds: str, i: int, rot_deg: str, t_m: str):
-    img, pts, K, T_true, label, _ = _val_raw(ds, i)
+    img, pts, K, T_true, label, _, dist, fe = _val_raw(ds, i)
     r, t = _parse_pert(rot_deg, t_m)
     T_in = perturb_T(T_true, rot_deg=r, t_m=t)
-    out, T_corr = _solve(img, pts, K, None, T_in, False)
-    return img, pts, K, T_true, T_in, T_corr, label, r, t, out
+    out, T_corr = _solve(img, pts, K, dist, T_in, fe)
+    return img, pts, K, T_true, T_in, T_corr, label, r, t, out, dist, fe
 
 
 @app.get('/api/val/frames')
 def val_frames(ds: str = 'pandaset'):
-    """val のフレーム数 (index は 0..n-1)。ds = pandaset | nuscenes"""
+    """val のフレーム数 (index は 0..n-1)。ds = pandaset | nuscenes | kamikado | tss4"""
     return {'ds': ds, 'n': len(_val_src(ds)), 'cache': _cache_of(ds), 'split': 'val'}
 
 
 @app.get('/api/val/image/{i}')
 def val_image(i: int, ds: str = 'pandaset'):
     from fastapi.responses import Response
-    *_, label, jpg = _val_raw(ds, i)
+    jpg = _val_raw(ds, i)[5]
     return Response(content=bytes(jpg), media_type='image/jpeg')
 
 
@@ -247,12 +261,12 @@ def val_eval(i: int = Form(...), ds: str = Form('pandaset'),
              rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
     """val の i 番目のフレームを、正しいポーズから (rot_deg, t_m) ずらして推論し、補正前後を返す。
     点の重ね描きは間引かず全点。"""
-    img, pts, K, T_true, T_in, T_corr, label, r, t, out = _val_eval(ds, i, rot_deg, t_m)
+    img, pts, K, T_true, T_in, T_corr, label, r, t, out, dist, fe = _val_eval(ds, i, rot_deg, t_m)
     e0 = pose_error(T_in, T_true); e1 = pose_error(T_corr, T_true)
     out.update(ds=ds, frame=label, index=int(i), injected={'rot_deg': r.tolist(), 't_m': t.tolist()},
                error_before={'rot_deg': e0[0], 't_m': e0[1]}, error_after={'rot_deg': e1[0], 't_m': e1[1]},
                error_before_axes=pose_error_axes(T_in, T_true), error_after_axes=pose_error_axes(T_corr, T_true),
-               overlay=_overlay(img, pts, K, None, False,
+               overlay=_overlay(img, pts, K, dist, fe,
                                 {'true': T_true, 'input': T_in, 'corrected': T_corr}, n_max=10 ** 9))
     return out
 
@@ -273,10 +287,11 @@ def val_eval_image(i: int = Form(...), ds: str = Form('pandaset'),
     """/api/val/eval と同じことをして、補正前 (左) と補正後 (右) の重ね画像を PNG で返す。
     誤差 (ヨー・ピッチ・ロール・x・y・z) はヘッダ X-Error-Before / X-Error-After (JSON)。"""
     from scripts.inference.infer_calib import render_overlay
-    img, pts, K, T_true, T_in, T_corr, label, r, t, out = _val_eval(ds, i, rot_deg, t_m)
+    img, pts, K, T_true, T_in, T_corr, label, r, t, out, dist, fe = _val_eval(ds, i, rot_deg, t_m)
     info = dict(frame=f'{ds} {label}', error_before_axes=pose_error_axes(T_in, T_true),
                 error_after_axes=pose_error_axes(T_corr, T_true))
-    return _png_response(render_overlay(img, pts, K, {'true': T_true, 'input': T_in, 'corrected': T_corr}), info)
+    return _png_response(render_overlay(img, pts, K, {'true': T_true, 'input': T_in, 'corrected': T_corr},
+                                        dist=dist, is_fisheye=fe), info)
 
 
 # 以前の PandaSet 専用の URL (ds=pandaset 固定の別名)

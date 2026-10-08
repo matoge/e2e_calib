@@ -29,7 +29,7 @@
 
 <form id="f" class="row">
  <fieldset><legend>Pick a val frame</legend>
-  <label>Dataset <select id="dsel" onchange="loadN()"><option value="pandaset">PandaSet</option><option value="nuscenes">nuScenes</option></select></label>
+  <label>Dataset <select id="dsel" onchange="loadN()"><option value="pandaset">PandaSet</option><option value="nuscenes">nuScenes</option><option value="kamikado">kamikado (fisheye)</option><option value="tss4">TSS4 (fisheye)</option></select></label>
   <label>Frame index <input type="text" id="psi" value="0" style="width:80px"> <span id="psn" class="dim"></span></label>
   <button type="button" onclick="document.getElementById('psi').value=Math.floor(Math.random()*psN)">Random</button>
   <button type="button" class="primary" onclick="goPS()">Perturb and correct (val frame)</button>
