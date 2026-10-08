@@ -60,9 +60,20 @@ def load_points(data, name: str = '') -> np.ndarray:
     if suf == '.npy':
         a = np.load(io.BytesIO(data))
     elif suf == '.bin':
-        # KITTI 系 (N,4) / nuScenes (N,5) のどちらも通す
+        # KITTI 系 (N,4) / nuScenes (N,5) のどちらも通す。点数が 20 の倍数だと長さだけでは
+        # 決まらない (以前は 4 列に読んで黙って壊れていた)。nuScenes の 5 列目はリング番号 (0〜127 の整数)。
         f = np.frombuffer(data, np.float32)
-        a = f.reshape(-1, 5) if f.size % 5 == 0 and f.size % 4 != 0 else f.reshape(-1, 4)
+        ok5, ok4 = f.size % 5 == 0, f.size % 4 == 0
+        if ok5 and ok4:
+            r = f.reshape(-1, 5)[:, 4]
+            ok5 = bool(np.all((r == np.round(r)) & (r >= 0) & (r < 128)))
+            ok4 = not ok5
+        if ok5:
+            a = f.reshape(-1, 5)
+        elif ok4:
+            a = f.reshape(-1, 4)
+        else:
+            raise ValueError(f'.bin: {f.size} float32 values is divisible by neither 4 nor 5: {name}')
     else:
         txt = data.decode('utf-8', 'replace') if isinstance(data, (bytes, bytearray)) else data
         rows = [r.replace(',', ' ').split() for r in txt.splitlines()
@@ -89,9 +100,23 @@ def load_calib(data, name: str = ''):
     d = json.loads(data.decode('utf-8') if isinstance(data, (bytes, bytearray)) else data)
     if 'K' in d:
         K = np.asarray(d['K'], np.float64).reshape(3, 3)
-        T = np.asarray(d.get('T_cam_lidar', d.get('T', np.eye(4))), np.float64).reshape(4, 4)
-        dist = np.asarray(d.get('dist', [0, 0, 0, 0]), np.float64).reshape(4)
-        fe = bool(d.get('is_fisheye', np.any(dist != 0)))
+        # 外部パラメータが無いときに単位行列で黙って進めない (以前は d.get(..., np.eye(4)))
+        key = 'T_cam_lidar' if 'T_cam_lidar' in d else ('T' if 'T' in d else None)
+        if key is None:
+            raise ValueError(f'calib JSON has no T_cam_lidar (or T). keys: {sorted(d)}')
+        T = np.asarray(d[key], np.float64).reshape(4, 4)
+        dist = np.asarray(d.get('dist', [0, 0, 0, 0]), np.float64).ravel()
+        # 魚眼 (Kannala-Brandt k1..k4) は is_fisheye で明示したときだけ。以前は dist が非ゼロなら
+        # 魚眼扱いで、OpenCV の radtan 係数を KB として投影していた。
+        fe = bool(d.get('is_fisheye', False))
+        if fe:
+            if dist.size != 4:
+                raise ValueError(f'with is_fisheye, dist must be Kannala-Brandt k1..k4 (4 values), got {dist.size}')
+        elif np.any(dist != 0):
+            raise ValueError('pinhole (radtan) distortion is not supported: undistort the image and set dist to 0, '
+                             'or add is_fisheye: true for Kannala-Brandt k1..k4')
+        else:
+            dist = np.zeros(4)
         return K, dist, T, fe
     # kamikado
     intr = d['intrinsic'] if 'intrinsic' in d else d
@@ -320,7 +345,12 @@ def make_dataset(c: dict, insts: list, fixed_pert=None):
         img_size=c['img_size'], grid_n=c['grid_n'],
         min_crop_px=c['min_crop_px'], max_crop_px=c['max_crop_px'],
         max_offset_m=c['t_m'], max_rot_deg=c['rot_deg'],
-        oversample=c['oversample'], crop_grid=True,
+        # 窓の数は画像を覆う格子の数。学習の oversample (PandaSet なら 40) のままだと、
+        # 大きな画像では格子の先頭 40 枚 (上の行) しか使わなかった。
+        oversample=max(int(c['oversample']),
+                       max(math.ceil(int(i['IW']) / int(c['min_crop_px'])) *
+                           math.ceil(int(i['IH']) / int(c['min_crop_px'])) for i in insts)),
+        crop_grid=True,
         k_per_cell=int(c.get('k_per_cell', 8)),
         share_pert=True, split_pert=False, n_full=0,
         # 推論は摂動ゼロ。ずれは渡されたポーズ側に入っている。

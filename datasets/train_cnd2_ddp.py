@@ -27,6 +27,7 @@ import warnings
 warnings.filterwarnings('ignore', message='Converting mask without torch.bool dtype')
 import sys, os, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import argparse, math, time, torch
+import numpy as np
 import torch.multiprocessing as _tmp
 try: _tmp.set_sharing_strategy('file_system')
 except Exception: pass
@@ -652,6 +653,10 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         out = (per_pt, _W_head) if _W_head is not None else per_pt
         imgs = imgs.float().div(255.0)       # 下の vis_capture 用
         valid  = ~pad_mask
+        # 格子で足りない窓を埋めた複製 (w_active=0) は点の損失にも入れない。BA では外していたが、
+        # 点の損失には入っていて、複製元の窓 (格子の先頭) だけ重みが増えていた。
+        if len(batch) > 16 and batch[16] is not None:
+            valid = valid & (batch[16].reshape(-1, 1).to(valid.device) > 0.5)
         ba_diag = None
         nll_loss = gaussian2d_nll(per_pt[valid], gt[valid])
         if (not train) and getattr(accel, '_pose_eval', None) is not None:

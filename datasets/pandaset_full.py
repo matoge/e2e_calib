@@ -1786,7 +1786,9 @@ class PandaSetCalibDatasetFull(Dataset):
             uv_target_loc = ((uv_pre_sel - np.array([u0, v0], dtype=np.float32)) * scale).astype(np.float32)
         else:
             uv_target_loc = uv_gt_loc
-        dist_m = (np.linalg.norm(pts_cam[sub_idx], axis=1) / 100.0).astype(np.float32)
+        # クエリの深度は、ずらしたポーズのカメラからの距離。pts_cam (GT のカメラ) で測っていた
+        # (〜2026-10-08) ので、同じ点の bucket の z_off との差から t·p̂ が読めた (GT の混入)。
+        dist_m = (np.linalg.norm(pts_cam_off[sub_idx], axis=1) / 100.0).astype(np.float32)
         is_obj = is_obj_full[cand_idx[sub_idx]].astype(np.float32)
 
         # u_band GT mask: points outside [gt_u_lo, gt_u_hi] in full-image coords
