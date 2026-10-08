@@ -1,11 +1,30 @@
-# Multi-frame fusion: how far does fusing frames bring the calibration error down? (2026-10-09)
+# Fusing 16 frames halves the nuScenes calibration error and cuts the worst case 3–4×; a stopped car gains nothing (2026-10-09)
 
-## Summary
+## Before / after fusion
 
-- Fusing F frames' 6-DoF estimates through their information matrices brings the error down on both datasets, but more slowly than 1/√F, and it levels off.
-- nuScenes (median geodesic): 0.211° at one frame → 0.094° at 64 frames (0.45×). The worst of 80 cases: 0.566° → 0.162°.
-- PandaSet: 0.081° → 0.049° at 32 frames; worst 0.342° → 0.146°. Yaw and pitch are already 0.02–0.03° (median) at one frame; roll stays at 0.04–0.05°.
-- The nuScenes groups mix scenes, which real data does not allow (calibration differs per log). Within-sequence fusion is next (section 4).
+Absolute error after correction. "1 frame" = single-frame inference; "fused" = F frames combined through their 6-DoF information matrices (Tukey). Model `nsps_s2_pad256`.
+
+| dataset | | frames | yaw | pitch | roll | geodesic |
+|---|---|---|---|---|---|---|
+| nuScenes | median | 1 frame | 0.081° | 0.089° | 0.120° | 0.211° |
+| | | **fused 16** | **0.039°** | **0.064°** | **0.058°** | **0.106°** |
+| | | fused 64 | 0.037° | 0.065° | 0.053° | 0.094° |
+| | max | 1 frame | 0.436° | 0.408° | 0.458° | 0.566° |
+| | | **fused 16** | **0.132°** | **0.107°** | **0.187°** | **0.215°** |
+| | | fused 64 | 0.079° | 0.093° | 0.135° | 0.162° |
+| PandaSet, moving scenes | median | 1 frame | 0.025° | 0.024° | 0.044° | 0.068° |
+| | | **fused 16** | **0.020°** | **0.021°** | **0.039°** | **0.047°** |
+| | | fused 32 | 0.018° | 0.019° | 0.035° | 0.043° |
+| | max | 1 frame | 0.099° | 0.108° | 0.592° | 0.593° |
+| | | **fused 16** | **0.050°** | **0.048°** | **0.140°** | **0.149°** |
+| | | fused 32 | 0.044° | 0.042° | 0.116° | 0.128° |
+| PandaSet 004, stopped (0.1 m in 8 s) | median | 1 frame | 0.062° | 0.042° | 0.111° | 0.140° |
+| | | fused 32 | 0.067° | 0.041° | 0.109° | 0.136° |
+
+- nuScenes median geodesic 0.211° → 0.106° at 16 frames (0.50×), max 0.566° → 0.215°. PandaSet (moving) median 0.068° → 0.047°, max 0.593° → 0.149°.
+- 16 frames carry the information of about 4 independent frames on nuScenes and about 2 on PandaSet (section 3b); the error levels off instead of following 1/√F.
+- A stopped car (PandaSet 004) does not improve: every frame sees the same background.
+- Caveats: nuScenes groups mix scenes (its val cache had 4 frames per scene); every frame in a group carries the same injected δ; PandaSet has 4 moving val scenes. Within-sequence nuScenes fusion is running (section 4).
 
 ![](_figs/2026-10-08/fusion_vs_sqrtF.png)
 
