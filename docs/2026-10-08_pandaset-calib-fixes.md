@@ -167,6 +167,28 @@ curl -X POST localhost:5092/api/eval_frame_image -F image=@image.jpg -F points=@
      -F calib=@calib.json -F rot_deg='[0.3,-0.2,0.25]' -F t_m='[0.1,-0.05,0.15]' -o out.png
 ```
 
+### nuScenes in the web page and API
+
+The page has a dataset selector (PandaSet / nuScenes). The generic endpoints take `ds=pandaset|nuscenes`; the old `/api/pandaset/*` URLs still work.
+
+```bash
+C=/mnt/ssd2t/work/e2e_calib/cache
+E2E_EXP=nsps_s2_pad256 E2E_PS_CACHE=$C/pandaset_pad256 E2E_NS_CACHE=$C/ns_850x4_pad256 \
+  python -m uvicorn services.calib_api.server:app --host 0.0.0.0 --port 5092
+curl "localhost:5092/api/val/frames?ds=nuscenes"
+curl -X POST localhost:5092/api/val/eval_image -F ds=nuscenes -F i=100 \
+     -F rot_deg='[0.4,-0.3,0.4]' -F t_m='[0.1,-0.1,0.15]' -D - -o out.png
+```
+
+Use a model trained on nuScenes (`nsps_s2_pad256`) and the caches it was trained on. Example, nuScenes val #100 (scene-0376/0), perturbation rot [0.4, −0.3, 0.4]°, t [0.1, −0.1, 0.15] m:
+
+| | yaw | pitch | roll | x | y | z |
+|---|---|---|---|---|---|---|
+| before | −0.303° | +0.398° | +0.398° | +0.100 m | −0.100 m | +0.150 m |
+| after | −0.073° | +0.128° | **+0.293°** | +0.044 m | +0.019 m | +0.049 m |
+
+![](_figs/2026-10-08/api_nuscenes_val100.jpg)
+
 ## 5. Open issues
 
 - Given the correct pose, an error remains after correction (roll 0.063°, z 0.018 m).

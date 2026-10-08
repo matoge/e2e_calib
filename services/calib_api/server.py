@@ -176,55 +176,80 @@ async def eval_frame(image: UploadFile = File(...), points: UploadFile = File(..
     return out
 
 
-# ── PandaSet の val からフレームを選んで評価する (アップロード無しで試す用) ────────────
-PS_CACHE = os.environ.get('E2E_PS_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full')
+# ── val からフレームを選んで評価する (アップロード無しで試す用)。PandaSet と nuScenes ────────────
+# キャッシュは学習に使ったものと合わせる (intensity の扱い・画像外の点の有無がキャッシュで違う)。
+VAL_CACHES = {
+    'pandaset': os.environ.get('E2E_PS_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full'),
+    'nuscenes': os.environ.get('E2E_NS_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/ns_850x4_pad256'),
+}
+PS_CACHE = VAL_CACHES['pandaset']
 
 
-def _ps_src():
-    if 'ps_src' not in _state:
+def _cache_of(ds: str) -> str:
+    if ds not in VAL_CACHES:
+        raise HTTPException(400, f'ds must be one of {sorted(VAL_CACHES)}, got {ds!r}')
+    return VAL_CACHES[ds]
+
+
+def _val_src(ds: str):
+    key = f'val_src_{ds}'
+    if key not in _state:
         from datasets.pandaset_full import PandaSetCalibDatasetFull
         c = _state['cfg']
-        _state['ps_src'] = PandaSetCalibDatasetFull(
-            cache_dir=PS_CACHE, split='val', img_size=c['img_size'], grid_n=c['grid_n'],
+        _state[key] = PandaSetCalibDatasetFull(
+            cache_dir=_cache_of(ds), split='val', img_size=c['img_size'], grid_n=c['grid_n'],
             min_crop_px=c['min_crop_px'], max_crop_px=c['max_crop_px'],
             max_offset_m=c['t_m'], max_rot_deg=c['rot_deg'], oversample=1)
-    return _state['ps_src']
+    return _state[key]
 
 
-def _ps_raw(i: int):
+def _val_raw(ds: str, i: int):
     """キャッシュの inst → (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, ラベル, JPEG)。CLI と同じ関数。"""
     from scripts.inference.infer_calib import load_pandaset_val
-    return load_pandaset_val(i, PS_CACHE)
+    n = len(_val_src(ds))
+    if not 0 <= int(i) < n:
+        raise HTTPException(400, f'{ds} val index must be 0..{n - 1}, got {i}')
+    return load_pandaset_val(i, _cache_of(ds))
 
 
-@app.get('/api/pandaset/frames')
-def ps_frames():
-    """val のフレーム数 (index は 0..n-1)。"""
-    return {'n': len(_ps_src()), 'cache': PS_CACHE, 'split': 'val'}
-
-
-@app.get('/api/pandaset/image/{i}')
-def ps_image(i: int):
-    from fastapi.responses import Response
-    *_, label, jpg = _ps_raw(i)
-    return Response(content=bytes(jpg), media_type='image/jpeg')
-
-
-@app.post('/api/pandaset/eval')
-def ps_eval(i: int = Form(...),
-            rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
-    """val の i 番目のフレームを、正しいポーズから (rot_deg, t_m) ずらして推論し、補正前後を返す。
-    点の重ね描きは間引かず全点。"""
-    img, pts, K, T_true, label, _ = _ps_raw(i)
+def _parse_pert(rot_deg: str, t_m: str):
     try:
         r = np.asarray(json.loads(rot_deg), np.float64).reshape(3)
         t = np.asarray(json.loads(t_m), np.float64).reshape(3)
     except Exception as e:
         raise HTTPException(400, f'rot_deg / t_m must be JSON lists of 3 numbers: {e}')
+    return r, t
+
+
+def _val_eval(ds: str, i: int, rot_deg: str, t_m: str):
+    img, pts, K, T_true, label, _ = _val_raw(ds, i)
+    r, t = _parse_pert(rot_deg, t_m)
     T_in = perturb_T(T_true, rot_deg=r, t_m=t)
     out, T_corr = _solve(img, pts, K, None, T_in, False)
+    return img, pts, K, T_true, T_in, T_corr, label, r, t, out
+
+
+@app.get('/api/val/frames')
+def val_frames(ds: str = 'pandaset'):
+    """val のフレーム数 (index は 0..n-1)。ds = pandaset | nuscenes"""
+    return {'ds': ds, 'n': len(_val_src(ds)), 'cache': _cache_of(ds), 'split': 'val'}
+
+
+@app.get('/api/val/image/{i}')
+def val_image(i: int, ds: str = 'pandaset'):
+    from fastapi.responses import Response
+    *_, label, jpg = _val_raw(ds, i)
+    return Response(content=bytes(jpg), media_type='image/jpeg')
+
+
+@app.post('/api/val/eval')
+def val_eval(i: int = Form(...), ds: str = Form('pandaset'),
+             rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
+    """val の i 番目のフレームを、正しいポーズから (rot_deg, t_m) ずらして推論し、補正前後を返す。
+    点の重ね描きは間引かず全点。"""
+    img, pts, K, T_true, T_in, T_corr, label, r, t, out = _val_eval(ds, i, rot_deg, t_m)
     e0 = pose_error(T_in, T_true); e1 = pose_error(T_corr, T_true)
-    out.update(frame=label, index=int(i), injected={'rot_deg': r.tolist(), 't_m': t.tolist()},
+    out.update(ds=ds, frame=label, index=int(i), injected={'rot_deg': r.tolist(), 't_m': t.tolist()},
                error_before={'rot_deg': e0[0], 't_m': e0[1]}, error_after={'rot_deg': e1[0], 't_m': e1[1]},
                error_before_axes=pose_error_axes(T_in, T_true), error_after_axes=pose_error_axes(T_corr, T_true),
                overlay=_overlay(img, pts, K, None, False,
@@ -242,19 +267,37 @@ def _png_response(img_rgb: np.ndarray, info: dict):
     return Response(content=buf.tobytes(), media_type='image/png', headers=hdr)
 
 
-@app.post('/api/pandaset/eval_image')
-def ps_eval_image(i: int = Form(...), rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
-    """/api/pandaset/eval と同じことをして、補正前 (左) と補正後 (右) の重ね画像を PNG で返す。
+@app.post('/api/val/eval_image')
+def val_eval_image(i: int = Form(...), ds: str = Form('pandaset'),
+                   rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
+    """/api/val/eval と同じことをして、補正前 (左) と補正後 (右) の重ね画像を PNG で返す。
     誤差 (ヨー・ピッチ・ロール・x・y・z) はヘッダ X-Error-Before / X-Error-After (JSON)。"""
     from scripts.inference.infer_calib import render_overlay
-    img, pts, K, T_true, label, _ = _ps_raw(i)
-    r = np.asarray(json.loads(rot_deg), np.float64).reshape(3)
-    t = np.asarray(json.loads(t_m), np.float64).reshape(3)
-    T_in = perturb_T(T_true, rot_deg=r, t_m=t)
-    out, T_corr = _solve(img, pts, K, None, T_in, False)
-    info = dict(frame=label, error_before_axes=pose_error_axes(T_in, T_true),
+    img, pts, K, T_true, T_in, T_corr, label, r, t, out = _val_eval(ds, i, rot_deg, t_m)
+    info = dict(frame=f'{ds} {label}', error_before_axes=pose_error_axes(T_in, T_true),
                 error_after_axes=pose_error_axes(T_corr, T_true))
     return _png_response(render_overlay(img, pts, K, {'true': T_true, 'input': T_in, 'corrected': T_corr}), info)
+
+
+# 以前の PandaSet 専用の URL (ds=pandaset 固定の別名)
+@app.get('/api/pandaset/frames')
+def ps_frames():
+    return val_frames('pandaset')
+
+
+@app.get('/api/pandaset/image/{i}')
+def ps_image(i: int):
+    return val_image(i, 'pandaset')
+
+
+@app.post('/api/pandaset/eval')
+def ps_eval(i: int = Form(...), rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
+    return val_eval(i, 'pandaset', rot_deg, t_m)
+
+
+@app.post('/api/pandaset/eval_image')
+def ps_eval_image(i: int = Form(...), rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
+    return val_eval_image(i, 'pandaset', rot_deg, t_m)
 
 
 @app.post('/api/eval_frame_image')

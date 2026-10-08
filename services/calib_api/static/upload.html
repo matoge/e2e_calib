@@ -28,10 +28,11 @@
 256 px windows and the per-window point shifts are combined into one pose by BA.</p>
 
 <form id="f" class="row">
- <fieldset><legend>Pick from PandaSet val</legend>
+ <fieldset><legend>Pick a val frame</legend>
+  <label>Dataset <select id="dsel" onchange="loadN()"><option value="pandaset">PandaSet</option><option value="nuscenes">nuScenes</option></select></label>
   <label>Frame index <input type="text" id="psi" value="0" style="width:80px"> <span id="psn" class="dim"></span></label>
   <button type="button" onclick="document.getElementById('psi').value=Math.floor(Math.random()*psN)">Random</button>
-  <button type="button" class="primary" onclick="goPS()">Perturb and correct (PandaSet)</button>
+  <button type="button" class="primary" onclick="goPS()">Perturb and correct (val frame)</button>
  </fieldset>
  <fieldset><legend>Or upload your own data</legend>
   <label>Image (PNG/JPG) <input type="file" name="image" id="img" required></label>
@@ -53,7 +54,7 @@
  <table id="tab"></table>
  <div class="legend" id="legend"></div>
  <div id="wrap"><canvas id="cv"></canvas></div>
- <p class="dim">Toggle layers with the checkboxes. PandaSet shows all points; uploads show at most 4000 (subsampled).</p>
+ <p class="dim">Toggle layers with the checkboxes. Val frames show all points; uploads show at most 4000 (subsampled).</p>
  <details><summary>Response JSON</summary><pre id="raw"></pre></details>
 </div>
 
@@ -61,17 +62,19 @@
 const COL={true:'#34c759',input:'#ff3b30',corrected:'#00c2ff'};
 const NAME={true:'correct pose',input:'perturbed pose (input)',corrected:'corrected pose'};
 let last=null, imgEl=null, show={true:true,input:true,corrected:true}, psN=1;
-fetch('/api/pandaset/frames').then(r=>r.json()).then(j=>{psN=j.n;document.getElementById('psn').textContent=`(0–${j.n-1})`;}).catch(()=>{});
+const dsv=()=>document.getElementById('dsel').value;
+function loadN(){fetch('/api/val/frames?ds='+dsv()).then(r=>r.json()).then(j=>{psN=j.n;document.getElementById('psn').textContent=`(0–${j.n-1})`;}).catch(()=>{});}
+loadN();
 async function goPS(){
   const i=parseInt(document.getElementById('psi').value)||0, fm=document.getElementById('f');
-  const fd=new FormData(); fd.append('i',i); fd.append('rot_deg',fm.rot_deg.value); fd.append('t_m',fm.t_m.value);
+  const fd=new FormData(); fd.append('i',i); fd.append('ds',dsv()); fd.append('rot_deg',fm.rot_deg.value); fd.append('t_m',fm.t_m.value);
   const st=document.getElementById('status'); st.textContent='Running inference…';
   try{
-    const r=await fetch('/api/pandaset/eval',{method:'POST',body:fd}); const j=await r.json();
+    const r=await fetch('/api/val/eval',{method:'POST',body:fd}); const j=await r.json();
     if(!r.ok){st.textContent='HTTP '+r.status+': '+(j.detail||JSON.stringify(j));return;}
-    st.textContent=`PandaSet val #${j.index} (scene/frame ${j.frame}), ${j.n_windows} windows, ${j.took_s} s, ${j.overlay.true.filter(p=>p).length} points`;
+    st.textContent=`${j.ds} val #${j.index} (scene/frame ${j.frame}), ${j.n_windows} windows, ${j.took_s} s, ${j.overlay.true.filter(p=>p).length} points`;
     last=j; document.getElementById('raw').textContent=JSON.stringify({...j,overlay:'(omitted)'},null,2);
-    imgEl=await new Promise(res=>{const im=new Image();im.onload=()=>res(im);im.src='/api/pandaset/image/'+i;});
+    imgEl=await new Promise(res=>{const im=new Image();im.onload=()=>res(im);im.src='/api/val/image/'+i+'?ds='+dsv();});
     render();
   }catch(e){st.textContent=String(e);}
 }
