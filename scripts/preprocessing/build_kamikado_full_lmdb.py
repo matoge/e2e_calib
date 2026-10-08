@@ -37,6 +37,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.preprocessing.lmdb_writer import ShardWriter, merge_shards  # noqa: E402
 from scripts.util.projection import project_lidar_into_image  # noqa: E402
 
+# 画像の外に残す幅 [px] と最小深度 [m]。学習のずれ (回転 0.5°、並進 0.2 m) で入ってくる点を残す
+FOV_PAD = 256
+Z_MIN = 0.1
+
 
 DEFAULT_SRC = Path('/home/hfunaya/raw/kamikado/scenes')
 DEFAULT_OUT = Path('/raid/home/hfunaya/cache/kamikado_v3_full')
@@ -118,10 +122,16 @@ def process_one_frame(scene_dir: Path, frame_idx: int, K, dist, T_SV,
     pts_V = _read_points_V(pts_path)
     if pts_V.size == 0:
         return None
-    _, pts_vis, uv_vis, z_vis, intensity_vis = project_lidar_into_image(
+    # 画像の外 FOV_PAD px・深度 Z_MIN m まで残す (PandaSet・nuScenes の builder と同じ)。
+    # 点の数の判定は従来どおり画像内 (z > 0.5) の点で数える
+    keep_in, *_ = project_lidar_into_image(
         pts_V, K, T_SV, IW, IH, is_fisheye=True, dist=dist, z_min=0.5)
-    if len(pts_vis) < 64:
+    if int(keep_in.sum()) < 64:
         return None
+    _, pts_vis, uv_vis, z_vis, intensity_vis = project_lidar_into_image(
+        pts_V, K, T_SV, IW, IH, is_fisheye=True, dist=dist, z_min=Z_MIN, pad_px=FOV_PAD)
+    # intensity は 0〜255 → [0,1] (他のキャッシュと同じ。データセットは [0,1] で clip するだけ)
+    intensity_vis = (np.asarray(intensity_vis, np.float32) / 255.0).astype(np.float32)
     is_obj_vis = np.zeros(len(pts_vis), dtype=np.float32)
 
     import io as _io
