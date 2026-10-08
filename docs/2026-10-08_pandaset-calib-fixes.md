@@ -198,18 +198,19 @@ python scripts/eval/multiframe_infer.py --exp nsps_s2_pad256 --cache <cache> --t
 python scripts/eval/multiframe_infer.py --exp nsps_s2_pad256 --cache <cache> --tag ns --group any --F 1,2,4,8,16,32,64
 ```
 
-Geodesic rotation error after correction [deg], and the largest per-axis value (Tukey):
+Error after correction, Tukey fusion (F=1 = single frame). Rotation per axis is the absolute error in degrees (yaw = about the camera y axis, pitch = x, roll = optical axis); geodesic = the three axes as one rotation; t = camera-centre distance [m].
 
-| | F | median | p90 | max | max \|roll\| | max t [m] |
-|---|---|---|---|---|---|---|
-| PandaSet (frames from one scene) | 1 | 0.081 | 0.179 | **0.342** | 0.328 | 0.108 |
-| | 4 | 0.060 | 0.127 | 0.237 | 0.236 | 0.087 |
-| | 8 | 0.055 | 0.132 | 0.155 | 0.148 | 0.079 |
-| | 32 | 0.049 | 0.136 | **0.146** | 0.130 | 0.065 |
-| nuScenes (frames from any scenes) | 1 | 0.211 | 0.446 | **0.566** | 0.458 | 0.168 |
-| | 4 | 0.132 | 0.218 | 0.266 | 0.235 | 0.079 |
-| | 16 | 0.106 | 0.176 | 0.215 | 0.187 | 0.060 |
-| | 64 | 0.094 | 0.154 | **0.162** | 0.135 | 0.046 |
+| | F | median yaw / pitch / roll [deg] | max yaw / pitch / roll [deg] | geodesic median / max [deg] | t median / max [m] |
+|---|---|---|---|---|---|
+| PandaSet (frames from one scene) | 1 | 0.027 / 0.025 / 0.054 | 0.115 / 0.079 / 0.328 | 0.081 / 0.341 | 0.033 / 0.108 |
+|  | 4 | 0.022 / 0.024 / 0.051 | 0.101 / 0.057 / 0.236 | 0.060 / 0.237 | 0.027 / 0.086 |
+|  | 8 | 0.020 / 0.024 / 0.048 | 0.093 / 0.057 / 0.147 | 0.055 / 0.155 | 0.029 / 0.079 |
+|  | 16 | 0.022 / 0.029 / 0.054 | 0.092 / 0.048 / 0.130 | 0.061 / 0.144 | 0.037 / 0.078 |
+|  | 32 | 0.024 / 0.022 / 0.042 | 0.089 / 0.047 / 0.130 | 0.049 / 0.146 | 0.032 / 0.065 |
+| nuScenes (frames from any scenes) | 1 | 0.081 / 0.089 / 0.120 | 0.436 / 0.408 / 0.458 | 0.211 / 0.566 | 0.054 / 0.168 |
+|  | 4 | 0.041 / 0.057 / 0.081 | 0.207 / 0.166 / 0.235 | 0.132 / 0.266 | 0.031 / 0.079 |
+|  | 16 | 0.039 / 0.064 / 0.058 | 0.132 / 0.107 / 0.187 | 0.106 / 0.215 | 0.025 / 0.060 |
+|  | 64 | 0.037 / 0.065 / 0.053 | 0.079 / 0.093 / 0.135 | 0.094 / 0.162 | 0.021 / 0.046 |
 
 - Sum, Huber and Tukey differ by at most 0.025° in the max (nuScenes F=8: sum 0.246, Tukey 0.222); the χ² gate is worse than the sum in some rows (PandaSet F=16 median 0.072 vs 0.063).
 - PandaSet's max stays at 0.144–0.146° from F=16 to 32, and p90 at 0.13–0.14° from F=4 to 32. Its frames come from one of 5 val scenes; they are not independent.
