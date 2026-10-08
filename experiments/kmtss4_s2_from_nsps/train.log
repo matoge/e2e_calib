@@ -1,0 +1,48 @@
+03:35:18  crop_grid: kamikado_pad256 3840x2160 / 512px -> 8x5 = 40 windows
+03:35:18  crop_grid: tss4_pad256 3840x1952 / 512px -> 8x4 = 32 windows
+03:35:18  crop_grid: 窓数がキャッシュ間で違う [40, 32] -> 最大の 40 に揃える。足りない分は実タイルの複製で埋め、BA では w_active=0 として外す
+03:35:18  crop_grid: overriding --oversample 16 -> 40
+03:35:19  accelerate: num_processes=1 mixed_precision=no device=cuda
+03:35:19    [/mnt/ssd2t/work/e2e_calib/cache/kamikado_pad256] train=683 val=98 (os=40) u_band=0.0 crop_px=512-512 mode=calib
+03:35:19    [/mnt/ssd2t/work/e2e_calib/cache/tss4_pad256] train=350 val=50 (os=40) u_band=0.0 crop_px=512-512 mode=calib
+03:35:19  SCENE-level split (from the cache meta): train=1033 val=148 frames — val scenes are never trained on
+03:35:20  params: 1.14M  (world_size=1, bs/rank=4, global_bs=4)
+03:35:20  resumed weights from experiments/nsps_s2_pad256/best_model.pt (missing=0 unexpected=0)
+03:37:05  ep001/30  tr_nll=4.5393 tr_mse=8.921  va_nll=4.9229 va_mse=9.751  lr=1.20e-04  ep_t=104.5s  total=1.7min
+03:37:05  ep001/30   POSE rot=0.1189deg t=0.0427m chi2r=3.9 sigma=9.613px frac_pd=1.00
+03:37:16    ↳ best val_nll=4.9229  saved experiments/kmtss4_s2_from_nsps/best_model.pt (4.62 MB)
+03:38:56  ep002/30  tr_nll=4.0204 tr_mse=7.458  va_nll=nan va_mse=nan  lr=1.80e-04  ep_t=99.0s  total=3.6min
+03:40:36  ep003/30  tr_nll=3.7181 tr_mse=6.810  va_nll=nan va_mse=nan  lr=2.40e-04  ep_t=100.3s  total=5.3min
+03:42:15  ep004/30  tr_nll=3.4893 tr_mse=6.366  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=99.5s  total=6.9min
+03:44:24  ep005/30  tr_nll=3.3509 tr_mse=6.255  va_nll=5.0076 va_mse=10.322  lr=3.00e-04  ep_t=128.5s  total=9.1min
+03:44:24  ep005/30   POSE rot=0.0862deg t=0.0333m chi2r=1.7 sigma=9.233px frac_pd=1.00
+03:46:15  ep006/30  tr_nll=3.1398 tr_mse=5.927  va_nll=nan va_mse=nan  lr=2.99e-04  ep_t=99.5s  total=10.9min
+03:47:54  ep007/30  tr_nll=2.9940 tr_mse=5.885  va_nll=nan va_mse=nan  lr=2.95e-04  ep_t=99.7s  total=12.6min
+03:49:34  ep008/30  tr_nll=2.8371 tr_mse=5.617  va_nll=nan va_mse=nan  lr=2.90e-04  ep_t=100.0s  total=14.2min
+03:51:14  ep009/30  tr_nll=2.6795 tr_mse=5.519  va_nll=nan va_mse=nan  lr=2.82e-04  ep_t=99.2s  total=15.9min
+03:53:22  ep010/30  tr_nll=2.4120 tr_mse=5.247  va_nll=5.4432 va_mse=10.611  lr=2.71e-04  ep_t=128.6s  total=18.0min
+03:53:22  ep010/30   POSE rot=0.1104deg t=0.0310m chi2r=2.3 sigma=7.505px frac_pd=1.00
+03:55:13  ep011/30  tr_nll=2.3528 tr_mse=5.363  va_nll=nan va_mse=nan  lr=2.59e-04  ep_t=99.5s  total=19.9min
+03:56:52  ep012/30  tr_nll=2.2014 tr_mse=5.063  va_nll=nan va_mse=nan  lr=2.46e-04  ep_t=99.5s  total=21.5min
+03:58:33  ep013/30  tr_nll=2.1430 tr_mse=4.996  va_nll=nan va_mse=nan  lr=2.31e-04  ep_t=100.6s  total=23.2min
+04:00:15  ep014/30  tr_nll=2.1668 tr_mse=5.018  va_nll=nan va_mse=nan  lr=2.14e-04  ep_t=101.6s  total=24.9min
+04:02:36  ep015/30  tr_nll=2.0424 tr_mse=4.822  va_nll=5.0088 va_mse=10.000  lr=1.97e-04  ep_t=140.9s  total=27.3min
+04:02:36  ep015/30   POSE rot=0.0899deg t=0.0313m chi2r=2.6 sigma=6.680px frac_pd=1.00
+04:04:37  ep016/30  tr_nll=1.9888 tr_mse=4.652  va_nll=nan va_mse=nan  lr=1.79e-04  ep_t=108.9s  total=29.3min
+04:07:42  ep017/30  tr_nll=1.8895 tr_mse=4.568  va_nll=nan va_mse=nan  lr=1.60e-04  ep_t=184.9s  total=32.4min
+04:10:23  ep018/30  tr_nll=1.8417 tr_mse=4.486  va_nll=nan va_mse=nan  lr=1.41e-04  ep_t=160.4s  total=35.0min
+04:13:02  ep019/30  tr_nll=1.8008 tr_mse=4.406  va_nll=nan va_mse=nan  lr=1.22e-04  ep_t=159.7s  total=37.7min
+04:15:58  ep020/30  tr_nll=1.7633 tr_mse=4.347  va_nll=4.9943 va_mse=10.062  lr=1.04e-04  ep_t=175.4s  total=40.6min
+04:15:58  ep020/30   POSE rot=0.0939deg t=0.0294m chi2r=3.5 sigma=6.545px frac_pd=1.00
+04:19:11  ep021/30  tr_nll=1.7169 tr_mse=4.296  va_nll=nan va_mse=nan  lr=8.68e-05  ep_t=178.5s  total=43.8min
+04:22:10  ep022/30  tr_nll=1.6490 tr_mse=4.228  va_nll=nan va_mse=nan  lr=7.04e-05  ep_t=179.0s  total=46.8min
+04:25:16  ep023/30  tr_nll=1.5707 tr_mse=4.167  va_nll=nan va_mse=nan  lr=5.52e-05  ep_t=185.5s  total=49.9min
+04:28:13  ep024/30  tr_nll=1.5462 tr_mse=4.129  va_nll=nan va_mse=nan  lr=4.15e-05  ep_t=177.2s  total=52.9min
+04:31:19  ep025/30  tr_nll=1.4918 tr_mse=4.017  va_nll=6.2980 va_mse=11.334  lr=2.96e-05  ep_t=185.6s  total=56.0min
+04:31:19  ep025/30   POSE rot=0.0899deg t=0.0276m chi2r=4.4 sigma=6.168px frac_pd=1.00
+04:34:53  ep026/30  tr_nll=1.4803 tr_mse=4.035  va_nll=nan va_mse=nan  lr=1.95e-05  ep_t=199.4s  total=59.5min
+04:37:19  ep027/30  tr_nll=1.4537 tr_mse=4.065  va_nll=nan va_mse=nan  lr=1.15e-05  ep_t=146.2s  total=62.0min
+04:39:13  ep028/30  tr_nll=1.4299 tr_mse=3.957  va_nll=nan va_mse=nan  lr=5.70e-06  ep_t=114.2s  total=63.9min
+04:41:09  ep029/30  tr_nll=1.4049 tr_mse=3.952  va_nll=nan va_mse=nan  lr=2.18e-06  ep_t=116.0s  total=65.8min
+04:43:40  ep030/30  tr_nll=1.4020 tr_mse=3.995  va_nll=6.5640 va_mse=10.645  lr=1.00e-06  ep_t=150.4s  total=68.3min
+04:43:40  ep030/30   POSE rot=0.0932deg t=0.0279m chi2r=6.2 sigma=5.784px frac_pd=1.00

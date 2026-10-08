@@ -1,0 +1,33 @@
+00:14:30  accelerate: num_processes=1 mixed_precision=no device=cuda
+00:14:30    [/mnt/ssd2t/work/e2e_calib/cache/kamikado_pad256] train=683 val=98 (os=40) u_band=0.0 crop_px=512-512 mode=calib
+00:14:30  SCENE-level split (from the cache meta): train=683 val=98 frames — val scenes are never trained on
+00:14:32  params: 1.04M  (world_size=1, bs/rank=4, global_bs=4)
+00:15:46  ep001/20  tr_nll=7.5736 tr_mse=11.294  va_nll=5.5247 va_mse=12.466  lr=1.20e-04  ep_t=74.4s  total=1.2min
+00:15:46  ep001/20   POSE rot=0.2355deg t=0.0858m chi2r=46.4 sigma=20.404px frac_pd=1.00
+00:15:52    ↳ best val_nll=5.5247  saved experiments/km_s1_512/best_model.pt (4.22 MB)
+00:16:54  ep002/20  tr_nll=5.2838 tr_mse=11.399  va_nll=nan va_mse=nan  lr=1.80e-04  ep_t=61.8s  total=2.4min
+00:17:57  ep003/20  tr_nll=5.2370 tr_mse=11.350  va_nll=nan va_mse=nan  lr=2.40e-04  ep_t=62.6s  total=3.4min
+00:18:58  ep004/20  tr_nll=5.2396 tr_mse=11.236  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=61.4s  total=4.4min
+00:20:14  ep005/20  tr_nll=5.1596 tr_mse=10.847  va_nll=5.5079 va_mse=12.462  lr=3.00e-04  ep_t=75.6s  total=5.7min
+00:20:14  ep005/20   POSE rot=0.2482deg t=0.0907m chi2r=63.9 sigma=18.826px frac_pd=1.00
+00:20:20    ↳ best val_nll=5.5079  saved experiments/km_s1_512/best_model.pt (4.22 MB)
+00:21:26  ep006/20  tr_nll=5.1297 tr_mse=10.732  va_nll=nan va_mse=nan  lr=2.97e-04  ep_t=65.0s  total=6.9min
+00:22:54  ep007/20  tr_nll=5.0199 tr_mse=10.269  va_nll=nan va_mse=nan  lr=2.87e-04  ep_t=88.6s  total=8.4min
+00:24:26  ep008/20  tr_nll=4.8923 tr_mse=9.847  va_nll=nan va_mse=nan  lr=2.71e-04  ep_t=90.7s  total=9.9min
+00:25:42  ep009/20  tr_nll=4.8089 tr_mse=9.625  va_nll=nan va_mse=nan  lr=2.51e-04  ep_t=76.0s  total=11.2min
+00:27:00  ep010/20  tr_nll=4.7353 tr_mse=9.368  va_nll=5.2474 va_mse=11.225  lr=2.25e-04  ep_t=77.7s  total=12.5min
+00:27:00  ep010/20   POSE rot=0.2257deg t=0.0830m chi2r=75.4 sigma=15.848px frac_pd=1.00
+00:27:06    ↳ best val_nll=5.2474  saved experiments/km_s1_512/best_model.pt (4.22 MB)
+00:28:18  ep011/20  tr_nll=4.6389 tr_mse=9.109  va_nll=nan va_mse=nan  lr=1.97e-04  ep_t=71.4s  total=13.8min
+00:29:30  ep012/20  tr_nll=4.5964 tr_mse=8.980  va_nll=nan va_mse=nan  lr=1.66e-04  ep_t=72.6s  total=15.0min
+00:30:43  ep013/20  tr_nll=4.5153 tr_mse=8.839  va_nll=nan va_mse=nan  lr=1.35e-04  ep_t=73.0s  total=16.2min
+00:31:54  ep014/20  tr_nll=4.4389 tr_mse=8.583  va_nll=nan va_mse=nan  lr=1.04e-04  ep_t=70.5s  total=17.4min
+00:33:21  ep015/20  tr_nll=4.3819 tr_mse=8.442  va_nll=5.0679 va_mse=10.211  lr=7.58e-05  ep_t=87.3s  total=18.8min
+00:33:21  ep015/20   POSE rot=0.2148deg t=0.0827m chi2r=78.4 sigma=14.297px frac_pd=1.00
+00:33:37    ↳ best val_nll=5.0679  saved experiments/km_s1_512/best_model.pt (4.22 MB)
+00:34:53  ep016/20  tr_nll=4.3354 tr_mse=8.330  va_nll=nan va_mse=nan  lr=5.05e-05  ep_t=75.6s  total=20.3min
+00:36:07  ep017/20  tr_nll=4.2789 tr_mse=8.160  va_nll=nan va_mse=nan  lr=2.96e-05  ep_t=73.9s  total=21.6min
+00:37:20  ep018/20  tr_nll=4.2348 tr_mse=8.103  va_nll=nan va_mse=nan  lr=1.39e-05  ep_t=73.4s  total=22.8min
+00:38:46  ep019/20  tr_nll=4.2075 tr_mse=8.013  va_nll=nan va_mse=nan  lr=4.27e-06  ep_t=85.7s  total=24.2min
+00:40:22  ep020/20  tr_nll=4.1789 tr_mse=7.954  va_nll=5.1708 va_mse=10.017  lr=1.00e-06  ep_t=95.5s  total=25.8min
+00:40:22  ep020/20   POSE rot=0.2089deg t=0.0800m chi2r=100.7 sigma=12.531px frac_pd=1.00

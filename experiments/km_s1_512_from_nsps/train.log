@@ -1,0 +1,31 @@
+00:45:52  accelerate: num_processes=1 mixed_precision=no device=cuda
+00:45:52    [/mnt/ssd2t/work/e2e_calib/cache/kamikado_pad256] train=683 val=98 (os=40) u_band=0.0 crop_px=512-512 mode=calib
+00:45:52  SCENE-level split (from the cache meta): train=683 val=98 frames — val scenes are never trained on
+00:45:54  params: 1.04M  (world_size=1, bs/rank=4, global_bs=4)
+00:45:54  resumed weights from experiments/nsps_s1_pad256/best_model.pt (missing=0 unexpected=0)
+00:47:40  ep001/20  tr_nll=4.5640 tr_mse=8.799  va_nll=5.3315 va_mse=10.754  lr=1.20e-04  ep_t=106.1s  total=1.8min
+00:47:40  ep001/20   POSE rot=0.2207deg t=0.0856m chi2r=89.8 sigma=14.180px frac_pd=1.00
+00:47:48    ↳ best val_nll=5.3315  saved experiments/km_s1_512_from_nsps/best_model.pt (4.22 MB)
+00:49:15  ep002/20  tr_nll=4.1008 tr_mse=7.116  va_nll=nan va_mse=nan  lr=1.80e-04  ep_t=86.0s  total=3.3min
+00:50:24  ep003/20  tr_nll=3.9289 tr_mse=6.612  va_nll=nan va_mse=nan  lr=2.40e-04  ep_t=69.5s  total=4.5min
+00:51:34  ep004/20  tr_nll=3.8314 tr_mse=6.369  va_nll=nan va_mse=nan  lr=3.00e-04  ep_t=70.1s  total=5.7min
+00:52:58  ep005/20  tr_nll=3.7907 tr_mse=6.210  va_nll=6.0095 va_mse=10.093  lr=3.00e-04  ep_t=83.4s  total=7.1min
+00:52:58  ep005/20   POSE rot=0.2269deg t=0.0788m chi2r=168.0 sigma=9.872px frac_pd=1.00
+00:54:16  ep006/20  tr_nll=3.6628 tr_mse=5.892  va_nll=nan va_mse=nan  lr=2.97e-04  ep_t=70.5s  total=8.4min
+00:55:24  ep007/20  tr_nll=3.5794 tr_mse=5.722  va_nll=nan va_mse=nan  lr=2.87e-04  ep_t=68.2s  total=9.5min
+00:56:33  ep008/20  tr_nll=3.4911 tr_mse=5.523  va_nll=nan va_mse=nan  lr=2.71e-04  ep_t=68.6s  total=10.6min
+00:58:14  ep009/20  tr_nll=3.4405 tr_mse=5.379  va_nll=nan va_mse=nan  lr=2.51e-04  ep_t=101.6s  total=12.3min
+01:00:05  ep010/20  tr_nll=3.3266 tr_mse=5.112  va_nll=5.6345 va_mse=9.258  lr=2.25e-04  ep_t=111.3s  total=14.2min
+01:00:05  ep010/20   POSE rot=0.2133deg t=0.0731m chi2r=170.6 sigma=7.857px frac_pd=1.00
+01:01:11  ep011/20  tr_nll=3.2668 tr_mse=4.985  va_nll=nan va_mse=nan  lr=1.97e-04  ep_t=59.7s  total=15.3min
+01:02:12  ep012/20  tr_nll=3.1941 tr_mse=4.853  va_nll=nan va_mse=nan  lr=1.66e-04  ep_t=60.9s  total=16.3min
+01:03:12  ep013/20  tr_nll=3.1221 tr_mse=4.694  va_nll=nan va_mse=nan  lr=1.35e-04  ep_t=60.2s  total=17.3min
+01:04:19  ep014/20  tr_nll=3.0597 tr_mse=4.575  va_nll=nan va_mse=nan  lr=1.04e-04  ep_t=66.5s  total=18.4min
+01:06:09  ep015/20  tr_nll=2.9895 tr_mse=4.444  va_nll=5.5568 va_mse=8.858  lr=7.58e-05  ep_t=109.8s  total=20.2min
+01:06:09  ep015/20   POSE rot=0.2123deg t=0.0754m chi2r=169.9 sigma=7.575px frac_pd=1.00
+01:07:49  ep016/20  tr_nll=2.9547 tr_mse=4.385  va_nll=nan va_mse=nan  lr=5.05e-05  ep_t=92.8s  total=21.9min
+01:08:58  ep017/20  tr_nll=2.8984 tr_mse=4.287  va_nll=nan va_mse=nan  lr=2.96e-05  ep_t=68.8s  total=23.1min
+01:09:57  ep018/20  tr_nll=2.8477 tr_mse=4.206  va_nll=nan va_mse=nan  lr=1.39e-05  ep_t=59.9s  total=24.1min
+01:10:58  ep019/20  tr_nll=2.8152 tr_mse=4.155  va_nll=nan va_mse=nan  lr=4.27e-06  ep_t=60.1s  total=25.1min
+01:12:33  ep020/20  tr_nll=2.8201 tr_mse=4.164  va_nll=6.3669 va_mse=9.003  lr=1.00e-06  ep_t=95.5s  total=26.7min
+01:12:33  ep020/20   POSE rot=0.2140deg t=0.0737m chi2r=235.9 sigma=6.392px frac_pd=1.00
