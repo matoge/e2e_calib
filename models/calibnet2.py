@@ -147,14 +147,30 @@ class Block(nn.Module):
     ONCE outside the n_iter loop and threaded in unchanged each iter.
     """
     def __init__(self, d: int = D_DIM, n_heads: int = 4, n_levels: int = 3,
-                 n_points: int = 4, no_value_proj: bool = False):
+                 n_points: int = 4, no_value_proj: bool = False,
+                 cross_attn: str = 'deform', ref_mode: str = 'learned'):
         super().__init__()
+        assert cross_attn in ('deform', 'full'), cross_attn
+        assert ref_mode in ('learned', 'query_offset', 'query'), ref_mode
         self.n_levels = n_levels
         self.norm_q   = nn.LayerNorm(d)
         self.norm_kv  = nn.LayerNorm(d)
-        self.cross_attn = MSDeformAttn(d_model=d, n_levels=n_levels,
-                                        n_heads=n_heads, n_points=n_points,
-                                        no_value_proj=no_value_proj)
+        # cross_attn='deform': MSDeformAttn。参照点の周り (n_heads×n_points×n_levels 点)
+        #   だけをサンプリングするので参照点が要る。参照点の作り方は ref_mode:
+        #     'learned'      sigmoid(ref_proj(q))              (2026-05-31〜 の既定)
+        #     'query_offset' sigmoid(logit(uv) + ref_proj(q))  (ps_s1_refq)
+        #     'query'        uv そのもの。ref_proj は使わない。ずれは DA 内の
+        #                    サンプリングオフセットだけが学ぶ。
+        #   uv は渡されたポーズで投影したクエリの位置 (幾何で決まる)。
+        # cross_attn='full': nn.MultiheadAttention で KV 全体を見る。参照点は無い。
+        self.cross_attn_type = cross_attn
+        self.ref_mode = ref_mode
+        if cross_attn == 'full':
+            self.cross_attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        else:
+            self.cross_attn = MSDeformAttn(d_model=d, n_levels=n_levels,
+                                            n_heads=n_heads, n_points=n_points,
+                                            no_value_proj=no_value_proj)
         # Q → reference points (one ref per level).  Zero-init weight + zero
         # bias → ref = sigmoid(0) = 0.5 at start (image center).  The network
         # learns to anchor as Q acquires per-point u/v info from cross-attn.
@@ -175,8 +191,13 @@ class Block(nn.Module):
                 kv_flat: torch.Tensor,
                 spatial_shapes: torch.Tensor,
                 level_start_index: torch.Tensor,
-                key_padding_mask=None):
+                key_padding_mask=None, ref_uv=None):
         """
+        ref_uv            : (B, N, 2) in [0,1] or None — クエリ自身の位置。
+                            渡すと参照点 = sigmoid(logit(ref_uv) + ref_proj(q))
+                            で、ref_proj (ゼロ初期化) は自分の位置からの差分を学ぶ。
+                            None なら従来どおり ref = sigmoid(ref_proj(q))
+                            (初期は全クエリが画像中央 0.5 を見る)。
         q                 : (B, N, D)
         kv_flat           : (B, Σ HlWl, D)  — already + level_embed, NOT normed
         spatial_shapes    : (n_levels, 2) long
@@ -193,12 +214,21 @@ class Block(nn.Module):
         nq  = self.norm_q(q)
         nkv = self.norm_kv(kv_flat)
 
-        # reference points from Q — (B, N, n_levels, 2) in [0, 1].
-        ref = self.ref_proj(nq).view(B, N, self.n_levels, 2)
-        ref = torch.sigmoid(ref)
-
-        ca = self.cross_attn(nq, ref, nkv, spatial_shapes, level_start_index,
-                              input_padding_mask=None)
+        if self.cross_attn_type == 'full':
+            ca, _ = self.cross_attn(nq, nkv, nkv, need_weights=False)
+        else:
+            # reference points — (B, N, n_levels, 2) in [0, 1].
+            if self.ref_mode == 'query':
+                assert ref_uv is not None, "ref_mode='query' には ref_uv が要る"
+                ref = ref_uv.clamp(0.0, 1.0).unsqueeze(2).expand(B, N, self.n_levels, 2)
+            else:
+                ref = self.ref_proj(nq).view(B, N, self.n_levels, 2)
+                if self.ref_mode == 'query_offset':
+                    assert ref_uv is not None
+                    ref = ref + torch.logit(ref_uv.clamp(1e-4, 1 - 1e-4)).unsqueeze(2)
+                ref = torch.sigmoid(ref)
+            ca = self.cross_attn(nq, ref, nkv, spatial_shapes, level_start_index,
+                                  input_padding_mask=None)
         ca = self.drop(ca)
 
         q1 = q + ca
@@ -254,17 +284,35 @@ class CalibNet2(nn.Module):
                  fourier_head_n_freq: int = 0,
                  fourier_head_scale: float = 10.0,
                  point_mlp_fourier_n_freq: int = 0,
-                 no_value_proj: bool = False):
+                 no_value_proj: bool = False,
+                 ref_from_query: bool = False,
+                 cross_attn: str = 'deform',
+                 ref_mode: str | None = None,
+                 frustum_nb: str = '3x3'):
         super().__init__()
+        # ref_from_query=True は ref_mode='query_offset' と同じ (ps_s1_refq の互換)。
+        if ref_mode is None:
+            ref_mode = 'query_offset' if ref_from_query else 'learned'
+        self.cross_attn = cross_attn
+        self.ref_mode = ref_mode
         self.img_size  = img_size
+        # True: クロスアテンションの参照点をクエリ自身の (u,v) に置き、ref_proj は
+        # そこからの差分を学ぶ。False (旧): 参照点は ref_proj の出力だけで、初期は
+        # 全クエリが画像中央を見る。モデルはまず「自分の点が画像のどこか」を
+        # token から回帰で覚え直す必要があった。リークがあった頃 (2026-05-31〜
+        # 10-07、クエリを GT 位置で選んでいた) はクエリの並びから答えが読めた
+        # ので、この位置合わせを覚えなくても当たっていた。
+        self.ref_from_query = ref_mode in ('query_offset', 'query')
         self.cnn = ConvNeXtBackbone(d, in_channels=in_channels,
                                      n_blocks=convnext_n_blocks)
         self.use_intensity = bool(use_intensity)
         self.point_mlp = PointMLP3(d,
                                     in_channels=4 if self.use_intensity else 3,
                                     fourier_n_freq=int(point_mlp_fourier_n_freq))
+        # frustum_nb: '3x3' (従来) = 周り 3x3 セルの候補からランダムに k_nb 点。
+        #             'own' = 自分のセルの点を選別せず全部 (上限はデータ側の k_per_cell)
         self.frustum_enc = FrustumLocalEncoder(
-            d, r_uv_cells=r_uv_cells, r_d=r_d, k=k_nb, grid_n=frustum_grid_n)
+            d, r_uv_cells=r_uv_cells, r_d=r_d, k=k_nb, grid_n=frustum_grid_n, nb=frustum_nb)
         self.pose_emb = RoPEPoseEmb(d, d_scalar=d_scalar, n_type1=n_type1)
         # --- block stack ---------------------------------------------------
         # Two regimes:
@@ -285,7 +333,8 @@ class CalibNet2(nn.Module):
         if self.kv_schedule is None:
             self.n_iter = n_iter
             self.block = Block(d=d, n_heads=n_heads, n_levels=3, n_points=n_points,
-                               no_value_proj=no_value_proj)
+                               no_value_proj=no_value_proj,
+                               cross_attn=cross_attn, ref_mode=ref_mode)
             self.level_embed = nn.Parameter(torch.zeros(3, d))
             nn.init.normal_(self.level_embed, std=0.02)
         else:
@@ -357,6 +406,7 @@ class CalibNet2(nn.Module):
         the A side; B has no Q).
         """
         uv_01 = distorted_uvd[..., :2] / self.img_size
+        self._ref_uv = uv_01 if self.ref_from_query else None
         d3    = distorted_uvd[..., 2:3]
         if self.use_intensity:
             q_in = torch.cat([uv_01, d3, distorted_uvd[..., 3:4]], dim=-1)
@@ -392,7 +442,8 @@ class CalibNet2(nn.Module):
         for _ in range(n_iters):
             q, delta_i = self.block(q, kv_flat, spatial_shapes,
                                      level_start_index,
-                                     key_padding_mask=key_padding_mask)
+                                     key_padding_mask=key_padding_mask,
+                                     ref_uv=getattr(self, '_ref_uv', None))
             delta_cum = delta_cum + delta_i
         return q, delta_cum
 
@@ -440,7 +491,8 @@ class CalibNet2(nn.Module):
             level_start_index = torch.as_tensor(cum[:-1], dtype=torch.long, device=device)
             q, delta_i = self.blocks[li](q, kv_flat, spatial_shapes,
                                           level_start_index,
-                                          key_padding_mask=key_padding_mask)
+                                          key_padding_mask=key_padding_mask,
+                                          ref_uv=getattr(self, '_ref_uv', None))
             delta_cum = delta_cum + delta_i
         return q, delta_cum
 

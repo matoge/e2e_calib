@@ -309,6 +309,144 @@ def make_image_and_points_grid_depth(
     return image, true_uvd, dist_uvd
 
 
+def make_image_and_points_lidar(
+    img_size: int = 64,
+    max_offset: float = 16.0,
+    seed: int | None = None,
+    n_obj: tuple[int, int] = (1, 4),
+    spacing: tuple[float, float] = (2.0, 12.0),
+    jitter_frac: float = 0.25,
+    drop: tuple[float, float] = (0.0, 0.3),
+    spacing_v: tuple[float, float] | None = None,
+    return_meta: bool = False,
+    shift_bg: bool = True,     # False: 背景はずらさない (ずれ 0)。物体だけずらす
+    keep_bg: bool = True,      # False: 背景の点を出さない (物体の点だけ)
+):
+    """ベンチの最小セット: 物体 n_obj 個 + 背景、深度はランダム、LiDAR の密度もランダム。
+
+    物体:   既存の形 (矩形 / 円 / 楕円 / ポール) を n_obj 個。重なりを許し、
+            近いものが手前に描かれる (z-buffer)。深度 U(0.05, 0.85)、背景は
+            U(物体の最大 + 0.05, 1.0)。
+    LiDAR:  横間隔 su と縦間隔 sv を spacing から別々に対数一様で引く (2 px = 64px 画像で
+            32×32 の密、12 px ≈ 5×5 の疎)。原点はランダム、各点を ±jitter_frac·s
+            だけ揺らし、drop の割合を抜く。各点の深度は真の位置の z-buffer の値
+            (物体の裏の背景点は出ない)。
+    ずれ:   深度グループ (物体ごと + 背景) ごとに独立に ±max_offset px。
+            ずらした後に画像内に入る点だけ残す。
+
+    Returns: image (3,H,W), true_uvd (N,3), dist_uvd (N,3)  d は [0,1]、背景が最大。
+    """
+    rng = torch.Generator()
+    if seed is not None:
+        rng.manual_seed(seed)
+    H = W = img_size
+    U = lambda lo, hi: float(torch.rand(1, generator=rng).item() * (hi - lo) + lo)
+    # シーンはクロップより P px ずつ大きいキャンバスに作り、最後に 64×64 を切り出す。
+    # 64×64 の中だけで作ると、物体が画像の端で切れ、真の位置が外にある点は物体の上でも
+    # 背景の深度になる → ずらすと「ずらした方向の端に物体の点が無い帯」ができ、
+    # それがずれの手がかりになっていた。実際のクロップでは物体はクロップの外へ続く。
+    # 座標はクロップ基準 (キャンバスでは +P)。
+    P = int(math.ceil(max_offset)) + 4
+    HB = H + 2 * P
+
+    bg_color = torch.rand(3, generator=rng)
+    image = bg_color[:, None, None].expand(3, HB, HB).clone()
+    yy, xx = torch.meshgrid(torch.arange(HB, dtype=torch.float32) - P,
+                            torch.arange(HB, dtype=torch.float32) - P, indexing="ij")
+    in_crop = (xx >= 0) & (xx < W) & (yy >= 0) & (yy < H)
+
+    n = _randint(n_obj[0], n_obj[1] + 1, rng)
+    objs = []
+    for _ in range(n):
+        for _try in range(50):
+            st, small = _randint(0, 4, rng), bool(_randint(0, 2, rng))
+            if st == 0:
+                cx, cy, a, b = _rand_rect(rng, img_size, small=small)
+            elif st == 1:
+                cx, cy, a = _rand_circle(rng, img_size, small=small); b = a
+            elif st == 2:
+                cx, cy, a, b = _rand_ellipse(rng, img_size, small=small)
+            else:
+                cx, cy, a, b = _rand_pole(rng, img_size)
+                # 端から端まで伸びるポール (半長 = img_size//2 - 1) はキャンバスの端まで伸ばす
+                if max(a, b) == img_size // 2 - 1:
+                    if b > a: b = HB // 2
+                    else:     a = HB // 2
+            # 大きさはそのまま、中心だけをキャンバス全体 (クロップ ±P) で動かす
+            cx = cx + U(-P, P); cy = cy + U(-P, P)
+            if st in (0, 3):
+                m = (xx - cx).abs().lt(a) & (yy - cy).abs().lt(b)
+            elif st == 1:
+                m = ((xx - cx) ** 2 + (yy - cy) ** 2) <= a ** 2
+            else:
+                m = ((xx - cx).pow(2) / a ** 2 + (yy - cy).pow(2) / b ** 2) <= 1.0
+            if (m & in_crop).sum() >= 16:      # クロップに 16 px 以上入る物体だけ採用
+                break
+        c = torch.rand(3, generator=rng)
+        while (c - bg_color).norm().item() < 0.35:
+            c = torch.rand(3, generator=rng)
+        objs.append((U(0.05, 0.85), m, c))
+    d_bg = U(max(o[0] for o in objs) + 0.05, 1.0) if objs else 1.0
+
+    # 遠い順に描く → 近いものが上書き (z-buffer)
+    depth_map = torch.full((HB, HB), d_bg)
+    for d, m, c in sorted(objs, key=lambda o: -o[0]):
+        image[:, m] = c[:, None]
+        depth_map[m] = d
+
+    # 対数一様: 一様だと密 (両方 2 px 付近) がほとんど出ない (中央値 78 点)
+    LU = lambda lo, hi: math.exp(U(math.log(lo), math.log(hi)))
+    su, sv = LU(*spacing), LU(*(spacing_v or spacing))
+    margin = max_offset
+    gx = torch.arange(-margin + U(0, su), W + margin, su)
+    gy = torch.arange(-margin + U(0, sv), H + margin, sv)
+    gyy, gxx = torch.meshgrid(gy, gx, indexing="ij")
+    xs, ys = gxx.reshape(-1), gyy.reshape(-1)
+    xs = xs + (torch.rand(len(xs), generator=rng) * 2 - 1) * jitter_frac * su
+    ys = ys + (torch.rand(len(ys), generator=rng) * 2 - 1) * jitter_frac * sv
+    drop_frac = U(*drop)
+    keep = torch.rand(len(xs), generator=rng) >= drop_frac
+    xs, ys = xs[keep], ys[keep]
+    # 全点の深度をキャンバスの z-buffer から取る (クロップの外の点も物体に当たりうる)
+    xi = (xs + P).floor().long().clamp(0, HB - 1)
+    yi = (ys + P).floor().long().clamp(0, HB - 1)
+    depths = depth_map[yi, xi].clone()
+
+    # ずれは別の乱数で引く。同じ seed なら点の密度に関係なく同じずれになる
+    # (点の生成で消費した乱数の数に引きずられない)。物体を手前から順に
+    # 0, 1, ... 番、背景を最後として、その順番でずれを割り当てる。
+    rng_t = torch.Generator()
+    rng_t.manual_seed((seed if seed is not None else 0) + 2_000_000)
+    order = sorted([o[0] for o in objs]) + [d_bg]
+    f32 = lambda x: float(torch.tensor(x, dtype=torch.float32))   # depths は float32
+    tab = {f32(d): ((torch.rand(2, generator=rng_t) * 2 - 1) * max_offset) for d in order}
+    if not shift_bg:
+        tab[f32(d_bg)] = torch.zeros(2)
+    true_parts, dist_parts, shifts = [], [], {}
+    for d_val in sorted(set(depths.tolist())):
+        if not keep_bg and d_val == f32(d_bg):
+            continue
+        sel = depths == d_val
+        t = tab[d_val]
+        shifts[d_val] = t.tolist()
+        uv_true = torch.stack([xs[sel], ys[sel]], 1)
+        uv_dist = uv_true + t[None]
+        vis = ((uv_dist[:, 0] >= 0) & (uv_dist[:, 0] < W) &
+               (uv_dist[:, 1] >= 0) & (uv_dist[:, 1] < H))
+        if not vis.any():
+            continue
+        dc = torch.full((int(vis.sum()), 1), d_val)
+        true_parts.append(torch.cat([uv_true[vis], dc], 1))
+        dist_parts.append(torch.cat([uv_dist[vis], dc], 1))
+    image = image[:, P:P + H, P:P + W].contiguous()
+    if not true_parts:      # 物体に点が 1 つも当たらなかった (keep_bg=False のとき)
+        true_parts = [torch.zeros(0, 3)]; dist_parts = [torch.zeros(0, 3)]
+    out = (image, torch.cat(true_parts), torch.cat(dist_parts))
+    if return_meta:
+        return out + (dict(su=su, sv=sv, drop=drop_frac, d_bg=d_bg, shifts=shifts),)
+    return out
+
+
 def collate_grid_depth(batch):
     """Collate variable-length point clouds by zero-padding to max N in batch."""
     imgs, true_list, dist_list = zip(*batch)
@@ -611,6 +749,12 @@ def make_image_and_points_depth(
     max_offset: float = 15.0,
     seed: int | None = None,
     bg_ratio: int = 1,     # bg points = n_obj_per * bg_ratio
+    color: bool = False,   # True: 背景・物体をランダムな色の RGB (3ch) にする
+    random_depth: bool = False,  # True: 深度をランダム (物体 U(0.05,0.85)、背景 U(物体の最大+0.05, 1))
+    grid_spacing: float | None = None,  # 数値: 点をランダムでなく LiDAR 格子 (この間隔 px、原点ランダム、±0.25 間隔の揺れ) に置く
+    area_uniform: bool = False,  # True: 画像全体に n_points 点をランダムに撒き、所属をその位置の形で決める (面積どおり)
+    lidar_spacing: tuple[float, float] | None = None,  # (lo, hi): LiDAR のように横・縦の間隔を別々に対数一様で引き、0〜30% 間引く
+    canvas: bool = False,  # True: 格子を画像の外 (各辺 max_offset) まで撒き、ずらした後に画像内の点だけ残す (端に寄せない)
 ):
     """
     Returns:
@@ -628,7 +772,7 @@ def make_image_and_points_depth(
         rng.manual_seed(seed)
 
     H = W = img_size
-    image = torch.zeros(1, H, W, dtype=torch.float32)
+    image = torch.zeros(1, H, W, dtype=torch.float32)   # 物体マスク (1 = 物体)。color のときも点の配置はこれで決める
     n_obj = n_points // (2 + bg_ratio)   # points per object
     n_bg  = n_points - 2 * n_obj         # background points
     n_per = n_obj                         # alias for legacy code below
@@ -686,29 +830,111 @@ def make_image_and_points_depth(
     # stack all U,V coords
     all_u = torch.cat([obj_xs[0], obj_xs[1], bg_x])   # (N,)
     all_v = torch.cat([obj_ys[0], obj_ys[1], bg_y])   # (N,)
+    if grid_spacing is not None:
+        # LiDAR 格子: 画像全体に間隔 grid_spacing の格子を置き、各点の所属 (物体 1 / 物体 2 /
+        # 背景) をその位置の形で決める。点の数とグループの大きさは形と間隔で決まる。
+        rng_g = torch.Generator()
+        rng_g.manual_seed((seed if seed is not None else 0) + 5_000_000)
+        if lidar_spacing is not None:
+            lo, hi = math.log(lidar_spacing[0]), math.log(lidar_spacing[1])
+            su = math.exp(float(torch.rand(1, generator=rng_g)) * (hi - lo) + lo)
+            sv = math.exp(float(torch.rand(1, generator=rng_g)) * (hi - lo) + lo)
+        else:
+            su = sv = float(grid_spacing)
+        sp = su
+        mg = float(max_offset) if canvas else 0.0
+        gx = torch.arange(-mg + float(torch.rand(1, generator=rng_g)) * su, W + mg, su)
+        gy = torch.arange(-mg + float(torch.rand(1, generator=rng_g)) * sv, H + mg, sv)
+        gyy, gxx = torch.meshgrid(gy, gx, indexing="ij")
+        px = gxx.reshape(-1) + (torch.rand(gxx.numel(), generator=rng_g) * 2 - 1) * 0.25 * su
+        py = gyy.reshape(-1) + (torch.rand(gyy.numel(), generator=rng_g) * 2 - 1) * 0.25 * sv
+        if not canvas:
+            px, py = px.clamp(0, W - 1), py.clamp(0, H - 1)
+        if lidar_spacing is not None:
+            keep = torch.rand(px.numel(), generator=rng_g) >= float(torch.rand(1, generator=rng_g)) * 0.3
+            px, py = px[keep], py[keep]
+        if area_uniform:
+            # 格子でなく一様ランダム (点の数は格子と同じ)。格子かどうかと、物体の点の割合を切り分ける用
+            px = torch.rand(px.numel(), generator=rng_g) * (W - 1)
+            py = torch.rand(py.numel(), generator=rng_g) * (H - 1)
+        yy_, xx_ = torch.meshgrid(torch.arange(H, dtype=torch.float32),
+                                  torch.arange(W, dtype=torch.float32), indexing="ij")
+        def _mask(st, cx, cy, a, b):
+            if st == 0:
+                m = torch.zeros(H, W, dtype=torch.bool); m[cy-b:cy+b, cx-a:cx+a] = True; return m
+            return (xx_-cx)**2 + (yy_-cy)**2 <= a**2
+        lab = torch.full((px.numel(),), 2, dtype=torch.long)      # 2 = 背景 (画像の外の点も背景)
+        inside = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+        ix, iy = px.floor().long().clamp(0, W - 1), py.floor().long().clamp(0, H - 1)
+        for k, sh in enumerate(shapes):
+            lab[_mask(*sh)[iy, ix] & inside] = k
+        sel = [lab == 0, lab == 1, lab == 2]
+        obj_xs, obj_ys = [px[sel[0]], px[sel[1]]], [py[sel[0]], py[sel[1]]]
+        bg_x, bg_y = px[sel[2]], py[sel[2]]
+        all_u = torch.cat([obj_xs[0], obj_xs[1], bg_x])
+        all_v = torch.cat([obj_ys[0], obj_ys[1], bg_y])
+        n_obj1, n_obj2, n_bg = int(sel[0].sum()), int(sel[1].sum()), int(sel[2].sum())
+    else:
+        n_obj1 = n_obj2 = n_obj
 
     # depth labels (normalised)
+    if random_depth:
+        # 深度は別の乱数で引く (点の配置・ずれは random_depth=False と同じになる)
+        rng_d = torch.Generator()
+        rng_d.manual_seed((seed if seed is not None else 0) + 4_000_000)
+        d1 = float(torch.rand(1, generator=rng_d) * 0.80 + 0.05)
+        d2 = float(torch.rand(1, generator=rng_d) * 0.80 + 0.05)
+        lo = max(d1, d2) + 0.05
+        dbg = float(torch.rand(1, generator=rng_d) * (1.0 - lo) + lo)
+    else:
+        d1, d2, dbg = DEPTH_OBJ1 / DEPTH_NORM, DEPTH_OBJ2 / DEPTH_NORM, DEPTH_BG / DEPTH_NORM
     depths = torch.cat([
-        torch.full((n_obj,), DEPTH_OBJ1 / DEPTH_NORM),
-        torch.full((n_obj,), DEPTH_OBJ2 / DEPTH_NORM),
-        torch.full((n_bg,),  DEPTH_BG   / DEPTH_NORM),
+        torch.full((n_obj1,), d1),
+        torch.full((n_obj2,), d2),
+        torch.full((n_bg,),  dbg),
     ])
 
     true_uvd = torch.stack([all_u, all_v, depths], dim=1)   # (N,3)
 
     # independent shifts per group
-    group_sizes = [n_obj, n_obj, n_bg]
+    group_sizes = [n_obj1, n_obj2, n_bg]
     dist_parts = []
     offset = 0
     for sz in group_sizes:
         tx = (torch.rand(1, generator=rng)*2 - 1) * max_offset
         ty = (torch.rand(1, generator=rng)*2 - 1) * max_offset
         uv_i = true_uvd[offset:offset+sz, :2]
-        uv_d  = (uv_i + torch.stack([tx.expand(sz), ty.expand(sz)], dim=1)).clamp(0, img_size-1)
+        uv_d  = uv_i + torch.stack([tx.expand(sz), ty.expand(sz)], dim=1)
+        if not canvas:
+            uv_d = uv_d.clamp(0, img_size-1)
         dist_parts.append(torch.cat([uv_d, true_uvd[offset:offset+sz, 2:3]], dim=1))
         offset += sz
 
     distorted_uvd = torch.cat(dist_parts, dim=0)   # (N,3)
+    if canvas:
+        # ずらした後に画像内に入る点だけ残す
+        vis = ((distorted_uvd[:, 0] >= 0) & (distorted_uvd[:, 0] < W) &
+               (distorted_uvd[:, 1] >= 0) & (distorted_uvd[:, 1] < H))
+        true_uvd, distorted_uvd = true_uvd[vis], distorted_uvd[vis]
+    if color:
+        # 色は別の乱数で引く (点の配置・ずれは color=False と同じになる)
+        rng_c = torch.Generator()
+        rng_c.manual_seed((seed if seed is not None else 0) + 3_000_000)
+        bgc = torch.rand(3, generator=rng_c)
+        rgb = bgc[:, None, None].expand(3, H, W).clone()
+        yy, xx = torch.meshgrid(torch.arange(H, dtype=torch.float32),
+                                torch.arange(W, dtype=torch.float32), indexing="ij")
+        for st, cx, cy, a, b in shapes:
+            c = torch.rand(3, generator=rng_c)
+            while (c - bgc).norm().item() < 0.35:
+                c = torch.rand(3, generator=rng_c)
+            m = torch.zeros(H, W, dtype=torch.bool)
+            if st == 0:
+                m[cy-b:cy+b, cx-a:cx+a] = True
+            else:
+                m = (xx-cx)**2 + (yy-cy)**2 <= a**2
+            rgb[:, m] = c[:, None]
+        image = rgb
     return image, true_uvd, distorted_uvd
 
 

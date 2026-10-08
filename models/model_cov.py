@@ -222,35 +222,6 @@ def gaussian_uvd_nll(params: torch.Tensor,
     return nll.mean()
 
 
-class CalibNetCov(nn.Module):
-    def __init__(self, d: int = D, img_size: int = 128):
-        super().__init__()
-        self.img_size     = img_size
-        self.cnn          = CNNBackbone(d)
-        self.point_mlp    = PointMLP(d)
-        self.cross_coarse = CrossAttentionBlockCov(d)
-        self.cross_fine   = CrossAttentionBlockCov(d)
-
-    def forward(self, image, distorted_uv):
-        """
-        Returns params (B, N, 5): [tx, ty, log_sx, log_sy, rho]
-        All in pixel space.
-        """
-        coarse_feat, fine_feat = self.cnn(image)
-        uv_01 = distorted_uv / self.img_size
-
-        q = self.point_mlp(uv_01)
-        q, raw_c = self.cross_coarse(q, coarse_feat, uv_01)
-
-        # warp using coarse mean (columns 0,1 are in [0,1] before scaling → use raw)
-        offset_c_01 = raw_c[..., :2]   # still un-scaled at this point
-        uv_w = (uv_01 + offset_c_01).clamp(0, 1)
-        q_w  = self.point_mlp(uv_w) + q
-        _, raw_f = self.cross_fine(q_w, fine_feat, uv_w)
-
-        # sum coarse + fine raw, then clamp/scale
-        raw = raw_c + raw_f
-        return clamp_params(raw, self.img_size)   # (B,N,5)
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +238,7 @@ def gaussian2d_nll(params: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     diagnostic of the first offending element so we can pin-point what
     blew up (target outlier? log_sx unclamped? rho ≈ ±1?).
     """
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         params = params.float()
         target = target.float()
         tx, ty       = params[..., 0], params[..., 1]

@@ -178,7 +178,8 @@ class FrustumLocalEncoder(nn.Module):
     """
     def __init__(self, d_out: int = D_DIM, r_uv_cells: float = 1.5, r_d: float = 0.004,
                  k: int = 32, grid_n: int = 16,
-                 d_local: int = 32, n_heads: int = 2, n_layers: int = 2):
+                 d_local: int = 32, n_heads: int = 2, n_layers: int = 2,
+                 q_from: str = 'token', nb: str = '3x3'):
         super().__init__()
         self.r_uv_cells = r_uv_cells   # neighborhood radius in cell units (1.5 = own cell + 8-neighbors)
         self.grid_n = grid_n
@@ -192,7 +193,18 @@ class FrustumLocalEncoder(nn.Module):
         # projection d_local → D (once, at the end). Everything in between runs
         # at d_local. PT blocks are residual + Pre-LN, K/V freshly projected from
         # rel each layer; KV fused into one 3 → 2·d_local matmul.
+        # q_from='token' (従来): Q = in_proj(点のトークン)。トークンには絶対位置 (u,v) が入っている。
+        # q_from='di': Q = 自分の点の (d, 強度) だけから作る。出てくる特徴は近傍の相対点群と
+        #              自分の深度・強度だけで決まり、画像のどこにあっても同じになる。
+        assert q_from in ('token', 'di'), q_from
+        self.q_from = q_from
+        # nb='3x3' (従来): 周り 3x3 セルの候補から k 点をランダムに選ぶ。
+        # nb='own': 自分のセル (1x1) の点だけを、選別せず全部使う (セルの点数はバケツの K_per_cell まで)。
+        assert nb in ('3x3', 'own'), nb
+        self.nb = nb
         self.in_proj  = nn.Linear(d_out, d_local)
+        if q_from == 'di':
+            self.q_di = nn.Sequential(nn.Linear(2, d_local), nn.GELU(), nn.Linear(d_local, d_local))
         self.layers   = nn.ModuleList([
             nn.ModuleDict(dict(
                 ln_q  = nn.LayerNorm(d_local),
@@ -243,10 +255,15 @@ class FrustumLocalEncoder(nn.Module):
         q_cu = (query_uvd[..., 0] / cell_px).long().clamp(0, G - 1)   # (B, Nq)
         q_cv = (query_uvd[..., 1] / cell_px).long().clamp(0, G - 1)
         # offsets: (du, dv) for the 9 cells in row-major order
-        du = torch.arange(-1, 2, device=query_uvd.device)             # (3,)
-        dv = torch.arange(-1, 2, device=query_uvd.device)
-        du9 = du.repeat(3)                                            # (9,)  -1,0,1,-1,0,1,-1,0,1
-        dv9 = dv.repeat_interleave(3)                                 # (9,)  -1,-1,-1,0,0,0,1,1,1
+        if self.nb == 'own':
+            du9 = torch.zeros(1, dtype=torch.long, device=query_uvd.device)
+            dv9 = torch.zeros(1, dtype=torch.long, device=query_uvd.device)
+        else:
+            du = torch.arange(-1, 2, device=query_uvd.device)             # (3,)
+            dv = torch.arange(-1, 2, device=query_uvd.device)
+            du9 = du.repeat(3)                                            # (9,)  -1,0,1,-1,0,1,-1,0,1
+            dv9 = dv.repeat_interleave(3)                                 # (9,)  -1,-1,-1,0,0,0,1,1,1
+        n_nb = du9.numel()
         nb_cu = (q_cu.unsqueeze(-1) + du9).clamp(0, G - 1)            # (B, Nq, 9)
         nb_cv = (q_cv.unsqueeze(-1) + dv9).clamp(0, G - 1)
         nb_cid = nb_cv * G + nb_cu                                     # (B, Nq, 9)
@@ -259,23 +276,35 @@ class FrustumLocalEncoder(nn.Module):
         bucket_v_exp = bucket_valid.unsqueeze(1).expand(-1, N_q, -1, -1)
         cand_valid = bucket_v_exp.gather(2, nb_v_exp)                  # (B, Nq, 9, K)
         # flatten neighbor + slot dims
-        cands = cands.reshape(B, N_q, 9 * K_pc, C)                     # (B, Nq, 72, C)
-        cand_valid = cand_valid.reshape(B, N_q, 9 * K_pc)              # (B, Nq, 72)
+        cands = cands.reshape(B, N_q, n_nb * K_pc, C)                  # (B, Nq, 72, C)
+        cand_valid = cand_valid.reshape(B, N_q, n_nb * K_pc)           # (B, Nq, 72)
 
         # rel relative to query
         rel_all = cands - query_uvd.unsqueeze(2)                       # (B, Nq, 72, C)
 
-        # Density-invariant: k random points from the valid set. Use the
-        # global RNG in BOTH train and eval — this is what the trainer's
-        # in-process val pass sees (it never switches model.eval()), so
-        # offline inference must do the same to reproduce val_nll.
-        rand_score = torch.rand(B, N_q, 9 * K_pc, device=query_uvd.device, dtype=query_uvd.dtype)
-        rand_score = rand_score.masked_fill(~cand_valid, -1.0)
-        kk = min(self.k, 9 * K_pc)
-        _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)        # (B, N_q, k)
-        valid = rand_score.gather(2, topk_idx) >= 0
-        idx_exp = topk_idx.unsqueeze(-1).expand(-1, -1, -1, C)
-        topk_rel = rel_all.gather(2, idx_exp)                          # (B, N_q, k, C)
+        # Density-invariant: k random points from the valid set.
+        # 学習時はグローバル乱数。eval (model.eval()) では固定シードの生成器を
+        # 使い、同じ入力から同じ出力が出るようにする。グローバル乱数のままだと
+        # 同じ入力で Δu,Δv が最大 4.6 px 揺れた (実測)。学習ループの val も
+        # model.train(False) を通るので、val と推論は同じ固定シードを見る。
+        if self.nb == 'own':
+            # 自分のセルの点を全部使う (選別なし)
+            topk_rel, valid = rel_all, cand_valid
+            topk_idx = torch.arange(n_nb * K_pc, device=query_uvd.device).expand(B, N_q, -1)
+        elif self.training:
+            rand_score = torch.rand(B, N_q, 9 * K_pc, device=query_uvd.device,
+                                    dtype=query_uvd.dtype)
+        else:
+            _gen = torch.Generator(device=query_uvd.device).manual_seed(0)
+            rand_score = torch.rand(B, N_q, 9 * K_pc, generator=_gen,
+                                    device=query_uvd.device, dtype=query_uvd.dtype)
+        if self.nb != 'own':
+            rand_score = rand_score.masked_fill(~cand_valid, -1.0)
+            kk = min(self.k, n_nb * K_pc)
+            _, topk_idx = rand_score.topk(kk, dim=-1, largest=True)    # (B, N_q, k)
+            valid = rand_score.gather(2, topk_idx) >= 0
+            idx_exp = topk_idx.unsqueeze(-1).expand(-1, -1, -1, C)
+            topk_rel = rel_all.gather(2, idx_exp)                      # (B, N_q, k, C)
 
         # Debug instrumentation
         self._last_topk_idx = topk_idx.detach()
@@ -291,7 +320,11 @@ class FrustumLocalEncoder(nn.Module):
         valid_mask = ~valid.unsqueeze(-1)                          # (B, Nq, K, 1)
 
         # one-time down-projection D → d_local
-        x = self.in_proj(query_token)                              # (B, Nq, d_local)
+        if self.q_from == 'di':
+            x = self.q_di(query_uvd[..., 2:4] if C >= 4 else
+                          torch.cat([query_uvd[..., 2:3], torch.zeros_like(query_uvd[..., 2:3])], -1))
+        else:
+            x = self.in_proj(query_token)                          # (B, Nq, d_local)
 
         # stack of PT blocks: residual + Pre-LN, fresh K/V from rel each layer
         for layer in self.layers:
@@ -601,7 +634,12 @@ class CalibNetDepth(nn.Module):
                  convnext_n_blocks: int = 2,
                  convnext_fine_d: int | None = None,
                  convnext_stem_d: int | None = None,
-                 use_info_head: bool = False):
+                 use_info_head: bool = False,
+                 frustum_q_from: str = 'token',
+                 deform_first_global: bool = False,
+                 pe_mode: str = 'lin',
+                 frustum_nb: str = '3x3',
+                 point_rel: bool = False):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -614,7 +652,15 @@ class CalibNetDepth(nn.Module):
                                                 n_blocks=convnext_n_blocks,
                                                 fine_d=convnext_fine_d,
                                                 stem_d=convnext_stem_d)
-                            if use_convnext else CNNBackbone(d, in_channels=in_channels))
+                            if use_convnext else CNNBackbone(d, in_channels=in_channels,
+                                                             pe_mode=pe_mode, img_px=img_size))
+        # pe_mode='sharp': 画像 (CNNBackbone) と点のトークンに同じ鋭いサイン波 PE を足す
+        self.pe_mode = pe_mode
+        # point_rel=True: 点のトークンに絶対位置を入れない。PointMLP3 の入力の (u,v) を 0 にし、
+        # 位置は UV のサイン波 PE (sharp_pe) だけで入れる。ブロック間の位置更新は PE の置き換え。
+        # 各ブロックの出力ヘッド proj(cat[q, uv]) の uv 列も重み 0 に固定する。
+        # (Deformable の参照点には uv を使うが、それはサンプリング位置でトークンには入らない)
+        self.point_rel = bool(point_rel)
         # Point input dim: 3 (u, v, d) for legacy caches; 4 (+ intensity) for V3-i.
         self.use_intensity = bool(use_intensity)
         self.point_mlp   = PointMLP3(d, in_channels=4 if self.use_intensity else 3)
@@ -626,7 +672,9 @@ class CalibNetDepth(nn.Module):
             self._is_3d_local = True
         else:
             self.frustum_enc = (FrustumLocalEncoder(d, r_uv_cells=r_uv_cells, r_d=r_d,
-                                                     k=k_nb, grid_n=frustum_grid_n)
+                                                     k=k_nb, grid_n=frustum_grid_n,
+                                                     q_from=frustum_q_from,
+                                                     nb=frustum_nb)
                                 if use_frustum else None)
             self._is_3d_local = False
         self.frame_enc   = FrameTokenEncoder(d, m_side=frame_token_side) if use_frame_token else None
@@ -667,7 +715,10 @@ class CalibNetDepth(nn.Module):
             Block = CrossAttentionBlockCov
             kw = dict(kv_self_attn=kv_self_attn, cross_temp=cross_temp)
 
-        self.cross_coarse  = Block(d, **kw)
+        # deform_first_global: deform_mode が sl/ml のとき、1 段目 (cross_coarse) だけを
+        # 全体アテンション (CrossAttentionBlockCov、coarse の画像トークン全体) にする
+        self.cross_coarse  = (CrossAttentionBlockCov(d, kv_self_attn=kv_self_attn, cross_temp=cross_temp)
+                              if (deform_first_global and deform_mode != 'none') else Block(d, **kw))
         self.cross_fine    = Block(d, **kw)
         if n_layers >= 3:
             self.cross_refine  = Block(d, **kw)
@@ -675,6 +726,14 @@ class CalibNetDepth(nn.Module):
             self.cross_fine2   = Block(d, **kw)
         self._self_first = self_first
         self._deform_mode = deform_mode
+        if self.point_rel:
+            for bn in ('cross_coarse', 'cross_fine', 'cross_refine', 'cross_fine2'):
+                blk = getattr(self, bn, None)
+                pr = getattr(blk, 'proj', None) if blk is not None else None
+                if pr is not None and pr.in_features == d + 2:
+                    with torch.no_grad():
+                        pr.weight[:, d:] = 0.0
+                    pr.weight.register_hook(lambda g, _d=d: torch.cat([g[:, :_d], torch.zeros_like(g[:, _d:])], 1))
 
         # CLS frame-level pose head: outputs (μ, log σ) for an n_dof SE3 patch
         # perturbation. Generic body (cross-attn aggregator) + DoF-specific head.
@@ -722,6 +781,11 @@ class CalibNetDepth(nn.Module):
                 m._cross_temp = t
 
     def _block(self, block, q, feat, uv_01, mask, extra_kv=None, extra_kv_mask=None):
+        if self._deform_mode != 'none' and isinstance(block, CrossAttentionBlockCov):
+            # 1 段目だけ全体アテンション (deform_first_global)。ml では feat が (coarse, fine) の組
+            f = feat[0] if isinstance(feat, (tuple, list)) else feat
+            return block(q, f, uv_01, key_padding_mask=mask, self_first=False,
+                         extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
         if self._deform_mode == 'ml':
             # feat here is (coarse_feat, fine_feat) tuple — ML block wants the list
             return block(q, list(feat), uv_01, self.level_embed,
@@ -792,7 +856,15 @@ class CalibNetDepth(nn.Module):
             else:
                 uvd_norm = torch.cat([uv_01, d3 * mask], dim=-1)
 
-        q = self.point_mlp(uvd_norm)
+        if self.point_rel:
+            from models.model import sharp_pe
+            uvd_rel = uvd_norm.clone(); uvd_rel[..., :2] = 0.0
+            q = self.point_mlp(uvd_rel) + sharp_pe(uv_01, D_DIM if False else self.point_mlp.net[-1].out_features, self.img_size).to(uvd_norm.dtype)
+        else:
+            q = self.point_mlp(uvd_norm)
+        if self.pe_mode == 'sharp' and not self.point_rel:
+            from models.model import sharp_pe
+            q = q + sharp_pe(uv_01, q.shape[-1], self.img_size).to(q.dtype)
         if self.frustum_enc is not None:
             if bucket_uvd is None or bucket_valid is None:
                 raise ValueError(
@@ -913,7 +985,17 @@ class CalibNetDepth(nn.Module):
                 refine_uvd = torch.cat([uv_i, d3, distorted_uvd[..., 3:4]], dim=-1)
             else:
                 refine_uvd = torch.cat([uv_i, d3], dim=-1)
-            q    = self.point_mlp(refine_uvd) + q
+            if self.point_rel:
+                from models.model import sharp_pe
+                uv_prev = uv_01 if i == 1 else uv_prev_
+                q = q - sharp_pe(uv_prev, q.shape[-1], self.img_size).to(q.dtype) \
+                      + sharp_pe(uv_i, q.shape[-1], self.img_size).to(q.dtype)
+                uv_prev_ = uv_i
+            else:
+                q    = self.point_mlp(refine_uvd) + q
+            if self.pe_mode == 'sharp' and not self.point_rel:
+                from models.model import sharp_pe
+                q = q + sharp_pe(uv_i, q.shape[-1], self.img_size).to(q.dtype)
             q, raw_i = self._block(blocks[i], q, feats_by_layer[i], uv_i, key_padding_mask,
                                     extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
             raw_cum = raw_cum + raw_i

@@ -113,7 +113,9 @@ try:
     # across workers, but torch DataLoader forks one process per worker so
     # each gets its own). Bench on dgx2 (Xeon 8168): PIL full decode 14.5ms,
     # TJ full decode 6.9ms, TJ crop+decode (384px) 4.5ms → 3.2× vs PIL.
-    _TJ_INST = _tj.TurboJPEG()
+    # TURBOJPEG_LIB: libturbojpeg.so の場所。システムに無い環境 (sam3) では neurad 環境のものを指す
+    _TJ_INST = (_tj.TurboJPEG(os.environ['TURBOJPEG_LIB']) if os.environ.get('TURBOJPEG_LIB')
+                else _tj.TurboJPEG())
     _TJ_PF_RGB = _tj.TJPF_RGB
     _HAVE_TJ = True
 except Exception:
@@ -236,7 +238,7 @@ class PandaSetCalibDatasetFull(Dataset):
         max_tries: re-sample random crop up to this many times before fallback
     """
     def __init__(self,
-                 cache_dir: str | Path,
+                 cache_dir: str | Path | None = None,
                  split: str = 'train',
                  img_size: int = 64,
                  min_crop_px: int = 128,
@@ -254,10 +256,15 @@ class PandaSetCalibDatasetFull(Dataset):
                  crop_grid: bool = False,
                  grid_frac: float = 0.5,
                  pert_seed: int = None,
+                 eval_seed: int = None,
                  pert_const: bool = False,
                  frame_stride: int = 1,
                  grid_n: int = 16,
-                 n_full: int = 1024,
+                 # 0 = 間引かない。クロップに入る点はセル上限 (K_per_cell=8 x 256 cell
+                 # = 2048) が決める。1024 だとそれより先にここが効いて、点の多い窓の
+                 # 27% が全体からランダムに落とされていた (PandaSet 実測, 2026-10-06)。
+                 # ランダムに落とすと近距離・地面など点の密な所ほど削れて偏る。
+                 n_full: int = 0,
                  k_per_cell: int = 8,
                  zoom_aug: bool = False,
                  rep_strategy: str = 'cell_center',
@@ -271,16 +278,24 @@ class PandaSetCalibDatasetFull(Dataset):
                  same_frame_self_sup: bool = False,
                  photometric_jitter: float = 0.25,
                  radial_pert_px: float = 0.0,
-                 preload: bool = True):
-        self.cache_dir = Path(cache_dir)
-        self.inst_dir  = self.cache_dir / 'inst'
+                 preload: bool = True,
+                 insts: list | None = None,
+                 fixed_pert=None):
+        # insts=[...]: キャッシュを持たず inst dict を直接渡すモード。推論
+        # (scripts/inference/infer_calib.py) 用。これが無かったので推論側が
+        # __new__ で属性を手詰めするスタブを作り、経路が 2 本になっていた。
+        # 同じ __init__ を通せば窓の切り方まで構造上一致する。
+        self._mem_insts = list(insts) if insts is not None else None
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self.inst_dir  = (self.cache_dir / 'inst') if self.cache_dir else None
         # LMDB packed path: if <cache_dir>/data.lmdb exists, use the packed
         # converter output (raw bytes, zero torch.load per sample). The .pt
         # path stays as a fallback.
-        self.lmdb_path = self.cache_dir / 'data.lmdb'
+        self.lmdb_path = (self.cache_dir / 'data.lmdb') if self.cache_dir else None
         # E2E_NO_LMDB=1 forces the legacy inst/*.pt path even when LMDB exists
         # (used by bench to A/B the two paths).
-        self._use_lmdb = bool(_HAVE_LMDB and self.lmdb_path.is_dir()
+        self._use_lmdb = bool(self.lmdb_path is not None and _HAVE_LMDB
+                              and self.lmdb_path.is_dir()
                               and os.environ.get('E2E_NO_LMDB') != '1')
         self._lmdb_env = None  # lazy-opened per worker after fork
         # Cuboids (world-coord 3D boxes) are deduped to per-frame keys in the
@@ -289,8 +304,12 @@ class PandaSetCalibDatasetFull(Dataset):
         # This is shared via fork copy-on-write across DataLoader workers so
         # the hot-path `__getitem__` never queries the cuboid key.
         self._cubs_map: dict | None = None
-        meta = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
         assert split in ('train', 'val')
+        self.split     = str(split)        # 'train' / 'val'。格子の固定判定に使う
+        if self._mem_insts is not None:
+            meta = {split: [f'mem{i}' for i in range(len(self._mem_insts))]}
+        else:
+            meta = torch.load(self.cache_dir / 'meta.pt', weights_only=False)
         self.fnames    = list(meta[split])
         if frame_stride > 1:
             self.fnames = self.fnames[::frame_stride]
@@ -342,8 +361,15 @@ class PandaSetCalibDatasetFull(Dataset):
         self.crop_grid  = bool(crop_grid)
         self.grid_frac  = float(grid_frac)
         self.pert_seed  = None if pert_seed is None else int(pert_seed)
+        # eval_seed: 渡すと __getitem__(idx) の中だけ numpy の乱数を (eval_seed, idx) で固定する。
+        # 段 1 (share_pert なし) の窓の位置・窓ごとの摂動は numpy のグローバル乱数で引くので、
+        # pert_seed だけでは固定されず、val の窓とずれ (数値も可視化も) が毎エポック変わっていた。
+        self.eval_seed  = None if eval_seed is None else int(eval_seed)
         self.pert_const = bool(pert_const)
-        self.fixed_pert = None
+        # 推論では摂動ゼロ (ずれは渡されたポーズ側に入っている)。学習では None
+        # で、share_pert/pert_seed の分岐が走る。
+        self.fixed_pert = (None if fixed_pert is None
+                           else np.asarray(fixed_pert, np.float64).reshape(6))
         self._grid_k    = 0
         self._use_grid  = False
         self._grid_ju = self._grid_jv = 0.0
@@ -369,7 +395,11 @@ class PandaSetCalibDatasetFull(Dataset):
         #                    "win" the cell when a pole edge moves a few px).
         #                    Requires retraining; old cell_center checkpoints
         #                    will see slightly out-of-distribution inputs.
-        assert rep_strategy in ('cell_center', 'nearest_cam'), \
+        #   'random_train' — 学習 (split='train' かつ pert_seed なし) ではセル内の
+        #                    点から毎回ランダムに 1 点、val・推論では 'cell_center'。
+        #                    cell_center 固定だと中心から離れた点 (細いポール・
+        #                    物体の縁) はクエリにならず、損失に一度も入らない。
+        assert rep_strategy in ('cell_center', 'nearest_cam', 'random_train'), \
             f'bad rep_strategy={rep_strategy}'
         self.rep_strategy = rep_strategy
         # Restrict pivot rows to the central horizontal band of the image. 0
@@ -423,13 +453,13 @@ class PandaSetCalibDatasetFull(Dataset):
         # DataLoader workers spawn/fork after __init__, so the list is shared
         # via copy-on-write / fork semantics and each worker hits RAM directly
         # instead of unpickling from disk every call.
-        self._cache = None
+        self._cache = self._mem_insts   # insts= のときは _load_inst がこれを返す
         # HARD REQUIREMENT (2026-05-29): every cache MUST be LMDB-packed.
         # The .pt-preload path duplicates ~150 KB/inst into every DataLoader
         # worker; on a 1.6M-frame Waymo cache that's hundreds of GB and
         # silently kills the job. If LMDB is missing, fail loudly so the
         # pack step is run before training, not as an OOM mystery later.
-        if not self._use_lmdb:
+        if not self._use_lmdb and self._mem_insts is None:
             raise RuntimeError(
                 f'Cache {self.cache_dir} has no data.lmdb. '
                 'Run scripts/preprocessing/convert_tile_cache_to_lmdb.py '
@@ -612,6 +642,16 @@ class PandaSetCalibDatasetFull(Dataset):
         return torch.load(self.inst_dir / self.fnames[i], weights_only=False)
 
     def __getitem__(self, idx: int):
+        if self.eval_seed is not None:
+            _st = np.random.get_state()
+            np.random.seed((self.eval_seed * 1000003 + int(idx)) & 0xFFFFFFFF)
+            try:
+                return self._getitem(idx)
+            finally:
+                np.random.set_state(_st)
+        return self._getitem(idx)
+
+    def _getitem(self, idx: int):
         # NEW (2026-05-29): idx is a FRAME index. Load the inst ONCE and pass
         # it via _inst_override so all `oversample` builds share the SAME
         # `inst['jpg_bytes']` object. The decode-cache (id-keyed) inside
@@ -657,10 +697,24 @@ class PandaSetCalibDatasetFull(Dataset):
             # solved one window at a time. grid_frac picks between them, so the
             # model sees both the fused-N and the single-window regime.
             self._grid_k  = 0
-            self._use_grid = bool(self.crop_grid) and (
-                np.random.rand() < self.grid_frac)
-            self._grid_ju = np.random.uniform(-1.0, 1.0)
-            self._grid_jv = np.random.uniform(-1.0, 1.0)
+            # crop_grid が立っていれば常に格子。grid_frac で確率的に格子と
+            # ランダムピボットを切り替えていたが、既定で渡されていた
+            # grid_frac=0.0 は「格子を一度も使わない」で、--crop-grid を
+            # 付けた run が全部ランダムピボットになっていた (front_670x3 /
+            # fuse28 / cam6 すべて crop_grid=True grid_frac=0.0)。
+            # grid_frac は受け取るだけで使わない。
+            self._use_grid = bool(self.crop_grid)
+            # 学習時だけ格子をずらす。推論 (split='val' / pert_seed が立つ
+            # eval 経路) では窓の位置を固定しないと、同じ ckpt を測り直す
+            # たびに違う窓を見ることになって数字が比較できない。
+            _fixed_grid = (str(getattr(self, 'split', 'train')) == 'val'
+                           or self.pert_seed is not None)
+            if _fixed_grid:
+                self._grid_ju = 0.0
+                self._grid_jv = 0.0
+            else:
+                self._grid_ju = np.random.uniform(-1.0, 1.0)
+                self._grid_jv = np.random.uniform(-1.0, 1.0)
             self._grid_cells = None
             if self._use_grid and inst is not None:
                 # Plan the grid HERE, keeping only cells that actually contain
@@ -691,11 +745,28 @@ class PandaSetCalibDatasetFull(Dataset):
                                                    _force_pert=_shared_pert,
                                                    _win_i=len(samples))
                     if built is None:
-                        ok = False
-                        break
+                        # そのタイルを BA に参加させないだけ。フレームごと
+                        # 再抽選すると、1 枚でも点の少ない窓があるフレームが
+                        # まるごと落ちる。空サンプルは collate が pad=True で
+                        # 埋めるので (collate_full: pad[k,:n]=False, n=0)、
+                        # GN の valid=~pad_mask がそのまま弾く。
+                        samples.append(None)
+                        continue
                     samples.append(built)
-            if ok:
+            _real = [x for x in samples if x is not None]
+            if _real and len(_real) == len(samples):
                 return samples
+            if _real and self._use_grid and not is_pair:
+                # 格子: 点が足りない窓 (ずらした後に min_pts 未満) は、有効な窓の複製で埋めて
+                # w_active=0 にする (BA に参加しない)。以前はここでフレームごと引き直していて、
+                # 学習では黙って別のフレームに差し替わり、推論 (フレーム 1 つ) では
+                # "no valid window after 1024 re-rolls" で落ちていた。
+                _dup = tuple(_real[0][:16]) + (torch.tensor(0.0, dtype=torch.float32),) + tuple(_real[0][17:])
+                return [x if x is not None else _dup for x in samples]
+            if not _real and N == 1:
+                raise RuntimeError(
+                    f"このフレームには点が {self.min_pts} 点以上入る窓が 1 つもない "
+                    f"(格子={self._use_grid})。渡されたポーズで点群が画像にほとんど投影されていない可能性")
             # re-roll an unseen FRAME idx
             for _ in range(128):
                 j = random.randint(0, N - 1)
@@ -909,14 +980,27 @@ class PandaSetCalibDatasetFull(Dataset):
                 scale = float(np.random.uniform(1.0, max(1.0, scale_max)))
                 cs = max(self.min_crop_px // 4, int(cs / scale))
             if self._use_grid:
+                # 格子のときはクロップ辺を乱数で振らない。cs は上で
+                # randint(min, max) で決まるが、_plan_grid は min_crop_px で
+                # セルを切っているので、両者がずれると格子の位置と実際の
+                # 窓の大きさが食い違う。min==max なら元から同じ。
+                cs = int(min(self.min_crop_px, IW, IH))
                 # Deterministic grid covering the WHOLE image, so the windows a
                 # fused pose sees are the same every time and reach the bottom
                 # rows (v>=815 were never covered by pivot sampling) and both
                 # side edges.
                 cells = self._grid_cells
                 if cells:
-                    u0, v0 = cells[(_win_i if _win_i is not None
-                                    else self._grid_k) % len(cells)]
+                    _ci = (_win_i if _win_i is not None else self._grid_k)
+                    # 点のあるセルが oversample に足りないときは複製で埋める。
+                    # 計算量は変わらないのでモデルには普通に通し (点ゼロの
+                    # サンプルを入れると KV が全マスクになって attention の
+                    # softmax が NaN)、BA 側で w_active=0 の窓を外す。
+                    # 巻き戻した窓をそのまま GN に入れると、同じ観測を 2 回
+                    # 数えて H が過大になる (PandaSet 40 枠に対し実セル中央値
+                    # 38 で 2 枚、nuScenes 28 枠に対し 24 で 4 枚。実測 2026-10-07)。
+                    self._w_active = 1.0 if _ci < len(cells) else 0.0
+                    u0, v0 = cells[_ci % len(cells)]
                     self._grid_k += 1
                 nx = max(1, int(np.ceil(IW / cs)))
                 ny = max(1, int(np.ceil(IH / cs)))
@@ -937,6 +1021,7 @@ class PandaSetCalibDatasetFull(Dataset):
                     u0 = int(np.clip(round(sx * (k %  nx) + ju), 0, max(0, IW - cs)))
                     v0 = int(np.clip(round(sy * (k // nx) + jv), 0, max(0, IH - cs)))
             else:
+                self._w_active = 1.0
                 u0 = int(np.clip(pu - cs / 2, 0, IW - cs))
                 v0 = int(np.clip(pv - cs / 2, 0, IH - cs))
 
@@ -953,7 +1038,7 @@ class PandaSetCalibDatasetFull(Dataset):
             cand_idx = np.where(in_pad)[0]
             if len(cand_idx) < self.min_pts:
                 continue
-            if len(cand_idx) > self.n_full:
+            if self.n_full > 0 and len(cand_idx) > self.n_full:
                 cand_idx = np.random.choice(cand_idx, size=self.n_full, replace=False)
             pts_c = pts[cand_idx]                       # (M<=2000, 3)
             intens_c = intensity[cand_idx]              # (M,) per-pt lidar intensity
@@ -1280,7 +1365,7 @@ class PandaSetCalibDatasetFull(Dataset):
             cand_idx_A = np.where(in_pad_A)[0]
             if len(cand_idx_A) < self.min_pts:
                 continue
-            if len(cand_idx_A) > self.n_full:
+            if self.n_full > 0 and len(cand_idx_A) > self.n_full:
                 cand_idx_A = np.random.choice(cand_idx_A, size=self.n_full, replace=False)
             pts_c_A = pts_A[cand_idx_A]
             intens_c_A = intensity_A[cand_idx_A]
@@ -1474,7 +1559,7 @@ class PandaSetCalibDatasetFull(Dataset):
         cand_idx = np.where(in_pad)[0]
         if len(cand_idx) < self.min_pts:
             return None
-        if len(cand_idx) > self.n_full:
+        if self.n_full > 0 and len(cand_idx) > self.n_full:
             cand_idx = np.random.choice(cand_idx, size=self.n_full, replace=False)
         pts_c    = pts[cand_idx]
         intens_c = intensity[cand_idx]
@@ -1645,12 +1730,19 @@ class PandaSetCalibDatasetFull(Dataset):
             return None
 
         # 16x16 sub-grid representative selection — fully vectorized.
-        # Cell assignment uses uv_GT (so the grid is regular regardless of
-        # perturbation). Without this, the grid drifts in the perturbation
-        # direction and corner cells go empty.
+        # セル割当ては摂動後の投影 (uv_off_c) で行う。推論で手に入るのはこれだけ。
+        # 2026-05-31 から 2026-10-07 までは GT 投影 (uv_gt_c) で割り当てていて、
+        # 「正解位置がセル中心に一番近い点」がクエリに選ばれていた。モデルは
+        # 正解がセル中心付近にあることを読めてしまい、学習時の val だけが良く出た。
+        # 実測 (ps_grid_ba_infohead, PandaSet val 8 フレーム, 同じ ckpt):
+        #   GT で選ぶ      rot 誤差 中央 0.0049 deg   t 0.0019 m   |μ| 20.5 px
+        #   摂動後で選ぶ   rot 誤差 中央 0.2268 deg   t 0.0733 m   |μ|  7.0 px
+        #   (注入した回転は中央 0.2292 deg = ほぼ何も補正していない)
+        # 元のコメントにあった「GT で選ばないとグリッドが摂動方向にずれて角の
+        # セルが空く」は、正解を漏らすことと引き換えにするほどの問題ではない。
         scale = S / cs
-        uv_local = np.stack([(uv_gt_c[in_crop_off, 0] - u0) * scale,
-                             (uv_gt_c[in_crop_off, 1] - v0) * scale], axis=1)
+        uv_local = np.stack([(uv_off_c[in_crop_off, 0] - u0) * scale,
+                             (uv_off_c[in_crop_off, 1] - v0) * scale], axis=1)
         grid_n = self.grid_n
         cell_S = float(S) / grid_n
         ci_u = np.clip((uv_local[:, 0] / cell_S).astype(int), 0, grid_n - 1)
@@ -1661,6 +1753,9 @@ class PandaSetCalibDatasetFull(Dataset):
             # Stable against fg/bg flips when a cell straddles an object edge.
             z_in_crop = z_off[in_crop_off].astype(np.float32)
             score = z_in_crop                                     # min-first
+        elif (self.rep_strategy == 'random_train' and self.split == 'train'
+              and self.pert_seed is None):
+            score = np.random.rand(int(in_crop_off.sum()))        # セル内でランダムに 1 点
         else:
             # Legacy: distance to cell center in uv plane.
             cu_c = (ci_u + 0.5) * cell_S
@@ -1823,10 +1918,14 @@ class PandaSetCalibDatasetFull(Dataset):
         cv = np.clip((uv_full_loc[:, 1] / cell_S).astype(np.int32), 0, G - 1)
         cell_id = cv * G + cu                                    # (n_raw,)
         n_raw = uvd_full_raw.shape[0]
-        # Random shuffle so that "first K per cell" picks K random pts when
-        # the cell is over-full. Cheap O(n_raw) permutation.
-        shuf = np.random.permutation(n_raw)
-        sorted_idx = shuf[np.argsort(cell_id[shuf], kind='stable')]
+        # セルが溢れたときにどの K 点を残すか。以前は np.random.permutation で
+        # 毎回ランダムに選んでいたので、同じフレーム・同じ窓でも実行ごとに
+        # 入力が変わり、推論が再現しなかった (実測: 同じ ckpt・同じ inst で
+        # rot が 0.03-0.11 deg ばらついた)。
+        # 代わりにセル内の元の並び (ライダーの発射順) に沿って等間隔に抜く。
+        # n 点から K 点なら 〇〇x〇〇x... のパターンで、決定的かつセル内に散る。
+        # 先頭 K 点だと走査順で片側に寄る。
+        sorted_idx = np.argsort(cell_id, kind='stable')
         sorted_uvd = uvd_full_raw[sorted_idx]                    # (n_raw, 3)
         sorted_cid = cell_id[sorted_idx]                         # (n_raw,)
         # within-cell rank: 0,1,2,... per cell. Take only those <K.
@@ -1834,9 +1933,22 @@ class PandaSetCalibDatasetFull(Dataset):
         cell_starts = np.zeros(G * G + 1, dtype=np.int64)
         cell_starts[1:] = counts.cumsum()
         intra = np.arange(n_raw, dtype=np.int64) - cell_starts[sorted_cid]
-        keep_mask = intra < K_per_cell
-        slots = intra[keep_mask]
-        cells = sorted_cid[keep_mask]
+        _n = counts[sorted_cid]                       # そのセルの点数
+        # (intra * K) % n < K  で、ちょうど K 点が等間隔に残る (n <= K なら全部)
+        keep_mask = (intra * K_per_cell) % np.maximum(_n, 1) < K_per_cell
+        # 残った点にセル内で 0..K-1 の連番を振り直す
+        _o = np.argsort(np.where(keep_mask, sorted_cid, G * G), kind='stable')
+        _k = keep_mask[_o]
+        _c2 = sorted_cid[_o][_k]
+        _cnt2 = np.bincount(_c2, minlength=G * G)
+        _st2 = np.zeros(G * G + 1, dtype=np.int64); _st2[1:] = _cnt2.cumsum()
+        _slots2 = np.arange(len(_c2), dtype=np.int64) - _st2[_c2]
+        sorted_idx = sorted_idx[_o][_k]
+        sorted_uvd = uvd_full_raw[sorted_idx]
+        sorted_cid = _c2
+        slots = _slots2
+        cells = _c2
+        keep_mask = np.ones(len(_c2), dtype=bool)
         bucket_uvd  = np.zeros((G * G, K_per_cell, 4), dtype=np.float32)
         bucket_valid = np.zeros((G * G, K_per_cell), dtype=bool)
         bucket_uvd[cells, slots]  = sorted_uvd[keep_mask]
@@ -1858,7 +1970,9 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.from_numpy(sub_idx.astype(np.int64)),
                 torch.tensor(float(u0), dtype=torch.float32),
                 torch.tensor(float(v0), dtype=torch.float32),
-                torch.tensor(1.0 if self._use_grid else 0.0, dtype=torch.float32))
+                torch.tensor(1.0 if self._use_grid else 0.0, dtype=torch.float32),
+                # 1 = この窓を BA に入れる / 0 = 枠を埋めるための複製
+                torch.tensor(float(getattr(self, '_w_active', 1.0)), dtype=torch.float32))
 
 
 def collate_full(batch):
@@ -1941,9 +2055,14 @@ def collate_full(batch):
     is_grid = (torch.stack([s[15] for s in batch]) if len(batch[0]) >= 16
                else torch.zeros(B, dtype=torch.float32))
 
+    # 1.0 = この窓を BA に入れる / 0.0 = 枠を埋めるための複製タイル。
+    # モデルには通すが GN では除く (同じ観測を 2 回数えない)。
+    w_active = (torch.stack([s[16] for s in batch]) if len(batch[0]) >= 17
+                else torch.ones(B, dtype=torch.float32))
+
     return (imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec,
             pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3, u0_t, v0_t,
-            is_grid)
+            is_grid, w_active)
 
 
 def collate_pair(batch):

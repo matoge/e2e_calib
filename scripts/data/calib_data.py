@@ -134,9 +134,11 @@ class CalibData:
         Imported lazily so just listing scenes() doesn't need torch.
         """
         if cache not in self._ds_per_cache:
-            from scripts.inference.infer_pipeline import make_ds
-            ds, c = make_ds(self.exp, str(cache), split='val', oversample=1)
-            self._ds_per_cache[cache] = (ds, c)
+            # inst を読むだけなので窓や摂動の設定は要らない。以前は
+            # scripts.inference.infer_pipeline.make_ds (旧推論経路) を経由していた。
+            from datasets.pandaset_full import PandaSetCalibDatasetFull
+            ds = PandaSetCalibDatasetFull(cache_dir=str(cache), split='val', oversample=1)
+            self._ds_per_cache[cache] = (ds, None)
         return self._ds_per_cache[cache]
 
     def tile(self, scene: str, frame: int, tile_id: int) -> dict:

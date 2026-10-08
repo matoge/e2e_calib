@@ -9,7 +9,7 @@ For every shared LMDB key:
     new intensity to within fp32 tolerance.
 
 Then runs the model from one ckpt on a handful of (scene, frame, tile)
-samples through both caches via infer_tiles, and reports the par delta
+samples through both caches (推論での比較は infer_tiles を畳んだ 2026-10-07 に削除), and reports the par delta
 (should be small — only intensity changed in the input).
 
 Usage:
@@ -120,69 +120,6 @@ def cmd_compare(src: Path, new: Path, divisor: float, max_keys: int):
     return False
 
 
-def cmd_spotcheck(src: Path, new: Path, exp: str, n: int, divisor: float):
-    """Run model on N tiles. For both old and new cache feed the SAME
-    pre-normalised intensity (clip(intensity / divisor, 0, 1)) so the only
-    thing being checked is whether the migration touched anything besides
-    intensity. par diff should be ~ float32 round-off."""
-    import torch
-    from PIL import Image
-    sys.path.insert(0, str(REPO_ROOT))
-    from scripts.inference.infer_calib import load_calib_model
-    from scripts.ba.ba_multicam_corr import infer_tiles
-    from scripts.inference.infer_pipeline import make_ds
-
-    model = load_calib_model(exp).eval()
-    ds_old, c = make_ds(exp, str(src), split='val', oversample=1)
-    ds_new, _ = make_ds(exp, str(new), split='val', oversample=1)
-    ba_cfg = dict(tile_size=512, model_input_size=c['img_size'],
-                  max_pts_per_tile=256, min_pts_per_tile=8, tile_stride=384)
-
-    diffs = []
-    for idx in range(min(n, len(ds_old))):
-        par_old = par_new = None
-        for label, ds, scale_intensity in [
-                ('old', ds_old, True),   # raw → /divisor → clip
-                ('new', ds_new, False),  # already normalised → clip only
-            ]:
-            inst = ds._load_inst(idx)
-            img = np.asarray(Image.open(io.BytesIO(bytes(inst['jpg_bytes'])))
-                              .convert('RGB'))
-            uv = inst['uv_full'].numpy().astype(np.float32)
-            z  = inst['z_cam'].numpy().astype(np.float32)
-            intensity = (inst['intensity'].numpy().astype(np.float32)
-                          if 'intensity' in inst else None)
-            K = inst['K_full'].numpy().astype(np.float32)
-            tu0, tv0 = int(inst.get('tile_u0', 0)), int(inst.get('tile_v0', 0))
-            uv = uv - np.array([tu0, tv0], dtype=np.float32)
-            K = K.copy(); K[0, 2] -= tu0; K[1, 2] -= tv0
-            H, W = img.shape[:2]
-            keep = ((uv[:, 0] >= 0) & (uv[:, 0] < W)
-                    & (uv[:, 1] >= 0) & (uv[:, 1] < H) & (z > 0))
-            uv = uv[keep]; z = z[keep]
-            if intensity is not None:
-                intensity = intensity[keep]
-                if scale_intensity:
-                    intensity = intensity / divisor
-                intensity = np.clip(intensity, 0.0, 1.0).astype(np.float32)
-            res = infer_tiles(model, img, uv, z, K, ba_cfg,
-                               torch.device('cuda'),
-                               intensity=intensity)
-            if res is None:
-                continue
-            if label == 'old':
-                par_old = res[1]
-            else:
-                par_new = res[1]
-        if par_old is not None and par_new is not None:
-            d = float(np.abs(par_old - par_new).max())
-            diffs.append(d)
-            print(f'  idx={idx}  par max abs diff: {d:.3e}')
-    if diffs:
-        print(f'\nSpotcheck: max par diff across {len(diffs)} tiles: '
-               f'{max(diffs):.3e}')
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--src', required=True, help='legacy cache root')
@@ -190,18 +127,10 @@ def main():
     ap.add_argument('--divisor', type=float, required=True)
     ap.add_argument('--max-keys', type=int, default=0,
                     help='limit comparison to first N keys (0 = all)')
-    ap.add_argument('--spotcheck', action='store_true',
-                    help='also run inference on a few tiles via both caches')
-    ap.add_argument('--exp', default='km_wv_wm_dgx2_n2_img128_v2')
-    ap.add_argument('--n-spotcheck', type=int, default=5)
     args = ap.parse_args()
 
     ok = cmd_compare(Path(args.src), Path(args.new), args.divisor,
                       args.max_keys)
-    if args.spotcheck:
-        print()
-        cmd_spotcheck(Path(args.src), Path(args.new), args.exp,
-                       args.n_spotcheck, args.divisor)
     sys.exit(0 if ok else 1)
 
 

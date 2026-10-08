@@ -359,137 +359,9 @@ def main(cfg=None):
     # same per-dataset samples but on the actual model (untrained at ep=0)
     # so we get the GT correspondence + Σ ellipse overlays for free.
 
-    # ── BA pose-residual eval setup (rank-0 only, optional) ─────────────────
-    # Re-uses _solve_one from scripts/eval/eval_shared_256x800.py: builds
-    # B = n_inst × n_per_inst sub-crops with one shared rig-level perturbation,
-    # runs frozen-current-model forward + shared-GN, returns δ̂ vs δ_target.
-    # The 2026-05-22 256×800 result (ω res 0.45 px @ fx) used the same path
-    # against the HEAD ckpt; here we run it as a tiny in-train metric.
+    # BA 評価 (旧 scripts/eval/eval_shared_256x800.py の _solve_one を呼ぶ別経路)
+    # は 2026-10-07 に削除。推論は scripts/inference/infer_calib.py の 1 本。
     ba_eval_state = None
-    if c.get('ba_eval', True) and accel.is_main_process:
-        try:
-            from scripts.eval import eval_shared_256x800 as _baeval
-            ba_idx       = int(c.get('ba_eval_idx', 17))
-            # Sweep over multiple perturbation magnitudes per epoch so we see
-            # how residual scales with target. Default: 0.5° / 1.0° / 1.5° at
-            # matching translation. Caller can override via --ba-eval-levels
-            # (parsed below) or set --ba-eval-rot-deg / --ba-eval-t-m for a
-            # single-level run.
-            ba_levels = c.get('ba_eval_levels')
-            if ba_levels is None:
-                if 'ba_eval_rot_deg' in c or 'ba_eval_t_m' in c:
-                    ba_levels = [(float(c.get('ba_eval_rot_deg', 0.5)),
-                                  float(c.get('ba_eval_t_m', 0.05)))]
-                else:
-                    ba_levels = [(0.5, 0.05), (1.0, 0.10), (1.5, 0.20)]
-            ba_n_seeds   = int(c.get('ba_eval_n_seeds', 4))
-            ba_n_inst    = int(c.get('ba_eval_n_inst', 20))
-            ba_start_ep  = int(c.get('ba_eval_start_ep', 1))
-            ba_cache     = c.get('ba_eval_cache', cache_paths[0])
-            # cs/n_per_inst: always 256-quadrant split (4-per-inst) so n_inst=200
-            # → 800 tiles. Decoupled from c['img_size']: even at img_size=128,
-            # eval crops are taken at 256 in original-camera units and then
-            # resized to S=img_size for the model — larger crops give more
-            # shared-GN Fisher info per tile (project_resolution_hypothesis_512).
-            # Caller can override via --ba-eval-cs / --ba-eval-npi.
-            ba_cs        = int(c.get('ba_eval_cs', 256))
-            ba_npi       = int(c.get('ba_eval_npi', 4))
-
-            ba_ds = PandaSetCalibDatasetFull(
-                cache_dir=ba_cache, split='val',
-                img_size=c['img_size'],
-                min_crop_px=c.get('min_crop_px', 128),
-                max_crop_px=c.get('max_crop_px', 512),
-                max_offset_m=0.0, max_rot_deg=0.0,
-                oversample=1, grid_n=c.get('grid_n', 16),
-                center_band=0.0, preload=False,
-            )
-            inst0 = ba_ds._load_inst(ba_idx)
-            assert inst0.get('is_fisheye', False), f'BA eval idx={ba_idx} not fisheye'
-            ba_dist_one = inst0['distortion'].clone().detach().to(torch.float32).reshape(1, 4)
-            ba_fx = float(inst0['K_full'].numpy()[0, 0])
-            _baeval.DEVICE = accel.device
-            ba_every_n   = int(c.get('ba_eval_every', 1))
-            ba_eval_state = dict(
-                mod=_baeval, ds=ba_ds, dist_one=ba_dist_one, fx=ba_fx,
-                idx=ba_idx, levels=ba_levels,
-                n_seeds=ba_n_seeds, n_inst=ba_n_inst, start_ep=ba_start_ep,
-                every_n=ba_every_n,
-                cs=ba_cs, npi=ba_npi,
-            )
-            levels_str = ' / '.join(f'±{r}°,±{t}m' for (r, t) in ba_levels)
-            log(f"BA eval: idx={ba_idx} levels=[{levels_str}] "
-                f"K={ba_n_seeds} seeds × n_inst={ba_n_inst} × cs={ba_cs}({ba_npi}-per) "
-                f"start_ep={ba_start_ep} every_n={ba_every_n}  fx={ba_fx:.1f}px")
-        except Exception as _e:
-            log(f"BA eval setup skipped: {_e!r}")
-            ba_eval_state = None
-
-    def _run_ba_eval(unwrapped, ep):
-        """Returns list of per-level dicts (omega_deg, omega_px, t_m, label,
-        vis_path). Renders one 3-panel overlay per level (seed=0) so the
-        ClearML images tab shows GT / perturbed / corrected at each ep.
-        """
-        if ba_eval_state is None or ep < ba_eval_state['start_ep']:
-            return None
-        s = ba_eval_state
-        # Skip ep that aren't on the every_n cadence — but always run on
-        # ep == start_ep (sanity gate) and on the last epoch.
-        every_n = int(s.get('every_n', 1))
-        if every_n > 1 and ep != s['start_ep'] and ep != int(c.get('epochs', ep)) \
-                and (ep - s['start_ep']) % every_n != 0:
-            return None
-        import numpy as _np
-        was_train = unwrapped.training
-        unwrapped.eval()
-        out = []
-        vis_dir = exp_dir / '_ba_vis' / f'ep{ep:03d}'
-        target_inst = s['ds']._load_inst(int(s['idx']))
-        try:
-            for li, (rot_deg, t_m) in enumerate(s['levels']):
-                omegas, ts = [], []
-                first_delta = None
-                first_ypr = first_tt = None
-                for k in range(s['n_seeds']):
-                    rng = _np.random.RandomState(1000 + 100 * li + k)
-                    ypr_t, t_t = s['mod']._draw_pert(rng, rot_deg=rot_deg, t_m=t_m)
-                    rng2 = _np.random.RandomState(2000 + 100 * li + k)
-                    d, _, _ = s['mod']._solve_one(
-                        unwrapped, s['ds'],
-                        target_idx=s['idx'], n_inst=s['n_inst'],
-                        cs=s['cs'], n_per_inst=s['npi'], rng=rng2,
-                        ypr_target=ypr_t, t_target=t_t,
-                        dist_one=s['dist_one'], cfg=c, label=f'ep{ep}-L{li}-s{k}')
-                    if k == 0:
-                        first_delta, first_ypr, first_tt = d, ypr_t, t_t
-                    tgt = _np.array([ypr_t[2], ypr_t[1], ypr_t[0]], dtype=_np.float64)
-                    d_np = d.detach().cpu().numpy()
-                    omegas.append(_np.linalg.norm(d_np[:3] - tgt))
-                    ts.append(_np.linalg.norm(d_np[3:] - t_t))
-                omega_mean = float(_np.mean(omegas))
-                t_mean     = float(_np.mean(ts))
-                omega_px   = float(s['fx'] * _np.tan(_np.deg2rad(omega_mean)))
-                label = f'r{rot_deg}_t{t_m}'
-                # Render overlay for the seed=0 solve
-                vis_path = None
-                try:
-                    vis_path = vis_dir / f'L{li}_{label}.png'
-                    suptitle = (f'ep={ep} idx={s["idx"]}  ±{rot_deg}°/±{t_m}m  '
-                                f'ω={omega_mean:.4f}° ({omega_px:.3f}px@fx) '
-                                f't={t_mean:.4f}m  (mean over K={s["n_seeds"]} seeds)')
-                    s['mod'].render_3panel_overlay(
-                        target_inst, first_ypr, first_tt, first_delta,
-                        out_path=vis_path, suptitle=suptitle,
-                        panel_label=f'BA-corrected (seed0)')
-                except Exception as _e:
-                    log(f"BA vis ep={ep} L{li} skipped: {_e!r}")
-                    vis_path = None
-                out.append(dict(omega_deg=omega_mean, omega_px=omega_px,
-                                t_m=t_mean, rot_deg=rot_deg, t_m_target=t_m,
-                                label=label, vis_path=vis_path))
-        finally:
-            if was_train: unwrapped.train()
-        return out
 
     # ── PRE-FLIGHT (ep=0): val pass on the untrained model so we fail fast
     # (within minutes) if loader/model is broken. midtrain_vis is gated to
@@ -546,11 +418,6 @@ def main(cfg=None):
         # below; keep K small (default 4 seeds × 20 inst × 4 sub-crops = 320
         # tiles per seed) so this stays under a few seconds on V100.
         ba_metrics = None
-        if accel.is_main_process and ba_eval_state is not None:
-            try:
-                ba_metrics = _run_ba_eval(accel.unwrap_model(model), epoch)
-            except Exception as _e:
-                log(f"BA eval ep={epoch} skipped: {_e!r}")
         accel.wait_for_everyone()
         scheduler.step()
         # tr/va numbers are PER-RANK means; for reporting we average across ranks.

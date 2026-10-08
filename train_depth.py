@@ -49,7 +49,8 @@ def main():
         train_size=8000, val_size=800, batch_size=BATCH_SIZE, num_workers=4,
         bg_ratio=BG_RATIO)
 
-    model     = torch.compile(CalibNetDepth().to(DEVICE), mode="max-autotune")
+    # CalibNetDepth の use_intensity 既定が True に変わった (実データ用)。この人工データは (u,v,d) の 3 列
+    model     = torch.compile(CalibNetDepth(use_intensity=False).to(DEVICE), mode="max-autotune")
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-3)
 
     def lr_lambda(e):

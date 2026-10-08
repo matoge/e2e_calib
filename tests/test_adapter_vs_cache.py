@@ -5,8 +5,8 @@ versus
   cache LMDB → inst (which build_kamikado_v3 already wrote)
 
 agree numerically on K, dist, pts_cam, uv_full, intensity (within
-float32 round-off), AND that running infer_tiles on either path
-produces identical par. Anything that breaks this means the adapter
+float32 round-off). (infer_tiles を使うモデル側の比較は、その推論経路を
+2026-10-07 に畳んだので外した。推論は tests/test_inference.py が見る。) Anything that breaks this means the adapter
 diverged from what the cache builder did, and inference will silently
 disagree downstream.
 
@@ -28,17 +28,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from datasets.pandaset_full import PandaSetCalibDatasetFull
-from scripts.ba.ba_multicam_corr import infer_tiles
 from scripts.data.adapters.kamikado import load_frame, TILE_LAYOUT
 from scripts.data.tile_cutter import frame_to_tiles
-from scripts.inference.infer_calib import load_calib_model
 
 
 CACHE = '/cache/kamikado_v3_tiled'
 RAW_ROOT = Path('/raw/kamikado/scenes')
 SCENE = 'points_ip664_D_20260226_224648_d005_3000_3020'
 FRAME = 0
-EXP = 'km_wv_wm_dgx2_n2_v4'
+
 
 REPROJ_TOL_PX = 1e-3
 PTS_TOL = 1e-4   # float32 round-off
@@ -136,25 +134,3 @@ def test_adapter_intensity_matches_cache_per_point():
         f'intensity diverges per-point: max={diffs.max():.3e} '
         f'(adapter range [{cf.intensity.min():.4f}, {cf.intensity.max():.4f}], '
         f'cache range [{i_cache.min():.4f}, {i_cache.max():.4f}])')
-
-
-def test_adapter_tile_infer_tiles_finite():
-    """Run infer_tiles on the adapter's parent frame (tile-cut by
-    infer_tiles) and confirm par is finite + σ > 0."""
-    cf = _adapter_frame()
-    model = load_calib_model(EXP).eval()
-    ba_cfg = dict(tile_size=384, model_input_size=128,
-                  max_pts_per_tile=256, min_pts_per_tile=8, tile_stride=320)
-    res = infer_tiles(model, cf.img,
-                       cf.uv_full.astype(np.float32),
-                       cf.z_cam.astype(np.float32),
-                       cf.K.astype(np.float32), ba_cfg,
-                       torch.device('cuda'),
-                       intensity=cf.intensity.astype(np.float32))
-    assert res is not None, 'infer_tiles None on adapter frame'
-    uv_pool, par_pool, z_pool = res
-    print(f'\n  adapter→infer_tiles: n_pool={len(uv_pool)}  '
-          f'σ_u_med={float(np.median(par_pool[:,2])):.2f}  '
-          f'σ_v_med={float(np.median(par_pool[:,3])):.2f}')
-    assert np.all(np.isfinite(par_pool)), 'non-finite par'
-    assert par_pool[:, 2].min() > 0 and par_pool[:, 3].min() > 0, 'σ ≤ 0'

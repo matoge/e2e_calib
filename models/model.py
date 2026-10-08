@@ -43,8 +43,35 @@ class PosEnc2D(nn.Module):
 # ---------------------------------------------------------------------------
 # CNN Backbone
 # ---------------------------------------------------------------------------
+def sharp_pe(uv01: torch.Tensor, d: int, img_px: int) -> torch.Tensor:
+    """鋭い 2 次元サイン波 PE。uv01: (..., 2) を [0,1] (画像幅で割った座標)。
+    周期が「画像 2 枚分」から「4 px」までの周波数を対数等間隔に d//4 本。
+    画像トークン (マスの中心) と点 (連続座標) で同じ関数を使う。"""
+    nb = d // 4
+    w = 2 * math.pi * torch.logspace(math.log10(0.5), math.log10(img_px / 4.0), nb,
+                                     device=uv01.device, dtype=torch.float32)
+    a = uv01[..., 1:2].float() * w
+    b = uv01[..., 0:1].float() * w
+    return torch.cat([a.sin(), a.cos(), b.sin(), b.cos()], -1).to(uv01.dtype)
+
+
+class SharpPosEnc2D(nn.Module):
+    """PosEnc2D の代わり。特徴マップのマスの中心 ((i+0.5)/H) に sharp_pe を足す。"""
+    def __init__(self, d_model: int, img_px: int):
+        super().__init__()
+        self.d, self.img_px = d_model, img_px
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, D_, H, W = x.shape
+        ys = (torch.arange(H, device=x.device, dtype=torch.float32) + 0.5) / H
+        xs = (torch.arange(W, device=x.device, dtype=torch.float32) + 0.5) / W
+        gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+        pe = sharp_pe(torch.stack([gx, gy], -1), self.d, self.img_px)   # (H, W, D)
+        return x + pe.permute(2, 0, 1).unsqueeze(0).to(x.dtype)
+
+
 class CNNBackbone(nn.Module):
-    def __init__(self, d: int = D, in_channels: int = 1):
+    def __init__(self, d: int = D, in_channels: int = 1, pe_mode: str = "lin", img_px: int = 128):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, 32, 3, stride=2, padding=1),   # 64x64
@@ -64,8 +91,11 @@ class CNNBackbone(nn.Module):
             nn.Conv2d(d, d, 3, stride=1, padding=1),
             nn.BatchNorm2d(d), nn.GELU(),
         )
-        self.pe_fine   = PosEnc2D(d)
-        self.pe_coarse = PosEnc2D(d)
+        if pe_mode == "sharp":
+            self.pe_fine, self.pe_coarse = SharpPosEnc2D(d, img_px), SharpPosEnc2D(d, img_px)
+        else:
+            self.pe_fine   = PosEnc2D(d)
+            self.pe_coarse = PosEnc2D(d)
 
     def forward(self, x):
         s      = self.stem(x)

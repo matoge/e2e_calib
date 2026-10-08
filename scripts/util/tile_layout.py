@@ -1,11 +1,10 @@
-"""Tile layout — single source of truth for sliding-tile geometry.
+"""Tile layout — tile geometry for building tiled caches.
 
-Both the cache build pipeline (scripts/preprocessing/_tile_split.py /
-build_*_v3) and online sliding inference
-(scripts/ba/ba_multicam_corr.infer_tiles) MUST route through this
-function so a frame is split the exact same way at training time and at
-inference time. Drift in tile boundaries between the two has historically
-been a silent source of train-vs-eval distribution mismatch.
+The cache build pipeline (scripts/preprocessing/_tile_split.py /
+build_*_v3) routes through this function. (Online sliding inference,
+scripts/ba/ba_multicam_corr.infer_tiles, used to share it; that inference
+path was removed on 2026-10-07. Inference now cuts windows inside the
+dataset, scripts/inference/infer_calib.py.)
 
 Conventions:
   * `span`        full image side in pixels

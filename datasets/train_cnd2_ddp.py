@@ -20,6 +20,11 @@ Launch (DGX2 GPU 3-10 + 15 = 9 processes, fp16):
         --cache /home/hfunaya/cache/kamikado_v3_tiled \
         --epochs 50 --oversample 16 --batch-size 64
 """
+import warnings
+# torch 2.0.0 の不具合: nn.MultiheadAttention を eval/no_grad (高速経路) で呼ぶと、key_padding_mask が
+# bool でも内部で float に変換してから戻すときに "Converting mask without torch.bool dtype" を毎回出す。
+# 結果には影響しない (最小例で再現済み)。val のたびにログを埋めるので、この警告だけ消す。
+warnings.filterwarnings('ignore', message='Converting mask without torch.bool dtype')
 import sys, os, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import argparse, math, time, torch
 import torch.multiprocessing as _tmp
@@ -29,6 +34,17 @@ from pathlib import Path
 from datetime import datetime
 
 from datasets.pandaset_full import PandaSetCalibDatasetFull, collate_full, collate_pair
+
+# 推論側 (scripts/inference/infer_calib.py) も同じ表から kv_schedule を組む。
+# main() の中に閉じていたので、ckpt と同じ構成を外から作れなかった。
+KV_SCHEDULES = {
+    'kick3': [
+        {'image': 'coarse',     'lidar': True, 'n_points': 4},
+        {'image': 'coarse',     'lidar': True, 'n_points': 4},
+        {'image': 'fine',       'lidar': True, 'n_points': 4},
+        {'image': 'super_fine', 'lidar': True, 'n_points': 8},
+    ],
+}
 from models.calibnet2 import CalibNet2
 from models.model_cov import gaussian2d_nll
 from scripts.ba.ba_torch import (
@@ -37,9 +53,104 @@ from scripts.ba.ba_torch import (
 )
 
 
+def ba_solve(per_pt, pad_mask, pts_cam_orig, K_orig, cs_t, *, img_size,
+             group=1, W_head=None, w_active=None, ba_iter=4, damping=1e-3,
+             detach_mu=True, duv_orig=None, residual_sign=-1.0):
+    """ネットの出力 → 窓を融合した δ_pred。GT を使わない。
+
+    学習の BA loss・eval の姿勢評価・推論 (scripts/inference/infer_calib.py) が
+    すべてこれを呼ぶ。以前は _ba_pose_loss の中に δ_pred と δ_gt が混ざっていて
+    外から呼べず、推論側が solve_pose を書き直した結果 prior_diag / sigma の
+    clamp / rho の tanh / W のスケールが抜けた (実測: PERT=0 で 1 deg)。
+
+    duv_orig を渡すと、δ_gt を同じグループ化で解けるよう並べ替えて返す (学習用)。
+
+    residual_sign: ネットの μ は「正解 − いま見えている位置」(学習の gt =
+    true_uvd − dist_uvd)。
+      学習 (-1): P0 は正しいポーズ側 (dataset が中で摂動を掛ける)。
+                 目標 = project(P0) − μ = 摂動後の位置。δ は 正解→摂動。
+      推論 (+1): P0 は渡されたずれたポーズ側。目標 = project(P0) + μ = 正解。
+                 δ は ずれ→正解 で、補正後のポーズ = E(δ) @ T_入力。
+    推論を -1 のまま解くと、完全に当たるモデルでも符号違いと線形化で
+    0.003-0.016 deg / 1.7-11 mm 残る (実測)。+1 なら 0.00000。
+    """
+    from scripts.ba.gn_pose import solve_pose
+    B, N = pts_cam_orig.shape[:2]
+    dev, dt = pts_cam_orig.device, pts_cam_orig.dtype
+    Zc = pts_cam_orig[..., 2]
+    valid = (~pad_mask) & (Zc > 0.5)
+    # 枠を埋めるための複製タイルは GN から外す。同じ観測を 2 回 H に足さない。
+    if w_active is not None:
+        valid = valid & (w_active.reshape(-1, 1).to(valid.device) > 0.5)
+    safe = torch.tensor([0., 0., 10.], device=dev, dtype=dt)
+    P0 = torch.where(valid.unsqueeze(-1), pts_cam_orig, safe)
+    if img_size is None:
+        raise ValueError('ba_solve: img_size must be the model input size')
+    s2o = (cs_t / float(img_size)).view(B, 1)
+    mu_orig = per_pt[..., :2] * s2o.unsqueeze(-1)
+    sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0) * s2o
+    sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0) * s2o
+    rho = torch.tanh(per_pt[..., 4]) * 0.95
+    if W_head is not None:
+        # InfoHead2x2 の W は局所 px^-2。GN は元カメラ px なので s2o^-2 で換算
+        W = W_head / (s2o * s2o).view(B, 1, 1, 1)
+    else:
+        W = make_info_from_sigma_rho(sx, sy, rho)
+    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09],
+                         device=dev, dtype=torch.float64)
+    G = int(group)
+    if G > 1:
+        assert B % G == 0, f"batch {B} not divisible by group {G}"
+        def _grp(x):
+            return x.reshape(B // G, G * x.shape[1], *x.shape[2:])
+        P0, mu_orig, W, valid = _grp(P0), _grp(mu_orig), _grp(W), _grp(valid)
+        if duv_orig is not None:
+            duv_orig = _grp(duv_orig)
+        K_orig = K_orig.reshape(B // G, G, 3, 3)[:, 0]
+        Bg, Ng = B // G, G * N
+    else:
+        Bg, Ng = B, N
+    P0d = P0.double(); Kd = K_orig.double()
+    mu_in = (mu_orig.detach() if detach_mu else mu_orig).double()
+    delta_pred, H = solve_pose(P0d, float(residual_sign) * mu_in, W.double(), Kd,
+                               valid=valid, n_iter=ba_iter, damping=damping,
+                               prior_diag=prior)
+    return dict(delta_pred=delta_pred, H=H, P0d=P0d, Kd=Kd, valid=valid,
+                prior=prior, sx=sx, sy=sy, Zc=Zc, B=Bg, N=Ng, duv_orig=duv_orig)
+
+
+def forward_calib(model, batch):
+    """collate_full の出力 → (per_pt, W_head)。学習・評価・推論の forward はこれ 1 本。"""
+    imgs, _t, dist_uvd, pad_mask, vfp, bucket_uvd, bucket_valid = batch[:7]
+    # dist_uvd の列: [u, v, d, is_obj, intensity] → is_obj (3 列目) を落とす
+    point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
+    out = model(imgs.float().div(255.0), point_in, dpose_R=None, vfp=vfp,
+                bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
+                key_padding_mask=pad_mask)
+    per_pt = out[0] if isinstance(out, tuple) else out
+    W_head = out[1] if (isinstance(out, tuple) and len(out) > 1) else None
+    return per_pt, W_head
+
+
+@torch.no_grad()
+def predict_pose(model, batch, *, img_size, group, ba_iter=4, damping=1e-3):
+    """batch → δ (B/G, 6) と H。推論の入口。学習の eval と同じ forward・同じ GN。
+
+    δ = (ωx, ωy, ωz [deg], tx, ty, tz [m])。渡したポーズ T (LiDAR→camera) に
+    対し、補正後のポーズは E(δ) @ T (E は ba_torch._apply_extrinsic と同じ
+    P' = R(ω)·P + t)。"""
+    per_pt, W_head = forward_calib(model, batch)
+    r = ba_solve(per_pt, batch[3], batch[8], batch[10], batch[11],
+                 img_size=img_size, group=group, W_head=W_head,
+                 w_active=(batch[16] if len(batch) > 16 else None),
+                 ba_iter=ba_iter, damping=damping, detach_mu=True,
+                 residual_sign=+1.0)
+    return r['delta_pred'], r['H']
+
+
 def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
                   loss_type='nll', detach_mu=False, img_size=None, group=1,
-                  W_head=None, is_grid=None, return_pose=False):
+                  W_head=None, is_grid=None, w_active=None, return_pose=False):
     """BA pose loss for cnd2 — uses the canonical, self-tested GN module
     (scripts/ba/gn_pose.solve_pose) on the dataset's ORIGINAL-camera solver
     fields (pts_cam_orig / duv_orig / K_orig). NO range→Z / tile-local-K
@@ -66,51 +177,7 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     if pts_cam_orig is None or duv_orig is None or K_orig is None or cs_t is None:
         return None, {}
     B, N, _ = dist_uvd.shape
-    dev, dt = dist_uvd.device, dist_uvd.dtype
-    # valid = not-padded AND physical depth (Z>0.5 m); sanitize the rest so the
-    # projection is finite (valid excludes them from the reduction).
-    Zc = pts_cam_orig[..., 2]
-    valid = (~pad_mask) & (Zc > 0.5)
-    safe = torch.tensor([0., 0., 10.], device=dev, dtype=dt)
-    P0 = torch.where(valid.unsqueeze(-1), pts_cam_orig, safe)
-
-    # Network μ/σ are TILE-LOCAL px; scale to original-camera px by cs/S (the
-    # tile origin cancels in a Δ, only the S/cs zoom remains — so duv_orig =
-    # duv_local·cs/S EXACTLY, and σ scales the same way). S = model img_size.
-    if img_size is None:
-        raise ValueError('_ba_pose_loss: img_size must be the model input size; '
-                         'it was hardcoded to 128 and silently doubled mu at 256.')
-    img_size = float(img_size)
-    s2o = (cs_t / img_size).view(B, 1)                        # (B,1)
-    mu_orig = per_pt[..., :2] * s2o.unsqueeze(-1)             # (B,N,2) orig px
-    sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0) * s2o
-    sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0) * s2o
-    rho = torch.tanh(per_pt[..., 4]) * 0.95
-    if W_head is not None:
-        # InfoHead2x2's learnable 2x2 per-point information matrix. It is the
-        # thing that is supposed to keep the GN from being overconfident, so it
-        # has to BE the W the GN uses. Rebuilding W from per_pt[..., 2:5]
-        # instead left info_head.mlp[-1] at its zero init -- never a single
-        # gradient step -- through every run so far.
-        # W_head is in LOCAL px^-2; the GN runs in original camera px, and
-        # duv scales by s2o, so the information scales by s2o^-2.
-        W = W_head / (s2o * s2o).view(B, 1, 1, 1)
-    else:
-        W = make_info_from_sigma_rho(sx, sy, rho)
-    prior = torch.tensor([1/9., 1/9., 1/9., 1/0.09, 1/0.09, 1/0.09], device=dev, dtype=torch.float64)
-
-    # FLOAT64 GN + NLL. fx_orig~930 → J~930 → H entries ~1e7 while prior floors
-    # at ~0.1 → condition number ~1e9. The fp32 forward is finite (loss≈288,
-    # rot_err 0.003°) but the cholesky/solve BACKWARD explodes to NaN at that
-    # conditioning (one tile's NaN grad → shared backbone → 99.9% params NaN).
-    # fp64 carries ~16 digits so the 1e9-conditioned factorisation + its grad
-    # stay clean; the .double() cast is autograd-transparent (grad casts back to
-    # the fp32 net). solve_pose only needs the float-precision bump here.
-    # group: windows-per-frame that share ONE delta (dataset share_pert). Their
-    # normal equations are the SAME pose problem, so concatenate the points into
-    # one solve instead of solving each 256px tile alone. A single tile is
-    # 24x overconfident (e^T H e / 6 = 24.4 measured on val); fusing G windows
-    # is what actually adds independent constraints.
+    dev = dist_uvd.device
     G = int(group)
     _mixed = (is_grid is not None and float(is_grid.max()) > 0.5
               and float(is_grid.min()) < 0.5)
@@ -147,23 +214,20 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
             diag[k] = sum(d[k] * (n / tot) for _, d, n in outs)
         diag['frac_grid'] = float(gm.float().mean())
         return loss, diag
-    if G > 1:
-        assert B % G == 0, f"batch {B} not divisible by group {G}"
-        def _grp(x):
-            return x.reshape(B // G, G * x.shape[1], *x.shape[2:])
-        P0, mu_orig, duv_orig = _grp(P0), _grp(mu_orig), _grp(duv_orig)
-        W, valid = _grp(W), _grp(valid)
-        K_orig = K_orig.reshape(B // G, G, 3, 3)[:, 0]   # one camera per frame
-        B, N = B // G, G * N            # N too: Wi below is built from (B, N)
-    P0d = P0.double(); Kd = K_orig.double()
-    mu_in = (mu_orig.detach() if detach_mu else mu_orig).double()
-    delta_pred, H_last = solve_pose(P0d, -mu_in, W.double(), Kd, valid=valid,
-                                    n_iter=ba_iter, damping=damping, prior_diag=prior)
+    # δ_pred は ba_solve で解く。推論もこれを呼ぶ (GT を使わない)
+    r = ba_solve(per_pt, pad_mask, pts_cam_orig, K_orig, cs_t,
+                 img_size=img_size, group=group, W_head=W_head,
+                 w_active=w_active, ba_iter=ba_iter, damping=damping,
+                 detach_mu=detach_mu, duv_orig=duv_orig)
+    delta_pred, H_last = r['delta_pred'], r['H']
+    P0d, Kd, valid, prior = r['P0d'], r['Kd'], r['valid'], r['prior']
+    sx, sy, Zc = r['sx'], r['sy'], r['Zc']
+    B, N = r['B'], r['N']
     with torch.no_grad():
         Wi = make_info_from_sigma_rho(torch.ones(B, N, device=dev, dtype=torch.float64),
                                       torch.ones(B, N, device=dev, dtype=torch.float64),
                                       torch.zeros(B, N, device=dev, dtype=torch.float64))
-        delta_gt, _ = solve_pose(P0d, -duv_orig.double(), Wi, Kd, valid=valid,
+        delta_gt, _ = solve_pose(P0d, -r['duv_orig'].double(), Wi, Kd, valid=valid,
                                  n_iter=ba_iter, damping=damping, prior_diag=prior)
 
     if loss_type == 'mse':
@@ -566,6 +630,14 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
     """
     model.train(train)
     total_nll, total_mse, n = 0.0, 0.0, 0
+    # 混ぜる前の 2 項を別々に残す。loss/nll は
+    #   (1-ba_weight)*点ごとNLL + ba_weight*姿勢NLL
+    # で、ba_weight が warmup で 0->0.05 に動くので、1 本の曲線だと
+    # 「下がった」のが点側なのか姿勢側なのか重みの変化なのか分からない。
+    total_pt_nll, total_ba_nll, n_ba = 0.0, 0.0, 0
+    # 学習中の姿勢指標。ステップ毎に print しているのに ClearML には
+    # eval 側 (pose/rot_err_deg series='val') しか出ていなかった。
+    _ps = {'rot_err': 0.0, 't_err': 0.0, 'frac_pd': 0.0, 'logdet': 0.0, 'n': 0}
     _t_start = time.time()
     _last_log_step = 0
     for batch in loader:
@@ -574,17 +646,11 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         # pert_vec (8,); collate_full stacks to (B, 8). Optional — older
         # caches may not emit it, so guard.
         pert_vec_b = batch[7] if len(batch) > 7 else None
-        imgs = imgs.float().div_(255.0)
         gt   = true_uvd[..., :2] - dist_uvd[..., :2]
-        # CalibNet2.use_intensity is True by default; pass [u,v,d,intensity].
-        # dist_uvd cols: [u, v, d, is_obj, intensity] → drop is_obj (col 3).
-        point_in = torch.cat([dist_uvd[..., :3], dist_uvd[..., 4:5]], dim=-1)
-        out = model(imgs, point_in,
-                    dpose_R=None, vfp=vfp,
-                    bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
-                    key_padding_mask=pad_mask)
-        # use_info_head=False here → out is per_pt only.
-        per_pt = out[0] if isinstance(out, tuple) else out
+        # forward は推論と同じ forward_calib を通す (経路を 1 本にする)
+        per_pt, _W_head = forward_calib(model, batch)
+        out = (per_pt, _W_head) if _W_head is not None else per_pt
+        imgs = imgs.float().div(255.0)       # 下の vis_capture 用
         valid  = ~pad_mask
         ba_diag = None
         nll_loss = gaussian2d_nll(per_pt[valid], gt[valid])
@@ -603,6 +669,7 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
                             (out[1].detach() if isinstance(out, tuple)
                              and len(out) > 1 else None)),
                     is_grid=(batch[15] if len(batch) > 15 else None),
+                    w_active=(batch[16] if len(batch) > 16 else None),
                     ba_iter=getattr(accel, '_ba_iter', 4),
                     damping=getattr(accel, '_ba_damping', 1e-3),
                     loss_type='nll', detach_mu=True,
@@ -629,6 +696,7 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
                                           group=getattr(accel, '_ba_group', 1),
                                           W_head=W_head,
                                           is_grid=(batch[15] if len(batch) > 15 else None),
+                    w_active=(batch[16] if len(batch) > 16 else None),
                                           ba_iter=getattr(accel, '_ba_iter', 4),
                                           damping=getattr(accel, '_ba_damping', 1e-3),
                                           loss_type=getattr(accel, '_ba_loss_type', 'nll'),
@@ -649,6 +717,9 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             err = (per_pt[valid][..., :2].float() - gt[valid]).norm(dim=-1)
             total_mse += err.mean().item()
         total_nll += loss.item(); n += 1
+        total_pt_nll += float(nll_loss.item())
+        if getattr(accel, '_ba_loss_mode', False) and ba_l is not None:
+            total_ba_nll += float(ba_l.item()); n_ba += 1
         # Stash last batch (rank-0 only) for end-of-epoch render. Same
         # contract as epoch_loop_pair.vis_capture but with calib fields.
         if vis_capture is not None and accel.is_main_process:
@@ -661,6 +732,12 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
                 if pert_vec_b is not None:
                     vis_capture['pert_vec'] = pert_vec_b.detach().cpu()
                 vis_capture['split']    = 'train' if train else 'val'
+        if ba_diag:
+            for _k in ('rot_err', 't_err', 'frac_pd', 'logdet'):
+                _v = ba_diag.get(_k)
+                if _v is not None and _v == _v:
+                    _ps[_k] += float(_v)
+            _ps['n'] += 1
         if train and accel.is_main_process and (n - _last_log_step >= 25):
             _dt = time.time() - _t_start
             sps_per  = n * imgs.shape[0] / _dt if _dt > 0 else 0
@@ -680,6 +757,14 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             print(f"  step {n}  loss={loss.item():+.3f}{ba_str}  "
                   f"sps/rank={sps_per:.0f}  sps(global)={sps_glob:.0f}", flush=True)
             _last_log_step = n
+    # 返り値は 2 要素のまま。len(tr_out)==4 が pair モードの判定に使われていて、
+    # ここを 4 にすると pair の (nll, mse, nll_calib, mse_calib) と衝突する。
+    # 分割した 2 項は accel に載せる (_pose_eval と同じ流儀)。
+    accel._nll_split = (total_pt_nll / max(n, 1),
+                        (total_ba_nll / n_ba) if n_ba else float('nan'))
+    accel._pose_train = ({k: _ps[k] / _ps['n'] for k in
+                          ('rot_err', 't_err', 'frac_pd', 'logdet')}
+                         if _ps['n'] else None)
     return (total_nll / max(n, 1), total_mse / max(n, 1))
 
 
@@ -689,7 +774,7 @@ def main():
     p.add_argument('--cache', required=True,
                    help='comma-separated v3-tiled cache path(s)')
     p.add_argument('--epochs', type=int, default=50)
-    p.add_argument('--eval-every', type=int, default=10,
+    p.add_argument('--eval-every', type=int, default=5,
                    help='Run validation + per-epoch debug-sample render only '
                         'every N epochs. Always evals on ep1 and the last ep. '
                         'Default 10 — matches CND1 cadence.')
@@ -709,15 +794,8 @@ def main():
     p.add_argument('--max-crop-px', type=int, default=512)
     p.add_argument('--grid-n', type=int, default=16)
     p.add_argument('--workers', type=int, default=8)
-    p.add_argument('--ba-loss', action='store_true',
-                   help='Use BA-based pose loss instead of per-point gaussian2d_nll')
     p.add_argument('--ba-iter', type=int, default=4)
     p.add_argument('--ba-damping', type=float, default=1e-3)
-    p.add_argument('--ba-w-source', choices=('infohead', 'sigma'),
-                   default='infohead',
-                   help="where the GN's per-point 2x2 information matrix comes "
-                        "from: InfoHead2x2 (learnable, constant 0.48*I at init) "
-                        "or the per-point sigma head (trained by gaussian2d_nll)")
     p.add_argument('--ba-warmup-start', type=int, default=0,
                    help='epoch at which the BA weight starts rising from 0')
     p.add_argument('--ba-warmup-end', type=int, default=0,
@@ -730,15 +808,6 @@ def main():
                         'degeneracy-safe, default) or "mse" (legacy rot+100·t).')
     p.add_argument('--grid-iw', type=int, default=1600, help='image width for the crop grid')
     p.add_argument('--grid-ih', type=int, default=900,  help='image height for the crop grid')
-    p.add_argument('--grid-frac', type=float, default=0.5,
-                   help='fraction of FRAMES that use the full-image grid (fused '
-                        'pose); the rest use random pivots (single-window pose)')
-    p.add_argument('--crop-grid', action='store_true',
-                   help='deterministic crop grid covering the WHOLE image instead of '
-                        'random lidar-pivot crops (needs oversample = ceil(W/cs)*ceil(H/cs))')
-    p.add_argument('--share-pert', action='store_true',
-                   help='one delta per FRAME: all `oversample` windows share it, '
-                        'so the BA loss can fuse them into a single pose')
     p.add_argument('--ba-detach-mu', action='store_true',
                    help='Detach μ in the BA pose loss so it trains only W (default '
                         'OFF = μ attached, natural E2E). Was a band-aid for the '
@@ -772,12 +841,10 @@ def main():
                         "(meta.pt) instead of reshuffling every frame together; "
                         "--val-fraction is ignored")
     p.add_argument('--split-seed', type=int, default=42)
-    p.add_argument('--use-info-head', action='store_true',
-                   help='enable InfoHead2x2 (still ignored by NLL loss; for ckpt only)')
     p.add_argument('--u-band', type=str, default='',
                    help='comma-separated <cache_path>:<frac> overrides for u_band '
                         '(central horizontal pivot band). 0=disabled, 0.8=keep '
-                        'central 80%. Example: '
+                        'central 80%%. Example: '
                         '"/home/hfunaya/cache_v5/tss4_v3_full_iter2kb4_yaw3:0.8"')
     p.add_argument('--frame-stride', type=str, default='',
                    help='comma-separated <cache_path>:<int> per-cache frame_stride '
@@ -851,10 +918,57 @@ def main():
                         'Use with --resume-ckpt to continue from where a prior '
                         'run left off (e.g. --resume-ckpt prev/best_model.pt '
                         '--start-epoch 20).')
+    # 段をこの 1 本で切り替える。段ごとに 4 つのフラグを手で揃えると必ずずれる
+    # (--crop-grid を付けても grid_frac=0.0 で格子が一度も使われていなかった、
+    #  --ba-w-source sigma で InfoHead に勾配が 1 本も行かず姿勢 loss が全部
+    #  sigma と mu に流れて点の NLL と衝突していた、など)。
+    #   stage 1  --no-with-ba : タイルだけ。BA なし。点ごとの gaussian2d_nll のみ
+    #   stage 2  --with-ba    : 格子 + share_pert で融合、BA loss を InfoHead に流す
+    p.add_argument('--rep-strategy', type=str, default='cell_center',
+                   choices=['cell_center', 'nearest_cam', 'random_train'],
+                   help="セルの代表点 (クエリ)。random_train = 学習はセル内ランダム、val・推論はセル中心に一番近い点")
+    p.add_argument('--val-seed', type=int, default=20261008,
+                   help="val のデータセットの乱数を (この値, サンプル番号) で固定する。窓の位置とずれが毎エポック同じになる")
+    p.add_argument('--frustum-nb', type=str, default='own', choices=['3x3', 'own'],
+                   help="局所エンコーダの近傍。3x3 = 周り 3x3 セルからランダム 16 点 (従来)、own = 自分のセルの点を全部")
+    p.add_argument('--k-per-cell', type=int, default=24,
+                   help="1 セルに詰める LiDAR 点の上限 (データ側のバケツ)")
+    p.add_argument('--cross-attn', type=str, default='deform', choices=['deform', 'full'],
+                   help="deform = MSDeformAttn (参照点の周りだけ), full = nn.MultiheadAttention (KV 全体、参照点なし)")
+    p.add_argument('--ref-mode', type=str, default='', choices=['', 'learned', 'query_offset', 'query'],
+                   help="deform の参照点。'' = --ref-from-query に従う。query = 投影位置そのもの (ref_proj を使わない)")
+    p.add_argument('--ref-from-query', action=argparse.BooleanOptionalAction, default=False,
+                   help='クロスアテンションの参照点をクエリ自身の (u,v) に置き、'
+                        'ref_proj はそこからの差分を学ぶ (models/calibnet2.Block)。'
+                        '既定 (False) は従来どおり ref_proj の出力だけで、初期は画像中央。')
+    p.add_argument('--with-ba', action=argparse.BooleanOptionalAction, default=False,
+                   help='stage 2 (--with-ba): 全画面の格子 + share_pert で窓を 1 つの '
+                        'GN に融合し、BA の姿勢 loss を InfoHead2x2 に流す。'
+                        'stage 1 (--no-with-ba, 既定): タイルだけ。点ごとの '
+                        'gaussian2d_nll のみで InfoHead は作らない')
     p.add_argument('--why', type=str, default='',
                    help='WHY blob: rationale, hypothesis, expected outcome '
                         '(stored in ClearML task comment, free-form prose).')
     args = p.parse_args()
+
+    # 段の切り替えはこの 1 本だけ。以下は派生で、個別に指定させない。
+    # 手で 5 つ揃えていた頃に実際にずれた例:
+    #   --crop-grid を付けても grid_frac=0.0 で格子が一度も使われていなかった
+    #   --ba-w-source sigma で InfoHead に勾配が 1 本も行かず、姿勢 loss が
+    #   全部 sigma と mu に流れて点ごとの NLL と衝突していた
+    #   use_info_head=True でも ba_loss と ba_w_source が揃わないと
+    #   info_head.mlp.4.weight は absmax 0 のまま
+    #   (docs/2026-08-28_grouped-ba-infohead.md バグ #4)
+    args.crop_grid     = bool(args.with_ba)   # 全画面の格子で窓を切る
+    args.share_pert    = bool(args.with_ba)   # 1 フレーム 1 δ。窓を融合できる
+    args.ba_loss       = bool(args.with_ba)   # 姿勢 loss
+    args.use_info_head = bool(args.with_ba)   # 姿勢側の 2x2 情報行列
+    args.ba_w_source   = 'infohead'           # 常に InfoHead。sigma は点側専用
+    args.grid_frac     = 1.0 if args.with_ba else 0.0   # 未使用。互換のため残す
+    print(f"with_ba={args.with_ba}  "
+          f"crop_grid={args.crop_grid} share_pert={args.share_pert} "
+          f"ba_loss={args.ba_loss} use_info_head={args.use_info_head} "
+          f"ba_w_source={args.ba_w_source}", flush=True)
 
     # find_unused_parameters=True: in pair_mode cross-frame path the legacy
     # entry-time pose_emb / info_head / etc. don't see gradients in some
@@ -898,29 +1012,54 @@ def main():
         # emits when a per-cache override is bigger than the global cs).
         # Fall back to args.min_crop_px when no per-cache override was given.
         import math as _math
-        _IW, _IH = int(args.grid_iw), int(args.grid_ih)
-        _cs_global = int(args.min_crop_px)
-        _cs = _cs_global
+        # 画像サイズはキャッシュを見て決める。--grid-iw/--grid-ih は手で合わせる
+        # 必要があり、1 組しか持てないので複数キャッシュを混ぜられなかった。
+        # 実際の格子は _plan_grid が inst['IW']/inst['IH'] から切る (docstring:
+        # "nx/ny follow from the image size and the crop size, so this adapts to
+        # any camera") ので、ここも同じ数え方をキャッシュごとにやって最大を取る。
+        # 窓数が足りないキャッシュは実タイルの複製で埋まり (pandaset_full の
+        # _w_active=0)、BA 側で valid &= w_active として外すので混在できる。
+        # 点ゼロのサンプルで埋めると KV が全マスクになって attention の
+        # softmax が NaN になる (実測: tr_nll=nan frac_pd=0.00)。
+        def _cache_wh(_cp):
+            try:
+                _d = PandaSetCalibDatasetFull(_cp, split='train', img_size=args.img_size,
+                                              max_offset_m=args.t_m, max_rot_deg=args.rot_deg,
+                                              min_crop_px=args.min_crop_px,
+                                              max_crop_px=args.max_crop_px,
+                                              grid_n=args.grid_n, oversample=1)
+                _i = _d._load_inst(0)
+                return int(_i['IW']), int(_i['IH'])
+            except Exception as _e:
+                log(f"crop_grid: {_cp} の画像サイズが読めない ({type(_e).__name__}: {_e}) "
+                    f"-- --grid-iw/--grid-ih {args.grid_iw}x{args.grid_ih} を使う")
+                return int(args.grid_iw), int(args.grid_ih)
+        _cs_map = {}
         if getattr(args, 'per_cache_crop_px', ''):
-            _cs_list = []
             for tok in args.per_cache_crop_px.split(','):
                 tok = tok.strip()
                 if not tok: continue
-                _, v = tok.rsplit(':', 1)
+                _k, v = tok.rsplit(':', 1)
                 v = v.strip()
-                _cs_list.append(int(v.split('-')[0]) if '-' in v else int(v))
-            if _cs_list:
-                # All caches must emit the SAME oversample count (batch is
-                # sharded across caches by index). Enforce that here.
-                _counts = sorted({_math.ceil(_IW/c) * _math.ceil(_IH/c) for c in _cs_list})
-                assert len(_counts) == 1, \
-                    f"per-cache crop_px yields different window counts {_counts} — mix not supported yet"
-                _cs = _cs_list[0]  # any cache's crop works, they're equivalent
-        _need = _math.ceil(_IW / _cs) * _math.ceil(_IH / _cs)
+                _cs_map[_k.strip()] = int(v.split('-')[0]) if '-' in v else int(v)
+        _paths = [x.strip() for x in args.cache.split(',') if x.strip()]
+        _per = []
+        for _cp in _paths:
+            _w, _h = _cache_wh(_cp)
+            _c = _cs_map.get(_cp, int(args.min_crop_px))
+            _n = _math.ceil(_w / _c) * _math.ceil(_h / _c)
+            _per.append((_cp, _w, _h, _c, _n))
+            log(f"crop_grid: {_cp.rsplit('/',1)[-1]} {_w}x{_h} / {_c}px "
+                f"-> {_math.ceil(_w/_c)}x{_math.ceil(_h/_c)} = {_n} windows")
+        _need = max(n for *_r, n in _per) if _per else \
+            _math.ceil(int(args.grid_iw) / int(args.min_crop_px)) * \
+            _math.ceil(int(args.grid_ih) / int(args.min_crop_px))
+        if len({n for *_r, n in _per}) > 1:
+            log(f"crop_grid: 窓数がキャッシュ間で違う {[n for *_r, n in _per]} "
+                f"-> 最大の {_need} に揃える。足りない分は実タイルの複製で埋め、"
+                f"BA では w_active=0 として外す")
         if int(args.oversample) != _need:
-            log(f"crop_grid: {_IW}x{_IH} / {_cs}px -> "
-                f"{_math.ceil(_IW/_cs)}x{_math.ceil(_IH/_cs)} = {_need} windows; "
-                f"overriding --oversample {args.oversample} -> {_need}")
+            log(f"crop_grid: overriding --oversample {args.oversample} -> {_need}")
             args.oversample = _need
     accel._ba_group     = int(args.oversample) if args.share_pert else 1
 
@@ -953,7 +1092,8 @@ def main():
     # --- dataset(s) ---
     # Note: pair_mode is set per-cache below (mixed mode), so it's NOT in
     # the shared ds_kw. Each cache passes its own pair_mode via cp_kw.
-    ds_kw = dict(img_size=args.img_size,
+    ds_kw = dict(img_size=args.img_size, rep_strategy=args.rep_strategy,
+                 k_per_cell=args.k_per_cell,
                  max_offset_m=args.t_m, max_rot_deg=args.rot_deg,
                  min_crop_px=args.min_crop_px, max_crop_px=args.max_crop_px,
                  grid_n=args.grid_n, oversample=args.oversample,
@@ -1029,8 +1169,11 @@ def main():
             _lo, _hi = crop_map[cp]
             cp_kw = {**cp_kw, 'min_crop_px': _lo, 'max_crop_px': _hi}
         tr = PandaSetCalibDatasetFull(cp, split='train', u_band=ub, **cp_kw)
+        # val も画像全体から窓を取る。2026-05-31 (c967134) から理由の記録なしに
+        # center_band=0.5 (縦の中央 50% の行だけ) が付いていて、段 1 の val は上下の端を含まなかった。
         va = PandaSetCalibDatasetFull(cp, split='val',
-                                       center_band=0.5, u_band=ub, **cp_kw)
+                                       u_band=ub,
+                                       eval_seed=args.val_seed, **cp_kw)
         _crop = crop_map.get(cp, (args.min_crop_px, args.max_crop_px))
         log(f"  [{cp}] train={len(tr)} val={len(va)} (os={os_i}) u_band={ub} "
             f"crop_px={_crop[0]}-{_crop[1]} mode={cp_mode}")
@@ -1112,14 +1255,6 @@ def main():
                                          shuffle=False, **_val_kw(collate_full))
 
     # --- model ---
-    KV_SCHEDULES = {
-        'kick3': [
-            {'image': 'coarse',     'lidar': True, 'n_points': 4},
-            {'image': 'coarse',     'lidar': True, 'n_points': 4},
-            {'image': 'fine',       'lidar': True, 'n_points': 4},
-            {'image': 'super_fine', 'lidar': True, 'n_points': 8},
-        ],
-    }
     kv_schedule = KV_SCHEDULES.get(args.kv_schedule) if args.kv_schedule else None
     model = CalibNet2(d=128, img_size=args.img_size, in_channels=3,
                       use_intensity=True, frustum_grid_n=args.grid_n,
@@ -1129,7 +1264,11 @@ def main():
                       fourier_head_n_freq=int(args.fourier_head_n_freq),
                       fourier_head_scale=float(args.fourier_head_scale),
                       point_mlp_fourier_n_freq=int(args.point_mlp_fourier_n_freq),
-                      use_info_head=args.use_info_head)
+                      use_info_head=args.use_info_head,
+                      ref_from_query=bool(args.ref_from_query),
+                      cross_attn=args.cross_attn,
+                      ref_mode=(args.ref_mode or None),
+                      frustum_nb=args.frustum_nb)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 
     if mixed_mode and train_loader_calib is not None:
@@ -1165,6 +1304,11 @@ def main():
             cml_task = _ClearMLTask.current_task()
             if cml_task is not None:
                 cml_logger = cml_task.get_logger()
+                # 起動直後に iteration 1 で 1 つ送っておく。最初の値が 1 エポック目の終わり (約 3 分後) だと、
+                # ClearML の監視 (:monitor:gpu / :monitor:machine) が待ちきれず「iteration = 開始からの
+                # 秒数」で記録し、タスク一覧の Iterations が秒数 (例: 181) になっていた。監視はタスクの
+                # 最後の iteration が 0 より大きくなったかで判断するので、iteration 0 では効かない。
+                cml_logger.report_scalar(title='lr', series='lr', value=float(args.lr), iteration=1)
         except Exception as _e:
             log(f"[clearml] logger init failed: {_e}")
 
@@ -1291,6 +1435,8 @@ def main():
         do_eval = (ep + 1) % eval_stride == 0 or (ep + 1) == epochs or ep == 0
         tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
                             args.img_size, vis_capture=vis_cap_train if do_eval else None)
+        tr_split = getattr(accel, '_nll_split', (float('nan'), float('nan')))
+        tr_pose  = getattr(accel, '_pose_train', None)
         # Mixed-mode: also run the calib-only secondary epoch (alternates
         # parameter updates with the primary pair epoch, both share model).
         tr_out_calib = None
@@ -1306,8 +1452,10 @@ def main():
                 if _epoch_fn_calib is not None and val_loader_calib is not None:
                     va_out_calib = _epoch_fn_calib(model, val_loader_calib, optimizer,
                                                     accel, False, args.img_size)
+            va_split = getattr(accel, '_nll_split', (float('nan'), float('nan')))
         else:
             va_out = (float('nan'),) * len(tr_out)
+            va_split = (float('nan'), float('nan'))
         if len(tr_out) == 4:
             tr_nll, tr_mse, tr_nll_cal, tr_mse_cal = tr_out
             va_nll, va_mse, va_nll_cal, va_mse_cal = va_out
@@ -1386,6 +1534,32 @@ def main():
                     rs(title='pose/frac_pd',     series='val', value=p_pd,  iteration=ep+1)
                     rs(title='pose/sigma_px',    series='val', value=p_sg,  iteration=ep+1)
                 rs(title='loss/nll', series='train', value=tr_nll, iteration=ep+1)
+                # 混ぜる前の 2 項。loss/nll は
+                #   (1-ba_weight)*nll_pt + ba_weight*nll_pose
+                # で ba_weight が warmup で動くので、1 本では何が下がったのか
+                # 読めない。nll_pt は点ごとの 2D ガウス NLL、nll_pose は
+                # 1/2 e^T H e - 1/2 logdet H。
+                if tr_split[0] == tr_split[0]:
+                    rs(title='loss/nll_pt', series='train', value=tr_split[0], iteration=ep+1)
+                if tr_split[1] == tr_split[1]:
+                    rs(title='loss/nll_pose', series='train', value=tr_split[1], iteration=ep+1)
+                if va_split[0] == va_split[0]:
+                    rs(title='loss/nll_pt', series='val', value=va_split[0], iteration=ep+1)
+                if va_split[1] == va_split[1]:
+                    rs(title='loss/nll_pose', series='val', value=va_split[1], iteration=ep+1)
+                rs(title='loss/ba_weight', series='train',
+                   value=float(getattr(accel, '_ba_weight', 0.0)), iteration=ep+1)
+                # 学習側の姿勢指標。eval は 10 epoch ごとなので、間の挙動は
+                # これでしか見えない (GN の解は毎ステップ計算されている)。
+                if tr_pose:
+                    rs(title='pose/rot_err_deg', series='train',
+                       value=tr_pose['rot_err'], iteration=ep+1)
+                    rs(title='pose/t_err_m', series='train',
+                       value=tr_pose['t_err'], iteration=ep+1)
+                    rs(title='pose/frac_pd', series='train',
+                       value=tr_pose['frac_pd'], iteration=ep+1)
+                    rs(title='pose/logdetH', series='train',
+                       value=tr_pose['logdet'], iteration=ep+1)
                 rs(title='loss/mse', series='train', value=tr_mse, iteration=ep+1)
                 rs(title='lr', series='lr',
                    value=scheduler.get_last_lr()[0], iteration=ep+1)
@@ -1514,14 +1688,20 @@ def main():
                                               (va_parts, 'val')):
                         for k, ds_k in enumerate(parts):
                             cache_name = Path(cache_paths[k]).name
+                            # フレームはデータセット全体から等間隔に、窓はそのフレームの中で点が一番多いもの
+                            # (BA に参加しない複製の窓は除く)。以前は先頭 4 フレーム (同じシーンの連続
+                            # フレーム) の先頭の窓 (格子なら左上) だけで、同じ木の葉ばかり並んでいた。
+                            _fr = np.linspace(0, len(ds_k) - 1, n_per_cache).astype(int)
                             for i in range(n_per_cache):
                                 try:
-                                    sample = ds_k[i % len(ds_k)]
+                                    sample = ds_k[int(_fr[i])]
                                 except Exception:
                                     continue
                                 if isinstance(sample, list):
-                                    if not sample: continue
-                                    sample = sample[0]
+                                    _ok = [x for x in sample if x is not None and
+                                           (len(x) <= 16 or float(x[16]) > 0)]
+                                    if not _ok: continue
+                                    sample = max(_ok, key=lambda x: int(x[2].shape[0]))
                                 # legacy single-frame tuple layout (from collate_full):
                                 #   (img, true_uvd, dist_uvd, vfp, bucket_uvd,
                                 #    bucket_valid, pert_vec, ...)

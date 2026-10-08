@@ -4,9 +4,8 @@ Image size (IW × IH) varies per dataset / camera, so we compute tile origins
 on the fly. Reusable from build_pandaset_full_v3 / build_nuscenes_v3 /
 build_waymo_v3.
 
-Tile-start computation lives in scripts.util.tile_layout so the cache
-build and the online sliding inference (infer_tiles) split frames the
-exact same way. Do NOT reintroduce a local copy — re-export only.
+Tile-start computation lives in scripts.util.tile_layout. Do NOT
+reintroduce a local copy — re-export only.
 """
 from __future__ import annotations
 import io

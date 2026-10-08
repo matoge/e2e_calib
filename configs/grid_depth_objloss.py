@@ -4,12 +4,12 @@
 
 CFG = dict(
     # ── Experiment ─────────────────────────────────────────────────────────
-    name             = "ladder4a_depth_area",
-    why              = "段 4a: 段 4 (格子 8px、物体の点 中央 20、8.51px) と同じ点の数・面積どおりの所属で、置き方だけ格子 → 一様ランダム。崩れの原因が格子か物体の点の数かを切り分ける。",
-    loss             = "nll",       # "nll" = gaussian2d_nll 1 本、"split" = μ は距離、σ は μ を止めた NLL
+    name             = "toy_bench_1obj_bgfix",
+    why              = "物体 1 個 + 背景を同じ LiDAR 格子 (間隔 2-12px 対数一様)、帯なしキャンバス。物体だけ ±16px ずらし、背景はずらさない。損失は全点平均の split (どれが物体かは損失に使わない)。比較: toy_bench_1obj_canvas (背景もずらす、5.47px)。",
+    loss             = "split",       # "nll" = gaussian2d_nll 1 本、"split" = μ は距離、σ は μ を止めた NLL
     sigma_start      = 20,            # split のとき、このエポックまでは μ だけ
     clearml          = True,
-    scene            = "depth_rgb_rd_area",
+    scene            = "lidar_bgfix",
     n_obj            = (1, 1),        # lidar シーンの物体数の範囲
     # scene: "lidar" = make_image_and_points_lidar, "grid" = 旧 (物体 2 個、間隔 4-8px)
     use_convnext     = False,
@@ -24,17 +24,17 @@ CFG = dict(
     kv_self_attn     = False,
     cross_temp       = 1.0,
     cross_temp_start = 1.0,
-    img_size    = 128,
+    img_size    = 64,
     in_channels = 3,
 
     # ── Training ───────────────────────────────────────────────────────────
-    epochs      = 80,
+    epochs      = 100,
     batch_size  = 64,
     lr          = 1e-3,
     lr_min      = 1e-6,
     train_size  = 8000,
     val_size    = 800,
-    max_offset     = 15.0,
+    max_offset     = 16.0,
     random_depths  = False,   # False → BG fixed at 1.0
     pool_size      = 32000,   # >0: サンプルを 1 回作って GPU に置き、毎エポック train_size 個を引く (ベンチ)
 )

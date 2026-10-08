@@ -178,146 +178,70 @@ To move the cache to a different disk, edit
 
 ---
 
-### Inference CLI options
+### Inference (one path, shared with training)
 
-`scripts/inference/infer_pipeline.py` is the **only correct entry point** —
-it runs preprocessing that is byte-identical to training and emits red→green
-visualization PNGs. Every visualization / eval / BA script goes through this
-module.
+Inference goes through **`scripts/inference/infer_calib.py` only**, and that
+module calls the same code the trainer uses: the dataset constructor
+(`PandaSetCalibDatasetFull(insts=...)`), `forward_calib`, and `ba_solve` via
+`predict_pose` in `datasets/train_cnd2_ddp.py`. There is no separate inference
+re-implementation to drift out of sync.
+
+| | training | inference |
+|---|---|---|
+| pose handed to the dataset | correct | the (wrong) one to correct |
+| perturbation | injected inside the dataset | none (`fixed_pert=0`) |
+| what the model sees | perturbed projection | perturbed projection |
 
 ```bash
-# random N samples
-PYTHONPATH=. python -m scripts.inference.infer_pipeline \
-    --exp <NAME> --cache <CACHE_DIR> --split val --n 8 --out out/foo
-
-# draw all points (useful for per-tile BA debug)
-PYTHONPATH=. python -m scripts.inference.infer_pipeline \
-    --exp <NAME> --cache <CACHE_DIR> --split val --idxs 0 --top-k -1 --out out/all
+# correct the pose in calib.json
+PYTHONPATH=. python scripts/inference/infer_calib.py <EXP> \
+    --image frame.png --points points.txt --calib calib.json
+# evaluate: calib.json holds the TRUE pose; perturb it outside, then correct
+PYTHONPATH=. python scripts/inference/infer_calib.py <EXP> \
+    --image frame.png --points points.txt --calib calib.json \
+    --pert-rot-deg 0.5 --pert-t-m 0.2
 ```
-
-PNG legend:
-- `red ○` = perturbed input hyp_uv
-- `green ○` = model prediction pred_uv (= hyp + Δ)
-- `yellow / magenta ✗` = GT
-- yellow/orange arrow = correction Δ (red → green)
-- cyan/magenta line = post-correction residual (green → GT)
-- lime ellipse = per-point 2D σ
-
-Example title: `idx=17 top100 of 223 valid pts σ 1.46-1.82px |pred-GT| 2.93±0.39px err b→a: 11.60→2.71px`
-
-`b→a` is the mean pixel error before → after correction.
-
-### Calling it from Python
 
 ```python
-import numpy as np
-from scripts.inference.infer_calib    import load_calib_model
-from scripts.inference.infer_pipeline import make_ds, infer_one, render_red_to_green
-
-EXP = 'km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2'
-m       = load_calib_model(EXP)
-ds, c   = make_ds(EXP, 'data/woven_v3_tile', split='val')
-res     = infer_one(m, ds, idx=17, seed=42)
-v       = res['valid']
-print(f"err {np.linalg.norm(res['hyp_uv'][v]  - res['true_uv'][v], axis=1).mean():.2f}"
-      f" → {np.linalg.norm(res['pred_uv'][v] - res['true_uv'][v], axis=1).mean():.2f} px")
-render_red_to_green(res, 'idx17.png', top_k=100)
+from scripts.inference.infer_calib import (load_model, build_inst, make_dataset,
+                                           infer, apply_delta)
+model, cfg = load_model('ps_s2_noleak')
+inst  = build_inst(img=rgb_uint8, pts=pts_xyzi, K=K, T_cam_lidar=T)
+delta, H, n_windows = infer(model, make_dataset(cfg, [inst]))
+T_corrected = apply_delta(T, delta)        # = E(delta) @ T
 ```
 
-`load_calib_model` reads `frustum_dense / use_intensity / n_layers / img_size /
-deform_mode / use_pose_emb` (etc.) directly from `experiments/<exp>/config.py`'s
-`CFG`, so **you don't have to pass anything at load time**. A ckpt/config
-mismatch fails loud with `size mismatch`.
+- `delta = (ωx, ωy, ωz [deg], tx, ty, tz [m])`, `E` is `P' = R(ω)·P + t`
+  (`ba_torch._apply_extrinsic`).
+- points: LiDAR frame `x y z [intensity]` as txt (default; curl-friendly),
+  npy, or bin (float32 N×4 / N×5).
+- calib: `{"K": 3x3, "T_cam_lidar": 4x4, "dist": [k1..k4]}` or a kamikado
+  `calib.calib`.
+- Evaluate in pose space (`pose_error`: geodesic angle + camera-centre
+  distance), not by comparing delta components.
 
-### WebUI demo server
+Regression tests: `tests/test_inference.py` (path correctness, model-free +
+NLL replay + smoke) and `tests/test_infer_pandaset.py` (inference vs training
+path on PandaSet val).
+
+### Calibration API
 
 ```bash
-PYTHONPATH=. python -m scripts.serving.caaas_app    # http://localhost:5002
+E2E_EXP=ps_s2_noleak PYTHONPATH=. python -m uvicorn \
+    services.calib_api.server:app --host 0.0.0.0 --port 5002
+# http://localhost:5002/calibrate  (upload page)
+curl -X POST localhost:5002/api/calibrate_frame \
+     -F image=@frame.png -F points=@points.txt -F calib=@calib.json
+curl -X POST localhost:5002/api/eval_frame \
+     -F image=@frame.png -F points=@points.txt -F calib=@calib.json \
+     -F 'rot_deg=[0.3,-0.2,0.4]' -F 't_m=[0.05,-0.1,0.15]'
 ```
 
-`caaas_app` shares `infer_calib.load_calib_model` for model loading and runs
-sliding inference tile-by-tile with `infer_tiles(model_input_size=c['img_size'])`.
-
-### One-frame kamikado raw → δ̂, fully local
-
-Runs the equivalent of the internal calib API
-(`http://172.16.200.185:8082/calibrate/frame`) without an HTTP server.
-`scripts/_debug/infer_raw_frame.py` is the canonical CLI. It takes a kamikado
-raw scene dir's `image_<f>.png + points_V_<f>.txt + calib.calib`, tiles it,
-runs the calib model, feeds BA, and prints the 6-DoF δ̂ + σ.
-
-```bash
-# 1) pull the raw scene from ClearML Dataset (kamikado_raw, ~900 MB / scene)
-#    Same ~/clearml.conf as the Quick start.
-python -c "
-from clearml import Dataset
-p = Dataset.get(dataset_id='93880ccd96ab49e0aa53cda9002276f9').get_local_copy()
-print(p)   # unpacked path in the ClearML cache
-"
-#   → the printed path contains points_ip664_D_*/{calib.calib, image_N.png, points_V_N.txt}
-
-# 2) run one frame
-PYTHONPATH=. python scripts/_debug/infer_raw_frame.py \
-    --scene <path printed above>/points_ip664_D_20260226_224648_d005_3000_3020 \
-    --frame 0 \
-    --exp km_wv_wm_n4_img128_ml_dense_pe_dgx2_200ep_v2
-```
-
-Measured output (tested against this repo):
-
-```
-== adapter: data/kamikado_raw/...d005_3000_3020  frame=0 ==
-  CalibFrame(scene='...d005_3000_3020' frame=0 cam='fcm' 3840x2160px fisheye=True N_pts=54979)
-== tile_cutter ==
-  35 tiles
-== infer_tiles + solve_dofs ==
-  BA pool N=10520
-
-== 6-DoF δ_pred ==
-DoF             δ_pred          σ
-------------------------------------
-omega_x     +0.9220     0.0048
-omega_y     +0.1408     0.0042
-omega_z     +0.0231     0.0032
-tx          +0.0058     0.0010
-ty          +0.1510     0.0006
-tz          -0.0266     0.0007
-```
-
-Data flow (`scripts/_debug/infer_raw_frame.py:1-90`):
-
-```
-image_<f>.png + points_V_<f>.txt + calib.calib
-   │  scripts/data/adapters/kamikado.load_frame
-   ↓
-CalibFrame(img, pts(N,4), uv_full, z_cam, K, dist, T_SV, ...)
-   │  scripts/data/tile_cutter.frame_to_tiles(**TILE_LAYOUT, min_pts=8)
-   ↓
-list[tile_inst]  (tile_size=384, stride=320, max_pts=256)
-   │  scripts/ba/ba_multicam_corr.infer_tiles  (1 forward, B=n_tiles, fp16)
-   ↓
-(uv_full[N,2], par[N,5]=Δuv+σuv+ρ, z_cam[N])  ← BA pool
-   │  scripts/ba/ba_multicam_corr.solve_dofs(_DOF_PRESETS['6dof_ext'])
-   ↓
-δ (6,) deg/m  +  cov[6,6]
-```
-
-`infer_raw_frame.py` flags:
-
-| flag | default | Meaning |
-|---|---|---|
-| `--scene` | (required) | kamikado raw scene dir |
-| `--frame` | (required) | int |
-| `--exp`   | `km_wv_wm_dgx2_n2_img128_v2` | resolves to `experiments/<exp>/best_model.pt` |
-| `--tile-size` | 384 | match the training `max_crop_px` |
-| `--tile-stride` | 320 | ~64 px overlap between tiles |
-| `--huber-k` | 0.0 | >0 enables IRLS Huber |
-| `--n-iter`  | 1   | IRLS iterations |
-| `--sigma-max` | 0.0 | >0 drops points with σ_pt > sigma_max before BA |
-
-**No ClearML, no sockets** — just local disk + GPU. The server side
-(`services/calib_api/server.py:671 calibrate_frame`) is just an HTTP wrapper
-around the same functions, so the δ̂ returned here matches production.
+`/api/calibrate_frame` returns `delta`, `T_cam_lidar_corrected`, and the 1σ of
+each component from the GN information matrix. `/api/eval_frame` treats the
+uploaded calib as the true pose, perturbs it outside the dataset with the same
+formula the dataset uses during training (`perturb_T`), and returns the error
+before and after correction.
 
 ### Training
 
