@@ -111,7 +111,7 @@ python scripts/inference/infer_calib.py ps_s2_own24_rt --image image.jpg --point
 
 ### 直す前後（CLI）
 
-PandaSet の val を番号で選び、ずらして直し、重ねた図を保存する。図の左が補正前（赤＝ずらしたポーズ、緑＝正しいポーズ）、右が補正後（水色＝補正後、緑＝正しいポーズ）。
+PandaSet の val を番号で選び、ずらして直し、重ねた図を保存する。図の左が補正前（赤＝ずらしたポーズ、緑＝正しいポーズ）、右が補正後（赤＝ずらしたポーズ、緑＝正しいポーズ、水色＝補正後。水色を一番上に描くので、緑と重なったところは水色だけ見える）。
 
 ```bash
 python scripts/inference/infer_calib.py ps_s2_own24_rt --pandaset-val 123 \
@@ -133,7 +133,7 @@ val 250、ずれあり:
 
 ![](_figs/2026-10-08/cli_val250_shift.jpg)
 
-val 123、ずれあり（API の `/api/pandaset/eval_image` で同じ条件を呼んだ画像も、これとバイト単位で同じ）:
+val 123、ずれあり（API の `/api/pandaset/eval_image` も同じ関数 `render_overlay` で描く）:
 
 ![](_figs/2026-10-08/cli_val123_shift.jpg)
 

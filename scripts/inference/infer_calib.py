@@ -240,7 +240,8 @@ def load_pandaset_val(i: int, cache: str = PS_CACHE):
 
 def render_overlay(img, pts, K, poses: dict, dist=None, is_fisheye=False) -> np.ndarray:
     """画像に、各ポーズで投影した LiDAR の点を重ねて保存する。
-    poses の色: true=緑, input=赤, corrected=水色。左右に 2 枚 (入力 / 補正後) 並べ、どちらにも正解を薄く重ねる。"""
+    poses の色: true=緑, input=赤, corrected=水色。左右に 2 枚 (入力 / 補正後) 並べ、どちらにも正解を重ねる。
+    右 (補正後) には入力も重ね、赤→水色でどれだけ動いたかを見せる。"""
     from scripts.util.projection import project_lidar_into_image
     IH, IW = img.shape[:2]
     col = {'true': (52, 199, 89), 'input': (255, 59, 48), 'corrected': (0, 194, 255)}
@@ -251,11 +252,12 @@ def render_overlay(img, pts, K, poses: dict, dist=None, is_fisheye=False) -> np.
     panels = []
     for name in [k for k in ('input', 'corrected') if k in poses]:
         p = base.copy()
-        layers = (['true'] if 'true' in poses else []) + [name]
+        layers = (['input'] if name == 'corrected' and 'input' in poses else []) + \
+                 (['true'] if 'true' in poses else []) + [name]
         for k in layers:
             for u, v in proj(poses[k]).astype(int):
                 cv2.circle(p, (int(u), int(v)), 2, col[k], -1)
-        cv2.putText(p, {'input': 'input (red)', 'corrected': 'corrected (cyan)'}[name] +
+        cv2.putText(p, {'input': 'input (red)', 'corrected': 'input (red)  /  corrected (cyan)'}[name] +
                     ('  /  true (green)' if 'true' in poses else ''),
                     (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
         panels.append(p)
