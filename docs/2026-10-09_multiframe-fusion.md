@@ -14,6 +14,17 @@ What limits it:
 - The fused error levels off (nuScenes about 0.09°, PandaSet moving scenes about 0.04°) rather than following 1/√F; roll stays the largest axis.
 - Evidence so far uses injected perturbations on val scenes, nuScenes groups that mix scenes, and 4 moving PandaSet val scenes.
 
+## Degrees to pixels
+
+Yaw and pitch shift the whole image: 1 px ≈ atan(1 / f). Roll rotates the image about its centre, so the shift grows with the distance r from the centre (r · θ); the value below is at the left/right edge.
+
+| camera | f | 1 px of yaw / pitch | roll that moves the left/right edge by 1 px |
+|---|---|---|---|
+| PandaSet front (1920×1080) | 1970 px | 0.029° | 0.060° (r = 960 px) |
+| nuScenes CAM_FRONT (1600×900) | ≈1260 px | 0.045° | 0.072° (r = 800 px) |
+
+For example, the fused nuScenes median of 0.039° (yaw, 16 frames) is 0.9 px; PandaSet's 0.020° (yaw, moving scenes, 16 frames) is 0.7 px.
+
 ## Before / after fusion
 
 Absolute error after correction. "1 frame" = single-frame inference; "fused" = F frames combined through their 6-DoF information matrices (Tukey). Model `nsps_s2_pad256`.
