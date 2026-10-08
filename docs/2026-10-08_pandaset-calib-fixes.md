@@ -171,7 +171,7 @@ curl -X POST localhost:5092/api/eval_frame_image -F image=@image.jpg -F points=@
 
 - Given the correct pose, an error remains after correction (roll 0.063°, z 0.018 m).
 - All numbers in sections 1 and 4 are from `ps_s2_own24_rt`, trained before the fixes in section 6 (GT leak in the query depth, binary intensity, caches without out-of-image points). No model has been trained on the new caches yet. The CLI and API still default to `pandaset_v3_full`, the cache that model was trained on; on `pandaset_pad256` the same val 123 case gives roll +0.185° instead of +0.138°.
-- Val is 5 PandaSet scenes (400 frames) and 34 nuScenes scenes (340 frames); val is reported as one pooled number, with no per-dataset breakdown.
+- Val is 5 PandaSet scenes (400 frames) and 85 nuScenes scenes (340 frames, 4 per scene); val is reported as one pooled number, with no per-dataset breakdown.
 - Stage 1 trains on random-pivot windows (background pivots only in the middle rows); inference tiles the whole image.
 - Train numbers logged during training are epoch averages of in-progress weights under random queries and shifted grids, not the val conditions.
 - ClearML val visualisations now pick frames evenly across the set and the window with the most points (from the next run on).
