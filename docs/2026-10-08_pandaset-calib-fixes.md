@@ -189,6 +189,34 @@ Use a model trained on nuScenes (`nsps_s2_pad256`) and the caches it was trained
 
 ![](_figs/2026-10-08/api_nuscenes_val100.jpg)
 
+### Multi-frame fusion (6-DoF information matrices, Huber / Tukey)
+
+Per frame, the real inference path gives (δ̂_f, H_f). The same injected δ is used for every frame of a draw (one rig), F frames are fused with `scripts/eval/frame_fusion.fuse` (`sum` = Σ H_f, `gate3` = χ² gate, `huber` / `tukey` = IRLS on the Mahalanobis distance scaled by 1.4826·median), and E(δ̄) @ T_in is compared with the true pose. Model `nsps_s2_pad256`, 200 val frames evenly spaced, 2 injected δ × 40 random groups per F (80 cases per row).
+
+```bash
+python scripts/eval/multiframe_infer.py --exp nsps_s2_pad256 --cache <cache> --tag ps --group scene --F 1,2,4,8,16,32
+python scripts/eval/multiframe_infer.py --exp nsps_s2_pad256 --cache <cache> --tag ns --group any --F 1,2,4,8,16,32,64
+```
+
+Geodesic rotation error after correction [deg], and the largest per-axis value (Tukey):
+
+| | F | median | p90 | max | max \|roll\| | max t [m] |
+|---|---|---|---|---|---|---|
+| PandaSet (frames from one scene) | 1 | 0.081 | 0.179 | **0.342** | 0.328 | 0.108 |
+| | 4 | 0.060 | 0.127 | 0.237 | 0.236 | 0.087 |
+| | 8 | 0.055 | 0.132 | 0.155 | 0.148 | 0.079 |
+| | 32 | 0.049 | 0.136 | **0.146** | 0.130 | 0.065 |
+| nuScenes (frames from any scenes) | 1 | 0.211 | 0.446 | **0.566** | 0.458 | 0.168 |
+| | 4 | 0.132 | 0.218 | 0.266 | 0.235 | 0.079 |
+| | 16 | 0.106 | 0.176 | 0.215 | 0.187 | 0.060 |
+| | 64 | 0.094 | 0.154 | **0.162** | 0.135 | 0.046 |
+
+- Sum, Huber and Tukey differ by at most 0.025° in the max (nuScenes F=8: sum 0.246, Tukey 0.222); the χ² gate is worse than the sum in some rows (PandaSet F=16 median 0.072 vs 0.063).
+- PandaSet's max stays at 0.144–0.146° from F=16 to 32, and p90 at 0.13–0.14° from F=4 to 32. Its frames come from one of 5 val scenes; they are not independent.
+- nuScenes within a scene: the 200-frame subset leaves fewer than 4 frames in most scenes; F=2 gives median 0.200°, max 0.647° (single frame: 0.220°, 0.940°).
+
+![](_figs/2026-10-08/multiframe_fusion.png)
+
 ## 5. Open issues
 
 - Given the correct pose, an error remains after correction (roll 0.063°, z 0.018 m).

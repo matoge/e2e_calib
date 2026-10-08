@@ -44,9 +44,46 @@ def _chi2_per_frame(H, dp, delta_bar):
     return np.einsum('fi,fij,fj->f', e, H, e) / 6.0
 
 
+def _irls(H, dp, weight_fn, iters=10, x0=None):
+    """IRLS on per-frame Mahalanobis distances r_f = sqrt((δ_f − x)ᵀ H_f (δ_f − x)).
+    r is divided by a robust scale s = 1.4826 · median(r) before the weight function, so the
+    thresholds work even when H is over- or under-confident (chi2r ≠ 1). Returns (x, Σ w_f H_f, w)."""
+    w = np.ones(len(H))
+    x = _pool(H, dp)[0] if x0 is None else x0
+    for _ in range(iters):
+        r = np.sqrt(np.maximum(np.einsum('fi,fij,fj->f', dp - x, H, dp - x), 0.0))
+        s = 1.4826 * np.median(r)
+        if s <= 1e-12:
+            break
+        w = weight_fn(r / s)
+        if w.sum() <= 1e-9:
+            break
+        Hw = H * w[:, None, None]
+        x_new = np.linalg.solve(Hw.sum(0), np.einsum('fij,fj->i', Hw, dp))
+        if np.abs(x_new - x).max() < 1e-9:
+            x = x_new; break
+        x = x_new
+    return x, (H * w[:, None, None]).sum(0), w
+
+
+def huber_w(u, c=1.345):
+    return np.where(u <= c, 1.0, c / np.maximum(u, 1e-12))
+
+
+def tukey_w(u, c=4.685):
+    return np.where(u < c, (1.0 - (u / c) ** 2) ** 2, 0.0)
+
+
 def fuse(H, dp, mode='gate3', gate_c=3.0, gate_iters=2):
-    """Return (δ̄, H_sum, keep_mask). All fp64."""
+    """Return (δ̄, H_sum, keep_mask). All fp64.
+    mode: sum | CI | gate3 | huber | tukey. huber/tukey return the IRLS weights in place of
+    keep_mask (tukey starts from the huber solution because its loss is not convex)."""
     keep = np.ones(len(H), dtype=bool)
+    if mode == 'huber':
+        return _irls(H, dp, huber_w)
+    if mode == 'tukey':
+        x0 = _irls(H, dp, huber_w)[0]
+        return _irls(H, dp, tukey_w, x0=x0)
     if mode == 'sum':
         d, Hs = _pool(H, dp);  return d, Hs, keep
     if mode == 'CI':
