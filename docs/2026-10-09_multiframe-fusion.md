@@ -59,9 +59,37 @@ Against 1/√F (median geodesic, deg):
 
 Every frame in a group carries the same injected δ. An error that depends on δ itself (a bias of the network or the GN for that δ) is the same in every frame and does not average out; only the frame-to-frame part does. The 40 groups per F are drawn from the same 200 frames, so they overlap and the 80 cases are not independent either.
 
+## 3b. The stopped scene (PandaSet 004) and the effective number of frames
+
+PandaSet val scene 004 is a car stopped at an intersection: the camera moves 0.1 m over 80 frames (030: 26.0 m, 014: 41.6 m, 015: 60.2 m, 042: 72.8 m). Its frames see the same background, so fusing them adds almost nothing.
+
+Fusing all 40 frames of one scene (geodesic, injected δ 0 / δ 1): 004 0.139° / 0.132°, 030 0.056° / 0.120°, 014 0.072° / 0.029°, 015 0.046° / 0.040°, 042 0.031° / 0.028°. The PandaSet max in section 2 is groups drawn from scene 004.
+
+Within-scene fusion with 004 separated (Tukey, 2 δ × 200 random groups = 400 cases per row):
+
+| PandaSet | F | geodesic median / p90 / max [deg] | median yaw / pitch / roll [deg] | max yaw / pitch / roll [deg] |
+|---|---|---|---|---|
+| moving scenes (030, 014, 015, 042) | 1 | 0.068 / 0.169 / 0.593 | 0.025 / 0.024 / 0.044 | 0.099 / 0.108 / 0.592 |
+| | 4 | 0.052 / 0.119 / 0.255 | 0.021 / 0.021 / 0.041 | 0.063 / 0.065 / 0.254 |
+| | 8 | 0.047 / 0.111 / 0.161 | 0.019 / 0.020 / 0.037 | 0.056 / 0.058 / 0.152 |
+| | 16 | 0.047 / 0.114 / 0.149 | 0.020 / 0.021 / 0.039 | 0.050 / 0.048 / 0.140 |
+| | 32 | 0.043 / 0.114 / 0.128 | 0.018 / 0.019 / 0.035 | 0.044 / 0.042 / 0.116 |
+| 004 (stopped) | 1 | 0.140 / 0.207 / 0.243 | 0.062 / 0.042 / 0.111 | 0.181 / 0.087 / 0.217 |
+| | 32 | 0.136 / 0.142 / 0.147 | 0.067 / 0.041 / 0.109 | 0.091 / 0.049 / 0.130 |
+
+Effective number of independent frames, N_eff = (median at F=1 / median at F)² (error ∝ 1/√information):
+
+| | F=16 | F=32 |
+|---|---|---|
+| nuScenes (groups mix scenes) | 4.0 | 3.7 |
+| PandaSet, moving scenes | 2.1 | 2.5 |
+| PandaSet 004, stopped | 1.1 | 1.1 |
+
+16–32 frames carry the information of about 2–4 independent frames; frames of one sequence are strongly correlated. The max falls more than the median (PandaSet moving: 0.593° → 0.149° at F=16; nuScenes: 0.566° → 0.215°).
+
 ## 4. Next: within-sequence fusion on nuScenes
 
-The nuScenes val cache keeps 1 in 10 keyframes (`--frame-frac 0.1`, 4 per scene), so the groups above mix scenes. Real calibration is fixed only within a log, so fusion has to be measured within one sequence. A cache of the same 85 val scenes with every keyframe (about 40 per scene) is being built:
+The nuScenes val cache keeps 1 in 10 keyframes (`--frame-frac 0.1`, 4 per scene), so the groups above mix scenes. Real calibration is fixed only within a log, so fusion has to be measured within one sequence. A cache of the same 85 val scenes with every keyframe is built (`ns_850val_all_pad256`: 3,421 frames, 39–41 per scene):
 
 ```bash
 python scripts/preprocessing/build_nuscenes_v3.py --data-root <nuScenes trainval> --meta-dir <...>/v1.0-trainval \
