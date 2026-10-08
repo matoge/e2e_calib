@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
-from scripts.ba.ba_torch import (solve_pinhole_xyz, _apply_extrinsic,
+from scripts.ba.ba_torch import (solve_pinhole_xyz, solve_kb_xyz, _apply_extrinsic,
                                   project_pinhole, make_info_from_sigma_rho)
 
 DOF6 = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
@@ -33,12 +33,21 @@ DOF6 = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
 
 def solve_pose(pts_cam: torch.Tensor, duv: torch.Tensor, W: torch.Tensor,
                K: torch.Tensor, *, dof=DOF6, valid=None, n_iter: int = 10,
-               damping: float = 0.0, prior_diag=None):
+               damping: float = 0.0, prior_diag=None, dist=None, fisheye=None):
     """The ONE pose solver. pts_cam (B,N,3) cam-frame metres; duv (B,N,2) px
     (target = project(pts_cam,K)+duv); W (B,N,2,2) info; K (B,3,3).
+    dist (B,4) Kannala-Brandt k1..k4 and fisheye (B,) 0/1: rows with fisheye=1 are solved with the
+    KB projection + Jacobian (solve_kb_xyz), the rest pinhole. Without dist/fisheye: pinhole.
     Returns (delta (B,len(dof)), H (B,K,K))."""
-    return solve_pinhole_xyz(pts_cam, duv, W, K, dof, valid=valid,
-                             n_iter=n_iter, damping=damping, prior_diag=prior_diag)
+    kw = dict(valid=valid, n_iter=n_iter, damping=damping, prior_diag=prior_diag)
+    fe = None if (dist is None or fisheye is None) else (fisheye.reshape(-1) > 0.5)
+    if fe is None or not bool(fe.any()):
+        return solve_pinhole_xyz(pts_cam, duv, W, K, dof, **kw)
+    d_kb, H_kb = solve_kb_xyz(pts_cam, duv, W, K, dist.to(pts_cam.dtype), dof, **kw)
+    if bool(fe.all()):
+        return d_kb, H_kb
+    d_ph, H_ph = solve_pinhole_xyz(pts_cam, duv, W, K, dof, **kw)
+    return (torch.where(fe[:, None], d_kb, d_ph), torch.where(fe[:, None, None], H_kb, H_ph))
 
 
 def _identity_W(B, N, dtype, device):

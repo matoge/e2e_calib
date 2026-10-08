@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPO))
 from datasets.pandaset_full import PandaSetCalibDatasetFull, collate_full
 from datasets.train_cnd2_ddp import _ba_pose_loss, forward_calib, predict_pose
 from scripts.inference.infer_calib import (load_model, build_inst, make_dataset,
-                                           perturb_T, apply_delta, pose_error)
+                                           perturb_T, apply_delta, pose_error, pose_error_axes)
 
 CACHE = os.environ.get('CACHE', '/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full')
 EXP = os.environ.get('CKPT_EXP', 'ps_grid_ba_infohead')
@@ -47,7 +47,7 @@ def main():
                                    max_rot_deg=0.5, min_crop_px=256, max_crop_px=256,
                                    grid_n=16, oversample=1)
     model, c = load_model(EXP)
-    rows = []
+    rows, axes = [], []
     idx = np.linspace(0, len(src) - 1, N).astype(int)
     print(f'{EXP}  {"ZERO" if ZERO else "注入あり"}  {N} フレーム')
     print(f'{"frame":>8} | {"補正前 rot[deg] t[m]":>20} | {"B 推論 rot t":>20} | {"A 学習経路 rot t":>18}')
@@ -74,6 +74,8 @@ def main():
         d, _H = predict_pose(model, bB, img_size=model.img_size, group=G)
         Tc = apply_delta(Tp, d[0].cpu().numpy())
         e0 = pose_error(Tp, T); e1 = pose_error(Tc, T)
+        ax = pose_error_axes(Tc, T)
+        axes.append([abs(ax[k]) for k in ('yaw_deg', 'pitch_deg', 'roll_deg', 'x_m', 'y_m', 'z_m')])
         rows.append((e0[0], e0[1], e1[0], e1[1], np.abs(eA[:3]).mean(), np.abs(eA[3:]).mean()))
         r = rows[-1]
         print(f"{inst['scene']}/{inst['frame']:<3} | {r[0]:8.4f} {r[1]:9.5f}  | {r[2]:8.4f} {r[3]:9.5f}  | "
@@ -83,6 +85,12 @@ def main():
           f'   B 推論 rot {np.median(a[:,2]):.4f} t {np.median(a[:,3]):.5f}'
           f'   A 学習経路 rot {np.median(a[:,4]):.4f} t {np.median(a[:,5]):.5f}')
     print(f'最悪    B 推論 rot {a[:,2].max():.4f} deg  t {a[:,3].max():.5f} m')
+    x = np.array(axes)
+    print('\nB 推論 補正後の軸ごとの絶対値   yaw[deg] pitch[deg] roll[deg]   x[m]    y[m]    z[m]')
+    for name, f in [('最悪', lambda v: v.max(0)), ('p90 ', lambda v: np.percentile(v, 90, 0)),
+                    ('中央', lambda v: np.median(v, 0))]:
+        v = f(x)
+        print(f'  {name}                       {v[0]:8.4f} {v[1]:9.4f} {v[2]:9.4f}  {v[3]:7.4f} {v[4]:7.4f} {v[5]:7.4f}')
     return a
 
 

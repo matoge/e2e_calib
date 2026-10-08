@@ -1999,6 +1999,10 @@ class PandaSetCalibDatasetFull(Dataset):
             self._debug_n += 1
         if delta1_se3 is None:
             delta1_se3 = np.zeros(6, dtype=np.float32)
+        _fe = bool(inst.get('is_fisheye', False)) and 'distortion' in inst
+        _dist4 = (np.asarray(inst['distortion'].numpy() if hasattr(inst['distortion'], 'numpy')
+                             else inst['distortion'], np.float32).reshape(4)
+                  if _fe else np.zeros(4, np.float32))
         return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
                 torch.tensor(vfp, dtype=torch.float32),
                 torch.from_numpy(bucket_uvd), torch.from_numpy(bucket_valid),
@@ -2013,7 +2017,9 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.tensor(float(v0), dtype=torch.float32),
                 torch.tensor(1.0 if self._use_grid else 0.0, dtype=torch.float32),
                 # 1 = この窓を BA に入れる / 0 = 枠を埋めるための複製
-                torch.tensor(float(getattr(self, '_w_active', 1.0)), dtype=torch.float32))
+                torch.tensor(float(getattr(self, '_w_active', 1.0)), dtype=torch.float32),
+                # 魚眼 (Kannala-Brandt k1..k4) なら GN もその投影で解く。ピンホールは 0 と 0.0
+                torch.from_numpy(_dist4), torch.tensor(1.0 if _fe else 0.0, dtype=torch.float32))
 
 
 def _dump_rep_debug(out_dir, n, img_crop, uv_all, grid_n, S, uv_sel, uv_gt_sel, uv_center, title):
@@ -2135,9 +2141,17 @@ def collate_full(batch):
     w_active = (torch.stack([s[16] for s in batch]) if len(batch[0]) >= 17
                 else torch.ones(B, dtype=torch.float32))
 
+    # 魚眼の係数とフラグ (GN を KB で解くため)。古いサンプルはピンホール扱い
+    if len(batch[0]) >= 19:
+        dist4 = torch.stack([s[17] for s in batch])                 # (B, 4)
+        is_fe = torch.stack([s[18] for s in batch])                 # (B,)
+    else:
+        dist4 = torch.zeros(B, 4, dtype=torch.float32)
+        is_fe = torch.zeros(B, dtype=torch.float32)
+
     return (imgs, true_p, dist_p, pad, vfps, b_uvds, b_valids, pert_6vec,
             pts_cam_orig, duv_orig, K_orig, cs_t, delta1_se3, u0_t, v0_t,
-            is_grid, w_active)
+            is_grid, w_active, dist4, is_fe)
 
 
 def collate_pair(batch):

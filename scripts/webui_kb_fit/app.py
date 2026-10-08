@@ -32,10 +32,13 @@ from flask import Flask, jsonify, render_template, request
 from PIL import Image
 from scipy.spatial.transform import Rotation
 
-RECALIB_PATH = Path(
-    '/home/hfunaya/git/loom/backend/assets/woven_sequence/llinking_26/recalibration.json'
-)
-SEQ_ROOT = Path('/mnt/ecp-perception/woven_sequence/llinking_29/20230612_001946')
+import os as _os
+# 環境変数で上書きできる (dgx2 以外のマシンで動かす用)。既定は dgx2 のパス。
+RECALIB_PATH = Path(_os.environ.get(
+    'KB_FIT_RECALIB',
+    '/home/hfunaya/git/loom/backend/assets/woven_sequence/llinking_26/recalibration.json'))
+SEQ_ROOT = Path(_os.environ.get('KB_FIT_SEQ_ROOT',
+                                '/mnt/ecp-perception/woven_sequence/llinking_29/20230612_001946'))
 ITER1_INST = Path('/raid/home/hfunaya/cache_v5/tss4_v3_full_iter1/inst/00000000.pt')
 VEHICLE_ID = '248'
 REAR_X_CUT = -10.0  # match loom pre-filter
@@ -153,8 +156,8 @@ def _project(pts_w: np.ndarray, R: np.ndarray, t: np.ndarray,
     return uv.reshape(-1, 2), z[valid]
 
 
-RAW_SEQ_ROOT = Path('/mnt/ecp-perception/woven_sequence/tss4_calib_raw_01/'
-                    '20230612_001946')
+RAW_SEQ_ROOT = Path(_os.environ.get('KB_FIT_RAW_SEQ_ROOT',
+                                    '/mnt/ecp-perception/woven_sequence/tss4_calib_raw_01/20230612_001946'))
 
 # Woven canary sequences (each dir holds setting-<ipXXX>.json + tss4_fcm/).
 CANARY_SEQ_ROOTS = [

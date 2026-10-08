@@ -254,13 +254,29 @@ def pose_error_axes(T_est: np.ndarray, T_gt: np.ndarray) -> dict:
 PS_CACHE = os.environ.get('E2E_PS_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full')
 
 
-def load_pandaset_val(i: int, cache: str = PS_CACHE):
-    """PandaSet のキャッシュの val の i 番目のフレーム →
-    (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, 'シーン/フレーム', JPEG のバイト列)"""
+def load_val_frame(i: int, cache: str = PS_CACHE):
+    """キャッシュの val の i 番目のフレーム → load_pandaset_val の 6 つ + (dist, is_fisheye)。
+    魚眼のキャッシュ (kamikado / woven / TSS4) は Kannala-Brandt の係数を返す。
+    以前の load_pandaset_val は歪みを返さず、魚眼をピンホールで投影していた。"""
     from datasets.pandaset_full import PandaSetCalibDatasetFull
     src = PandaSetCalibDatasetFull(cache_dir=cache, split='val', img_size=256, grid_n=16,
                                    min_crop_px=256, max_crop_px=256, oversample=1)
     inst = src._load_inst(int(i))
+    fe = bool(inst.get('is_fisheye', False))
+    dist = (inst['distortion'].numpy().astype(np.float64) if fe and 'distortion' in inst else None)
+    return (*load_pandaset_val(i, cache, _inst=inst), dist, fe)
+
+
+def load_pandaset_val(i: int, cache: str = PS_CACHE, _inst=None):
+    """PandaSet のキャッシュの val の i 番目のフレーム →
+    (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, 'シーン/フレーム', JPEG のバイト列)。
+    魚眼のキャッシュには load_val_frame (歪み係数も返す) を使う。"""
+    from datasets.pandaset_full import PandaSetCalibDatasetFull
+    if _inst is None:
+        src = PandaSetCalibDatasetFull(cache_dir=cache, split='val', img_size=256, grid_n=16,
+                                       min_crop_px=256, max_crop_px=256, oversample=1)
+        _inst = src._load_inst(int(i))
+    inst = _inst
     img = cv2.imdecode(np.frombuffer(inst['jpg_bytes'], np.uint8), cv2.IMREAD_COLOR)[:, :, ::-1].copy()
     K = inst['K_full'].numpy().astype(np.float64)
     R = inst['R_gt'].numpy().astype(np.float64); cp = inst['cam_pos'].numpy().astype(np.float64)
@@ -406,8 +422,7 @@ def main():
     a = ap.parse_args()
 
     if a.pandaset_val is not None:
-        img, pts, K, T, label, _ = load_pandaset_val(a.pandaset_val)
-        dist, fe = None, False
+        img, pts, K, T, label, _, dist, fe = load_val_frame(a.pandaset_val)
         print(f'PandaSet val #{a.pandaset_val}  シーン/フレーム {label}  点 {len(pts)}')
     else:
         if not (a.image and a.points and a.calib):

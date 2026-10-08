@@ -56,7 +56,7 @@ from scripts.ba.ba_torch import (
 
 def ba_solve(per_pt, pad_mask, pts_cam_orig, K_orig, cs_t, *, img_size,
              group=1, W_head=None, w_active=None, ba_iter=4, damping=1e-3,
-             detach_mu=True, duv_orig=None, residual_sign=-1.0):
+             detach_mu=True, duv_orig=None, residual_sign=-1.0, dist=None, fisheye=None):
     """ネットの出力 → 窓を融合した δ_pred。GT を使わない。
 
     学習の BA loss・eval の姿勢評価・推論 (scripts/inference/infer_calib.py) が
@@ -110,16 +110,21 @@ def ba_solve(per_pt, pad_mask, pts_cam_orig, K_orig, cs_t, *, img_size,
         if duv_orig is not None:
             duv_orig = _grp(duv_orig)
         K_orig = K_orig.reshape(B // G, G, 3, 3)[:, 0]
+        if dist is not None:
+            dist = dist.reshape(B // G, G, 4)[:, 0]
+            fisheye = fisheye.reshape(B // G, G)[:, 0]
         Bg, Ng = B // G, G * N
     else:
         Bg, Ng = B, N
     P0d = P0.double(); Kd = K_orig.double()
     mu_in = (mu_orig.detach() if detach_mu else mu_orig).double()
+    distd = None if dist is None else dist.double()
     delta_pred, H = solve_pose(P0d, float(residual_sign) * mu_in, W.double(), Kd,
                                valid=valid, n_iter=ba_iter, damping=damping,
-                               prior_diag=prior)
+                               prior_diag=prior, dist=distd, fisheye=fisheye)
     return dict(delta_pred=delta_pred, H=H, P0d=P0d, Kd=Kd, valid=valid,
-                prior=prior, sx=sx, sy=sy, Zc=Zc, B=Bg, N=Ng, duv_orig=duv_orig)
+                prior=prior, sx=sx, sy=sy, Zc=Zc, B=Bg, N=Ng, duv_orig=duv_orig,
+                dist=distd, fisheye=fisheye)
 
 
 def forward_calib(model, batch):
@@ -147,7 +152,9 @@ def predict_pose(model, batch, *, img_size, group, ba_iter=4, damping=1e-3):
                  img_size=img_size, group=group, W_head=W_head,
                  w_active=(batch[16] if len(batch) > 16 else None),
                  ba_iter=ba_iter, damping=damping, detach_mu=True,
-                 residual_sign=+1.0)
+                 residual_sign=+1.0,
+                 dist=(batch[17] if len(batch) > 18 else None),
+                 fisheye=(batch[18] if len(batch) > 18 else None))
     return r['delta_pred'], r['H']
 
 
@@ -198,8 +205,9 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
                 continue
             mm = m.repeat_interleave(G)
             b2 = list(batch)
-            for i in (8, 9, 10, 11):
-                b2[i] = batch[i][mm]
+            for i in (8, 9, 10, 11, 17, 18):
+                if i < len(batch) and torch.is_tensor(batch[i]):
+                    b2[i] = batch[i][mm]
             l, d = _ba_pose_loss(per_pt[mm], dist_uvd[mm], pad_mask[mm], b2,
                                  ba_iter=ba_iter, damping=damping,
                                  loss_type=loss_type, detach_mu=detach_mu,
@@ -221,7 +229,9 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
     r = ba_solve(per_pt, pad_mask, pts_cam_orig, K_orig, cs_t,
                  img_size=img_size, group=group, W_head=W_head,
                  w_active=w_active, ba_iter=ba_iter, damping=damping,
-                 detach_mu=detach_mu, duv_orig=duv_orig)
+                 detach_mu=detach_mu, duv_orig=duv_orig,
+                 dist=(batch[17] if len(batch) > 18 else None),
+                 fisheye=(batch[18] if len(batch) > 18 else None))
     delta_pred, H_last = r['delta_pred'], r['H']
     P0d, Kd, valid, prior = r['P0d'], r['Kd'], r['valid'], r['prior']
     sx, sy, Zc = r['sx'], r['sy'], r['Zc']
@@ -231,7 +241,8 @@ def _ba_pose_loss(per_pt, dist_uvd, pad_mask, batch, ba_iter=4, damping=1e-3,
                                       torch.ones(B, N, device=dev, dtype=torch.float64),
                                       torch.zeros(B, N, device=dev, dtype=torch.float64))
         delta_gt, _ = solve_pose(P0d, -r['duv_orig'].double(), Wi, Kd, valid=valid,
-                                 n_iter=ba_iter, damping=damping, prior_diag=prior)
+                                 n_iter=ba_iter, damping=damping, prior_diag=prior,
+                                 dist=r['dist'], fisheye=r['fisheye'])
 
     if loss_type == 'mse':
         rot_loss = (delta_pred[:, :3] - delta_gt[:, :3]).pow(2).mean()
