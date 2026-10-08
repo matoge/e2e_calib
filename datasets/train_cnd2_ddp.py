@@ -931,6 +931,9 @@ def main():
     #  sigma と mu に流れて点の NLL と衝突していた、など)。
     #   stage 1  --no-with-ba : タイルだけ。BA なし。点ごとの gaussian2d_nll のみ
     #   stage 2  --with-ba    : 格子 + share_pert で融合、BA loss を InfoHead に流す
+    p.add_argument('--crop-pivot', choices=['image', 'lidar'], default='image',
+                   help="non-grid (stage-1) windows: 'image' = uniform over image pixels, reroll if too few "
+                        "LiDAR points; 'lidar' = centred on a random LiDAR point from the middle bands (old)")
     p.add_argument('--rep-strategy', type=str, default='cell_center',
                    choices=['cell_center', 'nearest_cam', 'random_train'],
                    help="セルの代表点 (クエリ)。random_train = 学習はセル内ランダム、val・推論はセル中心に一番近い点")
@@ -1107,6 +1110,7 @@ def main():
                  split_pert=False,
                  share_pert=bool(args.share_pert),
                  crop_grid=bool(args.crop_grid),
+                 crop_pivot=str(args.crop_pivot),
                  grid_frac=float(args.grid_frac),
                  pair_stride=int(args.pair_stride),
                  pair_bidir=bool(args.pair_bidir),
@@ -1140,6 +1144,18 @@ def main():
             if not tok: continue
             k, v = tok.rsplit(':', 1)
             os_map[k.strip()] = int(v)
+    # Per-cache frame stride (fnames[::stride], train and val). 以前は引数を読むだけで
+    # どこにも渡しておらず、--frame-stride は黙って無視されていた。
+    fs_map: dict[str, int] = {}
+    if getattr(args, 'frame_stride', ''):
+        for tok in args.frame_stride.split(','):
+            tok = tok.strip()
+            if not tok: continue
+            k, v = tok.rsplit(':', 1)
+            fs_map[k.strip()] = int(v)
+    unknown = set(fs_map) - set(cache_paths)
+    if unknown:
+        raise ValueError(f'--frame-stride names caches not in --cache: {sorted(unknown)}')
     # Per-cache crop-px override. Value is either "MIN-MAX" or a single "CS"
     # (fixed crop = MIN = MAX). Overrides both --min-crop-px and --max-crop-px
     # for that cache; --img-size (the model input resolution AFTER resize) is
@@ -1172,6 +1188,8 @@ def main():
             cp_mode = 'pair' if args.pair_mode else 'calib'
             cp_pair = bool(args.pair_mode)
         cp_kw = {**ds_kw, 'oversample': os_i, 'pair_mode': cp_pair}
+        if cp in fs_map:
+            cp_kw = {**cp_kw, 'frame_stride': fs_map[cp]}
         if cp in crop_map:
             _lo, _hi = crop_map[cp]
             cp_kw = {**cp_kw, 'min_crop_px': _lo, 'max_crop_px': _hi}

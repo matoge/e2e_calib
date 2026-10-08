@@ -53,6 +53,10 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation, Slerp
 
+# 画像の外に残す幅 [px] と最小深度 [m]。学習のずれ (回転 0.5°、並進 0.2 m) で入ってくる点を残す
+FOV_PAD = 256
+Z_MIN = 0.1
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.preprocessing._tile_split import cut_inst_to_tiles  # noqa: E402
 from scripts.util.projection import (
@@ -343,14 +347,36 @@ def process_frame(args_tuple):
         # is byte-identical with kamikado/CaaaS via the shared helper.
         T_cl = _T_lidar_to_cam_at_camera_time(
             pose_curr, pose_cam, R_cv, t_cv)
+        if 'poslv' in setting:
+            # setting の poslv (後軸 → カメラの外部パラメータの基準系) を挟む:
+            # X_cam = Tc · T_front_rear · T_vv · X_rear。build_tss4_v3.load_calib と同じ合成。
+            # TSS4 は fcm.mp/rot が車頭系で poslv = mp [-3.823, 0, 0.702]。woven_sequence_27 (TMPOC) は
+            # 後軸系で poslv = 0 (単位変換) なので結果は変わらない。
+            p_ = setting['poslv']
+            r_, pi_, y_ = p_['rot']
+            T_fr = np.eye(4)
+            T_fr[:3, :3] = Rotation.from_euler('zyx', [y_, pi_, r_]).as_matrix()
+            T_fr[:3, 3] = np.asarray(p_['mp'], np.float64)
+            Tc = _T_lidar_to_cam_at_camera_time(np.eye(4), np.eye(4), R_cv, t_cv)
+            T_cl = Tc @ T_fr @ (np.linalg.inv(pose_cam) @ pose_curr)
         # Pack LiDAR pts + intensity into a single (N,4) for the shared helper.
         pts_xyzi = np.column_stack(
             [pts_flu.astype(np.float32), intensity.astype(np.float32)])
+        # 画像の外 FOV_PAD px・深度 Z_MIN m まで残す (PandaSet・nuScenes・kamikado の builder と同じ)。
+        # 点の数の判定は従来どおり画像内 (z > 0.5) の点で数える
+        keep_in, *_ = project_lidar_into_image(
+            pts_xyzi, K, T_cl, W, H, is_fisheye=True, dist=dist, z_min=0.5)
+        if int(keep_in.sum()) < 64:
+            return frame_id, 0
         _, pts_vis, uv_vis, z_vis, int_vis = project_lidar_into_image(
             pts_xyzi, K, T_cl, W, H,
-            is_fisheye=True, dist=dist, z_min=0.5)
-        if len(pts_vis) < 64:
-            return frame_id, 0
+            is_fisheye=True, dist=dist, z_min=Z_MIN, pad_px=FOV_PAD)
+        # intensity は [0,1] に揃える。woven_sequence_27 の npz は 0〜255、TSS4 (tss4_calib_raw_01) は
+        # 既に 0〜1 (値/255) なので、1 を超える値があるフレームだけ 255 で割る
+        int_vis = np.asarray(int_vis, np.float32)
+        if int_vis.size and float(int_vis.max()) > 1.0:
+            int_vis = int_vis / 255.0
+        int_vis = int_vis.astype(np.float32)
 
         cubs = _load_cuboids_vehicle(seq, frame_id)
         # is_obj test runs in vehicle FLU (boxes are stored there). Lift the

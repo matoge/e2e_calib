@@ -33,9 +33,10 @@ def main():
     ap.add_argument('--frames', default='0,10,20', help='frame indices within the split')
     ap.add_argument('--split', default='val', help='which frames to use (both modes use the same frames)')
     ap.add_argument('--seed', type=int, default=20261008)
+    ap.add_argument('--crop', type=int, default=256, help='crop size in the original image (resized to 256)')
     a = ap.parse_args()
     frames = [int(x) for x in a.frames.split(',') if x.strip()]
-    kw = dict(img_size=256, min_crop_px=256, max_crop_px=256, grid_n=16, max_offset_m=0.2,
+    kw = dict(img_size=256, min_crop_px=a.crop, max_crop_px=a.crop, grid_n=16, max_offset_m=0.2,
               max_rot_deg=0.5, oversample=1, k_per_cell=24, eval_seed=a.seed)
     rows = []
     # 両方とも split='train' の経路で同じ窓・同じずれを作り、代表点の選び方だけ変える

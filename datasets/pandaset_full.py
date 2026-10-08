@@ -258,6 +258,7 @@ class PandaSetCalibDatasetFull(Dataset):
                  pert_seed: int = None,
                  eval_seed: int = None,
                  debug_dir: str | None = None,
+                 crop_pivot: str = 'image',
                  debug_max: int = 40,
                  pert_const: bool = False,
                  frame_stride: int = 1,
@@ -370,6 +371,12 @@ class PandaSetCalibDatasetFull(Dataset):
         # debug_dir (または環境変数 E2E_DATASET_DEBUG): 窓ごとに代表点の選び方を描いた PNG を
         # 最大 debug_max 枚書く。赤 = 実際に選ばれた点 (学習は random_train ならセル内ランダム)、
         # 水色の輪 = セル中心に一番近い点 (val・推論で選ばれる点)、緑 = 選ばれた点の正しい位置。
+        # crop_pivot: 格子でない窓 (段 1) の置き方。
+        #   'image' = 画像の画素から一様に窓を置き、その中の LiDAR 点を集める。点が足りなければ引き直す。
+        #   'lidar' (〜2026-10-09) = ランダムな LiDAR 点を中心に置く。背景の点は縦 5 段の真ん中 3 段から
+        #             だけ選ぶので、上下の段と LiDAR の薄い所がほとんど学習に入らなかった。
+        assert crop_pivot in ('image', 'lidar'), crop_pivot
+        self.crop_pivot = crop_pivot
         self.debug_dir = debug_dir or os.environ.get('E2E_DATASET_DEBUG') or None
         self.debug_max = int(debug_max)
         self._debug_n = 0
@@ -946,10 +953,14 @@ class PandaSetCalibDatasetFull(Dataset):
         # cropped region only). Old cache: image is already decoded as a tensor.
         img_full = None if 'jpg_bytes' in inst else inst['img']  # (3, H, W) uint8 or None
 
-        for _ in range(self.max_tries):
+        _tries = self.max_tries if (self._use_grid or self.crop_pivot == 'lidar') else max(self.max_tries, 64)
+        for _ in range(_tries):
             # Pick pivot first so cs can scale with depth (close pivots need
             # larger crops to capture object edges; far pivots fit fine in small).
-            if len(obj_idxs) > 0 and (len(bg_cells) == 0 or np.random.rand() < 0.5):
+            if self.crop_pivot == 'image' and not self._use_grid:
+                # 画像ベース: 窓の位置は後で画素から一様に決める。ここでは深度を使う分岐を通さない
+                i = None; pu = pv = None
+            elif len(obj_idxs) > 0 and (len(bg_cells) == 0 or np.random.rand() < 0.5):
                 i = obj_idxs[np.random.randint(len(obj_idxs))]
                 pu, pv = uv_full[i]
             elif len(bg_cells) > 0:
@@ -961,8 +972,8 @@ class PandaSetCalibDatasetFull(Dataset):
                 continue
             # Depth-aware cs sampling: <20m → up to 768 px (keep whole vehicle in frame),
             # else stay narrow [min_crop_px, max_crop_px]
-            piv_z = float(z[i])
-            if self.min_crop_px == self.max_crop_px:
+            piv_z = float(z[i]) if i is not None else 0.0
+            if self.min_crop_px == self.max_crop_px or i is None:
                 # Fixed crop asked for: honour it. The depth branch below widens
                 # near pivots to 768 px, which made 42% of "256-only" crops come
                 # out 256-759 px -- so "equal scale 256" was never true.
@@ -980,7 +991,7 @@ class PandaSetCalibDatasetFull(Dataset):
             # z<20m (no zoom) up to 2.0 at z>=100m. Far pivots only — close-up
             # zoom on near objects creates artifacts (see project_uvemb_query
             # _curriculum stage 4 design rationale).
-            if getattr(self, 'zoom_aug', False) and piv_z >= 20.0:
+            if getattr(self, 'zoom_aug', False) and i is not None and piv_z >= 20.0:
                 t = min(1.0, (piv_z - 20.0) / 80.0)         # 0 at 20m, 1 at 100m+
                 scale_max = 1.0 + t * 1.0                   # 1.0 → 2.0
                 # 20m → 1.0–1.2 (effectively 0.05–0.20), 100m → 1.0–2.0
@@ -1028,6 +1039,10 @@ class PandaSetCalibDatasetFull(Dataset):
                 if not cells:
                     u0 = int(np.clip(round(sx * (k %  nx) + ju), 0, max(0, IW - cs)))
                     v0 = int(np.clip(round(sy * (k // nx) + jv), 0, max(0, IH - cs)))
+            elif self.crop_pivot == 'image':
+                self._w_active = 1.0
+                u0 = int(np.random.randint(0, max(0, IW - cs) + 1))
+                v0 = int(np.random.randint(0, max(0, IH - cs) + 1))
             else:
                 self._w_active = 1.0
                 u0 = int(np.clip(pu - cs / 2, 0, IW - cs))
