@@ -28,7 +28,8 @@ services/calib_api/raw_pipeline.py が kamikado 専用の raw 経路を持って
     python scripts/inference/infer_calib.py ps_grid_ba_infohead \
         --image ... --points ... --calib ... --pert-rot-deg 0.5 --pert-t-m 0.2
 """
-import argparse, importlib.util, io, json, math, sys
+import argparse, importlib.util, io, json, math, os, sys
+import cv2
 from pathlib import Path
 
 import numpy as np
@@ -219,6 +220,54 @@ def pose_error_axes(T_est: np.ndarray, T_gt: np.ndarray) -> dict:
                 x_m=float(dx), y_m=float(dy), z_m=float(dz))
 
 
+PS_CACHE = os.environ.get('E2E_PS_CACHE', '/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full')
+
+
+def load_pandaset_val(i: int, cache: str = PS_CACHE):
+    """PandaSet のキャッシュの val の i 番目のフレーム →
+    (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, 'シーン/フレーム', JPEG のバイト列)"""
+    from datasets.pandaset_full import PandaSetCalibDatasetFull
+    src = PandaSetCalibDatasetFull(cache_dir=cache, split='val', img_size=256, grid_n=16,
+                                   min_crop_px=256, max_crop_px=256, oversample=1)
+    inst = src._load_inst(int(i))
+    img = cv2.imdecode(np.frombuffer(inst['jpg_bytes'], np.uint8), cv2.IMREAD_COLOR)[:, :, ::-1].copy()
+    K = inst['K_full'].numpy().astype(np.float64)
+    R = inst['R_gt'].numpy().astype(np.float64); cp = inst['cam_pos'].numpy().astype(np.float64)
+    T = np.eye(4); T[:3, :3] = R.T; T[:3, 3] = -R.T @ cp
+    pts = np.concatenate([inst['pts'].numpy(), inst['intensity'].numpy()[:, None]], 1).astype(np.float32)
+    return img, pts, K, T, f"{inst['scene']}/{inst['frame']}", inst['jpg_bytes']
+
+
+def render_overlay(img, pts, K, poses: dict, dist=None, is_fisheye=False) -> np.ndarray:
+    """画像に、各ポーズで投影した LiDAR の点を重ねて保存する。
+    poses の色: true=緑, input=赤, corrected=水色。左右に 2 枚 (入力 / 補正後) 並べ、どちらにも正解を薄く重ねる。"""
+    from scripts.util.projection import project_lidar_into_image
+    IH, IW = img.shape[:2]
+    col = {'true': (52, 199, 89), 'input': (255, 59, 48), 'corrected': (0, 194, 255)}
+    def proj(T):
+        keep, _pc, uv, *_ = project_lidar_into_image(pts, K, T, IW, IH, is_fisheye=is_fisheye, dist=dist)
+        return uv
+    base = (img.astype(np.float32) * 0.6).astype(np.uint8)
+    panels = []
+    for name in [k for k in ('input', 'corrected') if k in poses]:
+        p = base.copy()
+        layers = (['true'] if 'true' in poses else []) + [name]
+        for k in layers:
+            for u, v in proj(poses[k]).astype(int):
+                cv2.circle(p, (int(u), int(v)), 2, col[k], -1)
+        cv2.putText(p, {'input': 'input (red)', 'corrected': 'corrected (cyan)'}[name] +
+                    ('  /  true (green)' if 'true' in poses else ''),
+                    (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
+        panels.append(p)
+    return np.concatenate(panels, 1) if len(panels) > 1 else panels[0]
+
+
+def draw_overlay(img, pts, K, poses: dict, path: str, dist=None, is_fisheye=False):
+    out = render_overlay(img, pts, K, poses, dist=dist, is_fisheye=is_fisheye)
+    cv2.imwrite(path, cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
+    return path
+
+
 # ── モデル ────────────────────────────────────────────────────────────────
 
 def _cfg_of(exp: str) -> dict:
@@ -300,9 +349,13 @@ def main():
     import cv2
     ap = argparse.ArgumentParser()
     ap.add_argument('exp')
-    ap.add_argument('--image', required=True)
-    ap.add_argument('--points', required=True)
-    ap.add_argument('--calib', required=True)
+    ap.add_argument('--pandaset-val', type=int, default=None,
+                    help='ファイルの代わりに PandaSet のキャッシュの val の i 番目のフレームを使う (calib は正しいポーズ)')
+    ap.add_argument('--image', default=None)
+    ap.add_argument('--points', default=None)
+    ap.add_argument('--calib', default=None)
+    ap.add_argument('--overlay', default=None,
+                    help='画像に点を重ねて保存する (左: 入力のポーズ、右: 補正後。正しいポーズがあれば緑で重ねる)')
     ap.add_argument('--pert-rot-deg', type=float, default=0.0,
                     help='評価用。正しいポーズに外から掛ける回転 (3 軸同じ値)')
     ap.add_argument('--pert-t-m', type=float, default=0.0,
@@ -314,9 +367,16 @@ def main():
                     help='評価用。正しいポーズに掛ける並進 JSON [3] (カメラ軸 x 右, y 下, z 前, m)')
     a = ap.parse_args()
 
-    img = cv2.imread(a.image)[:, :, ::-1]
-    pts = load_points(a.points)
-    K, dist, T, fe = load_calib(a.calib)
+    if a.pandaset_val is not None:
+        img, pts, K, T, label, _ = load_pandaset_val(a.pandaset_val)
+        dist, fe = None, False
+        print(f'PandaSet val #{a.pandaset_val}  シーン/フレーム {label}  点 {len(pts)}')
+    else:
+        if not (a.image and a.points and a.calib):
+            ap.error('--pandaset-val か、--image --points --calib の 3 つを指定する')
+        img = cv2.imread(a.image)[:, :, ::-1]
+        pts = load_points(a.points)
+        K, dist, T, fe = load_calib(a.calib)
     inj = None
     if a.rot is not None or a.t is not None:
         import json as _json
@@ -350,6 +410,11 @@ def main():
         print(f'{"":8s}' + ''.join(f'{k:>11s}' for k in ('yaw[deg]', 'pitch[deg]', 'roll[deg]', 'x[m]', 'y[m]', 'z[m]')))
         for lab, e in (('補正前', a0), ('補正後', a1)):
             print(f'{lab:6s}' + ''.join(f'{e[k]:+11.4f}' for k in ('yaw_deg', 'pitch_deg', 'roll_deg', 'x_m', 'y_m', 'z_m')))
+    if a.overlay:
+        poses = {'input': T, 'corrected': T_corr}
+        if inj is not None:
+            poses['true'] = T_true
+        print('重ねた画像:', draw_overlay(img, pts, K, poses, a.overlay, dist=dist, is_fisheye=fe))
 
 if __name__ == '__main__':
     main()

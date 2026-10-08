@@ -109,6 +109,54 @@ python scripts/inference/infer_calib.py ps_s2_own24_rt --image image.jpg --point
     --calib calib.json --rot '[0.3,-0.2,0.4]' --t '[0.05,-0.1,0.15]'
 ```
 
+### 直す前後（CLI）
+
+PandaSet の val を番号で選び、ずらして直し、重ねた図を保存する。図の左が補正前（赤＝ずらしたポーズ、緑＝正しいポーズ）、右が補正後（水色＝補正後、緑＝正しいポーズ）。
+
+```bash
+python scripts/inference/infer_calib.py ps_s2_own24_rt --pandaset-val 123 \
+    --rot '[0.4,-0.3,0.4]' --t '[0.1,-0.1,0.15]' --overlay out.png
+```
+
+| フレーム | | ヨー | ピッチ | ロール | x | y | z |
+|---|---|---|---|---|---|---|---|
+| val 250（シーン 015/10）ずれ 回転 [−0.45, 0.4, −0.1]°・並進 [−0.18, 0.12, 0.05] m | 補正前 | +0.399° | −0.103° | −0.451° | −0.180 m | +0.120 m | +0.050 m |
+| | 補正後 | −0.025° | +0.015° | **+0.098°** | +0.007 m | +0.002 m | −0.011 m |
+| val 123（シーン 042/43）ずれ 回転 [0.4, −0.3, 0.4]°・並進 [0.1, −0.1, 0.15] m | 補正前 | −0.303° | +0.398° | +0.398° | +0.100 m | −0.100 m | +0.150 m |
+| | 補正後 | +0.024° | −0.045° | **+0.138°** | −0.009 m | −0.026 m | +0.011 m |
+| val 250、ずれなし | 補正前 | 0 | 0 | 0 | 0 | 0 | 0 |
+| | 補正後 | −0.034° | −0.001° | **+0.087°** | +0.010 m | −0.009 m | −0.020 m |
+
+3 例とも補正後に一番大きく残るのはロール。ずれなしで入れても、ロール 0.087°・z 0.020 m 動く。
+
+val 250、ずれあり:
+
+![](_figs/2026-10-08/cli_val250_shift.jpg)
+
+val 123、ずれあり（API の `/api/pandaset/eval_image` で同じ条件を呼んだ画像も、これとバイト単位で同じ）:
+
+![](_figs/2026-10-08/cli_val123_shift.jpg)
+
+val 250、ずれなし:
+
+![](_figs/2026-10-08/cli_val250_zero.jpg)
+
+### 直す前後（API）
+
+```bash
+# 前後を重ねた PNG が返る。誤差はヘッダ X-Error-Before / X-Error-After / X-Frame（JSON）
+curl -X POST localhost:5092/api/pandaset/eval_image -F i=123 \
+     -F rot_deg='[0.4,-0.3,0.4]' -F t_m='[0.1,-0.1,0.15]' -D - -o out.png
+
+# 同じものを JSON で（軸ごとの誤差 error_before_axes / error_after_axes と、点の投影 overlay）
+curl -X POST localhost:5092/api/pandaset/eval -F i=123 \
+     -F rot_deg='[0.4,-0.3,0.4]' -F t_m='[0.1,-0.1,0.15]'
+
+# 自分のデータで前後の PNG
+curl -X POST localhost:5092/api/eval_frame_image -F image=@image.jpg -F points=@points.txt \
+     -F calib=@calib.json -F rot_deg='[0.3,-0.2,0.25]' -F t_m='[0.1,-0.05,0.15]' -o out.png
+```
+
 ## 5. まだ残っていること
 
 - 正しいポーズを渡しても補正後に誤差が残る（ロール 0.063°、z 0.018 m）。

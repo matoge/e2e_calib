@@ -192,15 +192,9 @@ def _ps_src():
 
 
 def _ps_raw(i: int):
-    """キャッシュの inst → (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, ラベル)"""
-    import cv2
-    inst = _ps_src()._load_inst(int(i))
-    img = cv2.imdecode(np.frombuffer(inst['jpg_bytes'], np.uint8), cv2.IMREAD_COLOR)[:, :, ::-1].copy()
-    K = inst['K_full'].numpy().astype(np.float64)
-    R = inst['R_gt'].numpy().astype(np.float64); cp = inst['cam_pos'].numpy().astype(np.float64)
-    T = np.eye(4); T[:3, :3] = R.T; T[:3, 3] = -R.T @ cp
-    pts = np.concatenate([inst['pts'].numpy(), inst['intensity'].numpy()[:, None]], 1).astype(np.float32)
-    return img, pts, K, T, f"{inst['scene']}/{inst['frame']}", inst['jpg_bytes']
+    """キャッシュの inst → (画像 RGB, 点 xyz+強度, K, 正しい T_cam_lidar, ラベル, JPEG)。CLI と同じ関数。"""
+    from scripts.inference.infer_calib import load_pandaset_val
+    return load_pandaset_val(i, PS_CACHE)
 
 
 @app.get('/api/pandaset/frames')
@@ -236,6 +230,47 @@ def ps_eval(i: int = Form(...),
                overlay=_overlay(img, pts, K, None, False,
                                 {'true': T_true, 'input': T_in, 'corrected': T_corr}, n_max=10 ** 9))
     return out
+
+
+def _png_response(img_rgb: np.ndarray, info: dict):
+    import cv2
+    from fastapi.responses import Response
+    ok, buf = cv2.imencode('.png', cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
+    hdr = {'X-Error-Before': json.dumps(info.get('error_before_axes')),
+           'X-Error-After': json.dumps(info.get('error_after_axes')),
+           'X-Frame': str(info.get('frame', ''))}
+    return Response(content=buf.tobytes(), media_type='image/png', headers=hdr)
+
+
+@app.post('/api/pandaset/eval_image')
+def ps_eval_image(i: int = Form(...), rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
+    """/api/pandaset/eval と同じことをして、補正前 (左) と補正後 (右) の重ね画像を PNG で返す。
+    誤差 (ヨー・ピッチ・ロール・x・y・z) はヘッダ X-Error-Before / X-Error-After (JSON)。"""
+    from scripts.inference.infer_calib import render_overlay
+    img, pts, K, T_true, label, _ = _ps_raw(i)
+    r = np.asarray(json.loads(rot_deg), np.float64).reshape(3)
+    t = np.asarray(json.loads(t_m), np.float64).reshape(3)
+    T_in = perturb_T(T_true, rot_deg=r, t_m=t)
+    out, T_corr = _solve(img, pts, K, None, T_in, False)
+    info = dict(frame=label, error_before_axes=pose_error_axes(T_in, T_true),
+                error_after_axes=pose_error_axes(T_corr, T_true))
+    return _png_response(render_overlay(img, pts, K, {'true': T_true, 'input': T_in, 'corrected': T_corr}), info)
+
+
+@app.post('/api/eval_frame_image')
+async def eval_frame_image(image: UploadFile = File(...), points: UploadFile = File(...),
+                           calib: UploadFile = File(...),
+                           rot_deg: str = Form('[0,0,0]'), t_m: str = Form('[0,0,0]')):
+    """/api/eval_frame と同じ入力。補正前 (左) と補正後 (右) の重ね画像を PNG で返す。"""
+    from scripts.inference.infer_calib import render_overlay
+    img, pts, K, dist, T_true, fe = await _read_inputs(image, points, calib)
+    r = np.asarray(json.loads(rot_deg), np.float64).reshape(3)
+    t = np.asarray(json.loads(t_m), np.float64).reshape(3)
+    T_in = perturb_T(T_true, rot_deg=r, t_m=t)
+    out, T_corr = _solve(img, pts, K, dist, T_in, fe)
+    info = dict(error_before_axes=pose_error_axes(T_in, T_true), error_after_axes=pose_error_axes(T_corr, T_true))
+    return _png_response(render_overlay(img, pts, K, {'true': T_true, 'input': T_in, 'corrected': T_corr},
+                                        dist=dist, is_fisheye=fe), info)
 
 
 @app.get('/calibrate', response_class=HTMLResponse)
