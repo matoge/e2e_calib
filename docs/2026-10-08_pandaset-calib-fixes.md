@@ -212,6 +212,19 @@ Error after correction, Tukey fusion (F=1 = single frame). Rotation per axis is 
 |  | 16 | 0.039 / 0.064 / 0.058 | 0.132 / 0.107 / 0.187 | 0.106 / 0.215 | 0.025 / 0.060 |
 |  | 64 | 0.037 / 0.065 / 0.053 | 0.079 / 0.093 / 0.135 | 0.094 / 0.162 | 0.021 / 0.046 |
 
+Measured median geodesic error against what 1/√F (independent per-frame errors averaging out) would give from the F=1 value:
+
+| median geodesic [deg] | F=1 | F=4 | F=16 | F=32 / 64 |
+|---|---|---|---|---|
+| PandaSet, measured | 0.081 | 0.060 | 0.061 | 0.049 (F=32) |
+| PandaSet, 1/√F | 0.081 | 0.041 | 0.020 | 0.014 (F=32) |
+| nuScenes, measured | 0.211 | 0.132 | 0.106 | 0.094 (F=64) |
+| nuScenes, 1/√F | 0.211 | 0.106 | 0.053 | 0.026 (F=64) |
+
+- The error falls more slowly than 1/√F and levels off (PandaSet about 0.05°, nuScenes about 0.09°). Every frame in a group carries the same injected δ, so any error that depends on δ itself is shared by all frames and does not average out.
+- Per axis, PandaSet yaw and pitch are already 0.02–0.03° (median) at F=1 and stay there; roll stays at 0.04–0.05°. nuScenes at F=64: pitch 0.065°, roll 0.053°.
+- nuScenes groups here mix scenes (the val cache has 4 frames per scene); real calibration differs per log, so fusion should be measured within a sequence. A val cache with every keyframe of the 85 val scenes (`ns_850val_all_pad256`, `--frame-frac 1.0`) is being built for that.
+
 - Sum, Huber and Tukey differ by at most 0.025° in the max (nuScenes F=8: sum 0.246, Tukey 0.222); the χ² gate is worse than the sum in some rows (PandaSet F=16 median 0.072 vs 0.063).
 - PandaSet's max stays at 0.144–0.146° from F=16 to 32, and p90 at 0.13–0.14° from F=4 to 32. Its frames come from one of 5 val scenes; they are not independent.
 - nuScenes within a scene: the 200-frame subset leaves fewer than 4 frames in most scenes; F=2 gives median 0.200°, max 0.647° (single frame: 0.220°, 0.940°).
