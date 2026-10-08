@@ -23,7 +23,7 @@ Absolute error after correction. "1 frame" = single-frame inference; "fused" = F
 
 - nuScenes median geodesic 0.211° → 0.106° at 16 frames (0.50×), max 0.566° → 0.215°. PandaSet (moving) median 0.068° → 0.047°, max 0.593° → 0.149°.
 - 16 frames carry the information of about 4 independent frames on nuScenes and about 2 on PandaSet (section 3b); the error levels off instead of following 1/√F.
-- A stopped car (PandaSet 004) does not improve: every frame sees the same background.
+- A stopped car (PandaSet 004) does not improve, and cannot by construction: see "Why a stopped car gains nothing" below.
 - Caveats: nuScenes groups mix scenes (its val cache had 4 frames per scene); every frame in a group carries the same injected δ; PandaSet has 4 moving val scenes. Within-sequence nuScenes fusion is running (section 4).
 
 ![](_figs/2026-10-08/fusion_vs_sqrtF.png)
@@ -77,6 +77,18 @@ Against 1/√F (median geodesic, deg):
 ## 3. Why it levels off
 
 Every frame in a group carries the same injected δ. An error that depends on δ itself (a bias of the network or the GN for that δ) is the same in every frame and does not average out; only the frame-to-frame part does. The 40 groups per F are drawn from the same 200 frames, so they overlap and the 80 cases are not independent either.
+
+## Why a stopped car gains nothing
+
+Fusion only averages away the part of the error that differs from frame to frame. When the car does not move:
+
+- the camera sees the same scene from the same place in every frame, and the LiDAR hits the same surfaces, so each frame's windows, points and image content are nearly identical;
+- the network therefore makes nearly the same error on every frame (the error that depends on what the scene looks like), and that shared error survives any amount of averaging;
+- only small things change between frames (sensor noise, pedestrians and cars passing), which is the part fusion can remove.
+
+Measured on PandaSet 004 (0.1 m of travel in 80 frames): median geodesic 0.140° at 1 frame and 0.136° at 32 frames; N_eff = 1.1. Fusing 32 frames of a stopped car is worth one frame.
+
+In practice: collect frames while the vehicle is moving and from different places (different scenes, turns, distances). Frames taken at standstill, or repeatedly of the same view, should be counted as one frame (or dropped) before fusion.
 
 ## 3b. The stopped scene (PandaSet 004) and the effective number of frames
 
