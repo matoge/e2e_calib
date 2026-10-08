@@ -1,5 +1,19 @@
 # Fusing 16 frames halves the nuScenes calibration error and cuts the worst case 3–4×; a stopped car gains nothing (2026-10-09)
 
+## Key point
+
+The network appears to have learned the camera and LiDAR well enough that each frame's output behaves like a reasonable observation of the calibration: an estimate plus an information matrix that can be fused like any other measurement.
+
+What supports this:
+- Fusing frames through their own information matrices lowers the error on both datasets (nuScenes median 0.211° → 0.106°, max 0.566° → 0.215° at 16 frames), using nothing but the network's per-frame (δ̂, H).
+- The plain information-weighted sum does about as well as Huber and Tukey (max within 0.025°), so few frames are gross outliers relative to their own H.
+- The errors behave like a sensor's: a frame-to-frame part that averages out, and a part shared by frames of the same view that does not (a stopped car gains nothing).
+
+What limits it:
+- Frames of one sequence are strongly correlated: 16 frames are worth about 4 independent frames on nuScenes and about 2 on PandaSet.
+- The fused error levels off (nuScenes about 0.09°, PandaSet moving scenes about 0.04°) rather than following 1/√F; roll stays the largest axis.
+- Evidence so far uses injected perturbations on val scenes, nuScenes groups that mix scenes, and 4 moving PandaSet val scenes.
+
 ## Before / after fusion
 
 Absolute error after correction. "1 frame" = single-frame inference; "fused" = F frames combined through their 6-DoF information matrices (Tukey). Model `nsps_s2_pad256`.
