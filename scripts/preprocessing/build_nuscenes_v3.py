@@ -29,6 +29,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 NS_ROOT  = Path('/mnt/nvme6t/nuscenes/data')
+# 画像の外に残す幅 [px] と最小深度 [m]。学習のずれ (回転 0.5°、並進 0.2 m) で入ってくる点を残す
+FOV_PAD = 256
+Z_MIN = 0.1
 META_DIR = NS_ROOT / 'v1.0-trainval'
 
 CAM_CHANNELS = ('CAM_FRONT', 'CAM_FRONT_LEFT', 'CAM_FRONT_RIGHT',
@@ -139,13 +142,16 @@ def _convert_scene(args_tuple):
                                       _CTX['ego'][lid['ego_pose_token']])
         bin_path = Path(data_root) / lid['filename']
         try:
-            pts_lid = np.frombuffer(bin_path.read_bytes(),
-                                     dtype=np.float32).reshape(-1, 5)[:, :3]
+            _raw = np.frombuffer(bin_path.read_bytes(), dtype=np.float32).reshape(-1, 5)
+            pts_lid = _raw[:, :3]
+            # intensity (0〜255) → [0,1]。以前は落としていて、キャッシュに intensity が無かった (全点 0)
+            intens_lid = (_raw[:, 3] / 255.0).astype(np.float32)
         except Exception:
             continue
         h = np.hstack([pts_lid, np.ones((len(pts_lid), 1), dtype=pts_lid.dtype)])
         pts_world = (T_lid2w @ h.T).T[:, :3].astype(np.float32)
         is_radar_lid = np.zeros(len(pts_world), dtype=np.float32)
+        intens_world = intens_lid
 
         # 5 radars in world frame. Continental ARS 408 → essentially 2D (z≈0
         # in sensor frame), but the world transform plants them at ~ego height.
@@ -155,6 +161,10 @@ def _convert_scene(args_tuple):
                      'RADAR_BACK_LEFT', 'RADAR_BACK_RIGHT')
         radar_pts_list = []
         try:
+            # レーダーの点はデータセット側で区別されない (is_radar を読まない) ので、
+            # _CTX['radar'] を True にしたときだけ混ぜる。既存の ns_850x4 などは LiDAR だけ。
+            if not _CTX.get('radar', False):
+                raise ImportError('radar off')
             from nuscenes.utils.data_classes import RadarPointCloud
             RadarPointCloud.disable_filters()  # raw, no dyn_prop / RCS filter
             for rch in radar_chs:
@@ -175,6 +185,8 @@ def _convert_scene(args_tuple):
             pts_world = np.concatenate([pts_world, pts_radar_world], axis=0)
             is_radar_lid = np.concatenate([is_radar_lid,
                                             np.ones(len(pts_radar_world), dtype=np.float32)])
+            intens_world = np.concatenate([intens_world,
+                                            np.zeros(len(pts_radar_world), dtype=np.float32)])
 
         # cuboids for this sample (world frame)
         cubs = []
@@ -214,8 +226,13 @@ def _convert_scene(args_tuple):
             pcam = (T_gt @ homo.T)[:3].T
             z = pcam[:, 2]
             uv = ((K @ pcam.T)[:2] / np.maximum(pcam[:, 2:].T, 1e-6)).T
-            vis = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW) & (uv[:, 1] >= 0) & (uv[:, 1] < IH)
-            if vis.sum() < 16: continue
+            # 画像の外 FOV_PAD px まで残す (ずらしたポーズで入ってくる点を欠かさない)。
+            # 点の数の判定は従来どおり GT で画像内の点で数える
+            in_img = (z > 0.5) & (uv[:, 0] >= 0) & (uv[:, 0] < IW) & (uv[:, 1] >= 0) & (uv[:, 1] < IH)
+            if in_img.sum() < 16: continue
+            vis = ((z > Z_MIN) & (uv[:, 0] >= -FOV_PAD) & (uv[:, 0] < IW + FOV_PAD) &
+                   (uv[:, 1] >= -FOV_PAD) & (uv[:, 1] < IH + FOV_PAD))
+            intens_v   = intens_world[vis].astype(np.float32)
             pts_vis    = pts_world[vis]
             uv_vis     = uv[vis].astype(np.float32)
             z_vis      = z[vis].astype(np.float32)
@@ -246,6 +263,7 @@ def _convert_scene(args_tuple):
                     z_cam    = torch.from_numpy(z_vis),
                     is_obj   = torch.from_numpy(is_obj_vis),
                     is_radar = torch.from_numpy(is_radar_v),
+                    intensity = torch.from_numpy(intens_v),
                 ))
                 fname = f'{gid:08d}.pt'
                 if sw is not None:

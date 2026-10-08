@@ -83,10 +83,11 @@ python -u datasets/train_cnd2_ddp.py <stage-1 args without --no-with-ba and --ov
 `--cache` takes a comma-separated list. nuScenes (1600×900) gives 7×4 = 28 windows of 256 px and PandaSet (1920×1080) gives 8×5 = 40; the trainer pads to 40 with copies of real windows and sets `w_active=0` on the copies so BA ignores them.
 
 ```bash
-./_kick_nsps_s1.sh   # ns_850x4 (850 scenes, CAM_FRONT) + pandaset_v3_full, stage 1, otherwise identical to ps_s1_own24_rt
+./_build_pad256_caches.sh   # rebuild both caches (section 6)
+./_kick_nsps_s1.sh          # ns_850x4_pad256 + pandaset_pad256, stage 1, otherwise identical to ps_s1_own24_rt
 ```
 
-Run `nsps_s1_own24_rt` started 2026-10-08 11:51: train 5,779 / val 740 frames (scene split). No results yet.
+Run `nsps_s1_pad256` started 2026-10-08 12:31: train 5,779 / val 740 frames (scene split). No results yet. Two earlier runs were stopped: `nsps_s1_own24_rt` (GT leak in the query depth, ep3) and `nsps_s1_dfix` (old caches).
 
 ## 4. Checking inference and the API
 
@@ -169,10 +170,47 @@ curl -X POST localhost:5092/api/eval_frame_image -F image=@image.jpg -F points=@
 ## 5. Open issues
 
 - Given the correct pose, an error remains after correction (roll 0.063°, z 0.018 m).
-- The dataset's candidate-point prefilter is GT projection ±64 px. Near points whose shift exceeds 64 px (0.2 m translation at 5 m depth ≈ 79 px) are dropped based on GT. The `z > 0.5` test also uses depth under the GT pose.
-- Val is 5 scenes (400 frames), train 34 scenes (2,720 frames); the cache holds only 39 scenes.
+- All numbers in sections 1 and 4 are from `ps_s2_own24_rt`, trained before the fixes in section 6 (GT leak in the query depth, binary intensity, caches without out-of-image points). No model has been trained on the new caches yet. The CLI and API still default to `pandaset_v3_full`, the cache that model was trained on; on `pandaset_pad256` the same val 123 case gives roll +0.185° instead of +0.138°.
+- Val is 5 PandaSet scenes (400 frames) and 34 nuScenes scenes (340 frames); val is reported as one pooled number, with no per-dataset breakdown.
+- Stage 1 trains on random-pivot windows (background pivots only in the middle rows); inference tiles the whole image.
 - Train numbers logged during training are epoch averages of in-progress weights under random queries and shifted grids, not the val conditions.
 - ClearML val visualisations now pick frames evenly across the set and the window with the most points (from the next run on).
+
+## 6. Code review (2026-10-08 afternoon): GT leaks and inference bugs
+
+| problem | severity | fix | file |
+|---|---|---|---|
+| The query point's depth `d` was the range from the **GT camera** (`pts_cam`); the same point in the bucket had z under the perturbed pose. From the difference, t·p̂ (translation along the window's viewing direction) could be read: a 7-parameter fit per window recovered it with correlation 1.000, rms error 3 mm against a 126 mm signal | GT leak | `pts_cam_off` (perturbed pose) | `datasets/pandaset_full.py` |
+| Cache held only points inside the image under GT; after perturbation the border that should fill in was empty (median 1% of points, max 3%) | GT-shaped hole | caches rebuilt with points up to 256 px outside the image, z > 0.1 | `scripts/preprocessing/build_*_v3.py` |
+| Candidate prefilter GT ±64 px, z > 0.5 under GT | GT-dependent drop | ±256 px, z > 0.1 (final test is still z_off > 0.5 under the perturbed pose) | `datasets/pandaset_full.py` |
+| Intensity: nuScenes cache had none (all 0); PandaSet stored raw 0–255 and the dataset clips to [0,1], so 94–98% of points were 1. In mixed training intensity was effectively a dataset label | data contract | both stored as raw/255; inference divides by 255 when an upload has values above 1 | builders, `scripts/inference/infer_calib.py` |
+| Point loss included grid windows duplicated to pad the count (`w_active=0`); BA already excluded them. Mixed stage 2: about 16 of nuScenes' 40 windows are duplicates | training bug | excluded from the point loss | `datasets/train_cnd2_ddp.py` |
+| ρ went through tanh twice before the GN weights (0.99 → 0.72); only used when there is no InfoHead | training bug | use the model's ρ directly (clamped to ±0.95) | `datasets/train_cnd2_ddp.py` |
+| numpy not imported: per-epoch debug render was skipped | training bug | import | `datasets/train_cnd2_ddp.py` |
+| `.bin` with N divisible by 20 was read as 4 columns (nuScenes 5-column files silently garbled) | inference bug | 5 columns if the 5th column is a ring index (integers 0–127), else 4 | `scripts/inference/infer_calib.py` |
+| calib JSON without `T_cam_lidar` silently used the identity | inference bug | error | `scripts/inference/infer_calib.py` |
+| any non-zero `dist` was treated as Kannala-Brandt fisheye | inference bug | fisheye only with `is_fisheye: true`; non-zero pinhole distortion is an error | `scripts/inference/infer_calib.py` |
+| windows fixed at the training count (40): above ~2 MP only the top rows of the image were used | inference bug | as many windows as cover the image | `scripts/inference/infer_calib.py` |
+| inference kept only points inside the image under the given pose | inference | keeps points up to 256 px outside, as the cache does | `scripts/inference/infer_calib.py` |
+
+With the query-depth fix, `ps_s2_own24_rt` on the same 40 val frames gives the same numbers as before to the 4th decimal (perturbed: median 0.0909° / 0.0331 m, worst 0.2595° / 0.1015 m). `d` is in units of 100 m, so the leaked part was about ±0.002 of the input.
+
+Checked and found correct: sign and direction of the correction (with the exact residual the pose comes back to 2e-9°), the eval endpoints give the dataset the perturbed pose (same as real use), the forward pass gets no GT tensor, there is no teacher forcing across iterations, and every architecture flag is read from the config at inference.
+
+Not changed: the val POSE metric in the training log linearises at the GT camera frame (inference numbers come from `tests/test_infer_pandaset.py`); random-pivot windows are centred on a GT-projected point; `vfp` (focal length) is not used by the model.
+
+### Representative point (query) per cell: training vs inference
+
+With `--rep-strategy random_train`, training picks a random point in each cell and val/inference pick the point closest to the cell centre. Debug mode draws this per window:
+
+```bash
+python scripts/visualization/vis_rep_points.py --cache <cache> --out <dir> --frames 0,123,250
+# or from any run: E2E_DATASET_DEBUG=<dir> (or debug_dir= in PandaSetCalibDatasetFull)
+```
+
+Left: training (random). Right: inference (closest to the cell centre). Same window and same perturbation in each row. Grey = all points in the window (projection under the perturbed pose), red = chosen representative, cyan ring = point closest to the cell centre, green = true position of the chosen point (red → green is the training target). The header gives how many chosen points coincide with the centre point: 33/130, 36/107 and 73/179 in training (cells with one point always coincide), and all of them in inference.
+
+![](_figs/2026-10-08/rep_train_vs_inference.jpg)
 
 ## Related
 

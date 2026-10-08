@@ -91,7 +91,9 @@ def ba_solve(per_pt, pad_mask, pts_cam_orig, K_orig, cs_t, *, img_size,
     mu_orig = per_pt[..., :2] * s2o.unsqueeze(-1)
     sx = torch.exp(per_pt[..., 2]).clamp(0.1, 50.0) * s2o
     sy = torch.exp(per_pt[..., 3]).clamp(0.1, 50.0) * s2o
-    rho = torch.tanh(per_pt[..., 4]) * 0.95
+    # per_pt[..., 4] はモデルの clamp_params で tanh(raw)*0.99 済みの ρ。以前はここでもう一度 tanh を
+    # 掛けていて (0.99 → 0.72)、GN が NLL で学習した ρ と違う相関で重みを作っていた。
+    rho = per_pt[..., 4].clamp(-0.95, 0.95)
     if W_head is not None:
         # InfoHead2x2 の W は局所 px^-2。GN は元カメラ px なので s2o^-2 で換算
         W = W_head / (s2o * s2o).view(B, 1, 1, 1)

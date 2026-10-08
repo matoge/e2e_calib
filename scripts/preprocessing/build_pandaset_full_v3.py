@@ -25,6 +25,10 @@ Storage (front_camera, 103 scenes, ~80 frames each):
 Crop is decided at __getitem__ time → no center bias from cache.
 """
 import argparse, sys, os, gzip, pickle, json, time
+
+# 画像の外に残す幅 [px] と最小深度 [m]。学習のずれ (回転 0.5°、並進 0.2 m) で入ってくる点を残す
+FOV_PAD = 256
+Z_MIN = 0.1
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
@@ -102,11 +106,16 @@ def _process_scene(args_tuple):
         # PandaSet lidar pkl includes an `i` (intensity) column per-point in
         # [0, 255] float. Save it alongside pts so the V3-i dataset path can
         # feed a 4-ch PointMLP (memory: project_lidar_intensity_pending).
-        intensity_all = (df['i'].values.astype(np.float32)
+        # intensity は 0〜255 → [0,1] に正規化して保存 (データセットは [0,1] で clip するだけ。
+        # 以前は生値を入れていて、clip で 94〜98% の点が 1 になっていた)
+        intensity_all = (df['i'].values.astype(np.float32) / 255.0
                          if 'i' in df.columns
                          else np.zeros(len(df), dtype=np.float32))
         uv, z = _project(pts_world, pose_mat, K)
-        vis = (z > 0.5) & (uv[:,0] >= 0) & (uv[:,0] < IW) & (uv[:,1] >= 0) & (uv[:,1] < IH)
+        # 画像の外 FOV_PAD px まで残す。ずらしたポーズで画像に入ってくる点が、GT で画像内の点しか
+        # 無いと端で欠ける (以前は GT で画像内だけ: 中央値で点の 1%)
+        vis = ((z > Z_MIN) & (uv[:,0] >= -FOV_PAD) & (uv[:,0] < IW + FOV_PAD) &
+               (uv[:,1] >= -FOV_PAD) & (uv[:,1] < IH + FOV_PAD))
         if vis.sum() < min_pts:
             continue
         pts_vis = pts_world[vis]

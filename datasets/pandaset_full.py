@@ -257,6 +257,8 @@ class PandaSetCalibDatasetFull(Dataset):
                  grid_frac: float = 0.5,
                  pert_seed: int = None,
                  eval_seed: int = None,
+                 debug_dir: str | None = None,
+                 debug_max: int = 40,
                  pert_const: bool = False,
                  frame_stride: int = 1,
                  grid_n: int = 16,
@@ -365,6 +367,12 @@ class PandaSetCalibDatasetFull(Dataset):
         # 段 1 (share_pert なし) の窓の位置・窓ごとの摂動は numpy のグローバル乱数で引くので、
         # pert_seed だけでは固定されず、val の窓とずれ (数値も可視化も) が毎エポック変わっていた。
         self.eval_seed  = None if eval_seed is None else int(eval_seed)
+        # debug_dir (または環境変数 E2E_DATASET_DEBUG): 窓ごとに代表点の選び方を描いた PNG を
+        # 最大 debug_max 枚書く。赤 = 実際に選ばれた点 (学習は random_train ならセル内ランダム)、
+        # 水色の輪 = セル中心に一番近い点 (val・推論で選ばれる点)、緑 = 選ばれた点の正しい位置。
+        self.debug_dir = debug_dir or os.environ.get('E2E_DATASET_DEBUG') or None
+        self.debug_max = int(debug_max)
+        self._debug_n = 0
         self.pert_const = bool(pert_const)
         # 推論では摂動ゼロ (ずれは渡されたポーズ側に入っている)。学習では None
         # で、share_pert/pert_seed の分岐が走る。
@@ -1031,10 +1039,13 @@ class PandaSetCalibDatasetFull(Dataset):
             # are dropped here and unrecoverable downstream → systematic gap
             # on the perturbation-edge of the crop). 25% is a safe upper
             # bound for default rot_deg=1.5 / t_m=0.20.
-            pad_px = max(64, int(cs * 0.25))
+            # 256 px = キャッシュが画像の外に残している幅 (build_*_v3.py の FOV_PAD)。以前は 64 px で、
+            # 並進 0.2 m・深度 5 m (約 79 px) の近い点がここで GT を基準に落ちていた。
+            # 深度も同じで、最終的な判定はずらしたポーズの z_off > 0.5 (build_crop)。
+            pad_px = max(256, int(cs * 0.25))
             in_pad = ((uv_full[:, 0] >= u0 - pad_px) & (uv_full[:, 0] < u0 + cs + pad_px) &
                       (uv_full[:, 1] >= v0 - pad_px) & (uv_full[:, 1] < v0 + cs + pad_px) &
-                      (z > 0.5))
+                      (z > 0.1))
             cand_idx = np.where(in_pad)[0]
             if len(cand_idx) < self.min_pts:
                 continue
@@ -1552,10 +1563,10 @@ class PandaSetCalibDatasetFull(Dataset):
         cs = min(IW, IH)
         u0 = (IW - cs) // 2
         v0 = (IH - cs) // 2
-        pad_px = int(cs * 0.10)
+        pad_px = max(256, int(cs * 0.10))
         in_pad = ((uv_full[:, 0] >= u0 - pad_px) & (uv_full[:, 0] < u0 + cs + pad_px) &
                   (uv_full[:, 1] >= v0 - pad_px) & (uv_full[:, 1] < v0 + cs + pad_px) &
-                  (z > 0.5))
+                  (z > 0.1))
         cand_idx = np.where(in_pad)[0]
         if len(cand_idx) < self.min_pts:
             return None
@@ -1958,6 +1969,19 @@ class PandaSetCalibDatasetFull(Dataset):
 
         self._last_crop = dict(u0=int(u0), v0=int(v0), cs=int(cs),
                                 scene=inst.get('scene'), frame=int(inst.get('frame', -1)))
+        if self.debug_dir and self._debug_n < self.debug_max:
+            _cu = (ci_u + 0.5) * cell_S; _cv = (ci_v + 0.5) * cell_S
+            _sc = (uv_local[:, 0] - _cu) ** 2 + (uv_local[:, 1] - _cv) ** 2
+            _o = np.lexsort((_sc, cell_id))
+            _, _fp = np.unique(cell_id[_o], return_index=True)
+            _used = ('random' if (self.rep_strategy == 'random_train' and self.split == 'train'
+                                  and self.pert_seed is None and force_sub_idx is None)
+                     else self.rep_strategy)
+            _dump_rep_debug(self.debug_dir, self._debug_n, img_crop, uv_local, grid_n, S,
+                            uv_off_loc, uv_gt_loc, uv_local[_o[_fp]],
+                            f"{self.split} rep={_used}  {inst.get('scene')}/{inst.get('frame', -1)}  "
+                            f"pts {len(uv_local)} reps {len(sub_idx)}")
+            self._debug_n += 1
         if delta1_se3 is None:
             delta1_se3 = np.zeros(6, dtype=np.float32)
         return (img_crop, torch.from_numpy(true_uvd), torch.from_numpy(dist_uvd),
@@ -1975,6 +1999,40 @@ class PandaSetCalibDatasetFull(Dataset):
                 torch.tensor(1.0 if self._use_grid else 0.0, dtype=torch.float32),
                 # 1 = この窓を BA に入れる / 0 = 枠を埋めるための複製
                 torch.tensor(float(getattr(self, '_w_active', 1.0)), dtype=torch.float32))
+
+
+def _dump_rep_debug(out_dir, n, img_crop, uv_all, grid_n, S, uv_sel, uv_gt_sel, uv_center, title):
+    """代表点の選び方を 1 枚の PNG に描く (debug_dir のときだけ呼ばれる)。座標はすべて窓の S px。
+    灰 = 窓の全点 (ずらしたポーズの投影)、赤 = 選ばれた代表点、水色の輪 = セル中心に一番近い点、
+    緑 = 選ばれた代表点の正しい位置 (赤→緑の線が学習の目標のずれ)。"""
+    import cv2
+    k = 3                                                  # 拡大率
+    _ic = img_crop[0] if img_crop.dim() == 4 else img_crop       # (3, S, S) uint8
+    im = _ic.permute(1, 2, 0).numpy().astype(np.float32) * 0.55
+    im = cv2.resize(im.astype(np.uint8), (S * k, S * k), interpolation=cv2.INTER_NEAREST)
+    im = np.ascontiguousarray(im[:, :, ::-1])              # RGB → BGR
+    c = S * k / grid_n
+    for g in range(1, grid_n):
+        p = int(round(g * c))
+        cv2.line(im, (p, 0), (p, S * k), (90, 90, 90), 1)
+        cv2.line(im, (0, p), (S * k, p), (90, 90, 90), 1)
+    P = lambda q: (int(round(q[0] * k)), int(round(q[1] * k)))
+    for q in uv_all:
+        cv2.circle(im, P(q), 2, (170, 170, 170), -1)
+    for q in uv_center:
+        cv2.circle(im, P(q), 7, (255, 200, 0), 2)
+    for a, b in zip(uv_sel, uv_gt_sel):
+        cv2.line(im, P(a), P(b), (80, 220, 80), 1)
+        cv2.circle(im, P(b), 3, (80, 220, 80), -1)
+        cv2.circle(im, P(a), 4, (40, 40, 255), -1)
+    same = sum(any(np.allclose(a, b) for b in uv_center) for a in uv_sel)
+    cv2.rectangle(im, (0, 0), (S * k, 52), (0, 0, 0), -1)
+    cv2.putText(im, title, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    cv2.putText(im, f"red=chosen  cyan ring=nearest to cell centre  green=true position   "
+                f"chosen==centre {same}/{len(uv_sel)}", (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (255, 255, 255), 1)
+    os.makedirs(out_dir, exist_ok=True)
+    cv2.imwrite(os.path.join(out_dir, f'rep_{os.getpid()}_{n:04d}.png'), im)
 
 
 def collate_full(batch):

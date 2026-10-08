@@ -43,7 +43,10 @@ from datasets.pandaset_full import PandaSetCalibDatasetFull, collate_full
 
 from scripts.util.projection import project_lidar_into_image
 
-Z_MIN = 0.5
+# キャッシュと同じ: 画像の外 FOV_PAD px、深度 Z_MIN m まで点を残す (build_*_v3.py)。
+# 最終的な判定はデータセット側の z_off > 0.5 と窓の範囲。
+Z_MIN = 0.1
+FOV_PAD = 256
 
 
 # ── 入力 ─────────────────────────────────────────────────────────────────
@@ -86,6 +89,9 @@ def load_points(data, name: str = '') -> np.ndarray:
         raise ValueError(f'点群の形が (N,>=3) でない: {a.shape}  ({name})')
     if a.shape[1] == 3:                      # intensity 無しは 0 で埋める
         a = np.concatenate([a, np.zeros((len(a), 1), np.float32)], 1)
+    # 学習のキャッシュの intensity は 0〜255 を /255 した [0,1]。1 を超える値があれば 0〜255 とみなす
+    if a.shape[1] >= 4 and len(a) and float(np.nanmax(a[:, 3])) > 1.0:
+        a = a.copy(); a[:, 3] = a[:, 3] / 255.0
     return np.ascontiguousarray(a[:, :4])
 
 
@@ -149,7 +155,7 @@ def build_inst(*, img: np.ndarray, pts: np.ndarray, K: np.ndarray,
     keep, pts_cam, uv, z, inten = project_lidar_into_image(
         pts, np.asarray(K, np.float64), np.asarray(T_cam_lidar, np.float64),
         IW, IH, is_fisheye=is_fisheye, dist=dist if is_fisheye else None,
-        z_min=Z_MIN)
+        z_min=Z_MIN, pad_px=FOV_PAD)
     if len(uv) < 8:
         raise RuntimeError(f'画像に落ちた点が {len(uv)} 個しかない')
     # R_gt / cam_pos はカメラ姿勢。pts は world 相当 = LiDAR 座標のままでよく、
