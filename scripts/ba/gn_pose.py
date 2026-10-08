@@ -33,16 +33,22 @@ DOF6 = ('omega_x', 'omega_y', 'omega_z', 'tx', 'ty', 'tz')
 
 def solve_pose(pts_cam: torch.Tensor, duv: torch.Tensor, W: torch.Tensor,
                K: torch.Tensor, *, dof=DOF6, valid=None, n_iter: int = 10,
-               damping: float = 0.0, prior_diag=None, dist=None, fisheye=None):
+               damping: float = 0.0, prior_diag=None,
+               robust: str | None = None, huber_k: float = 1.5,
+               dist=None, fisheye=None):
     """The ONE pose solver. pts_cam (B,N,3) cam-frame metres; duv (B,N,2) px
     (target = project(pts_cam,K)+duv); W (B,N,2,2) info; K (B,3,3).
     dist (B,4) Kannala-Brandt k1..k4 and fisheye (B,) 0/1: rows with fisheye=1 are solved with the
     KB projection + Jacobian (solve_kb_xyz), the rest pinhole. Without dist/fisheye: pinhole.
+    `robust`: optional IRLS kernel ('huber'/'tukey') applied each iter on the
+    Mahalanobis residual (pinhole only). Keep None for the train contract.
     Returns (delta (B,len(dof)), H (B,K,K))."""
     kw = dict(valid=valid, n_iter=n_iter, damping=damping, prior_diag=prior_diag)
     fe = None if (dist is None or fisheye is None) else (fisheye.reshape(-1) > 0.5)
     if fe is None or not bool(fe.any()):
-        return solve_pinhole_xyz(pts_cam, duv, W, K, dof, **kw)
+        return solve_pinhole_xyz(pts_cam, duv, W, K, dof, robust=robust, huber_k=huber_k, **kw)
+    if robust is not None:
+        raise NotImplementedError('solve_pose: robust IRLS is pinhole-only; solve_kb_xyz has no robust kernel')
     d_kb, H_kb = solve_kb_xyz(pts_cam, duv, W, K, dist.to(pts_cam.dtype), dof, **kw)
     if bool(fe.all()):
         return d_kb, H_kb

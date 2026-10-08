@@ -28,6 +28,7 @@ build/
 experiments/*/best_model.pt
 experiments/*/train.log
 infra/.cml_setup.sh
+scripts/_watch/
 !scripts/webui_kb_fit/_outputs/crop_boxes_ip607.json
 
 # 2026-08-30: LiDAR-camera キャリブレーションの標準構成。この 6 実験だけ

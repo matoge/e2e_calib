@@ -57,15 +57,19 @@ def main():
 
     # Lightweight Task just to host the OutputModel registration. Use a
     # 'utility' tag so it doesn't pollute the experiment dashboard.
+    # output_uri=True hits an SDK bug in newer clearml (bool → urlparse crash).
+    # Pull the files_server from config and pass as string.
+    from clearml.config import config_obj
+    files_uri = config_obj.get('api.files_server', 'http://172.18.2.49:8087')
     task = Task.init(project_name=args.project, task_name=f'tag/{args.name}',
-                      task_type=Task.TaskTypes.custom, output_uri=True,
+                      task_type=Task.TaskTypes.custom, output_uri=files_uri,
                       auto_connect_frameworks=False, auto_resource_monitoring=False,
                       reuse_last_task_id=False)
     om = OutputModel(task=task, name=args.name,
                       framework='PyTorch',
                       tags=args.tag,
                       comment=args.comment or f'tagged from {args.ckpt}')
-    om.update_weights(weights_filename=str(args.ckpt), upload_uri=True)
+    om.update_weights(weights_filename=str(args.ckpt), upload_uri=files_uri)
     print(f'registered model id={om.id}  name={args.name}  tags={args.tag}')
     print(f'URL: {task.get_output_log_web_page()}')
     task.close()

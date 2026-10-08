@@ -1,0 +1,96 @@
+# infra/Dockerfile.serve
+#
+# Self-contained LiDAR–camera auto-calibration API. FastAPI (Uvicorn) on
+# :8501 with weights baked in — the image is meant to run behind an ALB /
+# ECS Service with no external state or filesystem dependency.
+#
+# Endpoints (see docs/… or GET /docs on a live container for full Swagger):
+#     GET  /health                          — liveness
+#     POST /calibrate/generic/frame         — payload-based (image + LiDAR + calib)
+#     POST /calibrate/generic/sequence      — multi-frame joint pool
+#     POST /calibrate/frame                 — legacy path, needs mounted seq dir
+#     POST /calibrate/sequence              — legacy path, needs mounted seq dir
+#
+# Build (GPU, common case):
+#     docker build -f infra/Dockerfile.serve \
+#         --build-arg BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime \
+#         -t e2e-calib-serve:gpu .
+#
+# Build (CPU-only, cheaper for ECS Fargate):
+#     docker build -f infra/Dockerfile.serve \
+#         --build-arg BASE_IMAGE=pytorch/pytorch:2.4.1-cpu \
+#         -t e2e-calib-serve:cpu .
+#
+# Run locally:
+#     docker run --rm --gpus all -p 8501:8501 e2e-calib-serve:gpu
+#     curl http://localhost:8501/health
+#
+# Push + deploy:  see infra/README.serve.md for ECR/ECS steps.
+
+ARG BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app:/app/scripts/inference
+
+# Minimal system packages. libgl1 is needed for opencv-python-headless (yes,
+# even the headless build links against libgl at import time). tini gives us
+# proper PID 1 signal handling so SIGTERM from ECS drains cleanly.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tini libgl1 libglib2.0-0 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY infra/requirements.serve.txt /tmp/requirements.serve.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.serve.txt
+
+# Copy only the code the serving path actually needs — no training scripts,
+# no dataset builders, no ClearML config. Keeps the image small (~5-6 GB for
+# GPU, ~2 GB for CPU) and secrets out of layers.
+COPY models/                        /app/models/
+COPY scripts/serving/               /app/scripts/serving/
+COPY scripts/inference/             /app/scripts/inference/
+COPY scripts/ba/                    /app/scripts/ba/
+COPY scripts/util/                  /app/scripts/util/
+COPY scripts/preprocessing/build_woven_sequence_v3.py  \
+     scripts/preprocessing/_tile_split.py              \
+     /app/scripts/preprocessing/
+COPY scripts/__init__.py            /app/scripts/__init__.py
+RUN touch /app/scripts/serving/__init__.py \
+          /app/scripts/preprocessing/__init__.py \
+          /app/scripts/inference/__init__.py \
+          /app/scripts/ba/__init__.py \
+          /app/scripts/util/__init__.py \
+          /app/models/__init__.py
+
+# Bake weights + config. This is the whole 4.5 MB experiments/… dir; the
+# server auto-discovers it by CKPT env var (see entrypoint.serve.sh).
+COPY experiments/kmwv_calok_s3_ba40_1003_1107/best_model.pt \
+     experiments/kmwv_calok_s3_ba40_1003_1107/config.py \
+     /app/weights/kmwv_calok_s3_ba40_1003_1107/
+
+# Optional hood-mask polygons (per-car_id JSON). If your deployment doesn't
+# use hood masks, this directory just stays empty — the payload-based
+# endpoints let the client provide `hood_polygon_uv` inline anyway.
+RUN mkdir -p /app/hood_masks
+
+COPY infra/entrypoint.serve.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# ECS best practice: non-root user. Uid 1000 keeps bind-mount permissions
+# intuitive on Linux hosts (matches the default developer uid).
+RUN useradd --create-home --shell /bin/bash --uid 1000 app \
+    && chown -R app:app /app
+USER app
+
+# Docker HEALTHCHECK — ECS honors this if you leave the default health-check
+# settings on the task definition. Model load takes 10-20 s so give it 30 s.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -sf http://127.0.0.1:${PORT:-8501}/health | grep -q '"status":"ok"' || exit 1
+
+EXPOSE 8501
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

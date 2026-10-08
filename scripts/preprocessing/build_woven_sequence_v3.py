@@ -85,24 +85,66 @@ def _load_setting(seq: Path) -> dict:
 def _camera_calib_fcm(setting: dict):
     """Returns (K, dist4, R_cam_from_veh, t_cam_in_veh, W, H, delay_ms_default).
 
-    Mirrors backend/projection_utils.get_rtotal:
-        rot = [roll, pitch, yaw] (stored)
-        R_camera_to_vehicle = from_euler('zyx', [yaw, pitch, roll])
-        R_cam_from_veh = R_TO_RDF @ inv(R_camera_to_vehicle)
-        t_cam_in_veh   = mp
+    Mirrors backend/projection_utils.{get_rtotal, get_poslv_adjusted_calibration}
+    so this works for BOTH setting styles:
+
+    - **TMPOC-written WovenSequence** (unilab, kamikado, …): `fcm.mp/rot` is
+      already in rear_axle frame and `poslv={rot:[0,0,0], mp:[0,0,0]}`.
+      Our composition below reduces to the previous `R_to_rdf @ R_c2v.T`.
+    - **Older TSS4 raw** (tss4_calib_raw_01, …): `fcm.mp/rot` is in
+      vehicle-head frame and `poslv.{mp,rot}` carries the head→rear-axle
+      offset. We compose through poslv so the returned transform maps
+      rear_axle (= what `vls128_rear_axle/*.npz` points live in) → camera.
+
+    Composition identical to LOOM `get_poslv_adjusted_calibration`:
+        R_total       = R_to_rdf @ inv(R_cam_to_vehicle_head)
+        R_rear2cam    = R_total @ R_rear_in_head         (= R_poslv)
+        t_rear2cam    = R_total @ (poslv.mp - fcm.mp)
+
+    We also honor `kb.focal_length` when the kb block exists — LOOM uses
+    that focal, not the pinhole `fc`, when projecting with KB4 (see
+    projection_utils.get_camera_params lines 126-132).
     """
     cam = setting['fcm']
-    fx, fy = cam['fc']
+    kb = cam['kb']
+    if isinstance(kb, dict) and 'focal_length' in kb:
+        fx = fy = float(kb['focal_length'])
+    else:
+        fx, fy = cam['fc']
     cx, cy = cam['cc']
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-    kb = cam['kb']
     dist = np.array([kb['k1'], kb['k2'], kb['k3'], kb['k4']], dtype=np.float32)
     W, H = int(cam['resolution'][0]), int(cam['resolution'][1])
     roll, pitch, yaw = cam['rot']
-    R_cv = Rotation.from_euler('zyx', [yaw, pitch, roll]).as_matrix()
-    R_cam_from_veh = (R_TO_RDF @ np.linalg.inv(R_cv)).astype(np.float32)
-    t_cam_in_veh = np.array(cam['mp'], dtype=np.float32)
-    delay_default = float(cam.get('camera_delay_ms', 0.0))
+    R_c2v_head = Rotation.from_euler('zyx', [yaw, pitch, roll]).as_matrix()
+
+    # Head → rear_axle frame bridge. TMPOC-written settings have
+    # `poslv = {rot:[0,0,0], mp:[0,0,0]}`, so the composition below reduces
+    # to the previous head-only formula. Older TSS4 raw sequences carry a
+    # non-zero poslv that encodes the head→rear-axle offset.
+    poslv = setting.get('poslv', {}) or {}
+    poslv_rot = poslv.get('rot') or [0.0, 0.0, 0.0]
+    poslv_mp  = poslv.get('mp')  or [0.0, 0.0, 0.0]
+    proll, ppitch, pyaw = poslv_rot
+    R_poslv = Rotation.from_euler('zyx', [pyaw, ppitch, proll]).as_matrix()
+    fcm_mp = np.array(cam['mp'], dtype=np.float64)
+    pos_mp = np.array(poslv_mp, dtype=np.float64)
+
+    # Returned pair treats the "vehicle" frame downstream of this function
+    # as the rear_axle frame (= where the LiDAR points live). Derivation:
+    #
+    #     p_cam        = R_rdf · R_c2v_head.T · (p_head − fcm.mp)
+    #     p_head       = R_poslv · p_rear + poslv.mp
+    #     ⇒ R_rear2cam = R_rdf · R_c2v_head.T · R_poslv
+    #       t_rear2cam = R_rdf · R_c2v_head.T · (poslv.mp − fcm.mp)
+    #
+    # Then cam-in-rear_axle = −R_rear2cam.T · t_rear2cam = R_poslv.T · (fcm.mp − poslv.mp).
+    # The downstream `_T_lidar_to_cam_at_camera_time` consumes
+    # `t_cam_in_veh` in that semantics (camera position in the LiDAR frame).
+    R_cam_from_veh = (R_TO_RDF @ R_c2v_head.T @ R_poslv).astype(np.float32)
+    t_cam_in_veh   = (R_poslv.T @ (fcm_mp - pos_mp)).astype(np.float32)
+
+    delay_default = float(cam.get('camera_delay_ms') or 0.0)
     return K, dist, R_cam_from_veh, t_cam_in_veh, W, H, delay_default
 
 
@@ -352,18 +394,7 @@ def process_frame(args_tuple):
         # is byte-identical with kamikado/CaaaS via the shared helper.
         T_cl = _T_lidar_to_cam_at_camera_time(
             pose_curr, pose_cam, R_cv, t_cv)
-        if 'poslv' in setting:
-            # setting の poslv (後軸 → カメラの外部パラメータの基準系) を挟む:
-            # X_cam = Tc · T_front_rear · T_vv · X_rear。build_tss4_v3.load_calib と同じ合成。
-            # TSS4 は fcm.mp/rot が車頭系で poslv = mp [-3.823, 0, 0.702]。woven_sequence_27 (TMPOC) は
-            # 後軸系で poslv = 0 (単位変換) なので結果は変わらない。
-            p_ = setting['poslv']
-            r_, pi_, y_ = p_['rot']
-            T_fr = np.eye(4)
-            T_fr[:3, :3] = Rotation.from_euler('zyx', [y_, pi_, r_]).as_matrix()
-            T_fr[:3, 3] = np.asarray(p_['mp'], np.float64)
-            Tc = _T_lidar_to_cam_at_camera_time(np.eye(4), np.eye(4), R_cv, t_cv)
-            T_cl = Tc @ T_fr @ (np.linalg.inv(pose_cam) @ pose_curr)
+        # POSLV (後軸 → 車頭) は _camera_calib_fcm の中で LOOM get_poslv_adjusted_calibration と同じく合成済み
         # Pack LiDAR pts + intensity into a single (N,4) for the shared helper.
         pts_xyzi = np.column_stack(
             [pts_flu.astype(np.float32), intensity.astype(np.float32)])

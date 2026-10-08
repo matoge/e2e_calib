@@ -349,6 +349,8 @@ def solve_pinhole_xyz(P0: Tensor, duv: Tensor, W: Tensor,
                         *, valid: Tensor | None = None,
                         n_iter: int = 1, damping: float = 0.0,
                         prior_diag: Tensor | None = None,
+                        robust: str | None = None,
+                        huber_k: float = 1.5,
                         ) -> Tuple[Tensor, Tensor]:
     """uv-free pinhole BA. Consumes cam-frame XYZ directly so units stay
     metric/original-camera and there is no (cs/S) leakage from a local-
@@ -379,10 +381,38 @@ def solve_pinhole_xyz(P0: Tensor, duv: Tensor, W: Tensor,
         r = target_uv - uv_pred
         Xc, Yc, Zc = P_lin.unbind(-1)
         J = pinhole_jacobian(Xc, Yc, Zc, K_lin, uv_pred, dof_names)
-        step, H_last = gn_step(J, W, r, valid=valid, damping=damping,
+        W_eff = _apply_robust(W, r, valid, robust, huber_k)
+        step, H_last = gn_step(J, W_eff, r, valid=valid, damping=damping,
                                 prior_diag=prior_diag)
         delta = delta + step
     return delta, H_last
+
+
+def _apply_robust(W: Tensor, r: Tensor, valid: Tensor | None,
+                   robust: str | None, k: float) -> Tensor:
+    """IRLS reweighting of W by a robust kernel on the Mahalanobis residual.
+
+    r_m² = rᵀ W r  (scalar per point); for Huber: w_h = min(1, k / r_m).
+    W_eff = w_h · W. Call this each GN iteration BEFORE gn_step → the
+    inner (JᵀWJ) and (JᵀWr) both see the capped W, so one point's influence
+    is bounded by k σ. Set robust=None to no-op (train path untouched)."""
+    if robust is None:
+        return W
+    # Mahalanobis norm of r under W (per point).
+    rWr = torch.einsum('bni,bnij,bnj->bn', r, W, r).clamp_min(0.0)
+    rm = torch.sqrt(rWr + 1e-12)
+    if robust == 'huber':
+        wh = torch.where(rm > k, k / rm.clamp_min(1e-12), torch.ones_like(rm))
+    elif robust == 'tukey':
+        c = k
+        inside = (rm < c).to(W.dtype)
+        u = (rm / c).clamp_max(1.0)
+        wh = inside * (1.0 - u * u) ** 2
+    else:
+        raise ValueError(f"unknown robust kernel: {robust}")
+    if valid is not None:
+        wh = torch.where(valid, wh, torch.zeros_like(wh))
+    return W * wh.unsqueeze(-1).unsqueeze(-1)
 
 
 def solve_kb_xyz(P0: Tensor, duv: Tensor, W: Tensor,

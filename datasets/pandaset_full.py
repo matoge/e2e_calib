@@ -492,6 +492,23 @@ class PandaSetCalibDatasetFull(Dataset):
         if self.pair_mode:
             self.pair_index = self._build_pair_index()
 
+        # Fail fast if the cache is pre-tiled but training wants on-the-fly
+        # crop_grid. A pre-tiled cache stores one inst per TILE (IW/IH ==
+        # tile size, pts filtered to tile bbox), so _plan_grid can only
+        # produce 1 cell → oversample N copies the SAME tile → share_pert
+        # fuses N copies → chi2r explodes. Build the cache WITHOUT --tile.
+        if self.crop_grid and len(self.fnames) > 0:
+            probe = self._load_inst(0)
+            if probe.get('tile_u0', 0) or probe.get('tile_v0', 0) or \
+               (int(probe.get('IW', 10**9)) < self.min_crop_px):
+                raise RuntimeError(
+                    f"Cache {self.cache_dir} looks PRE-TILED (fname[0]={self.fnames[0]}, "
+                    f"IW={probe.get('IW')}, IH={probe.get('IH')}, "
+                    f"tile_u0={probe.get('tile_u0')}, tile_v0={probe.get('tile_v0')}), "
+                    f"but training was given --crop-grid with min_crop_px={self.min_crop_px}. "
+                    f"On-the-fly grid cropping expects FRAME-level insts (IW=full image). "
+                    f"Rebuild the cache WITHOUT --tile in scripts/preprocessing/build_*_v3.py.")
+
     def __len__(self):
         # NEW (2026-05-29): one __getitem__ call returns `oversample` samples
         # as a list, so len equals the number of frames (not inflated). The
