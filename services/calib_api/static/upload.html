@@ -1,7 +1,7 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LiDAR-カメラ キャリブ補正</title>
+<title>LiDAR-Camera Calibration</title>
 <style>
  :root{--bg:#fff;--fg:#1d1d1f;--dim:#666;--line:#ddd;--panel:#f6f6f7}
  body{font:14px/1.5 system-ui,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
@@ -23,29 +23,29 @@
  details pre{background:var(--panel);padding:10px;border-radius:6px;overflow:auto;max-height:300px}
  #status{margin:8px 0;min-height:1.5em}
 </style></head><body><main>
-<h1>LiDAR → カメラ 外部パラメータ補正</h1>
-<p class="dim">学習と同じ推論経路（scripts/inference/infer_calib.py）。画像全体を 256 px の窓に分け、
-窓ごとの点のずれを BA で 1 つのポーズにまとめる。</p>
+<h1>LiDAR → camera extrinsic correction</h1>
+<p class="dim">Same inference path as training (scripts/inference/infer_calib.py). The whole image is split into
+256 px windows and the per-window point shifts are combined into one pose by BA.</p>
 
 <form id="f" class="row">
- <fieldset><legend>PandaSet の val から選ぶ</legend>
-  <label>フレーム番号 <input type="text" id="psi" value="0" style="width:80px"> <span id="psn" class="dim"></span></label>
-  <button type="button" onclick="document.getElementById('psi').value=Math.floor(Math.random()*psN)">ランダムに選ぶ</button>
-  <button type="button" class="primary" onclick="goPS()">ずらして直す（PandaSet）</button>
+ <fieldset><legend>Pick from PandaSet val</legend>
+  <label>Frame index <input type="text" id="psi" value="0" style="width:80px"> <span id="psn" class="dim"></span></label>
+  <button type="button" onclick="document.getElementById('psi').value=Math.floor(Math.random()*psN)">Random</button>
+  <button type="button" class="primary" onclick="goPS()">Perturb and correct (PandaSet)</button>
  </fieldset>
- <fieldset><legend>または自分のデータをアップロード</legend>
-  <label>画像（PNG/JPG）<input type="file" name="image" id="img" required></label>
-  <label>点群 LiDAR 座標 x y z [intensity]（txt / npy / bin）<input type="file" name="points" required></label>
-  <label>calib JSON {"K", "T_cam_lidar", "dist"} または kamikado calib.calib <input type="file" name="calib" required></label>
+ <fieldset><legend>Or upload your own data</legend>
+  <label>Image (PNG/JPG) <input type="file" name="image" id="img" required></label>
+  <label>Point cloud, LiDAR frame x y z [intensity] (txt / npy / bin) <input type="file" name="points" required></label>
+  <label>calib JSON {"K", "T_cam_lidar", "dist"} or kamikado calib.calib <input type="file" name="calib" required></label>
  </fieldset>
- <fieldset><legend>ずらす量（calib が正しいポーズのとき、外からずらして直るかを見る）</legend>
-  <label>回転 [deg]（ZYX：ロール, ヨー, ピッチ）<input type="text" name="rot_deg" value="[0.3,-0.2,0.4]"></label>
-  <label>並進 [m]（カメラ軸 x 右, y 下, z 前）<input type="text" name="t_m" value="[0.05,-0.1,0.15]"></label>
-  <p class="dim">学習時のずれの範囲は 回転 各軸 ±0.5°、並進 各軸 ±0.2 m。</p>
+ <fieldset><legend>Perturbation (when the calib is correct: perturb it and check it comes back)</legend>
+  <label>Rotation [deg] (ZYX: roll, yaw, pitch) <input type="text" name="rot_deg" value="[0.3,-0.2,0.4]"></label>
+  <label>Translation [m] (camera axes: x right, y down, z forward) <input type="text" name="t_m" value="[0.05,-0.1,0.15]"></label>
+  <p class="dim">Training range: rotation ±0.5° per axis, translation ±0.2 m per axis.</p>
  </fieldset>
 </form>
-<button type="button" onclick="go('/api/eval_frame')">ずらして直す（アップロードしたデータ）</button>
-<button type="button" onclick="go('/api/calibrate_frame')">calib のまま補正量を出す</button>
+<button type="button" onclick="go('/api/eval_frame')">Perturb and correct (uploaded data)</button>
+<button type="button" onclick="go('/api/calibrate_frame')">Correction for the calib as-is</button>
 <div id="status" class="dim"></div>
 
 <div id="res" style="display:none">
@@ -53,24 +53,24 @@
  <table id="tab"></table>
  <div class="legend" id="legend"></div>
  <div id="wrap"><canvas id="cv"></canvas></div>
- <p class="dim">チェックで表示を切り替え。PandaSet は全点、アップロードは最大 4000 点（間引き）。</p>
- <details><summary>応答の JSON</summary><pre id="raw"></pre></details>
+ <p class="dim">Toggle layers with the checkboxes. PandaSet shows all points; uploads show at most 4000 (subsampled).</p>
+ <details><summary>Response JSON</summary><pre id="raw"></pre></details>
 </div>
 
 <script>
 const COL={true:'#34c759',input:'#ff3b30',corrected:'#00c2ff'};
-const NAME={true:'正しいポーズ',input:'ずらしたポーズ（入力）',corrected:'補正後のポーズ'};
+const NAME={true:'correct pose',input:'perturbed pose (input)',corrected:'corrected pose'};
 let last=null, imgEl=null, show={true:true,input:true,corrected:true}, psN=1;
-fetch('/api/pandaset/frames').then(r=>r.json()).then(j=>{psN=j.n;document.getElementById('psn').textContent=`（0〜${j.n-1}）`;}).catch(()=>{});
+fetch('/api/pandaset/frames').then(r=>r.json()).then(j=>{psN=j.n;document.getElementById('psn').textContent=`(0–${j.n-1})`;}).catch(()=>{});
 async function goPS(){
   const i=parseInt(document.getElementById('psi').value)||0, fm=document.getElementById('f');
   const fd=new FormData(); fd.append('i',i); fd.append('rot_deg',fm.rot_deg.value); fd.append('t_m',fm.t_m.value);
-  const st=document.getElementById('status'); st.textContent='推論中…';
+  const st=document.getElementById('status'); st.textContent='Running inference…';
   try{
     const r=await fetch('/api/pandaset/eval',{method:'POST',body:fd}); const j=await r.json();
-    if(!r.ok){st.textContent='HTTP '+r.status+'：'+(j.detail||JSON.stringify(j));return;}
-    st.textContent=`PandaSet val #${j.index}（シーン/フレーム ${j.frame}）、窓 ${j.n_windows} 枚、${j.took_s} 秒、点 ${j.overlay.true.filter(p=>p).length}`;
-    last=j; document.getElementById('raw').textContent=JSON.stringify({...j,overlay:'(省略)'},null,2);
+    if(!r.ok){st.textContent='HTTP '+r.status+': '+(j.detail||JSON.stringify(j));return;}
+    st.textContent=`PandaSet val #${j.index} (scene/frame ${j.frame}), ${j.n_windows} windows, ${j.took_s} s, ${j.overlay.true.filter(p=>p).length} points`;
+    last=j; document.getElementById('raw').textContent=JSON.stringify({...j,overlay:'(omitted)'},null,2);
     imgEl=await new Promise(res=>{const im=new Image();im.onload=()=>res(im);im.src='/api/pandaset/image/'+i;});
     render();
   }catch(e){st.textContent=String(e);}
@@ -79,11 +79,11 @@ function fmt(x,d){return (x>=0?'+':'')+x.toFixed(d)}
 async function go(url){
   const fd=new FormData(document.getElementById('f'));
   if(url.endsWith('calibrate_frame')){fd.delete('rot_deg');fd.delete('t_m');}
-  const st=document.getElementById('status'); st.textContent='推論中…';
+  const st=document.getElementById('status'); st.textContent='Running inference…';
   try{
     const r=await fetch(url,{method:'POST',body:fd}); const j=await r.json();
-    if(!r.ok){st.textContent='HTTP '+r.status+'：'+(j.detail||JSON.stringify(j));return;}
-    st.textContent=`窓 ${j.n_windows} 枚、${j.took_s} 秒`;
+    if(!r.ok){st.textContent='HTTP '+r.status+': '+(j.detail||JSON.stringify(j));return;}
+    st.textContent=`${j.n_windows} windows, ${j.took_s} s`;
     last=j; document.getElementById('raw').textContent=JSON.stringify(j,null,2);
     const f=document.getElementById('img').files[0];
     imgEl=await new Promise(res=>{const im=new Image();im.onload=()=>res(im);im.src=URL.createObjectURL(f);});
@@ -94,18 +94,18 @@ function render(){
   const j=last; document.getElementById('res').style.display='';
   const tab=document.getElementById('tab'), sm=document.getElementById('summary');
   if(j.error_after_axes){
-    const ks=[['yaw_deg','ヨー','°'],['pitch_deg','ピッチ','°'],['roll_deg','ロール','°'],
+    const ks=[['yaw_deg','yaw','°'],['pitch_deg','pitch','°'],['roll_deg','roll','°'],
               ['x_m','x','m'],['y_m','y','m'],['z_m','z','m']];
-    tab.innerHTML='<tr><th></th>'+ks.map(k=>`<th>${k[1]} [${k[2]}]</th>`).join('')+'<th>回転（まとめて）</th><th>並進（まとめて）</th></tr>'+
+    tab.innerHTML='<tr><th></th>'+ks.map(k=>`<th>${k[1]} [${k[2]}]</th>`).join('')+'<th>rotation (total)</th><th>translation (total)</th></tr>'+
       ['before','after'].map(w=>{const a=j['error_'+w+'_axes'],b=j['error_'+w];
-        return `<tr><td>${w=='before'?'補正前（入れたずれ）':'補正後'}</td>`+ks.map(k=>`<td>${fmt(a[k[0]],3)}</td>`).join('')+
+        return `<tr><td>${w=='before'?'before (injected perturbation)':'after correction'}</td>`+ks.map(k=>`<td>${fmt(a[k[0]],3)}</td>`).join('')+
                `<td>${b.rot_deg.toFixed(3)}°</td><td>${b.t_m.toFixed(3)} m</td></tr>`}).join('');
-    sm.textContent=`回転 ${j.error_before.rot_deg.toFixed(3)}° → ${j.error_after.rot_deg.toFixed(3)}°、`+
-                   `並進 ${j.error_before.t_m.toFixed(3)} m → ${j.error_after.t_m.toFixed(3)} m`;
+    sm.textContent=`rotation ${j.error_before.rot_deg.toFixed(3)}° → ${j.error_after.rot_deg.toFixed(3)}°, `+
+                   `translation ${j.error_before.t_m.toFixed(3)} m → ${j.error_after.t_m.toFixed(3)} m`;
   }else{
-    tab.innerHTML='<tr><th>補正量 δ</th><th>ωx</th><th>ωy</th><th>ωz [deg]</th><th>tx</th><th>ty</th><th>tz [m]</th></tr><tr><td></td>'+
+    tab.innerHTML='<tr><th>correction δ</th><th>ωx</th><th>ωy</th><th>ωz [deg]</th><th>tx</th><th>ty</th><th>tz [m]</th></tr><tr><td></td>'+
       j.delta.rot_deg.map(v=>`<td>${fmt(v,3)}</td>`).join('')+j.delta.t_m.map(v=>`<td>${fmt(v,3)}</td>`).join('')+'</tr>';
-    sm.textContent='calib のポーズに対する補正量（正解が無いので誤差は出せない）';
+    sm.textContent='Correction relative to the calib pose (no ground truth, so no error is shown)';
   }
   const lg=document.getElementById('legend');
   lg.innerHTML=Object.keys(j.overlay).map(k=>`<label><input type="checkbox" ${show[k]?'checked':''} onchange="show['${k}']=this.checked;draw()"><i class="sw" style="background:${COL[k]}"></i>${NAME[k]}</label>`).join('');

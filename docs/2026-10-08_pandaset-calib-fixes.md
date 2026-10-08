@@ -1,170 +1,179 @@
-# PandaSet：学習・推論・API を同じ経路で回す（2026-10-07〜08 の修正と結果）
+# PandaSet: training, inference and the API on one code path (fixes and results, 2026-10-07 to 08)
 
-## 結論
+## Summary
 
-- PandaSet の段 1（BA なし）→ 段 2（BA あり）を、学習・推論（`infer_calib.py`）・API（`/api/eval_frame`）の同じ経路で回した。
-- 外でずらしたポーズ（回転 各軸 ±0.5°、並進 各軸 ±0.2 m）を渡すと、val 40 フレームの補正後の中央値は次のとおり。
-  - ヨー 0.027°、ピッチ 0.029°、ロール 0.065°（PandaSet 前方カメラ f=1970 px で約 1 px）
-  - x 0.010 m、y 0.013 m、z 0.020 m
-- 正しいポーズを渡しても、補正後に同じくらいの誤差（ヨー 0.026°、ピッチ 0.039°、ロール 0.063°）が残る。
-- 一番大きいのはロールと z（前後）。val の p90 は、ロール 0.148°、z 0.075 m。
+- PandaSet stage 1 (no BA) → stage 2 (with BA) now runs through the same code path for training, inference (`infer_calib.py`) and the API (`/api/eval_frame`).
+- With a pose perturbed from outside (rotation ±0.5° per axis, translation ±0.2 m per axis), the median error after correction over 40 val frames is:
+  - yaw 0.027°, pitch 0.029°, roll 0.065° (about 1 px on the PandaSet front camera, f = 1970 px)
+  - x 0.010 m, y 0.013 m, z 0.020 m
+- Given the correct pose, a similar error remains after correction (yaw 0.026°, pitch 0.039°, roll 0.063°).
+- The largest errors are roll and z (forward). Val p90: roll 0.148°, z 0.075 m.
 
-## 1. 結果（ps_s2_own24_rt、本当の推論の経路）
+## 1. Results (ps_s2_own24_rt, real inference path)
 
-40 フレームずつ、補正後の誤差の絶対値。カメラ座標で、ヨー＝y 軸（下）まわり、ピッチ＝x 軸（右）まわり、ロール＝光軸まわり、x/y/z はカメラ中心のずれ。
+40 frames each; absolute error after correction. Camera frame: yaw = about the y axis (down), pitch = about the x axis (right), roll = about the optical axis; x/y/z = camera-centre offset.
 
-| | ヨー | ピッチ | ロール | x | y | z |
+| | yaw | pitch | roll | x | y | z |
 |---|---|---|---|---|---|---|
-| val 補正前 中央 | 0.189° | 0.323° | 0.276° | 0.102 m | 0.082 m | 0.114 m |
-| **val 補正後 中央** | **0.027°** | **0.029°** | **0.065°** | **0.010 m** | **0.013 m** | **0.020 m** |
-| val 補正後 p90 | 0.065° | 0.060° | 0.148° | 0.026 m | 0.030 m | 0.075 m |
-| val ずれなし 補正後 中央 | 0.026° | 0.039° | 0.063° | 0.009 m | 0.016 m | 0.018 m |
-| val ずれなし 補正後 p90 | 0.078° | 0.100° | 0.140° | 0.020 m | 0.033 m | 0.046 m |
-| train 補正後 中央 | 0.021° | 0.020° | 0.050° | 0.010 m | 0.013 m | 0.010 m |
+| val, before correction, median | 0.189° | 0.323° | 0.276° | 0.102 m | 0.082 m | 0.114 m |
+| **val, after, median** | **0.027°** | **0.029°** | **0.065°** | **0.010 m** | **0.013 m** | **0.020 m** |
+| val, after, p90 | 0.065° | 0.060° | 0.148° | 0.026 m | 0.030 m | 0.075 m |
+| val, no perturbation, after, median | 0.026° | 0.039° | 0.063° | 0.009 m | 0.016 m | 0.018 m |
+| val, no perturbation, after, p90 | 0.078° | 0.100° | 0.140° | 0.020 m | 0.033 m | 0.046 m |
+| train, after, median | 0.021° | 0.020° | 0.050° | 0.010 m | 0.013 m | 0.010 m |
 
-API（`/api/eval_frame`）で val の 1 フレームを 3 通りのずれで呼んだ結果（段 1 の重み）:
+One val frame through the API (`/api/eval_frame`) with three perturbations (stage-1 weights):
 
-| 入れたずれ | 補正前（測地 / 距離） | 補正後 |
+| perturbation | before (geodesic / distance) | after |
 |---|---|---|
-| なし | 0.000° / 0.000 m | 0.143° / 0.043 m |
+| none | 0.000° / 0.000 m | 0.143° / 0.043 m |
 | (0.3, −0.2, 0.25)° / (0.1, −0.05, 0.15) m | 0.438° / 0.187 m | 0.159° / 0.048 m |
 | (−0.45, 0.4, −0.1)° / (−0.18, 0.12, 0.05) m | 0.611° / 0.222 m | 0.104° / 0.037 m |
 
-学習の val の推移（段 2、学習ログの「POSE rot」＝回転の 3 軸の絶対値の平均。測地距離ではない）:
+Val during training (stage 2; "POSE rot" in the training log = mean of the absolute values of the 3 rotation axes, not the geodesic angle):
 
-| ep | 回転（3 軸平均） | 並進 | chi2r | σ |
+| ep | rotation (3-axis mean) | translation | chi2r | σ |
 |---|---|---|---|---|
 | 1 | 0.098° | 0.045 m | 22719 | 4.5 px |
 | 10 | 0.056 | 0.021 | 0.9 | 5.0 |
 | 30 | 0.045 | 0.014 | 2.6 | 3.1 |
 
-train のログ（同じ定義）は ep30 で 0.025°。同じ評価コードで train のシーンを測ると 0.036°、val のシーンは 0.046°。
+The train log (same definition) gives 0.025° at ep30. With the same evaluation code, train scenes give 0.036° and val scenes 0.046°.
 
-## 2. 直したこと
+## 2. What was fixed
 
-| 何が問題だったか | 直し方 | ファイル |
+| problem | fix | file |
 |---|---|---|
-| セルの代表点（クエリ）を GT の投影で選んでいた（2026-05-31〜）。モデルが座標から答えを読めた | ずらした後の投影（`uv_off_c`）で選ぶ | `datasets/pandaset_full.py` |
-| CalibNet2 の Deformable の参照点を `sigmoid(Linear(q))` で作っていて、自分の位置を見ていなかった（学習後も自分から 42〜100 px 離れていた） | `--ref-mode query`：参照点＝各点の uv そのもの。ずれは DA 内のサンプリング位置だけが学ぶ | `models/calibnet2.py` |
-| 局所エンコーダが周り 3×3 セルからランダムに 16 点、1 セル最大 8 点 | `--frustum-nb own --k-per-cell 24`（既定）：自分のセルの点を全部、1 セル最大 24 点 | `models/model_depth.py`、`train_cnd2_ddp.py` |
-| 学習でも val でもクエリがセル中心に一番近い点だけ | `--rep-strategy random_train`：学習時だけセル内ランダム、val・推論は中心に一番近い点 | `datasets/pandaset_full.py` |
-| 格子の窓のうち 1 枚でも点が足りないと、フレームごと引き直していた（学習では黙って別フレームに、推論では "no valid window after 1024 re-rolls" で落ちる） | 足りない窓は有効な窓の複製で埋め、`w_active=0`（BA に参加しない） | `datasets/pandaset_full.py` |
-| val に理由の記録なしで `center_band=0.5`（縦の中央 50% の行だけ）が付いていた | 外した。val も画像全体から窓を取る | `train_cnd2_ddp.py` |
-| val の窓とずれが毎エポック変わる（段 1 は numpy のグローバル乱数） | `--val-seed`（既定 20261008）で val の `__getitem__` の乱数を固定 | `pandaset_full.py`、`train_cnd2_ddp.py` |
-| ClearML のタスク一覧の Iterations が秒数（180 など）になる | 起動直後に iteration 1 で lr を送る | `train_cnd2_ddp.py`、`train_grid_depth.py` |
-| ClearML の報告用プロセス（fork）が `Task.init` で止まり、数値が 1 件も届かないことがあった | `~/clearml.conf` に `sdk.development.report_use_subprocess: false`（各マシンで設定） | — |
-| "Converting mask without torch.bool dtype" が val のたびに大量に出る | torch 2.0.0 の不具合（bool のマスクでも出る）。この警告だけ表示しない | `train_cnd2_ddp.py` |
-| eval が 10 エポックごと | 既定を 5 エポックごとに | `train_cnd2_ddp.py` |
-| 誤差が測地距離か 3 軸平均かで混乱 | `pose_error_axes`：ヨー・ピッチ・ロール・x・y・z を出す。API の応答にも `error_before_axes` / `error_after_axes` | `scripts/inference/infer_calib.py`、`services/calib_api/server.py` |
+| The per-cell representative point (query) was chosen from the GT projection (since 2026-05-31), so the model could read the answer from the coordinates | choose it from the perturbed projection (`uv_off_c`) | `datasets/pandaset_full.py` |
+| CalibNet2's Deformable reference point was `sigmoid(Linear(q))` and did not look at the point's own position (after training it was still 42–100 px away from the point) | `--ref-mode query`: reference point = the point's own uv. The offset is learned only by the sampling locations inside DA | `models/calibnet2.py` |
+| The local encoder took 16 random points from the surrounding 3×3 cells, at most 8 per cell | `--frustum-nb own --k-per-cell 24` (default): all points of the own cell, up to 24 | `models/model_depth.py`, `train_cnd2_ddp.py` |
+| In both training and val the query was always the point closest to the cell centre | `--rep-strategy random_train`: random within the cell during training only; val and inference use the point closest to the centre | `datasets/pandaset_full.py` |
+| If any grid window had too few points, the whole frame was re-drawn (silently a different frame in training; in inference it crashed with "no valid window after 1024 re-rolls") | fill missing windows with a copy of a valid window and set `w_active=0` (excluded from BA) | `datasets/pandaset_full.py` |
+| Val had `center_band=0.5` (only the vertical middle 50% of rows) with no recorded reason | removed; val takes windows from the whole image | `train_cnd2_ddp.py` |
+| Val windows and perturbations changed every epoch (stage 1 used numpy's global RNG) | `--val-seed` (default 20261008) fixes the RNG in val `__getitem__` | `pandaset_full.py`, `train_cnd2_ddp.py` |
+| ClearML's task list showed seconds (e.g. 180) as Iterations | report lr at iteration 1 right after start-up | `train_cnd2_ddp.py`, `train_grid_depth.py` |
+| ClearML's reporter subprocess (fork) sometimes hung in `Task.init` and no scalars arrived | `sdk.development.report_use_subprocess: false` in `~/clearml.conf` (set on each machine) | — |
+| "Converting mask without torch.bool dtype" printed in bulk on every val | a torch 2.0.0 bug (fires even for bool masks); only this warning is suppressed | `train_cnd2_ddp.py` |
+| eval every 10 epochs | default changed to every 5 | `train_cnd2_ddp.py` |
+| confusion between geodesic angle and 3-axis mean | `pose_error_axes` reports yaw, pitch, roll, x, y, z; the API response also has `error_before_axes` / `error_after_axes` | `scripts/inference/infer_calib.py`, `services/calib_api/server.py` |
 
-## 3. 学習のしかた
+## 3. How to train
 
 ```bash
-# 段 1（BA なし）。--frustum-nb own --k-per-cell 24 は既定
+# Stage 1 (no BA). --frustum-nb own --k-per-cell 24 is the default
 python -u datasets/train_cnd2_ddp.py --cache <pandaset_v3_full> \
   --min-crop-px 256 --max-crop-px 256 --img-size 256 --grid-n 16 --batch-size 4 --workers 6 \
   --val-fraction 0.1 --scene-split --n-iter 4 --lr 3e-4 --rot-deg 0.5 --t-m 0.2 \
   --clearml --clearml-project e2e_calib/calib --no-with-ba --oversample 40 --epochs 20 \
-  --cross-attn deform --ref-mode query --rep-strategy random_train --name <段1の名前>
+  --cross-attn deform --ref-mode query --rep-strategy random_train --name <stage1 name>
 
-# 段 2（BA あり）。段 1 の最良の重みから
-python -u datasets/train_cnd2_ddp.py <段 1 と同じ引数から --no-with-ba と --oversample を外す> \
-  --with-ba --resume-ckpt experiments/<段1の名前>/best_model.pt --start-epoch 0 --epochs 30 \
+# Stage 2 (with BA), from the best stage-1 weights
+python -u datasets/train_cnd2_ddp.py <stage-1 args without --no-with-ba and --oversample> \
+  --with-ba --resume-ckpt experiments/<stage1 name>/best_model.pt --start-epoch 0 --epochs 30 \
   --ba-iter 4 --ba-damping 1e-3 --ba-weight 0.05 --ba-loss-type nll \
-  --ba-warmup-start 0 --ba-warmup-end 10 --name <段2の名前>
+  --ba-warmup-start 0 --ba-warmup-end 10 --name <stage2 name>
 ```
 
-- 段 2 の実例は `_kick_ps_s2_after_rt.sh`。
-- 時間（RTX 3090 1 枚）：段 1 は 1 エポック約 3.2 分、段 2 は約 3.5〜4 分。
-- 環境：今回の最後の run は `sam3` 環境（torch 2.11）。`sam3` に libturbojpeg が無いので `TURBOJPEG_LIB=<libturbojpeg.so.0 のパス>` を渡した。API（uvicorn、FastAPI）は `neurad` 環境（torch 2.0）で動かした。torch 2.11 で保存した重みは 2.0 で読める。
+- Stage-2 example: `_kick_ps_s2_after_rt.sh`.
+- Time (one RTX 3090): stage 1 about 3.2 min/epoch, stage 2 about 3.5–4 min/epoch.
+- Environment: the last runs used the `sam3` env (torch 2.11). `sam3` has no libturbojpeg, so pass `TURBOJPEG_LIB=<path to libturbojpeg.so.0>`. The API (uvicorn, FastAPI) ran in the `neurad` env (torch 2.0). Weights saved with torch 2.11 load in 2.0.
 
-## 4. 推論・API の確かめ方
+### nuScenes + PandaSet together
+
+`--cache` takes a comma-separated list. nuScenes (1600×900) gives 7×4 = 28 windows of 256 px and PandaSet (1920×1080) gives 8×5 = 40; the trainer pads to 40 with copies of real windows and sets `w_active=0` on the copies so BA ignores them.
 
 ```bash
-# 本当の推論の経路で 40 フレーム（外でずらしたポーズを渡す）。ZERO=1 でずれなし
-CKPT_EXP=<段2の名前> N=40 python tests/test_infer_pandaset.py
+./_kick_nsps_s1.sh   # ns_850x4 (850 scenes, CAM_FRONT) + pandaset_v3_full, stage 1, otherwise identical to ps_s1_own24_rt
+```
+
+Run `nsps_s1_own24_rt` started 2026-10-08 11:51: train 5,779 / val 740 frames (scene split). No results yet.
+
+## 4. Checking inference and the API
+
+```bash
+# 40 frames through the real inference path (perturbed pose given from outside). ZERO=1 for no perturbation
+CKPT_EXP=<stage2 name> N=40 python tests/test_infer_pandaset.py
 
 # API
-E2E_EXP=<段2の名前> python -m uvicorn services.calib_api.server:app --port 5092
+E2E_EXP=<stage2 name> python -m uvicorn services.calib_api.server:app --port 5092
 curl -X POST localhost:5092/api/eval_frame -F image=@image.jpg -F points=@points.txt \
      -F calib=@calib.json -F rot_deg='[0.3,-0.2,0.25]' -F t_m='[0.1,-0.05,0.15]'
 ```
 
-### Web ページで試す
+### Web page
 
 ```bash
 E2E_EXP=ps_s2_own24_rt python -m uvicorn services.calib_api.server:app --host 0.0.0.0 --port 5092
-# ブラウザで http://<host>:5092/calibrate
+# open http://<host>:5092/calibrate
 ```
 
-- 「PandaSet の val から選ぶ」：フレーム番号（0〜399）を入れるかランダムに選び、ずらす量（回転 ZYX の度、並進 カメラ軸の m）を入れて「ずらして直す」。キャッシュは `E2E_PS_CACHE`（既定 `/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full`）。
-- 補正前・補正後の誤差（ヨー・ピッチ・ロール・x・y・z）の表と、画像に LiDAR の点を重ねた図（緑＝正しいポーズ、赤＝ずらしたポーズ、水色＝補正後）が出る。
-- 自分のデータ（画像・点群・calib JSON）をアップロードしても同じことができる。
-- 例：val #123（シーン 042、フレーム 43）、ずれ 回転 [0.4, −0.3, 0.4]°・並進 [0.1, −0.1, 0.15] m → 補正後 ヨー +0.024°、ピッチ −0.045°、ロール +0.138°、x −0.009 m、y −0.026 m、z +0.011 m。
+- "Pick from PandaSet val": enter a frame index (0–399) or pick one at random, enter the perturbation (rotation ZYX in degrees, translation along camera axes in m), and press "Perturb and correct". The cache is `E2E_PS_CACHE` (default `/mnt/ssd2t/work/e2e_calib/cache/pandaset_v3_full`).
+- It shows a table of the errors before/after (yaw, pitch, roll, x, y, z) and the image with LiDAR points overlaid (green = correct pose, red = perturbed pose, cyan = corrected).
+- Uploading your own data (image, point cloud, calib JSON) works the same way.
 
-CLI では、`--rot` と `--t` でずれを軸ごとに指定できる。
+The CLI takes the perturbation per axis with `--rot` and `--t`:
 
 ```bash
 python scripts/inference/infer_calib.py ps_s2_own24_rt --image image.jpg --points points.txt \
     --calib calib.json --rot '[0.3,-0.2,0.4]' --t '[0.05,-0.1,0.15]'
 ```
 
-### 直す前後（CLI）
+### Before / after (CLI)
 
-PandaSet の val を番号で選び、ずらして直し、重ねた図を保存する。図の左が補正前（赤＝ずらしたポーズ、緑＝正しいポーズ）、右が補正後（赤＝ずらしたポーズ、緑＝正しいポーズ、水色＝補正後。水色を一番上に描くので、緑と重なったところは水色だけ見える）。
+Pick a PandaSet val frame by index, perturb, correct and save an overlay. Left panel: before correction (red = perturbed pose, green = correct pose). Right panel: after correction (red = perturbed pose, green = correct pose, cyan = corrected; cyan is drawn on top, so where it overlaps green only cyan is visible).
 
 ```bash
 python scripts/inference/infer_calib.py ps_s2_own24_rt --pandaset-val 123 \
     --rot '[0.4,-0.3,0.4]' --t '[0.1,-0.1,0.15]' --overlay out.png
 ```
 
-| フレーム | | ヨー | ピッチ | ロール | x | y | z |
+| frame | | yaw | pitch | roll | x | y | z |
 |---|---|---|---|---|---|---|---|
-| val 250（シーン 015/10）ずれ 回転 [−0.45, 0.4, −0.1]°・並進 [−0.18, 0.12, 0.05] m | 補正前 | +0.399° | −0.103° | −0.451° | −0.180 m | +0.120 m | +0.050 m |
-| | 補正後 | −0.025° | +0.015° | **+0.098°** | +0.007 m | +0.002 m | −0.011 m |
-| val 123（シーン 042/43）ずれ 回転 [0.4, −0.3, 0.4]°・並進 [0.1, −0.1, 0.15] m | 補正前 | −0.303° | +0.398° | +0.398° | +0.100 m | −0.100 m | +0.150 m |
-| | 補正後 | +0.024° | −0.045° | **+0.138°** | −0.009 m | −0.026 m | +0.011 m |
-| val 250、ずれなし | 補正前 | 0 | 0 | 0 | 0 | 0 | 0 |
-| | 補正後 | −0.034° | −0.001° | **+0.087°** | +0.010 m | −0.009 m | −0.020 m |
+| val 250 (scene 015/10), perturbation rot [−0.45, 0.4, −0.1]°, t [−0.18, 0.12, 0.05] m | before | +0.399° | −0.103° | −0.451° | −0.180 m | +0.120 m | +0.050 m |
+| | after | −0.025° | +0.015° | **+0.098°** | +0.007 m | +0.002 m | −0.011 m |
+| val 123 (scene 042/43), perturbation rot [0.4, −0.3, 0.4]°, t [0.1, −0.1, 0.15] m | before | −0.303° | +0.398° | +0.398° | +0.100 m | −0.100 m | +0.150 m |
+| | after | +0.024° | −0.045° | **+0.138°** | −0.009 m | −0.026 m | +0.011 m |
+| val 250, no perturbation | before | 0 | 0 | 0 | 0 | 0 | 0 |
+| | after | −0.034° | −0.001° | **+0.087°** | +0.010 m | −0.009 m | −0.020 m |
 
-3 例とも補正後に一番大きく残るのはロール。ずれなしで入れても、ロール 0.087°・z 0.020 m 動く。
+In all three cases roll is the largest residual. With no perturbation the output still moves by roll 0.087° and z 0.020 m.
 
-val 250、ずれあり:
+val 250, perturbed:
 
 ![](_figs/2026-10-08/cli_val250_shift.jpg)
 
-val 123、ずれあり（API の `/api/pandaset/eval_image` も同じ関数 `render_overlay` で描く）:
+val 123, perturbed (the API's `/api/pandaset/eval_image` draws with the same function, `render_overlay`):
 
 ![](_figs/2026-10-08/cli_val123_shift.jpg)
 
-val 250、ずれなし:
+val 250, no perturbation:
 
 ![](_figs/2026-10-08/cli_val250_zero.jpg)
 
-### 直す前後（API）
+### Before / after (API)
 
 ```bash
-# 前後を重ねた PNG が返る。誤差はヘッダ X-Error-Before / X-Error-After / X-Frame（JSON）
+# returns the before/after overlay as PNG; errors in headers X-Error-Before / X-Error-After / X-Frame (JSON)
 curl -X POST localhost:5092/api/pandaset/eval_image -F i=123 \
      -F rot_deg='[0.4,-0.3,0.4]' -F t_m='[0.1,-0.1,0.15]' -D - -o out.png
 
-# 同じものを JSON で（軸ごとの誤差 error_before_axes / error_after_axes と、点の投影 overlay）
+# same as JSON (per-axis errors error_before_axes / error_after_axes and projected points in overlay)
 curl -X POST localhost:5092/api/pandaset/eval -F i=123 \
      -F rot_deg='[0.4,-0.3,0.4]' -F t_m='[0.1,-0.1,0.15]'
 
-# 自分のデータで前後の PNG
+# before/after PNG for your own data
 curl -X POST localhost:5092/api/eval_frame_image -F image=@image.jpg -F points=@points.txt \
      -F calib=@calib.json -F rot_deg='[0.3,-0.2,0.25]' -F t_m='[0.1,-0.05,0.15]' -o out.png
 ```
 
-## 5. まだ残っていること
+## 5. Open issues
 
-- 正しいポーズを渡しても補正後に誤差が残る（ロール 0.063°、z 0.018 m）。
-- データセットの候補点の前絞りが、GT の投影 ±64 px で決まっている。ずれが 64 px を超える近い点（並進 0.2 m、深度 5 m で約 79 px）は GT 依存で落ちる。`z > 0.5` の判定も GT のポーズの深度。
-- val は 5 シーン（400 フレーム）、train は 34 シーン（2,720 フレーム）。キャッシュに 39 シーンしか入っていない。
-- 学習中の train の値は、クエリがランダム・格子がずれた条件で、学習途中の重みのエポック平均。val と同じ条件ではない。
-- ClearML の val の可視化は、フレームを全体から等間隔に、窓を点の一番多いものに選ぶよう直した（次の run から）。
+- Given the correct pose, an error remains after correction (roll 0.063°, z 0.018 m).
+- The dataset's candidate-point prefilter is GT projection ±64 px. Near points whose shift exceeds 64 px (0.2 m translation at 5 m depth ≈ 79 px) are dropped based on GT. The `z > 0.5` test also uses depth under the GT pose.
+- Val is 5 scenes (400 frames), train 34 scenes (2,720 frames); the cache holds only 39 scenes.
+- Train numbers logged during training are epoch averages of in-progress weights under random queries and shifted grids, not the val conditions.
+- ClearML val visualisations now pick frames evenly across the set and the window with the most points (from the next run on).
 
-## 関連
+## Related
 
-- 人工データでの切り分け: [2026-10-08_toy-bench-ladder.md](2026-10-08_toy-bench-ladder.md)（Deformable で参照点を自分の位置にすると、格子の点のデータで 7.03 → 1.66 px）
+- Synthetic-data isolation: [2026-10-08_toy-bench-ladder.md](2026-10-08_toy-bench-ladder.md) (Deformable with the reference point at the point's own position: 7.03 → 1.66 px on grid-point data)

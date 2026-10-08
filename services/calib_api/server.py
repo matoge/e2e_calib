@@ -79,15 +79,15 @@ async def _read_inputs(image: UploadFile, points: UploadFile, calib: UploadFile)
     try:
         img = np.array(Image.open(io.BytesIO(await image.read())).convert('RGB'))
     except Exception as e:
-        raise HTTPException(400, f'image を読めない: {type(e).__name__}: {e}')
+        raise HTTPException(400, f'cannot read image: {type(e).__name__}: {e}')
     try:
         pts = load_points(await points.read(), points.filename or '')
     except Exception as e:
-        raise HTTPException(400, f'points を読めない: {type(e).__name__}: {e}')
+        raise HTTPException(400, f'cannot read points: {type(e).__name__}: {e}')
     try:
         K, dist, T, fe = load_calib(await calib.read(), calib.filename or '')
     except Exception as e:
-        raise HTTPException(400, f'calib を読めない: {type(e).__name__}: {e}')
+        raise HTTPException(400, f'cannot read calib: {type(e).__name__}: {e}')
     return img, pts, K, dist, T, fe
 
 
@@ -161,7 +161,7 @@ async def eval_frame(image: UploadFile = File(...), points: UploadFile = File(..
         r = np.asarray(json.loads(rot_deg), np.float64).reshape(3)
         t = np.asarray(json.loads(t_m), np.float64).reshape(3)
     except Exception as e:
-        raise HTTPException(400, f'rot_deg / t_m は JSON の 3 要素: {e}')
+        raise HTTPException(400, f'rot_deg / t_m must be JSON lists of 3 numbers: {e}')
     T_in = perturb_T(T_true, rot_deg=r, t_m=t)
     out, T_corr = _solve(img, pts, K, dist, T_in, fe)
     e0 = pose_error(T_in, T_true); e1 = pose_error(T_corr, T_true)
@@ -220,7 +220,7 @@ def ps_eval(i: int = Form(...),
         r = np.asarray(json.loads(rot_deg), np.float64).reshape(3)
         t = np.asarray(json.loads(t_m), np.float64).reshape(3)
     except Exception as e:
-        raise HTTPException(400, f'rot_deg / t_m は JSON の 3 要素: {e}')
+        raise HTTPException(400, f'rot_deg / t_m must be JSON lists of 3 numbers: {e}')
     T_in = perturb_T(T_true, rot_deg=r, t_m=t)
     out, T_corr = _solve(img, pts, K, None, T_in, False)
     e0 = pose_error(T_in, T_true); e1 = pose_error(T_corr, T_true)

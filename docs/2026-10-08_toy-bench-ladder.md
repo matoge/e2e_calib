@@ -1,66 +1,66 @@
-# 人工データのベンチ：どこで崩れるか（2026-10-07〜08）
+# Synthetic-data bench: where training breaks (2026-10-07 to 08)
 
-## 結論
+## Summary
 
-- 点を LiDAR の格子に置くと、全体クロスアテンションの CalibNetDepth は物体の点を直せない（8.51 px）。クロスアテンションを Deformable（参照点＝各点自身の uv）にすると、同じデータで 1.66 px まで下がる。1 px は切っていない。
-- 全体アテンションのまま位置埋め込みを鋭くしても、局所エンコーダの Q から絶対位置を抜いても、7〜9 px 台のまま。
-- 1 px を切ったのは、旧データ（物体の上に点の 3 分の 2 を密集させた、簡単すぎる問題）の 0.95 px だけ。
+- With points on a LiDAR grid, CalibNetDepth with global cross-attention cannot correct the object points (8.51 px). Switching cross-attention to Deformable (reference point = each point's own uv) brings the same data down to 1.66 px. It does not go below 1 px.
+- Keeping global attention and making the positional embedding sharper, or removing the absolute position from the local encoder's Q, stays at 7–9 px.
+- The only run below 1 px is the old data (two thirds of the points packed onto the objects — too easy a problem) at 0.95 px.
 
-## 1. 旧データから 1 つずつ変えたときの物体の点の誤差
+## 1. Object-point error when changing one thing at a time from the old data
 
-モデルは CalibNetDepth（3 層）、128 px、損失は NLL（全点平均）、80 エポック。val は seed 700000〜 の 800 枚。何も補正しないときは約 11 px。
+Model: CalibNetDepth (3 layers), 128 px, NLL loss (mean over all points), 80 epochs. Val: 800 images from seed 700000. No correction ≈ 11 px.
 
-| 段 | 前の段から変えたこと | クロスアテンション | 局所エンコーダ | ep80 物体 | ep80 背景 |
+| step | change from the previous step | cross-attention | local encoder | ep80 object | ep80 background |
 |---|---|---|---|---|---|
-| 0 | 旧データ（物体 2 個＋背景、255 点を 1:1:1、白黒、深度固定） | 全体 | なし | 0.95 | 1.99 |
-| 2 | 画像を白黒 → ランダムな色の RGB | 全体 | なし | 1.04 | 1.83 |
-| 3 | 深度を固定 → ランダム | 全体 | なし | 1.14 | 1.90 |
-| 4 | 点を LiDAR 格子 8 px（面積どおり。物体の点 約 170 → 中央値 20） | 全体 | なし | **8.51** | 2.70 |
-| 4a | 格子でなく一様ランダム（点の数は段 4 と同じ） | 全体 | なし | 10.72 | 1.19 |
-| 4f | 段 4 に局所エンコーダ | 全体 | あり | 7.03 | 2.63 |
-| 4f-1 | 局所エンコーダの Q を（d, 強度）だけから | 全体 | あり | 7.39 | 2.67 |
-| 4f-PE | 位置埋め込みを鋭く（画像と点に同じサイン波、周期 画像 2 枚分〜4 px） | 全体 | あり | 8.83 | 2.05 |
-| **4f-D** | クロスアテンションを Deformable（参照点＝自分の uv） | Deformable | あり | **1.66** | 1.02 |
-| 4f-D g1 | 1 段目だけ全体、2・3 段目 Deformable | 混合 | あり | 2.16（ep47 で停止） | 1.31 |
-| 4f-D grid4 | 格子 4 px（1 枚 約 1024 点） | Deformable | あり | 1.57（ep31 で停止） | 0.92 |
+| 0 | old data (2 objects + background, 255 points at 1:1:1, greyscale, fixed depth) | global | no | 0.95 | 1.99 |
+| 2 | greyscale → random-colour RGB | global | no | 1.04 | 1.83 |
+| 3 | fixed depth → random | global | no | 1.14 | 1.90 |
+| 4 | points on an 8 px LiDAR grid (by area; object points ≈ 170 → median 20) | global | no | **8.51** | 2.70 |
+| 4a | uniform random instead of grid (same point count as step 4) | global | no | 10.72 | 1.19 |
+| 4f | step 4 + local encoder | global | yes | 7.03 | 2.63 |
+| 4f-1 | local encoder Q from (d, intensity) only | global | yes | 7.39 | 2.67 |
+| 4f-PE | sharper positional embedding (same sinusoids for image and points, periods 2 images to 4 px) | global | yes | 8.83 | 2.05 |
+| **4f-D** | Deformable cross-attention (reference point = own uv) | Deformable | yes | **1.66** | 1.02 |
+| 4f-D g1 | layer 1 global, layers 2–3 Deformable | mixed | yes | 2.16 (stopped at ep47) | 1.31 |
+| 4f-D grid4 | 4 px grid (≈ 1024 points per image) | Deformable | yes | 1.57 (stopped at ep31) | 0.92 |
 
-段 3 と段 4 の点（同じ seed、違うのは点の置き方だけ）:
+Points of steps 3 and 4 (same seed; only the point placement differs):
 
 ![](_figs/2026-10-08/ladder3_vs_4_points.png)
 
-段 4（全体アテンション）と段 4f-D（Deformable）の ep80、val の 1 枚目:
+Step 4 (global attention) and step 4f-D (Deformable), ep80, first val image:
 
 ![](_figs/2026-10-08/ladder4_ep80_val0.png)
 ![](_figs/2026-10-08/ladder4fD_ep80_val0.png)
 
-## 2. 全体アテンションで何が起きているか
+## 2. What happens with global attention
 
-- 画像を別のサンプルのものに差し替えても予測がほとんど変わらない run がある（物体だけずらして背景を止めた run で、予測の変化 0.02 px）。画像を使わずに、平均（ずれ 0）を出し続けている。
-- 物体のずれを全サンプル共通の定数にした問題でも、約 375 回の更新のあいだ出力 0 のまま止まり、そのあと急に下がった。
-- 損失には物体の点も入っていて、勾配も流れている。同じ 16 枚だけなら 200 回で 9.99 → 1.03 px まで覚える。
-- 深度は見えている。物体の点の深度を背景の値に書き換えると、段 4 の予測は 12.96 px 動く。物体だと分かったあとに、その物体のずれを画像から読めていない。
-- 16×16 の最小問題（物体の画素の点だけ、全点同じずれ ±3 px）なら、全体アテンションでも 0.14〜0.16 px まで下がる。
+- In some runs the prediction barely changes when the image is swapped for another sample's (in the run where only the object moves and the background is fixed, the prediction changes by 0.02 px). It ignores the image and keeps outputting the mean (zero shift).
+- Even with the object shift a constant shared by all samples, the output stayed at 0 for about 375 updates and then dropped suddenly.
+- The loss includes the object points and gradients do flow. On the same 16 images it memorises 9.99 → 1.03 px in 200 updates.
+- Depth is visible: overwriting the object points' depth with the background value moves the step-4 prediction by 12.96 px. It knows a point is on the object but does not read that object's shift from the image.
+- In a minimal 16×16 problem (points only on object pixels, all with the same ±3 px shift), global attention reaches 0.14–0.16 px.
 
-## 3. 損失について（物体 1 個、64 px のベンチ）
+## 3. Loss (1 object, 64 px bench)
 
-| 損失 | 物体の点 |
+| loss | object points |
 |---|---|
-| NLL（全点平均） | 1 バッチ 400 回でも 9.1〜15.4 px（σ を広げて μ が動かない） |
-| μ は距離、σ は μ を止めた NLL（split） | 5.47 px（100 エポック） |
-| split で物体と背景を半分ずつ（split_grp） | 2.60 px（深度差 0.05〜0.10 でも中央値 2.00 px） |
+| NLL (mean over all points) | 9.1–15.4 px even after 400 updates on one batch (σ widens, μ does not move) |
+| μ by distance, σ by NLL with μ stopped (split) | 5.47 px (100 epochs) |
+| split with object and background weighted half/half (split_grp) | 2.60 px (median 2.00 px even at depth difference 0.05–0.10) |
 
-物体の点は全点の 6.8%。全点平均だと、損失の 9 割以上を背景の点が占める。
+Object points are 6.8% of all points. With the all-point mean, background points make up over 90% of the loss.
 
-## 4. まだやっていないこと
+## 4. Not done yet
 
-- LiDAR のように密度を変え（横と縦の間隔を別々に 4〜24 px）、画像の外にも点を撒いてずらしたあとに画像内だけ残す版。局所エンコーダあり・なしの 2 本は、セッションが落ちてまだ 1 エポックも回っていない。
-- 格子 4 px と 1 段目全体アテンションの run を最後まで回すこと。
-- GT を与えない推論の確認（点の順番を入れ替える、ずらさない入力、自分で足したずれ）。
-- 物体ごとに独立なずれではなく、1 つのポーズから来るずれ（回転は共通、並進は 1/d）にしたときに、全体アテンションと Deformable の差が残るか。
-- PandaSet（CalibNet2）に戻すこと。参照点の作り方を直した ps_s1_refq は 10 エポックで 6.50 px。参照点＝自分の uv そのもの（`--ref-mode query`）は ep3 で止めたまま。
+- Variable density like a LiDAR (horizontal and vertical spacing separately 4–24 px), with points scattered outside the image too and only those inside kept after the shift. The two runs (with and without the local encoder) had not finished one epoch when the session died.
+- Finishing the 4 px grid run and the layer-1-global run.
+- Checking inference without GT (shuffled point order, unperturbed input, self-added shifts).
+- Whether the gap between global attention and Deformable remains when shifts come from one pose (shared rotation, translation as 1/d) instead of per-object independent shifts.
+- Going back to PandaSet (CalibNet2). ps_s1_refq with the fixed reference point: 6.50 px at 10 epochs. Reference point = own uv (`--ref-mode query`) stopped at ep3. (Later done: see [2026-10-08_pandaset-calib-fixes.md](2026-10-08_pandaset-calib-fixes.md).)
 
-## 再現
+## Reproduce
 
-- 学習: `GRID_CFG=configs.<設定> python -u train_grid_depth.py`（設定は `configs/grid_depth*.py`）
-- データ: `datasets/synthetic.py` の `make_image_and_points_depth`（段 0〜4）、`make_image_and_points_lidar`（64 px ベンチ）
-- ClearML: プロジェクト e2e_calib/calib、タグ `toy_bench`
+- Training: `GRID_CFG=configs.<config> python -u train_grid_depth.py` (configs in `configs/grid_depth*.py`)
+- Data: `make_image_and_points_depth` in `datasets/synthetic.py` (steps 0–4), `make_image_and_points_lidar` (64 px bench)
+- ClearML: project e2e_calib/calib, tag `toy_bench`
