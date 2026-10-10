@@ -345,7 +345,9 @@ def load_model(exp: str, device='cuda', ckpt: str = 'best_model.pt'):
                       ref_from_query=bool(c.get('ref_from_query', False)),
                       cross_attn=c.get('cross_attn', 'deform'),
                       ref_mode=(c.get('ref_mode') or None),
-                      frustum_nb=c.get('frustum_nb', '3x3'))
+                      frustum_nb=c.get('frustum_nb', '3x3'),
+                      std_decoder=bool(c.get('std_decoder', False)),
+                      frustum_rel_uv_norm=bool(c.get('frustum_rel_uv_norm', False)))
     sd = torch.load(REPO_ROOT / 'experiments' / exp / ckpt, map_location='cpu',
                     weights_only=False)
     sd = sd.get('model', sd) if isinstance(sd, dict) else sd

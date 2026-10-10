@@ -179,8 +179,12 @@ class FrustumLocalEncoder(nn.Module):
     def __init__(self, d_out: int = D_DIM, r_uv_cells: float = 1.5, r_d: float = 0.004,
                  k: int = 32, grid_n: int = 16,
                  d_local: int = 32, n_heads: int = 2, n_layers: int = 2,
-                 q_from: str = 'token', nb: str = '3x3'):
+                 q_from: str = 'token', nb: str = '3x3', rel_uv_norm: bool = False):
         super().__init__()
+        # rel_uv_norm=True: kv_proj に入れる相対量のうち Δu, Δv を img_size で割る (Δd, Δintensity はそのまま)。
+        #   PointMLP3 の u/img_size と同じ扱い。従来 (False) は Δu, Δv が窓の px のまま (中央値 4 px, p90 11 px) で、
+        #   Δd (距離/100 m の差、中央値 0.0003, p90 0.036) と桁が違った (2026-10-10 測定)
+        self.rel_uv_norm = bool(rel_uv_norm)
         self.r_uv_cells = r_uv_cells   # neighborhood radius in cell units (1.5 = own cell + 8-neighbors)
         self.grid_n = grid_n
         self.r_d  = r_d
@@ -281,6 +285,8 @@ class FrustumLocalEncoder(nn.Module):
 
         # rel relative to query
         rel_all = cands - query_uvd.unsqueeze(2)                       # (B, Nq, 72, C)
+        if self.rel_uv_norm:
+            rel_all = torch.cat([rel_all[..., :2] / float(img_size), rel_all[..., 2:]], dim=-1)
 
         # Density-invariant: k random points from the valid set.
         # 学習時はグローバル乱数。eval (model.eval()) では固定シードの生成器を
@@ -639,7 +645,9 @@ class CalibNetDepth(nn.Module):
                  deform_first_global: bool = False,
                  pe_mode: str = 'lin',
                  frustum_nb: str = '3x3',
-                 point_rel: bool = False):
+                 point_rel: bool = False,
+                 detach_ref: bool = False,
+                 std_decoder: bool = False):
         """deform_mode: 'none' (standard cross-attn, cascaded coarse/fine),
                        'sl'  (single-level deformable, same cascade),
                        'ml'  (multi-level deformable — each block sees both
@@ -656,6 +664,17 @@ class CalibNetDepth(nn.Module):
                                                              pe_mode=pe_mode, img_px=img_size))
         # pe_mode='sharp': 画像 (CNNBackbone) と点のトークンに同じ鋭いサイン波 PE を足す
         self.pe_mode = pe_mode
+        # detach_ref=True: ブロック間で位置 uv_i を .detach() する (Deformable DETR の iterative refinement)。
+        # 前のブロックの Δuv は合計として出力に入るだけで、後ろのブロックのサンプリング位置を通る勾配は受けない。
+        self.detach_ref = bool(detach_ref)
+        # std_decoder=True: 普通の Deformable DETR デコーダの形 (iterative refinement + deep supervision)。
+        #   - 位置: 各ブロックの Δuv を積み上げ、次のブロックの参照点にする。detach は別 (detach_ref)。
+        #     PandaSet 256 固定・50 エポックで detach ありは val nll 4.568 / mse 9.66、なしは 4.348 / 8.81 (2026-10-10)
+        #   - σ, ρ: 各ブロック自身の出力 (積み上げない)
+        #   - 各ブロックの出力 (積み上げた位置 + そのブロックの σ) を self._aux に残し、学習側で全部に損失をかける
+        #   最終出力 = 最後のブロックの出力
+        self.std_decoder = bool(std_decoder)
+        self._aux = None
         # point_rel=True: 点のトークンに絶対位置を入れない。PointMLP3 の入力の (u,v) を 0 にし、
         # 位置は UV のサイン波 PE (sharp_pe) だけで入れる。ブロック間の位置更新は PE の置き換え。
         # 各ブロックの出力ヘッド proj(cat[q, uv]) の uv 列も重み 0 に固定する。
@@ -978,9 +997,12 @@ class CalibNetDepth(nn.Module):
         # first layer (uv_01)
         q, raw_cum = self._block(blocks[0], q, feats_by_layer[0], uv_01, key_padding_mask,
                                   extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
+        aux_raw = [raw_cum] if self.std_decoder else None
         # refinement layers
         for i in range(1, min(self.n_layers, len(blocks))):
             uv_i = (uv_01 + raw_cum[..., :2]).clamp(0, 1)
+            if self.detach_ref:
+                uv_i = uv_i.detach()
             if self.use_intensity:
                 refine_uvd = torch.cat([uv_i, d3, distorted_uvd[..., 3:4]], dim=-1)
             else:
@@ -999,8 +1021,15 @@ class CalibNetDepth(nn.Module):
             q, raw_i = self._block(blocks[i], q, feats_by_layer[i], uv_i, key_padding_mask,
                                     extra_kv=extra_kv, extra_kv_mask=extra_kv_mask)
             raw_cum = raw_cum + raw_i
-        raw = raw_cum
-        per_pt = clamp_params(raw, self.img_size)   # (B,N,5)
+            if self.std_decoder:
+                aux_raw.append(torch.cat([raw_cum[..., :2], raw_i[..., 2:]], dim=-1))
+        if self.std_decoder:
+            aux = [clamp_params(r, self.img_size) for r in aux_raw]
+            self._aux = aux
+            per_pt = aux[-1]
+        else:
+            raw = raw_cum
+            per_pt = clamp_params(raw, self.img_size)   # (B,N,5)
 
         if self.frame_pose_head is not None:
             # q here is the final per-pt feature stack (B, N, D) — input to CLS.

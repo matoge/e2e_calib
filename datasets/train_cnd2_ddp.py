@@ -672,6 +672,10 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
             valid = valid & (batch[16].reshape(-1, 1).to(valid.device) > 0.5)
         ba_diag = None
         nll_loss = gaussian2d_nll(per_pt[valid], gt[valid])
+        # std_decoder (deep supervision): 学習の点の損失は全層の NLL の平均。記録する nll は最後の層 (nll_loss)
+        _aux = getattr(accel.unwrap_model(model), '_aux', None)
+        nll_train = (torch.stack([gaussian2d_nll(a[valid], gt[valid]) for a in _aux]).mean()
+                     if _aux is not None else nll_loss)
         if (not train) and getattr(accel, '_pose_eval', None) is not None:
             # POSE evaluation, run every eval epoch whether or not the BA loss
             # is switched on. tr_mse/va_mse are ||mu - gt|| in local crop px --
@@ -721,11 +725,12 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
                                           detach_mu=getattr(accel, '_ba_detach_mu', True))
             ba_weight = getattr(accel, '_ba_weight', 0.5)
             if ba_l is None:
-                loss = nll_loss
+                loss = nll_train; loss_rec = nll_loss.detach()
             else:
-                loss = (1.0 - ba_weight) * nll_loss + ba_weight * ba_l
+                loss = (1.0 - ba_weight) * nll_train + ba_weight * ba_l
+                loss_rec = ((1.0 - ba_weight) * nll_loss + ba_weight * ba_l).detach()
         else:
-            loss = nll_loss
+            loss = nll_train; loss_rec = nll_loss.detach()
         if train:
             optimizer.zero_grad(set_to_none=True)
             accel.backward(loss)
@@ -734,7 +739,7 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool,
         with torch.no_grad():
             err = (per_pt[valid][..., :2].float() - gt[valid]).norm(dim=-1)
             total_mse += err.mean().item()
-        total_nll += loss.item(); n += 1
+        total_nll += loss_rec.item(); n += 1
         total_pt_nll += float(nll_loss.item())
         if getattr(accel, '_ba_loss_mode', False) and ba_l is not None:
             total_ba_nll += float(ba_l.item()); n_ba += 1
@@ -792,6 +797,9 @@ def main():
     p.add_argument('--cache', required=True,
                    help='comma-separated v3-tiled cache path(s)')
     p.add_argument('--epochs', type=int, default=50)
+    p.add_argument('--eval-only', action='store_true',
+                   help='no training pass: run validation once on --resume-ckpt and exit '
+                        '(use with --start-epoch N-1 --epochs N)')
     p.add_argument('--eval-every', type=int, default=5,
                    help='Run validation + per-epoch debug-sample render only '
                         'every N epochs. Always evals on ep1 and the last ep. '
@@ -950,6 +958,11 @@ def main():
                    help="セルの代表点 (クエリ)。random_train = 学習はセル内ランダム、val・推論はセル中心に一番近い点")
     p.add_argument('--val-seed', type=int, default=20261008,
                    help="val のデータセットの乱数を (この値, サンプル番号) で固定する。窓の位置とずれが毎エポック同じになる")
+    p.add_argument('--frustum-rel-uv-norm', action='store_true',
+                   help='FrustumLocalEncoder: divide the relative Δu, Δv by img_size (Δd unchanged)')
+    p.add_argument('--std-decoder', action='store_true',
+                   help='Deformable DETR decoder: per-layer weights + per-layer head, reference moved by the '
+                        'accumulated Δuv each layer, per-layer σ, NLL on every layer (deep supervision)')
     p.add_argument('--frustum-nb', type=str, default='own', choices=['3x3', 'own'],
                    help="局所エンコーダの近傍。3x3 = 周り 3x3 セルからランダム 16 点 (従来)、own = 自分のセルの点を全部")
     p.add_argument('--k-per-cell', type=int, default=24,
@@ -1304,7 +1317,9 @@ def main():
                       ref_from_query=bool(args.ref_from_query),
                       cross_attn=args.cross_attn,
                       ref_mode=(args.ref_mode or None),
-                      frustum_nb=args.frustum_nb)
+                      frustum_nb=args.frustum_nb,
+                      std_decoder=bool(args.std_decoder),
+                      frustum_rel_uv_norm=bool(args.frustum_rel_uv_norm))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 
     if mixed_mode and train_loader_calib is not None:
@@ -1468,16 +1483,19 @@ def main():
         # tiles + decodes JPEG every epoch) and 50ep × 10ep stride still
         # gives 5 eval points per run.
         eval_stride = int(getattr(args, 'eval_every', 10))
-        do_eval = (ep + 1) % eval_stride == 0 or (ep + 1) == epochs or ep == 0
-        tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
-                            args.img_size, vis_capture=vis_cap_train if do_eval else None)
+        do_eval = (ep + 1) % eval_stride == 0 or (ep + 1) == epochs or ep == 0 or args.eval_only
+        if args.eval_only:
+            tr_out = None
+        else:
+            tr_out = _epoch_fn(model, train_loader, optimizer, accel, True,
+                                args.img_size, vis_capture=vis_cap_train if do_eval else None)
         tr_split = getattr(accel, '_nll_split', (float('nan'), float('nan')))
         tr_pose  = getattr(accel, '_pose_train', None)
         # Mixed-mode: also run the calib-only secondary epoch (alternates
         # parameter updates with the primary pair epoch, both share model).
         tr_out_calib = None
         va_out_calib = None
-        if _epoch_fn_calib is not None and train_loader_calib is not None:
+        if _epoch_fn_calib is not None and train_loader_calib is not None and not args.eval_only:
             tr_out_calib = _epoch_fn_calib(model, train_loader_calib, optimizer,
                                             accel, True, args.img_size)
         if do_eval:
@@ -1492,6 +1510,8 @@ def main():
         else:
             va_out = (float('nan'),) * len(tr_out)
             va_split = (float('nan'), float('nan'))
+        if tr_out is None:
+            tr_out = (float('nan'),) * len(va_out)
         if len(tr_out) == 4:
             tr_nll, tr_mse, tr_nll_cal, tr_mse_cal = tr_out
             va_nll, va_mse, va_nll_cal, va_mse_cal = va_out

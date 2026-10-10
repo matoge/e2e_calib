@@ -98,7 +98,12 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
                        bucket_uvd=bucket_uvd, bucket_valid=bucket_valid,
                        pose_emb_se3=delta1_se3)
         valid  = ~pad_mask
-        loss   = gaussian2d_nll(params[valid], gt[valid])
+        _aux = getattr(accel.unwrap_model(model), '_aux', None)
+        if _aux is not None:
+            # deep supervision: 各ブロックの出力に同じ NLL をかけて平均。params (= 最後のブロック) は指標用
+            loss = torch.stack([gaussian2d_nll(a[valid], gt[valid]) for a in _aux]).mean()
+        else:
+            loss = gaussian2d_nll(params[valid], gt[valid])
         if train:
             optimizer.zero_grad(set_to_none=True)
             accel.backward(loss)
@@ -116,7 +121,9 @@ def epoch_loop(model, loader, optimizer, accel: Accelerator, train: bool):
             if is_bg.any():
                 bg_nll_s  += gaussian2d_nll(params[is_bg],  gt[is_bg]).item();  bg_n  += 1
                 bg_errs.append((params[is_bg][..., :2].float() - gt[is_bg]).norm(dim=-1).detach())
-        total_nll += loss.item(); total_mse += mse; n += 1
+        # deep supervision のときも記録する nll は最後のブロック (= 出力) の値。他の run と比べられるように
+        _nll_rec = gaussian2d_nll(params[valid], gt[valid]).item() if _aux is not None else loss.item()
+        total_nll += _nll_rec; total_mse += mse; n += 1
         # Lowered from 100 to 25 so short runs (smoke / small train-size) still
         # see step-level sps. Otherwise users report "SPS not appearing".
         if train and accel.is_main_process and (n - _last_log_step >= 25):
@@ -220,7 +227,10 @@ def main(cfg=None):
                   frame_stride=c.get('frame_stride', 1),
                   grid_n=c.get('grid_n', 16),
                   oversample=c.get('oversample', 12),
-                  split_pert=c.get('split_pert', False))
+                  split_pert=c.get('split_pert', False),
+                  rep_strategy=c.get('rep_strategy', 'cell_center'),
+                  k_per_cell=c.get('k_per_cell', 8))
+    log(f"rep_strategy={ds_kw['rep_strategy']}  detach_ref={bool(c.get('detach_ref', False))}  std_decoder={bool(c.get('std_decoder', False))}  deform_mode={c.get('deform_mode')}  k_per_cell={ds_kw['k_per_cell']}")
     log(f"cache={cache}  perturbation=±{ds_kw['max_rot_deg']} deg / ±{ds_kw['max_offset_m']} m  "
         f"crop_px=[{ds_kw['min_crop_px']}, {ds_kw['max_crop_px']}] (full → {c['img_size']})")
     cache_paths = [p.strip() for p in str(cache).split(',') if p.strip()]
@@ -238,7 +248,11 @@ def main(cfg=None):
         # set is dominated by interpretable mid-image samples (default 0.5 =
         # central 50% of rows). Set val_center_band=0 to disable.
         va_kw = dict(cp_kw)
-        va_kw['center_band'] = float(c.get('val_center_band', 0.5))
+        if c.get('scene_split'):
+            # train_cnd2_ddp.py --scene-split と同じ val: 画像全体から窓、窓とずれは val_seed で固定
+            va_kw['eval_seed'] = int(c.get('val_seed', 20261008))
+        else:
+            va_kw['center_band'] = float(c.get('val_center_band', 0.5))
         va_p = PandaSetCalibDatasetFull(cp, split='val',   **va_kw)
         log(f"  [{cp}] train={len(tr_p)} val={len(va_p)} (os={cp_kw['oversample']})")
         tr_parts.append(tr_p); va_parts.append(va_p)
@@ -246,14 +260,20 @@ def main(cfg=None):
     va_full = ConcatDataset(va_parts) if len(va_parts) > 1 else va_parts[0]
     log(f"train cache: {len(tr_full)} inst   val cache: {len(va_full)} inst")
 
-    full_ds = ConcatDataset([tr_full, va_full])
-    idxs = list(range(len(full_ds)))
-    _r.Random(c["split_seed"]).shuffle(idxs)
-    n_val_obj = int(len(idxs) * c["val_fraction"])
-    val_idxs, train_idxs = idxs[:n_val_obj], idxs[n_val_obj:]
-    train_ds = Subset(full_ds, train_idxs)
-    val_ds   = Subset(full_ds, val_idxs)
-    log(f"object-level split: train={len(train_ds)} val={len(val_ds)} (seed={c['split_seed']})")
+    if c.get('scene_split'):
+        # キャッシュの meta.pt の train/val (シーン単位) をそのまま使う。val のシーンは学習に入らない。
+        # 下の既定は train と val を混ぜてサンプル単位でシャッフルするので、val の窓が学習と同じシーケンスから来る。
+        train_ds, val_ds = tr_full, va_full
+        log(f"SCENE-level split (from the cache meta): train={len(train_ds)} val={len(val_ds)}")
+    else:
+        full_ds = ConcatDataset([tr_full, va_full])
+        idxs = list(range(len(full_ds)))
+        _r.Random(c["split_seed"]).shuffle(idxs)
+        n_val_obj = int(len(idxs) * c["val_fraction"])
+        val_idxs, train_idxs = idxs[:n_val_obj], idxs[n_val_obj:]
+        train_ds = Subset(full_ds, train_idxs)
+        val_ds   = Subset(full_ds, val_idxs)
+        log(f"object-level split: train={len(train_ds)} val={len(val_ds)} (seed={c['split_seed']})")
 
     train_size = c.get('train_size', None)
     val_size   = c.get('val_size',   None)
@@ -282,7 +302,9 @@ def main(cfg=None):
                           deform_mode=c.get("deform_mode", "none"),
                           convnext_n_blocks=c.get("convnext_n_blocks", 2),
                           convnext_fine_d=c.get("convnext_fine_d", None),
-                          convnext_stem_d=c.get("convnext_stem_d", None))
+                          convnext_stem_d=c.get("convnext_stem_d", None),
+                          detach_ref=c.get("detach_ref", False),
+                          std_decoder=c.get("std_decoder", False))
     # torch.compile BEFORE accel.prepare so DDP wraps the compiled graph.
     # mode='reduce-overhead' is the sweet spot: CUDA graph capture for static
     # shapes, minimal compile time (~30-60s vs max-autotune's 5+ min).
@@ -573,6 +595,18 @@ if __name__ == "__main__":
     ap.add_argument('--n-layers', type=int, default=None)
     ap.add_argument('--img-size', type=int, default=None)
     ap.add_argument('--convnext', action='store_true')
+    ap.add_argument('--scene-split', action='store_true',
+                    help='val = the cache meta val scenes (never trained on), whole-image windows, fixed by --val-seed')
+    ap.add_argument('--val-seed', type=int, default=20261008)
+    ap.add_argument('--k-per-cell', type=int, default=None,
+                    help='LiDAR points kept per 16x16 cell for the neighbourhood (dataset default 8; train_cnd2_ddp uses 24)')
+    ap.add_argument('--std-decoder', action='store_true',
+                    help='per-block sigma + deep supervision (reference update as before; add --detach-ref to detach it)')
+    ap.add_argument('--detach-ref', action='store_true',
+                    help='detach the per-block position uv_i (Deformable DETR iterative refinement)')
+    ap.add_argument('--rep-strategy', default=None, choices=['cell_center', 'nearest_cam', 'random_train'],
+                    help='query per cell: cell_center = closest to the cell centre (default, as in May), '
+                         'nearest_cam = smallest depth')
     ap.add_argument('--convnext-n-blocks', type=int, default=None,
                     help='ConvNeXt blocks per stage (default 2). 4 ~= +0.7 M params, +30%% forward.')
     ap.add_argument('--convnext-fine-d', type=int, default=None,
@@ -650,6 +684,11 @@ if __name__ == "__main__":
     if args.n_layers is not None: cfg['n_layers'] = args.n_layers
     if args.img_size is not None: cfg['img_size'] = args.img_size
     if args.convnext: cfg['use_convnext'] = True
+    if args.scene_split: cfg['scene_split'] = True; cfg['val_seed'] = args.val_seed
+    if args.rep_strategy is not None: cfg['rep_strategy'] = args.rep_strategy
+    if args.detach_ref: cfg['detach_ref'] = True
+    if args.std_decoder: cfg['std_decoder'] = True
+    if args.k_per_cell is not None: cfg['k_per_cell'] = args.k_per_cell
     if args.convnext_n_blocks is not None: cfg['convnext_n_blocks'] = args.convnext_n_blocks
     if args.convnext_fine_d   is not None: cfg['convnext_fine_d']   = args.convnext_fine_d
     if args.convnext_stem_d   is not None: cfg['convnext_stem_d']   = args.convnext_stem_d

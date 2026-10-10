@@ -1,111 +1,133 @@
 """Waymo Open Dataset v2 → calibration cache (same inst schema as the kamikado / woven / PandaSet caches).
 
-Unlike build_waymo_v3.py this does NOT use lidar_camera_projection. v3 back-projected the LCP uv with the
-LiDAR range used as the camera z (range ≥ z: median +4–7 %, up to +20 %), so translation-induced shifts were
-under-estimated. Here the LiDAR points are real 3D points and the projection is our own pinhole, exactly as
-for PandaSet / nuScenes:
+uv comes from Waymo's own projection, the same chain that produced lidar_camera_projection (cp points):
 
-  TOP LiDAR range image (return1) + lidar_calibration  → points in the vehicle frame at LiDAR time
-  vehicle_pose (LiDAR time) and [CameraImageComponent].pose (vehicle pose at the camera shutter)
-      + camera extrinsic (camera_calibration)          → points in the camera frame at shutter time
-  pinhole K (camera_calibration f_u f_v c_u c_v)       → uv_full
+  TOP LiDAR range image return1 + lidar_calibration + lidar_pose (vehicle pose per LiDAR pixel) + vehicle_pose
+      → v2 lidar_utils.convert_range_image_to_cartesian(pixel_pose, frame_pose)   points, vehicle frame @ frame time
+      → frame pose                                                                world points (float64)
+  camera_calibration (f, c, k1 k2 p1 p2 k3, extrinsic, rolling_shutter_direction)
+      + [CameraImageComponent] pose / velocity / pose_timestamp / rolling_shutter_params
+      → py_camera_model_ops.world_to_image                                        uv with distortion + rolling shutter
 
-Range-image decode and calibration loading are the helpers already verified in waymo_to_pandaset.py.
-Lens distortion is not modelled (pinhole), and the per-pixel pose of the spinning LiDAR is not applied.
+Checked against cp on 5 segments × 5 cameras: median 1.15–1.57 px, p90 ≤ 2.84 px (GLOBAL_SHUTTER instead: up to 25 px).
+
+Training is pinhole with one pose per image, so each point is stored as the 3D point that the pinhole K projects
+exactly onto Waymo's uv: pts = z · K⁻¹ [u, v, 1], z = depth of the point in the camera at pose_timestamp.
+Distortion and rolling shutter are folded into the point's direction; K·pts reproduces uv_full.
 
 Per inst: pts (N,3) camera frame (OpenCV: x right, y down, z forward), uv_full, z_cam, intensity (range-image
-channel 1, clipped to [0,1]), K_full, jpg_bytes (original JPEG), IW, IH, R_gt = I, cam_pos = 0, is_obj = 0.
-Points kept: z > Z_MIN and up to FOV_PAD px outside the image (same rule as the other builders).
+channel 1, clipped to [0,1]), K_full (f_u f_v c_u c_v), jpg_bytes (original JPEG), IW, IH, R_gt = I, cam_pos = 0, is_obj = 0.
+Points kept: world_to_image ok, z > max(Z_MIN, --min-depth, default 2 m), up to FOV_PAD px outside the image.
 Splits: training/ → train, validation/ → val (different segments).
 
+Runs in the `waymo` conda env (tensorflow + waymo-open-dataset-tf-2-12-0 + torch cpu):
     python scripts/preprocessing/build_waymo_v4.py --src /mnt/ssd2t/work/waymo_v2 --out <cache> --stride 10
-    python scripts/preprocessing/convert_tile_cache_to_lmdb.py --cache <cache>
+    python scripts/preprocessing/convert_tile_cache_to_lmdb.py --cache <cache>      (neurad env)
 """
-import argparse, io, sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import argparse, io
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pyarrow.parquet as pq
 import torch
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.preprocessing.waymo_to_pandaset import (_decode_range_image, _load_cam_intr_extr,  # noqa: E402
-                                                      _load_lidar_cal, CAMERAS, TOP_LIDAR)
-
 FOV_PAD = 256
 Z_MIN = 0.1
 GID_STRIDE = 10000          # gid block per segment (frames × cameras)
-
-
-def _top_lidar_pts(row, incl, az_corr, T_veh_from_lid):
-    """Range image return1 → (N,3) vehicle-frame points + (N,) intensity, same mask as _decode_range_image."""
-    vals = row['[LiDARComponent].range_image_return1.values']
-    shape = row['[LiDARComponent].range_image_return1.shape']
-    pts_lid = _decode_range_image(vals, shape, incl, az_corr)
-    ri = np.asarray(vals, np.float32).reshape(shape)
-    inten = ri[:, :, 1][ri[:, :, 0] > 0].astype(np.float32)
-    pts_veh = pts_lid @ T_veh_from_lid[:3, :3].T + T_veh_from_lid[:3, 3]
-    return pts_veh.astype(np.float64), inten
+TOP_LIDAR = 1
+CAMERAS = {1: 'FRONT', 2: 'FRONT_LEFT', 3: 'FRONT_RIGHT', 4: 'SIDE_LEFT', 5: 'SIDE_RIGHT'}
+CI, CC = '[CameraImageComponent].', '[CameraCalibrationComponent].'
+INTR = ['f_u', 'f_v', 'c_u', 'c_v', 'k1', 'k2', 'p1', 'p2', 'k3']
 
 
 def process_seg(args):
-    split_dir, seg, out_dir, gid0, cams, stride, max_frames = args
+    split_dir, seg, out_dir, gid0, cams, stride, max_frames, min_depth = args
+    import tensorflow as tf
+    tf.config.set_visible_devices([], 'GPU')
+    from waymo_open_dataset import v2
+    from waymo_open_dataset.v2.perception import lidar as v2_lidar
+    from waymo_open_dataset.v2.perception.utils import lidar_utils
+    from waymo_open_dataset.wdl_limited.camera.ops import py_camera_model_ops
+
     W = Path(split_dir)
     inst_dir = Path(out_dir) / 'inst'
     inst_dir.mkdir(parents=True, exist_ok=True)
-    lcal = pd.read_parquet(W / 'lidar_calibration' / f'{seg}.parquet')
-    T_veh_from_lid, incl, az_corr = _load_lidar_cal(lcal[lcal['key.laser_name'] == TOP_LIDAR].iloc[0])
-    ccal = pd.read_parquet(W / 'camera_calibration' / f'{seg}.parquet')
-    cam_cal = {int(r['key.camera_name']): _load_cam_intr_extr(r) for _, r in ccal.iterrows()}
-    vpose = pd.read_parquet(W / 'vehicle_pose' / f'{seg}.parquet').set_index('key.frame_timestamp_micros')
-    lid = pq.read_table(W / 'lidar' / f'{seg}.parquet',
-                        columns=['key.frame_timestamp_micros', '[LiDARComponent].range_image_return1.values',
-                                 '[LiDARComponent].range_image_return1.shape'],
-                        filters=[('key.laser_name', '=', TOP_LIDAR)]).to_pandas().set_index('key.frame_timestamp_micros')
-    img = pq.read_table(W / 'camera_image' / f'{seg}.parquet',
-                        columns=['key.frame_timestamp_micros', 'key.camera_name', '[CameraImageComponent].image',
-                                 '[CameraImageComponent].pose.transform'],
-                        filters=[('key.camera_name', 'in', list(cams))]).to_pandas()
-    ts_all = sorted(set(lid.index) & set(vpose.index) & set(img['key.frame_timestamp_micros']))[::stride]
+    rd = lambda c, **k: pq.read_table(W / c / f'{seg}.parquet', **k).to_pandas()
+    top = [('key.laser_name', '=', TOP_LIDAR)]
+    lcal = v2.LiDARCalibrationComponent.from_dict(rd('lidar_calibration', filters=top).iloc[0])
+    ccal = rd('camera_calibration').set_index('key.camera_name')
+    vpose = rd('vehicle_pose').set_index('key.frame_timestamp_micros', drop=False)
+    lid_ts = set(pq.read_table(W / 'lidar' / f'{seg}.parquet', columns=['key.frame_timestamp_micros'],
+                               filters=top).column(0).to_pylist())
+    img_cols = [c for c in pq.read_schema(W / 'camera_image' / f'{seg}.parquet').names]
+    img_ts = set(pq.read_table(W / 'camera_image' / f'{seg}.parquet', columns=['key.frame_timestamp_micros']).column(0).to_pylist())
+    ts_all = sorted(lid_ts & set(vpose.index) & img_ts)[::stride]
     if max_frames:
         ts_all = ts_all[:max_frames]
-    img = img.set_index(['key.frame_timestamp_micros', 'key.camera_name'])
+    # one read per component for just these frames (a read per frame grew pyarrow's memory to 17 GB → OOM)
+    sel = top + [('key.frame_timestamp_micros', 'in', ts_all)]
+    key = ['key.segment_context_name', 'key.frame_timestamp_micros', 'key.laser_name']
+    lid = rd('lidar', filters=sel, columns=key + [f'[LiDARComponent].range_image_return1.{x}' for x in ('values', 'shape')]
+             ).set_index('key.frame_timestamp_micros', drop=False)
+    lpo = rd('lidar_pose', filters=sel, columns=key + [f'[LiDARPoseComponent].range_image_return1.{x}' for x in ('values', 'shape')]
+             ).set_index('key.frame_timestamp_micros', drop=False)
+    img = rd('camera_image', columns=img_cols, filters=[('key.frame_timestamp_micros', 'in', ts_all),
+                                                        ('key.camera_name', 'in', list(cams))])
     written, gid = [], gid0
     for fi, ts in enumerate(ts_all):
-        pts_veh, inten = _top_lidar_pts(lid.loc[ts], incl, az_corr, T_veh_from_lid)
-        T_world_from_veh = np.asarray(vpose.loc[ts, '[VehiclePoseComponent].world_from_vehicle.transform'],
-                                      np.float64).reshape(4, 4)
+        # range images built directly: from_dict wants the return2 columns we do not read
+        ri1 = v2_lidar.RangeImage(values=lid.loc[ts, '[LiDARComponent].range_image_return1.values'],
+                                  shape=lid.loc[ts, '[LiDARComponent].range_image_return1.shape'])
+        pri = v2_lidar.PoseRangeImage(values=lpo.loc[ts, '[LiDARPoseComponent].range_image_return1.values'],
+                                      shape=lpo.loc[ts, '[LiDARPoseComponent].range_image_return1.shape'])
+        fpose = v2.VehiclePoseComponent.from_dict(vpose.loc[ts])
+        xyz = lidar_utils.convert_range_image_to_cartesian(ri1, lcal, pri,
+                                                            fpose).numpy().astype(np.float64)
+        ri = ri1.tensor.numpy()
+        m = ri[..., 0] > 0
+        inten = ri[..., 1][m].astype(np.float32)
+        T_world_from_veh = np.asarray(fpose.world_from_vehicle.transform, np.float64).reshape(4, 4)
+        pw = xyz[m] @ T_world_from_veh[:3, :3].T + T_world_from_veh[:3, 3]
+        imgs = img[img['key.frame_timestamp_micros'] == ts].set_index('key.camera_name')
         for cid in cams:
-            if (ts, cid) not in img.index:
+            if cid not in imgs.index:
                 continue
-            r = img.loc[(ts, cid)]
-            fu, fv, cu, cv, T_veh_from_wcam = cam_cal[cid]
-            T_world_from_vshut = np.asarray(r['[CameraImageComponent].pose.transform'], np.float64).reshape(4, 4)
-            T_wcam_from_veh = np.linalg.inv(T_world_from_vshut @ T_veh_from_wcam) @ T_world_from_veh
-            P = pts_veh @ T_wcam_from_veh[:3, :3].T + T_wcam_from_veh[:3, 3]           # waymo cam: x fwd, y left, z up
-            pc = np.stack([-P[:, 1], -P[:, 2], P[:, 0]], 1)                              # OpenCV cam
-            jpg = bytes(r['[CameraImageComponent].image'])
+            r, c = imgs.loc[cid], ccal.loc[cid]
+            T_veh_from_wcam = np.asarray(c[CC + 'extrinsic.transform'], np.float64).reshape(4, 4)
+            cim = (list(r[CI + 'pose.transform'])
+                   + [r[CI + f'velocity.{a}_velocity.{x}'] for a in ('linear', 'angular') for x in 'xyz']
+                   + [r[CI + 'pose_timestamp'], r[CI + 'rolling_shutter_params.shutter'],
+                      r[CI + 'rolling_shutter_params.camera_trigger_time'],
+                      r[CI + 'rolling_shutter_params.camera_readout_done_time']])
+            uvo = py_camera_model_ops.world_to_image(
+                tf.constant(T_veh_from_wcam, tf.float64),
+                tf.constant([c[CC + 'intrinsic.' + k] for k in INTR], tf.float64),
+                tf.constant([c[CC + 'width'], c[CC + 'height'], c[CC + 'rolling_shutter_direction']], tf.int32),
+                tf.constant(cim, tf.float64), tf.constant(pw, tf.float64)).numpy()
+            u, v, ok = uvo[:, 0], uvo[:, 1], uvo[:, 2] > 0
+            # depth: the point in the camera at pose_timestamp (waymo cam: x fwd, y left, z up)
+            T_wcam_from_world = np.linalg.inv(np.asarray(r[CI + 'pose.transform'], np.float64).reshape(4, 4) @ T_veh_from_wcam)
+            z = (pw @ T_wcam_from_world[:3, :3].T + T_wcam_from_world[:3, 3])[:, 0]
+            jpg = bytes(r[CI + 'image'])
             with Image.open(io.BytesIO(jpg)) as im:
                 IW, IH = im.size
-            z = pc[:, 2]
-            zs = np.where(z > 1e-6, z, 1e-6)
-            u = fu * pc[:, 0] / zs + cu
-            v = fv * pc[:, 1] / zs + cv
-            in_img = (z > 0.5) & (u >= 0) & (u < IW) & (v >= 0) & (v < IH)
+            in_img = ok & (z > 0.5) & (u >= 0) & (u < IW) & (v >= 0) & (v < IH)
             if int(in_img.sum()) < 64:
                 continue
-            keep = (z > Z_MIN) & (u >= -FOV_PAD) & (u < IW + FOV_PAD) & (v >= -FOV_PAD) & (v < IH + FOV_PAD)
+            keep = ok & (z > max(Z_MIN, min_depth)) & (u >= -FOV_PAD) & (u < IW + FOV_PAD) & (v >= -FOV_PAD) & (v < IH + FOV_PAD)
+            fu, fv, cu, cv = (float(c[CC + 'intrinsic.' + k]) for k in INTR[:4])
+            zk = z[keep]
+            pc = np.stack([(u[keep] - cu) / fu * zk, (v[keep] - cv) / fv * zk, zk], 1)       # K · pc = (u, v)
             K = np.array([[fu, 0, cu], [0, fv, cv], [0, 0, 1]], np.float32)
             inst = dict(
                 cam_pos=torch.zeros(3), R_gt=torch.eye(3), T_gt=torch.eye(4), K_full=torch.from_numpy(K),
                 cuboids=[], scene=seg, cam=CAMERAS[cid], frame=int(fi),
                 jpg_bytes=jpg, IH=int(IH), IW=int(IW),
-                pts=torch.from_numpy(pc[keep].astype(np.float32)),
+                pts=torch.from_numpy(pc.astype(np.float32)),
                 uv_full=torch.from_numpy(np.stack([u[keep], v[keep]], 1).astype(np.float32)),
-                z_cam=torch.from_numpy(z[keep].astype(np.float32)),
+                z_cam=torch.from_numpy(zk.astype(np.float32)),
                 is_obj=torch.zeros(int(keep.sum())),
                 intensity=torch.from_numpy(np.clip(inten[keep], 0.0, 1.0).astype(np.float32)),
             )
@@ -126,6 +148,9 @@ def main():
     ap.add_argument('--max-segs', type=int, default=None)
     ap.add_argument('--val-max-segs', type=int, default=None, help='cap on validation segments (default: --max-segs)')
     ap.add_argument('--workers', type=int, default=2)
+    ap.add_argument('--min-depth', type=float, default=2.0,
+                    help='drop points closer than this camera-frame z [m]: at z = 2 m a 0.2 m translation already moves a\n'
+                         'point ~200 px (f ~ 2000 px), and near returns include the ego body')
     a = ap.parse_args()
     cams = tuple(int(c) for c in a.cams.split(','))
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -135,15 +160,16 @@ def main():
         cap = a.val_max_segs if (key == 'val' and a.val_max_segs is not None) else a.max_segs
         segs = sorted(p.stem for p in (Path(a.src) / split / 'lidar').glob('*.parquet'))[:cap]
         for seg in segs:
-            jobs.append((key, (str(Path(a.src) / split), seg, str(out), k * GID_STRIDE, cams, a.stride, a.max_frames)))
+            jobs.append((key, (str(Path(a.src) / split), seg, str(out), k * GID_STRIDE, cams, a.stride, a.max_frames,
+                               a.min_depth)))
             k += 1
     print(f'{len(jobs)} segments ({sum(j[0] == "train" for j in jobs)} train) cams={cams} stride={a.stride}', flush=True)
-    with ProcessPoolExecutor(max_workers=a.workers) as ex:
-        futs = {ex.submit(process_seg, j[1]): j[0] for j in jobs}
-        for n, f in enumerate(as_completed(futs), 1):
-            seg, written = f.result()
-            meta[futs[f]].extend(written)
-            print(f'  [{n}/{len(jobs)}] {futs[f]} {seg}: {len(written)} insts', flush=True)
+    split_of = {j[1][1]: j[0] for j in jobs}
+    # a fresh process per segment: pyarrow keeps the ~9 GB peak of a segment's reads, and it piled up across segments
+    with Pool(a.workers, maxtasksperchild=1) as pool:
+        for n, (seg, written) in enumerate(pool.imap_unordered(process_seg, [j[1] for j in jobs]), 1):
+            meta[split_of[seg]].extend(written)
+            print(f'  [{n}/{len(jobs)}] {split_of[seg]} {seg}: {len(written)} insts', flush=True)
     meta = {'train': sorted(meta['train']), 'val': sorted(meta['val']), 'cam': 'waymo_5cam', 'is_fisheye': False}
     torch.save(meta, out / 'meta.pt')
     print(f'meta.pt saved: train={len(meta["train"])} val={len(meta["val"])}', flush=True)

@@ -42,10 +42,23 @@ def main():
     ap.add_argument('--n', type=int, default=8, help='frames evenly spaced over the split')
     ap.add_argument('--per-scene', action='store_true', help='first frame of every scene instead of --n')
     ap.add_argument('--cols', type=int, default=2)
+    ap.add_argument('--frames', default='', help="specific frames, e.g. '014:14,22,70' (scene:frame numbers)")
     a = ap.parse_args()
     ds = PandaSetCalibDatasetFull(a.cache, split=a.split, img_size=256, min_crop_px=256, max_crop_px=256,
                                   grid_n=16, max_offset_m=0.2, max_rot_deg=0.5, oversample=1)
-    if a.per_scene:
+    if a.frames:
+        want_scene, want = a.frames.split(':')
+        want = [int(x) for x in want.split(',')]
+        found = {}
+        for i in range(len(ds)):
+            inst = ds._load_inst(i)
+            if str(inst['scene']) == want_scene and int(inst['frame']) in want:
+                found[int(inst['frame'])] = i
+        missing = [f for f in want if f not in found]
+        if missing:
+            raise SystemExit(f'not in {a.split}: scene {want_scene} frames {missing}')
+        idx = [found[f] for f in want]
+    elif a.per_scene:
         seen, idx = set(), []
         for i in range(len(ds)):
             s = ds._load_inst(i)['scene']

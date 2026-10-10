@@ -288,7 +288,9 @@ class CalibNet2(nn.Module):
                  ref_from_query: bool = False,
                  cross_attn: str = 'deform',
                  ref_mode: str | None = None,
-                 frustum_nb: str = '3x3'):
+                 frustum_nb: str = '3x3',
+                 std_decoder: bool = False,
+                 frustum_rel_uv_norm: bool = False):
         super().__init__()
         # ref_from_query=True は ref_mode='query_offset' と同じ (ps_s1_refq の互換)。
         if ref_mode is None:
@@ -312,7 +314,8 @@ class CalibNet2(nn.Module):
         # frustum_nb: '3x3' (従来) = 周り 3x3 セルの候補からランダムに k_nb 点。
         #             'own' = 自分のセルの点を選別せず全部 (上限はデータ側の k_per_cell)
         self.frustum_enc = FrustumLocalEncoder(
-            d, r_uv_cells=r_uv_cells, r_d=r_d, k=k_nb, grid_n=frustum_grid_n, nb=frustum_nb)
+            d, r_uv_cells=r_uv_cells, r_d=r_d, k=k_nb, grid_n=frustum_grid_n, nb=frustum_nb,
+            rel_uv_norm=frustum_rel_uv_norm)
         self.pose_emb = RoPEPoseEmb(d, d_scalar=d_scalar, n_type1=n_type1)
         # --- block stack ---------------------------------------------------
         # Two regimes:
@@ -386,6 +389,29 @@ class CalibNet2(nn.Module):
         with torch.no_grad():
             self.final_head.bias[2] = math.log(2.0)
             self.final_head.bias[3] = math.log(2.0)
+        # std_decoder=True: 普通の Deformable DETR デコーダの形 (単フレームの calib 経路だけ)。
+        #   - 層ごとに別の重みのブロック (n_iter 個)。KV は同じ 3 レベル (coarse, fine, lidar)
+        #   - 層ごとのヘッド proj(cat[q, ref]) → (Δu, Δv, log σu, log σv, ρ)。旧 CalibNetDepth と同じ読み出し
+        #   - 位置は Δuv を積み上げ、次の層の参照点にする (detach なし)。σ, ρ はその層自身
+        #   - 各層の出力を self._aux に残す。学習側 (train_cnd2_ddp) が全部に NLL をかけて平均 (deep supervision)
+        #   最終出力 = 最後の層。self.block / final_head は使わない。
+        self.std_decoder = bool(std_decoder)
+        self._aux = None
+        if self.std_decoder:
+            assert self.kv_schedule is None, 'std_decoder: kv_schedule とは併用しない'
+            assert ref_mode == 'query', "std_decoder: 参照点を動かすので ref_mode='query' が要る"
+            self.std_blocks = nn.ModuleList([
+                Block(d=d, n_heads=n_heads, n_levels=3, n_points=n_points,
+                      no_value_proj=no_value_proj, cross_attn=cross_attn, ref_mode=ref_mode)
+                for _ in range(self.n_iter)])
+            del self.block                       # 共有ブロックは std では使わない (パラメータに残さない)
+            self.std_heads = nn.ModuleList()
+            for _ in range(self.n_iter):
+                h = nn.Linear(d + 2, 5)
+                nn.init.zeros_(h.weight); nn.init.zeros_(h.bias)
+                with torch.no_grad():
+                    h.bias[2] = math.log(2.0); h.bias[3] = math.log(2.0)
+                self.std_heads.append(h)
 
         if use_info_head:
             from models.model_depth import InfoHead2x2
@@ -495,6 +521,27 @@ class CalibNet2(nn.Module):
                                           ref_uv=getattr(self, '_ref_uv', None))
             delta_cum = delta_cum + delta_i
         return q, delta_cum
+
+    def _forward_std(self, image, distorted_uvd, bucket_uvd, bucket_valid, key_padding_mask=None):
+        """std_decoder の単フレーム forward。各層: ブロック → ヘッド → 位置を更新して次の層の参照点に。"""
+        from models.model_cov import clamp_params
+        q = self._build_Q(distorted_uvd, bucket_uvd, bucket_valid, key_padding_mask=key_padding_mask)
+        kv_flat, sh, lsi = self._build_kv(image, bucket_uvd, bucket_valid)
+        uv0 = self._ref_uv                                   # 摂動後の投影位置 [0,1]
+        duv = torch.zeros_like(uv0)                          # 積み上げた Δuv (img_size で割った単位)
+        ref = uv0
+        aux = []
+        for blk, head in zip(self.std_blocks, self.std_heads):
+            q, _ = blk(q, kv_flat, sh, lsi, key_padding_mask=key_padding_mask, ref_uv=ref)
+            raw_l = head(torch.cat([q, ref], dim=-1))
+            duv = duv + raw_l[..., :2]
+            aux.append(clamp_params(torch.cat([duv, raw_l[..., 2:]], dim=-1), self.img_size))
+            ref = (uv0 + duv).clamp(0.0, 1.0)
+        self._aux = aux
+        per_pt = aux[-1]
+        if self.info_head is not None:
+            return per_pt, self.info_head(q)
+        return per_pt
 
     def _readout(self, delta_cum: torch.Tensor):
         """Δ_cum → (per_pt[..., :5], W?). Single final head; abs-PE leak gate
@@ -658,6 +705,9 @@ class CalibNet2(nn.Module):
         # Calib = single forward_frame call. No PoseEmb: there's no ego motion
         # to inject (R=I implicit) and frame-token learns lidar↔image alignment
         # without a hint.
+        if self.std_decoder:
+            return self._forward_std(image, distorted_uvd, bucket_uvd, bucket_valid,
+                                     key_padding_mask=key_padding_mask)
         if self.kv_schedule is not None:
             # In kv_schedule mode the entire schedule runs on the single frame.
             q, delta_cum = self.forward_frame(
